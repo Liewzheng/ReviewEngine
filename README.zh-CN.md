@@ -1,4 +1,4 @@
-# review-engine
+# ReviewEngine
 
 > 为每个 Pull Request 配备一个虚拟的 **CodeReview 评审委员会** —— 多专家、可打分、可执行。
 
@@ -8,22 +8,22 @@
 
 [English Documentation](README.md)
 
-review-engine 基于 [Apache License 2.0](LICENSE) 发布。核心 CLI、本地评审、GitLab/GitHub 集成、REST API 和默认专家团队均免费开源。SSO、审计日志、自定义专家模板、专属支持等企业功能则通过商业许可单独提供。
+ReviewEngine 基于 [Apache License 2.0](LICENSE) 发布。核心 CLI、本地评审、GitLab/GitHub 集成、REST API 和默认专家团队均免费开源。SSO、审计日志、自定义专家模板、专属支持等企业功能则通过商业许可单独提供。
 
 ---
 
-## 为什么用 review-engine？
+## 为什么用 ReviewEngine？
 
 持续、深入的代码评审很难做好。团队忙得不可开交，上下文支离破碎，安全漏洞、性能衰退或可复用性机会很容易被忽略 —— 尤其是在大 diff 或不熟悉的代码里。
 
-review-engine 把一支虚拟工程师团队带到每一次评审中：一个可配置的 **CodeReview 评审委员会**，让多位 AI 专家并行审视同一份改动，各自从专业角度出发，输出结构化、可执行的评审意见。
+ReviewEngine 把一支虚拟工程师团队带到每一次评审中：一个可配置的 **CodeReview 评审委员会**，让多位 AI 专家并行审视同一份改动，各自从专业角度出发，输出结构化、可执行的评审意见。
 
 - **多专家并行评审** —— 安全、性能、质量、可复用性、文档等多维度同时评审。
 - **结构化输出** —— 每条发现都包含严重级别、置信度、证据、影响、建议和工作量。
 - **可打分、可比较** —— 各专家独立打分，再加权汇总为总体得分和明确的风险等级。
 - **在你工作的地方运行** —— GitLab MR、GitHub PR、本地仓库、CI/CD 或 REST API。
 
-| 代码评审通常给人的感觉             | review-engine 的做法                                                         |
+| 代码评审通常给人的感觉             | ReviewEngine 的做法                                                         |
 | ---------------------------------- | ---------------------------------------------------------------------------- |
 | "有人检查过 SQL 注入吗？"          | 安全负责人始终在评审委员会里，并明确报告发现。                               |
 | "这个 diff 太大了，从哪开始看？"   | 专家各司其职，结果汇总成一份带评分的报告。                                   |
@@ -34,7 +34,7 @@ review-engine 把一支虚拟工程师团队带到每一次评审中：一个可
 
 ## 适合谁用？
 
-你可能会喜欢 review-engine，如果你：
+你可能会喜欢 ReviewEngine，如果你：
 
 - **想要深度，不只是表面评论。** 多专家意味着安全、性能、质量、文档等关注点在单次评审中都能覆盖到。
 - **想在提交 PR/MR 之前就完成评审。** 针对 `main`、暂存区或某个提交范围在本地运行，提前修复问题。
@@ -154,7 +154,7 @@ review-engine review --local-path . --base main
 
 ## 支持的 LLM 供应商
 
-review-engine 开箱即用支持多种 LLM 供应商：
+ReviewEngine 开箱即用支持多种 LLM 供应商：
 
 - **OpenAI**（例如 GPT-4o）
 - **Anthropic**（例如 Claude）
@@ -181,7 +181,7 @@ temperature = 0.3
 
 ## 集成方式
 
-review-engine 可通过多种入口融入现有工作流：
+ReviewEngine 可通过多种入口融入现有工作流：
 
 - **GitLab MR** —— 通过 CLI 使用 `--mr-url`，或通过 webhook 评论命令（`/review`、`/improve`）。
 - **GitHub PR** —— 通过 CLI 使用 `--mr-url` 或 webhook。
@@ -223,9 +223,9 @@ review-engine serve --port 8080
 
 ## 性能
 
-review-engine 设计为轻量且适合 CI 运行。资源消耗主要由 LLM 网络延迟决定，而不是本地 CPU 或内存。
+ReviewEngine 设计为轻量且适合 CI 运行。资源消耗主要由 LLM 网络延迟决定，而不是本地 CPU 或内存。
 
-针对本仓库的基准测试（3 次运行，本地 CLI，DeepSeek 模型）：
+针对约 3 万行代码仓库的基准测试（3 次运行，`repo-review`，本地 CLI，DeepSeek 模型）：
 
 | 指标 | 平均值 |
 |---|---|
@@ -234,13 +234,13 @@ review-engine 设计为轻量且适合 CI 运行。资源消耗主要由 LLM 网
 | Max RSS | 约 19 MB |
 | CPU 时间 | 约 0.07 秒 |
 
-大部分耗时花在等待 LLM 响应上，实际速度取决于你的模型提供商、模型和项目规模。
+对于典型的 branch/MR 评审，`review` 命令通常在 **30–50 秒** 内完成，具体取决于 LLM 提供商和网络状况。
 
 ---
 
 ## 命令
 
-review-engine 围绕一组精简的命令组织：
+ReviewEngine 围绕一组精简的命令组织：
 
 | 命令                 | 用途                                                       |
 | -------------------- | ---------------------------------------------------------- |
@@ -277,4 +277,4 @@ review-engine 围绕一组精简的命令组织：
 
 ## 许可
 
-review-engine 核心基于 [Apache License 2.0](LICENSE) 许可。企业版功能和商业支持单独开发，不属于本开源仓库的一部分。
+ReviewEngine 核心基于 [Apache License 2.0](LICENSE) 许可。企业版功能和商业支持单独开发，不属于本开源仓库的一部分。

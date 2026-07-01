@@ -223,9 +223,9 @@ Input → Config Resolution → Expert Selection → Parallel Review → Consoli
 
 ## Performance
 
-review-engine is designed to be lightweight and CI-friendly. The resource usage is dominated by LLM network latency, not local CPU or memory.
+ReviewEngine is designed to be lightweight and CI-friendly. Resource usage is dominated by LLM network latency, not local CPU or memory.
 
-Benchmarked on this repository (3 runs, local CLI, DeepSeek model):
+Benchmarked on a ~30k LOC repository (3 runs, `repo-review`, local CLI, DeepSeek model):
 
 | Metric | Average |
 |---|---|
@@ -234,7 +234,7 @@ Benchmarked on this repository (3 runs, local CLI, DeepSeek model):
 | Max RSS | ~19 MB |
 | CPU time | ~0.07 s |
 
-Most of the wall time is spent waiting for LLM responses, so actual speed depends on your provider, model, and project size.
+For a typical branch/MR review, the `review` command usually completes in **30–50 s**, depending on the LLM provider and network conditions.
 
 ---
 

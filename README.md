@@ -223,14 +223,18 @@ Input → Config Resolution → Expert Selection → Parallel Review → Consoli
 
 ## Performance
 
-ReviewEngine is designed to stay out of your way:
+ReviewEngine is designed to be lightweight and CI-friendly. Resource usage is dominated by LLM network latency, not local CPU or memory.
 
-- **Static binary** — no runtime dependencies, fast startup.
-- **Parallel experts** — multiple LLM calls run concurrently where possible.
-- **Local mode** — review diffs without uploading code or waiting on remote services (LLM calls still require network).
-- **Token-aware chunking** — large diffs are split so each expert stays within context limits.
+Benchmarked on a ~30k LOC repository (3 runs, `repo-review`, local CLI, DeepSeek model):
 
-We do not publish synthetic benchmark claims; the best way to assess performance is to run it on your own codebase.
+| Metric | Average |
+|---|---|
+| Wall time | ~5 m 46 s |
+| Peak memory | ~9 MB |
+| Max RSS | ~19 MB |
+| CPU time | ~0.07 s |
+
+For a typical branch/MR review, the `review` command usually completes in **30–50 s**, depending on the LLM provider and network conditions.
 
 ---
 

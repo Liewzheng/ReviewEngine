@@ -165,10 +165,13 @@ detect_asset() {
         aarch64|arm64)
             case "${kernel}" in
                 Linux)
-                    echo "review-engine-aarch64-linux"
+                    echo "review-engine-aarch64-unknown-linux-gnu tar.gz review-engine"
                     ;;
                 Darwin)
-                    echo "review-engine-aarch64-apple-darwin"
+                    echo "review-engine-aarch64-apple-darwin tar.gz review-engine"
+                    ;;
+                MINGW*|Windows*|CYGWIN*)
+                    echo "review-engine-aarch64-pc-windows-msvc zip review-engine.exe"
                     ;;
                 *)
                     error "Unsupported platform: ${arch} ${kernel}"
@@ -180,13 +183,13 @@ detect_asset() {
         x86_64|amd64)
             case "${kernel}" in
                 Linux)
-                    echo "review-engine-x86_64-linux"
+                    echo "review-engine-x86_64-unknown-linux-gnu tar.gz review-engine"
                     ;;
                 Darwin)
-                    echo "review-engine-x86_64-apple-darwin"
+                    echo "review-engine-x86_64-apple-darwin tar.gz review-engine"
                     ;;
                 MINGW*|Windows*|CYGWIN*)
-                    echo "review-engine-x86_64-windows.exe"
+                    echo "review-engine-x86_64-pc-windows-msvc zip review-engine.exe"
                     ;;
                 *)
                     error "Unsupported platform: ${arch} ${kernel}"
@@ -388,9 +391,10 @@ install_binary() {
     fi
 
     header "Detecting platform"
-    local asset
-    asset="$(detect_asset)"
-    success "Detected asset: ${asset}"
+    local asset ext binary_name
+    read -r asset ext binary_name <<< "$(detect_asset)"
+    local archive_name="${asset}.${ext}"
+    success "Detected asset: ${archive_name} (binary: ${binary_name})"
 
     header "Resolving version"
     local version
@@ -407,39 +411,69 @@ install_binary() {
     fi
 
     local asset_url checksum_url
-    asset_url=$(pick_asset_link "${release_path}" "${asset}")
-    checksum_url=$(pick_asset_link "${release_path}" "${asset}.sha256")
+    asset_url=$(pick_asset_link "${release_path}" "${archive_name}")
+    checksum_url=$(pick_asset_link "${release_path}" "${archive_name}.sha256")
 
     if [ -z "${asset_url}" ]; then
-        error "Could not find asset link for ${asset} in release."
+        error "Could not find asset link for ${archive_name} in release."
         exit 1
     fi
 
-    if [ -z "${checksum_url}" ]; then
-        error "Could not find checksum link for ${asset}.sha256 in release."
-        exit 1
-    fi
+    local tmp_archive="${TMP_DIR}/${archive_name}"
+    local tmp_checksum="${TMP_DIR}/${archive_name}.sha256"
+    local tmp_binary="${TMP_DIR}/${binary_name}"
 
-    local tmp_asset="${TMP_DIR}/${asset}"
-    local tmp_checksum="${TMP_DIR}/${asset}.sha256"
-
-    header "Downloading binary"
+    header "Downloading archive"
     info "URL: ${asset_url}"
-    if ! download_file_with_auth "${asset_url}" "${tmp_asset}"; then
+    if ! download_file_with_auth "${asset_url}" "${tmp_archive}"; then
         exit 1
     fi
-    success "Binary downloaded successfully"
+    success "Archive downloaded successfully"
 
-    header "Downloading checksum"
-    info "URL: ${checksum_url}"
-    if ! download_file_with_auth "${checksum_url}" "${tmp_checksum}"; then
-        exit 1
+    if [ -n "${checksum_url}" ]; then
+        header "Downloading checksum"
+        info "URL: ${checksum_url}"
+        if download_file_with_auth "${checksum_url}" "${tmp_checksum}"; then
+            header "Verifying checksum"
+            if ! verify_checksum "${tmp_archive}" "${tmp_checksum}"; then
+                exit 1
+            fi
+        else
+            warn "Could not download checksum for ${archive_name}. Skipping verification."
+        fi
+    else
+        warn "No checksum asset found for ${archive_name}. Skipping verification."
     fi
 
-    header "Verifying checksum"
-    if ! verify_checksum "${tmp_asset}" "${tmp_checksum}"; then
+    header "Extracting binary"
+    case "${ext}" in
+        tar.gz)
+            if ! tar -xzf "${tmp_archive}" -C "${TMP_DIR}"; then
+                error "Failed to extract ${archive_name}"
+                exit 1
+            fi
+            ;;
+        zip)
+            if ! command -v unzip &>/dev/null; then
+                error "unzip is not installed. Please install unzip first."
+                exit 1
+            fi
+            if ! unzip -q "${tmp_archive}" -d "${TMP_DIR}"; then
+                error "Failed to extract ${archive_name}"
+                exit 1
+            fi
+            ;;
+        *)
+            error "Unsupported archive extension: ${ext}"
+            exit 1
+            ;;
+    esac
+
+    if [ ! -f "${tmp_binary}" ]; then
+        error "Extracted binary not found: ${binary_name}"
         exit 1
     fi
+    success "Extracted ${binary_name}"
 
     header "Installing binary"
     if [ ! -d "${BIN_DIR}" ]; then
@@ -447,7 +481,7 @@ install_binary() {
         info "Created ${BIN_DIR}"
     fi
 
-    cp "${tmp_asset}" "${BIN_PATH}"
+    cp "${tmp_binary}" "${BIN_PATH}"
     chmod +x "${BIN_PATH}"
     success "Installed review-engine to ${BIN_PATH}"
 

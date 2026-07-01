@@ -57,3 +57,4 @@ jobs:
           bin: review-engine
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
+          checksum: sha256

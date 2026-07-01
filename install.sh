@@ -216,7 +216,7 @@ download_file_with_auth() {
     set +e
     http_code=$(curl --fail --silent --show-error --retry 3 --location \
         --write-out '%{http_code}' \
-        "${auth_args[@]}" \
+        ${auth_args[@]+"${auth_args[@]}"} \
         --output "${output_path}" \
         "${url}")
     curl_exit=$?

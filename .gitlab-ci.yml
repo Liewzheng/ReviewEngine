@@ -1,0 +1,201 @@
+stages:
+  - build
+  - test
+  - release
+
+workflow:
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'
+    - when: never
+
+variables:
+  RUSTFLAGS: "-D warnings"
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  CARGO_NET_RETRY: "20"
+  CARGO_HTTP_TIMEOUT: "600"
+  CARGO_HTTP_MULTIPLEXING: "false"
+
+cache:
+  key: "$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cargo/
+    - target/
+
+.before_script_template: &before_script_template
+  before_script:
+    - |
+      if ! command -v cargo >/dev/null 2>&1; then
+        echo "cargo not found; installing Rust via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
+          --profile minimal \
+          --default-toolchain stable
+      else
+        echo "cargo already available: $(command -v cargo)"
+      fi
+    - |
+      if [ -f "$CARGO_HOME/env" ]; then
+        . "$CARGO_HOME/env"
+      elif [ -f "$HOME/.cargo/env" ]; then
+        . "$HOME/.cargo/env"
+      else
+        export PATH="$CARGO_HOME/bin:$HOME/.cargo/bin:$PATH"
+      fi
+    - rustup default stable
+    - rustc --version && cargo --version
+    - |
+      mkdir -p "$CARGO_HOME"
+      {
+        echo '[source.crates-io]'
+        echo 'replace-with = "ustc"'
+        echo ''
+        echo '[source.ustc]'
+        echo 'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"'
+      } > "$CARGO_HOME/config.toml"
+
+.build-cross: &build-cross
+  <<: *before_script_template
+  tags:
+    - linux
+    - rust
+  stage: build
+  retry: 2
+  script:
+    - |
+      if [ -n "${TARGET}" ]; then
+        rustup target add "${TARGET}"
+        if [ -n "${LINKER}" ]; then
+          export "CARGO_TARGET_$(echo "${TARGET}" | tr '[:lower:]-' '[:upper:]_')_LINKER=${LINKER}"
+        fi
+        cargo fetch --locked --target "${TARGET}"
+        cargo build --release --target "${TARGET}" --features cli
+      else
+        cargo fetch --locked
+        cargo build --release --features cli
+      fi
+  artifacts:
+    paths:
+      - "${ARTIFACT_PATH}"
+    expire_in: 30 days
+
+build-linux-aarch64:
+  <<: *build-cross
+  variables:
+    TARGET: ""
+    LINKER: ""
+    ARTIFACT_PATH: "target/release/review-engine"
+
+build-linux-x86_64:
+  <<: *build-cross
+  variables:
+    TARGET: "x86_64-unknown-linux-gnu"
+    LINKER: "x86_64-linux-gnu-gcc"
+    ARTIFACT_PATH: "target/x86_64-unknown-linux-gnu/release/review-engine"
+
+build-windows-x86_64:
+  <<: *build-cross
+  variables:
+    TARGET: "x86_64-pc-windows-gnu"
+    LINKER: "x86_64-w64-mingw32-gcc"
+    ARTIFACT_PATH: "target/x86_64-pc-windows-gnu/release/review-engine.exe"
+
+.build-macos: &build-macos
+  <<: *before_script_template
+  tags:
+    - macos
+    - rust
+    - arm64
+  stage: build
+  retry: 2
+  script:
+    - rustup target add "${TARGET}"
+    - cargo fetch --locked --target "${TARGET}"
+    - cargo build --release --target "${TARGET}" --features cli
+  artifacts:
+    paths:
+      - "${ARTIFACT_PATH}"
+    expire_in: 30 days
+
+build-macos-aarch64:
+  <<: *build-macos
+  variables:
+    TARGET: "aarch64-apple-darwin"
+    ARTIFACT_PATH: "target/aarch64-apple-darwin/release/review-engine"
+
+build-macos-x86_64:
+  <<: *build-macos
+  variables:
+    TARGET: "x86_64-apple-darwin"
+    ARTIFACT_PATH: "target/x86_64-apple-darwin/release/review-engine"
+
+test:
+  <<: *before_script_template
+  tags:
+    - linux
+    - rust
+  stage: test
+  script:
+    - cargo test --lib --features cli
+  dependencies:
+    - build-linux-aarch64
+
+test-macos:
+  <<: *before_script_template
+  tags:
+    - macos
+    - rust
+    - arm64
+  stage: test
+  script:
+    - cargo test --lib --features cli
+
+cargo-deny:
+  <<: *before_script_template
+  tags:
+    - linux
+    - rust
+  stage: test
+  script:
+    - cargo deny check
+
+smoke-test:
+  stage: test
+  tags:
+    - linux
+    - rust
+  needs:
+    - build-linux-aarch64
+    - build-linux-x86_64
+    - build-windows-x86_64
+    - build-macos-aarch64
+    - build-macos-x86_64
+  script:
+    - |
+      file target/release/review-engine
+      file target/x86_64-unknown-linux-gnu/release/review-engine
+      file target/x86_64-pc-windows-gnu/release/review-engine.exe
+      file target/aarch64-apple-darwin/release/review-engine
+      file target/x86_64-apple-darwin/release/review-engine
+    - target/release/review-engine --version
+    - |
+      if command -v qemu-x86_64-static >/dev/null 2>&1; then
+        echo "Running x86_64 Linux binary under qemu-x86_64-static ..."
+        qemu-x86_64-static target/x86_64-unknown-linux-gnu/release/review-engine --version
+      else
+        echo "qemu-x86_64-static not available; skipping x86_64 runtime smoke test."
+      fi
+
+release-stable:
+  stage: release
+  tags:
+    - linux
+    - rust
+  dependencies:
+    - build-linux-aarch64
+    - build-linux-x86_64
+    - build-windows-x86_64
+    - build-macos-aarch64
+    - build-macos-x86_64
+  script:
+    - ./scripts/publish-release.sh stable "$CI_COMMIT_TAG"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v\d+\.\d+\.\d+$/'

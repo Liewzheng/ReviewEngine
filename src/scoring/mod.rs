@@ -1,0 +1,417 @@
+//! Scoring logic for individual experts and overall review quality.
+//!
+//! Computes numerical scores (0–100) from expert findings using a
+//! penalty-based system: critical findings deduct 30 points, high
+//! deduct 15, medium deduct 5, low deduct 1, and notes deduct 0.
+//! [`expert_score`] calculates a single expert's score, while
+//! [`weighted_overall_score`] combines multiple expert scores
+//! weighted by their configured importance. The module also defines
+//! [`ReviewScoreRecord`] and [`ExpertScoreRecord`] for reporting.
+
+use crate::models::{Finding, RiskLevel};
+
+/// A record of an expert's contribution to the overall score.
+#[derive(Debug, Clone)]
+pub struct ExpertScoreRecord {
+    pub expert_name: String,
+    /// Individual score (0-100) based on this expert's findings.
+    pub individual_score: u8,
+    /// This expert's configured weight (0-100).
+    pub weight: u8,
+}
+
+/// A record of the overall review score.
+#[derive(Debug, Clone)]
+pub struct ReviewScoreRecord {
+    pub overall_score: u8,
+    pub risk_level: RiskLevel,
+    pub expert_scores: Vec<ExpertScoreRecord>,
+}
+
+/// Compute an individual expert score from their findings.
+///
+/// Scoring logic:
+/// - Start at 100 (perfect score)
+/// - Critical findings: -30 each
+/// - High findings: -15 each
+/// - Medium findings: -5 each
+/// - Low findings: -1 each
+/// - Note findings: no penalty
+/// - Clamp to 0-100 range
+pub fn expert_score(findings: &[Finding]) -> u8 {
+    let mut penalty = 0i32;
+    for finding in findings {
+        match finding.severity {
+            crate::models::Severity::Critical => penalty += 30,
+            crate::models::Severity::High => penalty += 15,
+            crate::models::Severity::Medium => penalty += 5,
+            crate::models::Severity::Low => penalty += 1,
+            crate::models::Severity::Note => {}
+        }
+    }
+    let score = 100i32 - penalty;
+    score.clamp(0, 100) as u8
+}
+
+/// Compute the weighted score from a list of (score, weight) pairs.
+///
+/// Returns `sum(score * weight) / sum(weight)`, clamped to 0–100.
+/// Returns 0 if the total weight is zero.
+pub(crate) fn compute_weighted(scores: &[(u8, u8)]) -> u8 {
+    let total_weight: u32 = scores.iter().map(|(_, w)| *w as u32).sum();
+    if total_weight == 0 {
+        return 0;
+    }
+
+    let weighted_sum: f64 = scores
+        .iter()
+        .map(|(s, w)| *s as f64 * (*w as f64 / total_weight as f64))
+        .sum();
+
+    weighted_sum.round().clamp(0.0, 100.0) as u8
+}
+
+/// Compute weighted overall score from multiple expert scores.
+///
+/// Each expert's score is weighted by their configured weight.
+/// The sum of weights must be 100 for a meaningful overall score.
+pub fn weighted_overall_score(expert_scores: &[(String, u8, u8)]) -> u8 {
+    let pairs: Vec<(u8, u8)> = expert_scores.iter().map(|(_, s, w)| (*s, *w)).collect();
+    compute_weighted(&pairs)
+}
+
+/// Map an overall score (0-100) to a RiskLevel.
+///
+/// Scores above 100 are treated as `Low` (defensively handles any `u8` input).
+pub fn score_to_risk_level(score: u8) -> RiskLevel {
+    match score {
+        0..=20 => RiskLevel::Critical,
+        21..=40 => RiskLevel::High,
+        41..=60 => RiskLevel::Medium,
+        61..=80 => RiskLevel::LowMedium,
+        _ => RiskLevel::Low, // 81..=u8::MAX
+    }
+}
+
+/// Compute the overall review score and risk level from expert findings.
+pub fn compute_overall(expert_data: &[(&str, &[Finding], u8)]) -> (u8, RiskLevel) {
+    let scores: Vec<(String, u8, u8)> = expert_data
+        .iter()
+        .map(|(name, findings, weight)| {
+            let score = expert_score(findings);
+            (name.to_string(), score, *weight)
+        })
+        .collect();
+
+    let overall = weighted_overall_score(&scores);
+    let risk = score_to_risk_level(overall);
+    (overall, risk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{Effort, Finding, Severity};
+
+    fn make_finding(severity: Severity) -> Finding {
+        Finding {
+            file: "test.rs".to_string(),
+            line: Some(1),
+            line_end: None,
+            severity,
+            confidence: 8,
+            category: String::new(),
+            title: "test".to_string(),
+            summary: String::new(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: String::new(),
+            effort: Effort::Small,
+            expert_name: "test".to_string(),
+            expert_role: String::new(),
+            agrees_with: vec![],
+            references: vec![],
+        }
+    }
+
+    #[test]
+    fn test_expert_score_perfect() {
+        let score = expert_score(&[]);
+        assert_eq!(score, 100);
+    }
+
+    #[test]
+    fn test_expert_score_critical() {
+        let score = expert_score(&[make_finding(Severity::Critical)]);
+        assert_eq!(score, 70);
+    }
+
+    #[test]
+    fn test_expert_score_high() {
+        let score = expert_score(&[make_finding(Severity::High)]);
+        assert_eq!(score, 85);
+    }
+
+    #[test]
+    fn test_expert_score_multiple() {
+        let findings = vec![
+            make_finding(Severity::Critical),
+            make_finding(Severity::High),
+            make_finding(Severity::Medium),
+        ];
+        let score = expert_score(&findings);
+        assert_eq!(score, 50); // 100 - 30 - 15 - 5
+    }
+
+    #[test]
+    fn test_expert_score_clamp_min() {
+        let findings = vec![
+            make_finding(Severity::Critical),
+            make_finding(Severity::Critical),
+            make_finding(Severity::Critical),
+            make_finding(Severity::Critical),
+        ];
+        let score = expert_score(&findings);
+        assert_eq!(score, 0); // clamped
+    }
+
+    #[test]
+    fn test_weighted_overall_score_equal_weights() {
+        let scores = vec![("alice".to_string(), 80u8, 50u8), ("bob".to_string(), 60u8, 50u8)];
+        let overall = weighted_overall_score(&scores);
+        assert_eq!(overall, 70); // (80*0.5 + 60*0.5) = 70
+    }
+
+    #[test]
+    fn test_weighted_overall_score_unequal_weights() {
+        let scores = vec![("alice".to_string(), 100u8, 75u8), ("bob".to_string(), 0u8, 25u8)];
+        let overall = weighted_overall_score(&scores);
+        assert_eq!(overall, 75); // (100*0.75 + 0*0.25) = 75
+    }
+
+    #[test]
+    fn test_score_to_risk_level() {
+        assert_eq!(score_to_risk_level(100), RiskLevel::Low);
+        assert_eq!(score_to_risk_level(70), RiskLevel::LowMedium);
+        assert_eq!(score_to_risk_level(50), RiskLevel::Medium);
+        assert_eq!(score_to_risk_level(30), RiskLevel::High);
+        assert_eq!(score_to_risk_level(10), RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_compute_overall() {
+        let bob_findings = [make_finding(Severity::Critical)];
+        let data = vec![("alice", &[] as &[Finding], 50u8), ("bob", &bob_findings[..], 50u8)];
+        let (score, risk) = compute_overall(&data);
+        assert_eq!(score, 85); // (100*0.5 + 70*0.5) = 85
+        assert_eq!(risk, RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_expert_score_mixed_severities() {
+        let findings = vec![
+            make_finding(Severity::Critical), // -30
+            make_finding(Severity::High),     // -15
+            make_finding(Severity::High),     // -15
+            make_finding(Severity::Medium),   // -5
+            make_finding(Severity::Low),      // -1
+            make_finding(Severity::Low),      // -1
+            make_finding(Severity::Note),     // -0
+        ];
+        // 100 - 30 - 15 - 15 - 5 - 1 - 1 - 0 = 33
+        let score = expert_score(&findings);
+        assert_eq!(score, 33);
+    }
+
+    #[test]
+    fn test_expert_score_only_notes() {
+        let findings = vec![make_finding(Severity::Note), make_finding(Severity::Note)];
+        assert_eq!(expert_score(&findings), 100);
+    }
+
+    #[test]
+    fn test_expert_score_large_penalty_clamp_min() {
+        let findings = vec![make_finding(Severity::Critical); 10]; // -300 = clamped to 0
+        assert_eq!(expert_score(&findings), 0);
+    }
+
+    #[test]
+    fn test_expert_score_single_low() {
+        assert_eq!(expert_score(&[make_finding(Severity::Low)]), 99);
+    }
+
+    #[test]
+    fn test_expert_score_single_medium() {
+        assert_eq!(expert_score(&[make_finding(Severity::Medium)]), 95);
+    }
+
+    #[test]
+    fn test_score_to_risk_level_boundary_values() {
+        // Boundary: 0 -> Critical
+        assert_eq!(score_to_risk_level(0), RiskLevel::Critical);
+        // Upper boundary of Critical: 20
+        assert_eq!(score_to_risk_level(20), RiskLevel::Critical);
+        // Just over: 21 -> High
+        assert_eq!(score_to_risk_level(21), RiskLevel::High);
+        // Upper boundary of High: 40
+        assert_eq!(score_to_risk_level(40), RiskLevel::High);
+        // Just over: 41 -> Medium
+        assert_eq!(score_to_risk_level(41), RiskLevel::Medium);
+        // Upper boundary of Medium: 60
+        assert_eq!(score_to_risk_level(60), RiskLevel::Medium);
+        // Just over: 61 -> LowMedium
+        assert_eq!(score_to_risk_level(61), RiskLevel::LowMedium);
+        // Upper boundary of LowMedium: 80
+        assert_eq!(score_to_risk_level(80), RiskLevel::LowMedium);
+        // Just over: 81 -> Low
+        assert_eq!(score_to_risk_level(81), RiskLevel::Low);
+        // u8::MAX = 255 -> Low
+        assert_eq!(score_to_risk_level(u8::MAX), RiskLevel::Low);
+        assert_eq!(score_to_risk_level(100), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_weighted_overall_score_zero_weight_sum() {
+        let scores = vec![("a".to_string(), 100u8, 0u8), ("b".to_string(), 50u8, 0u8)];
+        assert_eq!(weighted_overall_score(&scores), 0);
+    }
+
+    #[test]
+    fn test_weighted_overall_score_single_expert() {
+        let scores = vec![("a".to_string(), 85u8, 100u8)];
+        assert_eq!(weighted_overall_score(&scores), 85);
+    }
+
+    #[test]
+    fn test_weighted_overall_score_rounding() {
+        // (80 * 33.33... + 70 * 33.33... + 90 * 33.33...) / 100 = 80
+        let scores = vec![
+            ("a".to_string(), 80u8, 33u8),
+            ("b".to_string(), 70u8, 33u8),
+            ("c".to_string(), 90u8, 34u8),
+        ];
+        let result = weighted_overall_score(&scores);
+        assert!(result > 0);
+        assert!(result <= 100);
+    }
+
+    #[test]
+    fn test_compute_overall_no_findings() {
+        let data = vec![("expert", &[] as &[Finding], 100u8)];
+        let (score, risk) = compute_overall(&data);
+        assert_eq!(score, 100);
+        assert_eq!(risk, RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_compute_overall_multiple_experts() {
+        let alice_findings = [make_finding(Severity::High)]; // score 85
+        let bob_findings = [make_finding(Severity::Medium), make_finding(Severity::Low)]; // score 94
+        let data = vec![("alice", &alice_findings[..], 50u8), ("bob", &bob_findings[..], 50u8)];
+        let (score, _risk) = compute_overall(&data);
+        // (85*0.5 + 94*0.5) = 89.5 -> 90
+        assert_eq!(score, 90);
+    }
+
+    #[test]
+    fn test_compute_overall_zero_weight() {
+        let data = vec![("a", &[] as &[Finding], 0u8)];
+        let (score, risk) = compute_overall(&data);
+        assert_eq!(score, 0);
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_expert_score_all_severities() {
+        // One of each severity
+        let findings = vec![
+            make_finding(Severity::Critical), // -30
+            make_finding(Severity::High),     // -15
+            make_finding(Severity::Medium),   // -5
+            make_finding(Severity::Low),      // -1
+            make_finding(Severity::Note),     // -0
+        ];
+        assert_eq!(expert_score(&findings), 49); // 100 - 30 - 15 - 5 - 1 = 49
+    }
+
+    #[test]
+    fn test_weighted_overall_score_large_weights() {
+        // Weights that sum to 100
+        let scores = vec![("a".to_string(), 100u8, 99u8), ("b".to_string(), 0u8, 1u8)];
+        assert_eq!(weighted_overall_score(&scores), 99);
+    }
+
+    #[test]
+    fn test_weighted_overall_score_all_zero_scores() {
+        let scores = vec![("a".to_string(), 0u8, 50u8), ("b".to_string(), 0u8, 50u8)];
+        assert_eq!(weighted_overall_score(&scores), 0);
+    }
+
+    #[test]
+    fn test_weighted_overall_score_no_experts() {
+        let scores: Vec<(String, u8, u8)> = vec![];
+        assert_eq!(weighted_overall_score(&scores), 0);
+    }
+
+    #[test]
+    fn test_score_to_risk_level_max_value() {
+        assert_eq!(score_to_risk_level(200), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_score_to_risk_level_min_value() {
+        assert_eq!(score_to_risk_level(0), RiskLevel::Critical);
+    }
+
+    #[test]
+    fn test_compute_overall_single_expert() {
+        let findings = [make_finding(Severity::Critical)]; // score 70
+        let data = vec![("security", &findings[..], 100u8)];
+        let (score, risk) = compute_overall(&data);
+        assert_eq!(score, 70);
+        assert_eq!(risk, RiskLevel::LowMedium);
+    }
+
+    #[test]
+    fn test_compute_overall_three_experts_asymmetric_weights() {
+        let a = [make_finding(Severity::Critical)]; // score 70
+        let b = [make_finding(Severity::High)]; // score 85
+        let c = [make_finding(Severity::Medium)]; // score 95
+        let data = vec![
+            ("lead", &a[..], 50u8),
+            ("quality", &b[..], 30u8),
+            ("docs", &c[..], 20u8),
+        ];
+        let (score, _) = compute_overall(&data);
+        // (70*0.5 + 85*0.3 + 95*0.2) = 35 + 25.5 + 19 = 79.5 -> 80
+        assert_eq!(score, 80);
+    }
+
+    #[test]
+    fn test_expert_score_record_fields() {
+        let record = ExpertScoreRecord {
+            expert_name: "test".to_string(),
+            individual_score: 85,
+            weight: 50,
+        };
+        assert_eq!(record.expert_name, "test");
+        assert_eq!(record.individual_score, 85);
+        assert_eq!(record.weight, 50);
+    }
+
+    #[test]
+    fn test_review_score_record_fields() {
+        let record = ReviewScoreRecord {
+            overall_score: 75,
+            risk_level: RiskLevel::Medium,
+            expert_scores: vec![ExpertScoreRecord {
+                expert_name: "a".to_string(),
+                individual_score: 80,
+                weight: 100,
+            }],
+        };
+        assert_eq!(record.overall_score, 75);
+        assert_eq!(record.risk_level, RiskLevel::Medium);
+        assert_eq!(record.expert_scores.len(), 1);
+    }
+}

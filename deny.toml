@@ -1,0 +1,100 @@
+# cargo-deny configuration for review-engine
+# Documentation: https://embarkstudios.github.io/cargo-deny/
+#
+# This file is used by cargo-deny to audit dependency licenses. It is intended
+# to keep the Open Core distribution free of copyleft or otherwise problematic
+# licenses that would conflict with the Apache-2.0-licensed core and the separate
+# commercial enterprise offering.
+
+[graph]
+# Common targets for statically linked release binaries.
+targets = [
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
+    { triple = "x86_64-apple-darwin" },
+    { triple = "aarch64-apple-darwin" },
+]
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+[licenses]
+version = 2
+
+# Permissive licenses that are compatible with the review-engine Open Core model.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "CC0-1.0",
+    "Unlicense",
+    "BSL-1.0",
+    "CDLA-Permissive-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+]
+
+# Copyleft and other licenses we explicitly reject for the core distribution.
+deny = [
+    "GPL-2.0",
+    "GPL-3.0",
+    "LGPL-2.1",
+    "LGPL-3.0",
+    "AGPL-3.0",
+    "MPL-2.0",
+    "SSPL-1.0",
+]
+
+# Fail the build if a dependency has no discernible license.
+unlicensed = "deny"
+
+# Fail the build if a dependency uses a copyleft license (redundant with the deny
+# list, but explicit).
+copyleft = "deny"
+
+# Any license not explicitly listed above should fail the build.
+default = "deny"
+
+# Crate-specific license expressions that are not simple single identifiers.
+[[licenses.exceptions]]
+name = "ring"
+version = "*"
+allow = ["Apache-2.0 AND ISC"]
+reason = "ring is statically linked and requires both the Apache-2.0 and ISC notices to be preserved"
+
+[[licenses.exceptions]]
+name = "rustls-webpki"
+version = "*"
+allow = ["ISC"]
+reason = "rustls-webpki uses the ISC license for its webpki-derived code"
+
+[[licenses.exceptions]]
+name = "matchit"
+version = "*"
+allow = ["MIT AND BSD-3-Clause"]
+reason = "matchit is dual-licensed under MIT and BSD-3-Clause; both notices must be preserved"
+
+[[licenses.exceptions]]
+name = "signal-hook"
+version = "*"
+allow = ["Apache-2.0/MIT"]
+reason = "Apache-2.0/MIT is equivalent to Apache-2.0 OR MIT"
+
+[[licenses.exceptions]]
+name = "fxhash"
+version = "*"
+allow = ["Apache-2.0/MIT"]
+reason = "Apache-2.0/MIT is equivalent to Apache-2.0 OR MIT"
+
+[bans]
+# No crate bans are configured by default; add them here if a crate must be
+# excluded for legal or technical reasons.
+
+[sources]
+# Allow crates from the default registry only.
+unknown-registry = "deny"
+unknown-git = "deny"

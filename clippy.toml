@@ -1,0 +1,6 @@
+# Clippy configuration for review-engine
+# See https://doc.rust-lang.org/clippy/ for all options
+
+disallowed-methods = [
+    { path = "std::process::exit", reason = "This should only be used in CLI handlers" },
+]

@@ -1,0 +1,458 @@
+use anyhow::Result;
+use review_engine::models::*;
+use review_engine::progress::ProgressMap;
+use std::path::Path;
+
+/// Resolve LLM configuration from multiple sources:
+/// 1. CLI --llm-config arguments (highest priority)
+/// 2. LLM_CONFIG environment variable
+/// 3. config.llm from parsed config file
+/// 4. Empty vec (fallback)
+pub fn resolve_llm_configs(argv_llm_configs: &[String], config: &AppConfig) -> anyhow::Result<Vec<LLMConfig>> {
+    if !argv_llm_configs.is_empty() {
+        let mut configs = Vec::new();
+        for s in argv_llm_configs {
+            configs.push(serde_json::from_str::<LLMConfig>(s)?);
+        }
+        return Ok(configs);
+    }
+    if let Ok(json) = std::env::var("LLM_CONFIG") {
+        if !json.is_empty() && json != "[]" {
+            return Ok(serde_json::from_str(&json)?);
+        }
+    }
+    if !config.llm.is_empty() {
+        return Ok(config.llm.clone());
+    }
+    Ok(Vec::new())
+}
+
+pub async fn run_stdin(format: &str, output: &Option<String>) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buf = String::new();
+    tokio::io::stdin().read_to_string(&mut buf).await?;
+    let req: serde_json::Value = serde_json::from_str(&buf)?;
+
+    let mr_url = req["mr_url"].as_str().unwrap_or_default();
+    let token = req["gitlab_token"].as_str().unwrap_or_default();
+    let llm_configs: Vec<LLMConfig> = serde_json::from_value(req["llm_configs"].clone())?;
+    let config_toml = req["config"].as_str().map(|s| s.to_string());
+
+    let result =
+        review_engine::run_review(mr_url, token, llm_configs, config_toml.map(ConfigSource::Inline), None).await?;
+    write_output(&result, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_mr(
+    mr_url: &str,
+    config_path: Option<String>,
+    gitlab_token: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+    publish: bool,
+    progress_map: Option<ProgressMap>,
+    review_id: &str,
+) -> Result<()> {
+    let token = gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default());
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source.clone()).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let progress_override = progress_map.map(|map| (map, review_id.to_string()));
+    let result = review_engine::run_review(mr_url, &token, configs, config_source, progress_override).await?;
+    write_output(&result, format, output, None, Some(&config.output_dir))?;
+
+    if publish {
+        if let Err(e) = review_engine::publish_review(&token, mr_url, &result).await {
+            let msg = e.to_string();
+            if msg.contains("401") || msg.contains("403") {
+                eprintln!("error: --publish failed: token lacks write permissions.\n  {msg}");
+            } else {
+                eprintln!("error: --publish failed:\n  {msg}");
+            }
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn run_improve(
+    mr_url: &str,
+    config_path: Option<String>,
+    gitlab_token: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+    publish: bool,
+) -> Result<()> {
+    let token = gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default());
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let client = review_engine::gitlab::client::Client::new(&token, mr_url)?;
+    let mr_info = client.fetch_mr_info().await?;
+    let diff = client.fetch_diff().await?;
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let result = review_engine::tools::improve::run_improve(&llm_client, &configs, &diff, &mr_info).await?;
+
+    let md = format!(
+        "## Code Improvement Suggestions\n\nGenerated {} suggestions.\n\n```json\n{}\n```",
+        result.code_suggestions.len(),
+        serde_json::to_string_pretty(&result).unwrap_or_default(),
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "improve".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    if publish {
+        if let Err(e) = review_engine::publish_review(&token, mr_url, &review_out).await {
+            let msg = e.to_string();
+            if msg.contains("401") || msg.contains("403") {
+                eprintln!("error: --publish failed: token lacks write permissions.\n  {msg}");
+            } else {
+                eprintln!("error: --publish failed:\n  {msg}");
+            }
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn run_describe(
+    mr_url: &str,
+    config_path: Option<String>,
+    gitlab_token: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+    publish: bool,
+) -> Result<()> {
+    let token = gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default());
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let client = review_engine::gitlab::client::Client::new(&token, mr_url)?;
+    let mr_info = client.fetch_mr_info().await?;
+    let diff = client.fetch_diff().await?;
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let commit_messages = vec![];
+    let result =
+        review_engine::tools::describe::run_describe(&llm_client, &configs, &diff, &mr_info, &commit_messages).await?;
+
+    let md = format!(
+        "## PR Description\n\n**Title**: {}\n\n**Description**: {}\n\n**Type**: {}",
+        result.title, result.description, result.change_type,
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "describe".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    if publish {
+        if let Err(e) = review_engine::publish_review(&token, mr_url, &review_out).await {
+            let msg = e.to_string();
+            if msg.contains("401") || msg.contains("403") {
+                eprintln!("error: --publish failed: token lacks write permissions.\n  {msg}");
+            } else {
+                eprintln!("error: --publish failed:\n  {msg}");
+            }
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+pub async fn run_local(
+    diff_path: &str,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+    progress_map: Option<ProgressMap>,
+    review_id: &str,
+) -> Result<()> {
+    let diff = tokio::fs::read_to_string(diff_path).await?;
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let (experts, mr_info) = prepare_review(&config, "local", "local", "main");
+
+    let (reports, _) = review_engine::orchestrator::run_experts(
+        &experts,
+        &mr_info,
+        &diff,
+        &llm_configs,
+        &config,
+        progress_map.clone(),
+        review_id,
+    )
+    .await?;
+
+    let out = ReviewOutput::new(reports);
+    write_output(&out, format, output, None, Some(&config.output_dir))?;
+    review_engine::progress::complete_progress(progress_map.as_ref(), review_id);
+    Ok(())
+}
+
+fn prepare_review(
+    config: &AppConfig,
+    project_path: &str,
+    source_branch: &str,
+    target_branch: &str,
+) -> (Vec<ExpertDef>, MRInfo) {
+    let experts = config.build_expert_defs();
+    let mr_info = MRInfo::new(
+        project_path.to_string(),
+        format!("Local review: {}", project_path),
+        source_branch.to_string(),
+        target_branch.to_string(),
+    );
+    (experts, mr_info)
+}
+
+pub async fn run_local_repo(
+    local_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+    staged: bool,
+    since: Option<&str>,
+    until: Option<&str>,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+    progress_map: Option<ProgressMap>,
+    review_id: &str,
+) -> Result<()> {
+    use review_engine::git::local::LocalGitBrowser;
+
+    let base_ref = base.unwrap_or("main");
+    let repo = LocalGitBrowser::new(local_path);
+    let diff = repo.get_diff(base_ref, head, staged, since, until).await?;
+
+    if diff.is_empty() {
+        println!("No changes to review (empty diff)");
+        return Ok(());
+    }
+
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+
+    let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let (experts, mr_info) = prepare_review(&config, local_path, "local", base_ref);
+
+    let (reports, _) = review_engine::orchestrator::run_experts(
+        &experts,
+        &mr_info,
+        &diff,
+        &llm_configs,
+        &config,
+        progress_map.clone(),
+        review_id,
+    )
+    .await?;
+
+    let out = ReviewOutput::new(reports);
+
+    let repo_root = match std::fs::canonicalize(local_path) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::warn!(
+                "Failed to canonicalize local path '{}': {}; path normalization disabled",
+                local_path,
+                e
+            );
+            None
+        }
+    };
+    write_output(&out, format, output, repo_root.as_deref(), Some(&config.output_dir))?;
+    review_engine::progress::complete_progress(progress_map.as_ref(), review_id);
+    Ok(())
+}
+
+pub async fn run_repo_review_local_or_enhanced(
+    local_path: &str,
+    llm_configs: &[LLMConfig],
+    format: &str,
+    output: &Option<String>,
+    progress_map: Option<ProgressMap>,
+    review_id: &str,
+) -> Result<()> {
+    use review_engine::repo::RepoScanner;
+
+    let result = if llm_configs.is_empty() {
+        // Local-only analysis (no LLM)
+        review_engine::tools::repo_review::run_local_repo_review(local_path, progress_map, review_id).await?
+    } else {
+        // LLM-enhanced analysis
+        let scanner = RepoScanner::new(local_path);
+        let entries = scanner.scan()?;
+        let llm_client = review_engine::llm::client::LLMClient::new();
+        review_engine::tools::repo_review::run_repo_review(
+            &llm_client,
+            llm_configs,
+            local_path,
+            &entries,
+            progress_map,
+            review_id,
+        )
+        .await?
+    };
+
+    let text = review_engine::tools::repo_review::render_repo_review_output(&result, format)?;
+    match output {
+        Some(path) => std::fs::write(path, &text)?,
+        None => println!("{}", text),
+    }
+    Ok(())
+}
+
+/// Normalize all finding file paths in a ReviewOutput in-place,
+/// then re-render markdown with the normalized paths.
+fn normalize_all_findings(output: &mut ReviewOutput, repo_root: &Path) {
+    for report in &mut output.reports {
+        for finding in &mut report.findings {
+            finding.file = review_engine::output::path::normalize_path(&finding.file, Some(repo_root));
+        }
+        report.markdown =
+            review_engine::output::renderer::render_expert_markdown(&report.expert_name, &report.findings);
+    }
+    if let Some(ref mut agg) = output.aggregated {
+        for finding in &mut agg.findings {
+            finding.file = review_engine::output::path::normalize_path(&finding.file, Some(repo_root));
+        }
+        agg.markdown = review_engine::output::renderer::render_aggregated_markdown(&agg.findings);
+    }
+}
+
+/// Format a ReviewOutput according to the requested format string.
+fn format_output(result: &ReviewOutput, format: &str) -> Result<String> {
+    Ok(match format {
+        "markdown" => result
+            .reports
+            .iter()
+            .map(|r| r.markdown.clone())
+            .collect::<Vec<_>>()
+            .join("\n\n---\n\n"),
+        "aggregated-markdown" => result
+            .aggregated
+            .as_ref()
+            .map(|a| a.markdown.clone())
+            .unwrap_or_else(|| String::from("No aggregated report")),
+        _ => serde_json::to_string_pretty(result)?,
+    })
+}
+
+fn write_output(
+    result: &ReviewOutput,
+    format: &str,
+    output: &Option<String>,
+    repo_root: Option<&Path>,
+    output_dir: Option<&str>,
+) -> Result<()> {
+    let text = if let Some(root) = repo_root {
+        let mut normalized = result.clone();
+        normalize_all_findings(&mut normalized, root);
+        format_output(&normalized, format)?
+    } else {
+        format_output(result, format)?
+    };
+
+    match output {
+        Some(path) => {
+            // Explicit --output: only write to file, not stdout
+            std::fs::write(path, &text)?;
+        }
+        None => {
+            // No explicit output: print to stdout
+            println!("{}", text);
+            // And save to default directory if configured
+            if let Some(dir) = output_dir {
+                let dir = std::path::Path::new(dir);
+                if !dir.exists() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                let ext = match format {
+                    "markdown" | "aggregated-markdown" => "md",
+                    _ => "json",
+                };
+                let now = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                let filename = format!("review_{}.{}", now, ext);
+                let filepath = dir.join(&filename);
+                std::fs::write(&filepath, &text)?;
+                eprintln!("Report saved to {}", filepath.display());
+            }
+        } // None
+    } // match output
+
+    Ok(())
+}
+
+/// Watch a config file for changes and log a warning when modified.
+/// This allows users to restart the app to pick up changes.
+pub async fn watch_config_file(path: std::path::PathBuf) {
+    tokio::task::spawn_blocking(move || {
+        use notify::{EventKind, Watcher};
+        use std::sync::mpsc;
+
+        let (tx, rx) = mpsc::channel::<notify::Result<notify::Event>>();
+        let mut watcher = match notify::recommended_watcher(tx) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!("Failed to start config watcher: {}", e);
+                return;
+            }
+        };
+
+        if let Err(e) = watcher.watch(&path, notify::RecursiveMode::NonRecursive) {
+            tracing::warn!("Failed to watch config file: {}", e);
+            return;
+        }
+
+        loop {
+            match rx.recv() {
+                Ok(Ok(event)) => {
+                    if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                        tracing::warn!(
+                            "Config file '{}' has changed. Restart review-engine to apply changes.",
+                            path.display()
+                        );
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!("Config watcher error: {}", e);
+                }
+                Err(_) => break,
+            }
+        }
+    })
+    .await
+    .ok();
+}

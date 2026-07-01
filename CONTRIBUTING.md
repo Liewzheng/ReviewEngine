@@ -16,16 +16,6 @@ By keeping the core open, we hope to benefit individual developers, foster exter
 4. **Add tests** when fixing bugs or adding behavior that should remain stable.
 5. **Open a Pull Request** and fill out the description so reviewers can understand the change.
 
-## Contributor License Agreement
-
-By submitting a Pull Request or otherwise contributing code, documentation, or other materials to this project, you agree that your contribution is made under the terms of the [Contributor License Agreement](.github/CLA.md). In short:
-
-- You keep the copyright to your contribution.
-- You grant the project a perpetual, irrevocable, worldwide, royalty-free, sublicensable license to use your contribution in both open-source and commercial offerings.
-- You represent that the work is your own and that you have the right to submit it.
-
-If you do not agree to these terms, please do not submit a Pull Request.
-
 ## What We Look For
 
 - Clear, focused changes with good commit messages.

@@ -257,7 +257,6 @@ ReviewEngine is organized around a small set of focused commands:
 
 - See [`CHANGELOG.md`](CHANGELOG.md) for recent releases and upcoming milestones.
 - See [`CONTRIBUTING.md`](CONTRIBUTING.md) for how to contribute code, docs, or issues.
-- See [`.github/CLA.md`](.github/CLA.md) for the Contributor License Agreement required for all contributions.
 
 We welcome contributors. Whether it's a bug report, a docs improvement, or a new expert idea, open an issue or pull request and we'll take a look.
 

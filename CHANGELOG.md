@@ -4,7 +4,6 @@
 
 ### Added
 - Project license switched to Apache-2.0; added `license = "Apache-2.0"` to `Cargo.toml`
-- Contributor License Agreement (CLA) in `.github/CLA.md`
 - `CONTRIBUTING.md` contribution guidelines
 - `THIRD_PARTY_LICENSES.md` and `scripts/generate-third-party-licenses.sh`
 - `deny.toml` cargo-deny license audit configuration

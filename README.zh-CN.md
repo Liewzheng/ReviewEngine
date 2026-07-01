@@ -257,7 +257,6 @@ review-engine 围绕一组精简的命令组织：
 
 - 近期发布和路线图里程碑见 [`CHANGELOG.md`](CHANGELOG.md)。
 - 如何贡献代码、文档或 issue 见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
-- 所有贡献者都需要签署 [`.github/CLA.md`](.github/CLA.md) 中的贡献者许可协议。
 
 我们欢迎贡献者。无论是 bug 报告、文档改进，还是新的专家想法，都欢迎提交 issue 或 pull request。
 

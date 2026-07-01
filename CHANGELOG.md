@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.2] - 2026-06-29
+## [0.6.2] - 2026-06-30
 
 ### Added
 - Project license switched to Apache-2.0; added `license = "Apache-2.0"` to `Cargo.toml`
@@ -12,6 +12,11 @@
 - New user-facing documentation: `docs/getting-started.md`, `docs/configuration.md`, `docs/enterprise.md`, and `docs/integrations/*`
 - Chinese README (`README.zh-CN.md`)
 - `.notes/` directory for internal planning, roadmaps, and business strategy documents
+- Evidence, impact, recommendation, effort fields in LLM expert findings (architecture lead + code quality)
+- 11 unit tests for `convert_scores`, `pick_top_risks`, and `build_languages`
+- Shared `parse_yaml_findings()` helper for consistent YAML→ScoreItem parsing
+- `severity_label()` static mapping (replaced heap-allocating `to_string().to_uppercase()`)
+- Tests for `render_aggregated_markdown` and severity label format for all 5 severity levels
 
 ### Changed
 - Replaced `dirs` dependency with `home` to avoid MPL-2.0 transitive dependency
@@ -20,10 +25,29 @@
 - Updated public documentation URLs from private GitLab to GitHub distribution address
 - Enterprise contact email set to `isletspace@outlook.com`
 - Rebased `feat/licensing-compliance` onto latest `origin/main`
+- `RepoReviewOutput` restructured: `overview` → `expert_scores` + `risk_categories` + `action_items` → `conclusion` (total-part-detail architecture)
+- Extracted shared helpers: `build_score_breakdown`, `build_risk_categories`, `build_action_items`, `build_languages`, `pick_top_risks` — eliminating all duplicate inline code between `build_output` / `build_output_from_aggregated`
+- `convert_scores` returns named struct `ConvertedScores` instead of tuple
+- `pick_top_risks` uses `select_nth_unstable_by` for O(n) partial selection
+- English-only, no-emoji output across all renderers (`renderer.rs`, `team_renderer.rs`, `repo_review.rs`)
+- Languages list truncated to top 3 by file count
+- Score breakdown `weighted_contrib` normalized by actual total weight (not hardcoded 100)
+- LLM prompt templates (`ARCHITECTURE_LEAD_SYSTEM_TEMPLATE`, `CODE_QUALITY_SYSTEM_TEMPLATE`) moved from inline `format!()` to `templates.rs` constants
+- Risk level mapping unified: `score_to_risk_level()` canonical function (0-40 critical, 41-60 high, 61-80 medium, 81-90 low, 91-100 healthy)
+- Scoring consolidated: `compute_weighted()` shared by both `experts::weighted_total()` and `scoring::weighted_overall_score()`
+- `convert_scores()` helper extracted, eliminating 65 lines of duplicate code between `build_output` / `build_output_from_aggregated`
+- `RiskCategory.risk_icon` field removed (was unused duplicate of `risk_level`)
 
 ### Fixed
 - Pre-existing syntax error (extra `fi`) in `install.sh`
 - `install.sh` now falls back to `shasum -a 256` on macOS
+- `merge_deduplicate` now merges (not drops) duplicate findings: highest severity, longest evidence/impact/recommendation, highest effort win
+- Noise filtering checks both `message` and `evidence`; empty findings filtered; logs discarded count
+- `top_risks` empty shows "Analysis incomplete" not "No issues found" when no expert data
+- Empty message guarded in `render_detail`
+- Finding heading level fixed (`###` → `####`)
+- Summary heading uses `####` instead of `###` to avoid heading level jump
+- Dead variable `all_details` removed from `build_output`
 
 ## [0.6.0] - 2026-06-29
 
@@ -127,38 +151,6 @@
 
 ### Changed
 - Upgraded from 0.4.0 to 0.4.1
-
-## [0.6.2] - 2026-06-30
-
-### Added
-- Evidence, impact, recommendation, effort fields in LLM expert findings (architecture lead + code quality)
-- 11 unit tests for `convert_scores`, `pick_top_risks`, and `build_languages`
-- Shared `parse_yaml_findings()` helper for consistent YAML→ScoreItem parsing
-- `severity_label()` static mapping (replaced heap-allocating `to_string().to_uppercase()`)
-- Tests for `render_aggregated_markdown` and severity label format for all 5 severity levels
-
-### Changed
-- `RepoReviewOutput` restructured: `overview` → `expert_scores` + `risk_categories` + `action_items` → `conclusion` (total-part-detail architecture)
-- Extracted shared helpers: `build_score_breakdown`, `build_risk_categories`, `build_action_items`, `build_languages`, `pick_top_risks` — eliminating all duplicate inline code between `build_output` / `build_output_from_aggregated`
-- `convert_scores` returns named struct `ConvertedScores` instead of tuple
-- `pick_top_risks` uses `select_nth_unstable_by` for O(n) partial selection
-- English-only, no-emoji output across all renderers (`renderer.rs`, `team_renderer.rs`, `repo_review.rs`)
-- Languages list truncated to top 3 by file count
-- Score breakdown `weighted_contrib` normalized by actual total weight (not hardcoded 100)
-- LLM prompt templates (`ARCHITECTURE_LEAD_SYSTEM_TEMPLATE`, `CODE_QUALITY_SYSTEM_TEMPLATE`) moved from inline `format!()` to `templates.rs` constants
-- Risk level mapping unified: `score_to_risk_level()` canonical function (0-40 critical, 41-60 high, 61-80 medium, 81-90 low, 91-100 healthy)
-- Scoring consolidated: `compute_weighted()` shared by both `experts::weighted_total()` and `scoring::weighted_overall_score()`
-- `convert_scores()` helper extracted, eliminating 65 lines of duplicate code between `build_output` / `build_output_from_aggregated`
-- `RiskCategory.risk_icon` field removed (was unused duplicate of `risk_level`)
-
-### Fixed
-- `merge_deduplicate` now merges (not drops) duplicate findings: highest severity, longest evidence/impact/recommendation, highest effort win
-- Noise filtering checks both `message` and `evidence`; empty findings filtered; logs discarded count
-- `top_risks` empty shows "Analysis incomplete" not "No issues found" when no expert data
-- Empty message guarded in `render_detail`
-- Finding heading level fixed (`###` → `####`)
-- Summary heading uses `####` instead of `###` to avoid heading level jump
-- Dead variable `all_details` removed from `build_output`
 
 ## Unreleased
 

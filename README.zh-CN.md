@@ -206,6 +206,25 @@ review-engine serve --port 8080
 
 ---
 
+## AI 技能
+
+ReviewEngine 也可以作为兼容 [Agent Skills](https://github.com/cline/agent-skills) 的 AI skill 使用，从而直接在支持的 Agent 中触发评审。
+
+支持的 Agent 包括 **Kimi Code**、**Claude Code**、**Codex CLI**、**OpenCode**、**Cursor** 以及其他兼容 Agent Skills 的客户端。
+
+全局安装该 skill：
+
+```bash
+cp -R .kimi-code/skills/review-engine ~/.kimi-code/skills/
+# 对于 Claude Code：~/.claude/skills/
+```
+
+安装后，使用 **"review-engine"**、**"review this repo"**、**"repo review"** 或 **"review a PR"** 等短语触发。
+
+详情见 [`.kimi-code/skills/review-engine/SKILL.md`](.kimi-code/skills/review-engine/SKILL.md)。
+
+---
+
 ## 架构
 
 ```

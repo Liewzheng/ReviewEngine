@@ -44,6 +44,11 @@ serve port="8080":
 install:
     cp target/release/review-engine {{home()}}/.local/bin/review-engine
 
+# Install the ReviewEngine AI skill for Kimi Code
+install-skill:
+    mkdir -p {{home()}}/.kimi-code/skills
+    cp -R .kimi-code/skills/review-engine {{home()}}/.kimi-code/skills/
+
 # Complete check (fmt + clippy + test)
 check: fmt-check clippy test
 

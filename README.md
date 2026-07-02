@@ -206,6 +206,25 @@ More examples and setup guides are in [`docs/integrations/`](docs/integrations/)
 
 ---
 
+## AI Skill
+
+ReviewEngine can also be used as an [Agent Skills](https://github.com/cline/agent-skills)-compatible AI skill, so you can trigger reviews directly from supported agents.
+
+Supported agents include **Kimi Code**, **Claude Code**, **Codex CLI**, **OpenCode**, **Cursor**, and other Agent Skills-compatible clients.
+
+Install the skill globally:
+
+```bash
+cp -R .kimi-code/skills/review-engine ~/.kimi-code/skills/
+# or for Claude Code: ~/.claude/skills/
+```
+
+Once installed, trigger it with phrases like **"review-engine"**, **"review this repo"**, **"repo review"**, or **"review a PR"**.
+
+For details, see [`.kimi-code/skills/review-engine/SKILL.md`](.kimi-code/skills/review-engine/SKILL.md).
+
+---
+
 ## Architecture
 
 ```

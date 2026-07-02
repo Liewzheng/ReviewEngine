@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.6.4] - 2026-07-02
+
+### Added
+- AI skill support: project-level skill files under `.kimi-code/skills/review-engine/` with command and configuration references.
+- README/justfile documentation for installing and using the `review-engine` AI skill.
+- Integration test suite: `tests/cli.rs` (6 tests) and `tests/server.rs` (3 tests).
+
+### Fixed
+- `init --default` now writes the built-in default config to `.code-audit-config.toml` instead of printing to stdout.
+- `validate` now runs full configuration validation (`load_and_apply`) rather than only parsing TOML.
+- `/metrics` endpoint always exposes at least one `review_engine_*` series by registering a `review_engine_build_info` gauge.
+
+### Changed
+- Unified orchestrator modules: removed `src/orchestrator.rs` and merged its public API into `src/team/orchestrator.rs`.
+- Unified scoring modules: split MR/PR review scoring into `src/scoring/review.rs` and repository health scoring into `src/scoring/repo.rs`, with `src/scoring/mod.rs` as a thin re-export layer.
+
 ## [0.6.3] - 2026-07-02
 
 ### Fixed

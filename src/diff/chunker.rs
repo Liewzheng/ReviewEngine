@@ -1,6 +1,8 @@
 //! Splits large diffs into smaller chunks for processing within token limits.
 //!
 //! @module review-engine: part of the CodeReview Board virtual engineering team
+use crate::diff::constants::DEFAULT_TOKEN_MODEL;
+use crate::diff::render::{render_file_diff, render_hunk};
 use crate::models::*;
 use crate::tokenizer::count_tokens;
 
@@ -20,7 +22,7 @@ pub fn chunk_by_files(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
 
     for file in files {
         let file_text = render_file_diff(file);
-        let file_tokens = count_tokens(&file_text, "gpt-4").unwrap_or(0);
+        let file_tokens = count_tokens(&file_text, DEFAULT_TOKEN_MODEL).unwrap_or(0);
 
         if current_tokens + file_tokens > max_tokens_per_chunk && !current_files.is_empty() {
             chunks.push(DiffChunk {
@@ -90,13 +92,13 @@ pub fn chunk_by_hunks(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
 /// Compute the token count for rendering a full file diff.
 fn compute_file_tokens(file: &DiffFile) -> usize {
     let file_text = render_file_diff(file);
-    count_tokens(&file_text, "gpt-4").unwrap_or(0)
+    count_tokens(&file_text, DEFAULT_TOKEN_MODEL).unwrap_or(0)
 }
 
 /// Compute the token count for a single hunk.
 fn compute_hunk_tokens(hunk: &DiffHunk) -> usize {
     let hunk_text = render_hunk(hunk);
-    count_tokens(&hunk_text, "gpt-4").unwrap_or(0)
+    count_tokens(&hunk_text, DEFAULT_TOKEN_MODEL).unwrap_or(0)
 }
 
 /// If adding `file_tokens` would exceed the budget, flush the current chunk first.
@@ -201,16 +203,6 @@ fn finish_chunk(chunks: &mut Vec<DiffChunk>, current: &mut Vec<DiffFile>) {
     }
 }
 
-fn render_hunk(hunk: &DiffHunk) -> String {
-    let mut out = hunk.header.clone();
-    out.push('\n');
-    for line in &hunk.lines {
-        out.push_str(&line.content);
-        out.push('\n');
-    }
-    out
-}
-
 /// Adaptive chunking: try files first, fall back to hunks if files exceed budget.
 pub fn adaptive_chunk(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<DiffChunk> {
     let file_chunks = chunk_by_files(files, max_tokens_per_chunk);
@@ -218,7 +210,7 @@ pub fn adaptive_chunk(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
     // Check if any chunk is too large
     let too_large = file_chunks.iter().any(|c| {
         let text: String = c.files.iter().map(render_file_diff).collect();
-        count_tokens(&text, "gpt-4").unwrap_or(0) > max_tokens_per_chunk
+        count_tokens(&text, DEFAULT_TOKEN_MODEL).unwrap_or(0) > max_tokens_per_chunk
     });
 
     if too_large {
@@ -226,19 +218,6 @@ pub fn adaptive_chunk(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
     } else {
         file_chunks
     }
-}
-
-fn render_file_diff(file: &DiffFile) -> String {
-    let mut out = format!("diff --git a/{} b/{}\n", file.old_path, file.new_path);
-    for hunk in &file.hunks {
-        out.push_str(&hunk.header);
-        out.push('\n');
-        for line in &hunk.lines {
-            out.push_str(&line.content);
-            out.push('\n');
-        }
-    }
-    out
 }
 
 #[cfg(test)]

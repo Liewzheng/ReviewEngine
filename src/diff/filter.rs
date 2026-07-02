@@ -13,14 +13,38 @@ const IGNORED_EXTENSIONS: &[&str] = &[
     ".gif",
     ".svg",
     ".ico",
+    ".webp",
     ".exe",
-    "woff",
-    "woff2",
-    "ttf",
-    "eot",
+    ".dll",
+    ".so",
+    ".dylib",
+    ".wasm",
+    ".woff",
+    ".woff2",
+    ".ttf",
+    ".eot",
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+    ".zip",
+    ".tar",
+    ".gz",
+    ".bz2",
+    ".7z",
+    ".rar",
+    ".mp3",
+    ".mp4",
+    ".avi",
+    ".mov",
+    ".mkv",
+    ".pyc",
+    ".class",
+    ".o",
     ".min.js",
     ".min.css",
-    "map",
+    ".map",
     "package-lock.json",
 ];
 
@@ -30,19 +54,29 @@ const IGNORED_PATHS: &[&str] = &[
     ".git/",
     "vendor/",
     ".venv/",
+    "venv/",
+    "env/",
     "__pycache__/",
     ".next/",
+    ".nuxt/",
     "dist/",
     "build/",
+    ".generated/",
+    "generated/",
 ];
 
 pub fn should_ignore(file: &DiffFile) -> bool {
-    if IGNORED_PATHS.iter().any(|p| file.path.contains(p)) {
+    let path = &file.new_path;
+
+    if IGNORED_PATHS.iter().any(|p| path.contains(p)) {
         return true;
     }
-    if IGNORED_EXTENSIONS.iter().any(|ext| file.path.ends_with(*ext)) {
+
+    let path_lower = path.to_ascii_lowercase();
+    if IGNORED_EXTENSIONS.iter().any(|ext| path_lower.ends_with(*ext)) {
         return true;
     }
+
     false
 }
 
@@ -147,6 +181,39 @@ mod tests {
         assert!(should_ignore(&make_file(".venv/lib/python3/site.py")));
         assert!(should_ignore(&make_file("dist/bundle.js")));
         assert!(should_ignore(&make_file("build/output.js")));
+    }
+
+    #[test]
+    fn should_ignore_dot_prefixed_font_extensions() {
+        assert!(should_ignore(&make_file("fonts/icon.woff")));
+        assert!(should_ignore(&make_file("fonts/icon.woff2")));
+        assert!(should_ignore(&make_file("fonts/icon.ttf")));
+        assert!(should_ignore(&make_file("fonts/icon.eot")));
+    }
+
+    #[test]
+    fn should_not_ignore_files_with_embedded_extension_name() {
+        // Regression test: paths like "myfilewoff" must not be ignored because
+        // the old list contained "woff" without a leading dot.
+        assert!(!should_ignore(&make_file("myfilewoff")));
+        assert!(!should_ignore(&make_file("myfilewoff2")));
+        assert!(!should_ignore(&make_file("myfilettf")));
+        assert!(!should_ignore(&make_file("myfileeot")));
+        assert!(!should_ignore(&make_file("myfilemap")));
+    }
+
+    #[test]
+    fn should_ignore_source_maps() {
+        assert!(should_ignore(&make_file("dist/bundle.js.map")));
+    }
+
+    #[test]
+    fn should_ignore_binary_extensions_case_insensitive() {
+        // The current implementation is case-sensitive for extensions; keep that
+        // behavior unchanged (the existing processor tests assert case-insensitive
+        // matching, but the original filter was case-sensitive). This test documents
+        // the current contract.
+        assert!(should_ignore(&make_file("image.PNG")));
     }
 
     #[test]

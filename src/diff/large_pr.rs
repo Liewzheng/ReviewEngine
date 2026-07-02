@@ -1,4 +1,5 @@
 use crate::diff::chunker::DiffChunk;
+use crate::diff::constants::DEFAULT_TOKEN_MODEL;
 use crate::diff::processor;
 use crate::models::*;
 use crate::tokenizer::count_tokens;
@@ -56,7 +57,7 @@ pub fn assess_large_pr(files: &[DiffFile], thresholds: &LargePrThresholds) -> La
     let file_count = files.len();
     let total_changes: u32 = files.iter().map(|f| f.additions + f.deletions).sum();
     let diff_text = processor::render_diff_text(files);
-    let estimated_tokens = count_tokens(&diff_text, "gpt-4").unwrap_or(0);
+    let estimated_tokens = count_tokens(&diff_text, DEFAULT_TOKEN_MODEL).unwrap_or(0);
 
     let mut details = Vec::new();
     let mut compression = CompressionLevel::None;

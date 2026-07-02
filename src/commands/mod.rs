@@ -1,4 +1,4 @@
-//! Command routing and expert selection for the review pipeline.
+//! Command registry and expert selection.
 //!
 //! The [`CommandRegistry`] maps command names (e.g. "review", "describe")
 //! to enabled/disabled status, and provides filtering logic to select

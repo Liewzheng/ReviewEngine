@@ -13,6 +13,7 @@
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
+pub mod actions;
 pub mod commands;
 pub mod config;
 pub mod context;
@@ -36,7 +37,6 @@ pub mod scoring;
 pub mod server;
 pub mod team;
 pub mod tokenizer;
-pub mod tools;
 
 #[cfg(feature = "python")]
 pub mod python;

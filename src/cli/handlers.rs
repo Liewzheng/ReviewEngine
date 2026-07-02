@@ -99,7 +99,7 @@ pub async fn run_improve(
     let diff = client.fetch_diff().await?;
 
     let llm_client = review_engine::llm::client::LLMClient::new();
-    let result = review_engine::tools::improve::run_improve(&llm_client, &configs, &diff, &mr_info).await?;
+    let result = review_engine::actions::improve::run_improve(&llm_client, &configs, &diff, &mr_info).await?;
 
     let md = format!(
         "## Code Improvement Suggestions\n\nGenerated {} suggestions.\n\n```json\n{}\n```",
@@ -154,7 +154,8 @@ pub async fn run_describe(
     let llm_client = review_engine::llm::client::LLMClient::new();
     let commit_messages = vec![];
     let result =
-        review_engine::tools::describe::run_describe(&llm_client, &configs, &diff, &mr_info, &commit_messages).await?;
+        review_engine::actions::describe::run_describe(&llm_client, &configs, &diff, &mr_info, &commit_messages)
+            .await?;
 
     let md = format!(
         "## PR Description\n\n**Title**: {}\n\n**Description**: {}\n\n**Type**: {}",
@@ -309,13 +310,13 @@ pub async fn run_repo_review_local_or_enhanced(
 
     let result = if llm_configs.is_empty() {
         // Local-only analysis (no LLM)
-        review_engine::tools::repo_review::run_local_repo_review(local_path, progress_map, review_id).await?
+        review_engine::actions::repo_review::run_local_repo_review(local_path, progress_map, review_id).await?
     } else {
         // LLM-enhanced analysis
         let scanner = RepoScanner::new(local_path);
         let entries = scanner.scan()?;
         let llm_client = review_engine::llm::client::LLMClient::new();
-        review_engine::tools::repo_review::run_repo_review(
+        review_engine::actions::repo_review::run_repo_review(
             &llm_client,
             llm_configs,
             local_path,
@@ -326,7 +327,7 @@ pub async fn run_repo_review_local_or_enhanced(
         .await?
     };
 
-    let text = review_engine::tools::repo_review::render_repo_review_output(&result, format)?;
+    let text = review_engine::actions::repo_review::render_repo_review_output(&result, format)?;
     match output {
         Some(path) => std::fs::write(path, &text)?,
         None => println!("{}", text),

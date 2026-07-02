@@ -392,9 +392,9 @@ pub async fn run() -> Result<()> {
         }
         Commands::Init { default } => {
             if default {
-                review_engine::tools::init::run_default()?;
+                review_engine::actions::init::run_default()?;
             } else {
-                review_engine::tools::init::run_interactive(".")?;
+                review_engine::actions::init::run_interactive(".")?;
             }
         }
         Commands::Improve {

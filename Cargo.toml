@@ -17,7 +17,7 @@ path = "src/main.rs"
 pyo3 = { version = "0.29", features = ["extension-module"], optional = true }
 
 # Async runtime
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 # HTTP server (health check, webhook)

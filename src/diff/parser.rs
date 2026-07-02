@@ -172,4 +172,72 @@ mod tests {
         assert_eq!(files[0].path, "src/old.rs");
         assert_eq!(files[0].new_path, "/dev/null");
     }
+
+    #[test]
+    fn test_parse_modified_file_with_multiple_hunks() {
+        let diff = "diff --git a/src/lib.rs b/src/lib.rs\n\
+                    --- a/src/lib.rs\n\
+                    +++ b/src/lib.rs\n\
+                    @@ -10,3 +10,4 @@\n\
+                     a\n\
+                    -b\n\
+                    +c\n\
+                     d\n\
+                    @@ -30,5 +30,5 @@\n\
+                     x\n\
+                    -y\n\
+                    +z\n\
+                     w\n\
+                     v";
+        let files = parse_unified_diff(diff);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, "src/lib.rs");
+        assert_eq!(files[0].old_path, "src/lib.rs");
+        assert_eq!(files[0].new_path, "src/lib.rs");
+        assert_eq!(files[0].hunks.len(), 2);
+        assert_eq!(files[0].hunks[0].old_start, 10);
+        assert_eq!(files[0].hunks[0].old_lines, 3);
+        assert_eq!(files[0].hunks[0].new_start, 10);
+        assert_eq!(files[0].hunks[0].new_lines, 4);
+        assert_eq!(files[0].hunks[1].old_start, 30);
+        assert_eq!(files[0].hunks[1].old_lines, 5);
+        assert_eq!(files[0].hunks[1].new_start, 30);
+        assert_eq!(files[0].hunks[1].new_lines, 5);
+        assert_eq!(files[0].additions, 2);
+        assert_eq!(files[0].deletions, 2);
+    }
+
+    #[test]
+    fn test_parse_new_file_line_range() {
+        let diff = "diff --git a/src/new.rs b/src/new.rs\n\
+                    --- /dev/null\n\
+                    +++ b/src/new.rs\n\
+                    @@ -0,0 +1,5 @@\n\
+                    +fn main() {\n\
+                    +    println!(\"hello\");\n\
+                    +}";
+        let files = parse_unified_diff(diff);
+        assert_eq!(files[0].hunks.len(), 1);
+        assert_eq!(files[0].hunks[0].old_start, 0);
+        assert_eq!(files[0].hunks[0].old_lines, 0);
+        assert_eq!(files[0].hunks[0].new_start, 1);
+        assert_eq!(files[0].hunks[0].new_lines, 5);
+    }
+
+    #[test]
+    fn test_parse_deleted_file_line_range() {
+        let diff = "diff --git a/src/old.rs b/src/old.rs\n\
+                    --- a/src/old.rs\n\
+                    +++ /dev/null\n\
+                    @@ -1,4 +0,0 @@\n\
+                    -fn main() {\n\
+                    -    println!(\"old\");\n\
+                    -}";
+        let files = parse_unified_diff(diff);
+        assert_eq!(files[0].hunks.len(), 1);
+        assert_eq!(files[0].hunks[0].old_start, 1);
+        assert_eq!(files[0].hunks[0].old_lines, 4);
+        assert_eq!(files[0].hunks[0].new_start, 0);
+        assert_eq!(files[0].hunks[0].new_lines, 0);
+    }
 }

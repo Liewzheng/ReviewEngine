@@ -380,4 +380,59 @@ mod tests {
         assert_eq!(normalize_title("  leading spaces  "), "leading spaces");
         assert_eq!(normalize_title("UPPERCASE"), "uppercase");
     }
+
+    #[test]
+    fn deduplicate_findings_empty_returns_empty() {
+        let config = ConsolidatorConfig::default();
+        let result = config.deduplicate_findings(vec![]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn deduplicate_findings_no_duplicates_keeps_all() {
+        let config = ConsolidatorConfig::default();
+        let findings = vec![
+            make_finding(Severity::High, 8, "a.rs", Some(1), "Issue A"),
+            make_finding(Severity::Medium, 7, "b.rs", Some(2), "Issue B"),
+        ];
+        let result = config.deduplicate_findings(findings);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn deduplicate_findings_exact_duplicates_merge_and_increment_agrees_with() {
+        let config = ConsolidatorConfig::default();
+        let mut first = make_finding(Severity::High, 8, "a.rs", Some(1), "Same issue");
+        first.expert_name = "alice".to_string();
+        let mut second = first.clone();
+        second.expert_name = "bob".to_string();
+        second.severity = Severity::Medium; // same key; should not matter for dedup
+
+        let result = config.deduplicate_findings(vec![first, second]);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].agrees_with.len(), 1);
+        assert!(result[0].agrees_with.contains(&"bob".to_string()));
+    }
+
+    #[test]
+    fn deduplicate_findings_different_findings_kept_separate() {
+        let config = ConsolidatorConfig::default();
+        let findings = vec![
+            make_finding(Severity::High, 8, "a.rs", Some(1), "Issue A"),
+            make_finding(Severity::High, 8, "a.rs", Some(1), "Issue B"),
+        ];
+        let result = config.deduplicate_findings(findings);
+        assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn deduplicate_findings_same_title_different_line_kept_separate() {
+        let config = ConsolidatorConfig::default();
+        let findings = vec![
+            make_finding(Severity::High, 8, "a.rs", Some(1), "Same issue"),
+            make_finding(Severity::High, 8, "a.rs", Some(2), "Same issue"),
+        ];
+        let result = config.deduplicate_findings(findings);
+        assert_eq!(result.len(), 2);
+    }
 }

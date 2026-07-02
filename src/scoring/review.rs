@@ -400,18 +400,26 @@ mod tests {
     }
 
     #[test]
-    fn test_review_score_record_fields() {
-        let record = ReviewScoreRecord {
-            overall_score: 75,
-            risk_level: RiskLevel::Medium,
-            expert_scores: vec![ExpertScoreRecord {
-                expert_name: "a".to_string(),
-                individual_score: 80,
-                weight: 100,
-            }],
-        };
-        assert_eq!(record.overall_score, 75);
-        assert_eq!(record.risk_level, RiskLevel::Medium);
-        assert_eq!(record.expert_scores.len(), 1);
+    fn test_compute_weighted_equal_weights() {
+        let scores = [(80, 50), (60, 50)];
+        assert_eq!(compute_weighted(&scores), 70);
+    }
+
+    #[test]
+    fn test_compute_weighted_zero_total_weight() {
+        let scores: &[(u8, u8)] = &[];
+        assert_eq!(compute_weighted(scores), 0);
+    }
+
+    #[test]
+    fn test_compute_weighted_single_pair() {
+        let scores = [(42, 100)];
+        assert_eq!(compute_weighted(&scores), 42);
+    }
+
+    #[test]
+    fn test_compute_weighted_rounds_half_up() {
+        let scores = [(33, 1), (34, 1)];
+        assert_eq!(compute_weighted(&scores), 34);
     }
 }

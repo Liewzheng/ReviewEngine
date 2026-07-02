@@ -370,4 +370,89 @@ review:
         assert_eq!(f.summary, "Mixed content parse");
         assert_eq!(f.expert_name, "quality");
     }
+
+    #[test]
+    fn parse_llm_response_parses_valid_yaml_without_fence() {
+        let yaml = r#"
+review:
+  findings:
+    - file: "src/main.rs"
+      line: 1
+      severity: "low"
+      title: "Style"
+      detail: "Missing newline"
+"#;
+        let report = parse_llm_response("style", yaml);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].severity, Severity::Low);
+    }
+
+    #[test]
+    fn parse_llm_response_parses_valid_json_content() {
+        let json = r#"```yaml
+{
+  "review": {
+    "findings": [
+      {
+        "file": "src/main.rs",
+        "line": 10,
+        "severity": "high",
+        "title": "JSON issue",
+        "detail": "Found via JSON"
+      }
+    ]
+  }
+}
+```"#;
+        let report = parse_llm_response("json", json);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].file, "src/main.rs");
+        assert_eq!(report.findings[0].severity, Severity::High);
+    }
+
+    #[test]
+    fn parse_aggregator_response_returns_report_for_valid_yaml() {
+        let yaml = r#"
+```yaml
+review:
+  findings:
+    - file: "src/lib.rs"
+      line: 5
+      severity: "critical"
+      title: "Race condition"
+      detail: "Shared state is unsynchronized"
+```
+"#;
+        let report = parse_aggregator_response(yaml).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn parse_aggregator_response_returns_error_for_malformed_content() {
+        let yaml = "review:\n  findings: [\n    not a valid sequence";
+        assert!(parse_aggregator_response(yaml).is_err());
+    }
+
+    #[test]
+    fn extract_findings_handles_missing_fields_with_defaults() {
+        let yaml = r#"
+```yaml
+review:
+  findings:
+    - file: "src/main.rs"
+      title: "Minimal finding"
+```
+"#;
+        let report = parse_llm_response("minimal", yaml);
+        let f = &report.findings[0];
+        assert_eq!(f.file, "src/main.rs");
+        assert_eq!(f.title, "Minimal finding");
+        assert_eq!(f.line, None);
+        assert_eq!(f.severity, Severity::Medium);
+        assert_eq!(f.confidence, 5);
+        assert_eq!(f.effort, Effort::Small);
+        assert!(f.summary.is_empty());
+        assert!(f.recommendation.is_empty());
+    }
 }

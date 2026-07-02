@@ -49,9 +49,9 @@ impl<'de> serde::Deserialize<'de> for ExpertTrigger {
         #[serde(untagged)]
         enum TriggerRepr {
             Str(String),
-            FileP { patterns: Vec<String> },
-            Lang { languages: Vec<String> },
-            DSize { max_files: usize },
+            FilePatterns { patterns: Vec<String> },
+            Languages { languages: Vec<String> },
+            DiffSize { max_files: usize },
         }
 
         match TriggerRepr::deserialize(deserializer)? {
@@ -60,9 +60,9 @@ impl<'de> serde::Deserialize<'de> for ExpertTrigger {
                 "on_demand" => Ok(ExpertTrigger::OnDemand),
                 _ => Err(serde::de::Error::unknown_variant(&s, &["always", "on_demand"])),
             },
-            TriggerRepr::FileP { patterns } => Ok(ExpertTrigger::FilePatterns { patterns }),
-            TriggerRepr::Lang { languages } => Ok(ExpertTrigger::Languages { languages }),
-            TriggerRepr::DSize { max_files } => Ok(ExpertTrigger::DiffSize { max_files }),
+            TriggerRepr::FilePatterns { patterns } => Ok(ExpertTrigger::FilePatterns { patterns }),
+            TriggerRepr::Languages { languages } => Ok(ExpertTrigger::Languages { languages }),
+            TriggerRepr::DiffSize { max_files } => Ok(ExpertTrigger::DiffSize { max_files }),
         }
     }
 }

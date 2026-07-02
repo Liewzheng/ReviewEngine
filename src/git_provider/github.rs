@@ -11,6 +11,14 @@ pub struct GitHubProvider {
 }
 
 impl GitHubProvider {
+    /// Create a new `GitHubProvider` for the given personal access token and PR URL.
+    ///
+    /// # Parameters
+    /// * `token` — GitHub personal access token used for API authentication.
+    /// * `pr_url` — Full URL to the pull request (e.g. `https://github.com/owner/repo/pull/123`).
+    ///
+    /// # Errors
+    /// Returns an error if `pr_url` cannot be parsed into a valid GitHub PR URL.
     pub fn new(token: &str, pr_url: &str) -> Result<Self> {
         let client = GitHubClient::new(token, pr_url)?;
         Ok(Self { client })
@@ -44,6 +52,6 @@ impl GitProvider for GitHubProvider {
     async fn add_reaction(&self, _comment_id: i64, _reaction: &str) -> Result<()> {
         // GitHub reactions API: POST /repos/:owner/:repo/pulls/comments/:comment_id/reactions
         // Not implemented yet. Reactions require a different API endpoint.
-        Ok(())
+        anyhow::bail!("add_reaction not implemented for GitHub")
     }
 }

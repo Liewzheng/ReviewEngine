@@ -10,11 +10,21 @@ use std::sync::OnceLock;
 /// it falls back to extracting the first fenced YAML block. On complete
 /// failure, it returns a best-effort report with empty findings so the
 /// expert is not lost.
-pub fn parse_llm_response(expert_name: &str, yaml_text: &str) -> Result<ExpertReport> {
+pub fn parse_llm_response(expert_name: &str, yaml_text: &str) -> ExpertReport {
     let cleaned = clean_yaml(yaml_text);
 
     match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned) {
-        Ok(value) => build_expert_report(expert_name, yaml_text, &value),
+        Ok(value) => match build_expert_report(expert_name, yaml_text, &value) {
+            Ok(report) => report,
+            Err(build_err) => {
+                tracing::warn!(
+                    expert_name = expert_name,
+                    error = %build_err,
+                    "Failed to build expert report from parsed YAML; using fallback"
+                );
+                fallback_report(expert_name, yaml_text)
+            }
+        },
         Err(parse_err) => {
             tracing::warn!(
                 expert_name = expert_name,
@@ -26,22 +36,25 @@ pub fn parse_llm_response(expert_name: &str, yaml_text: &str) -> Result<ExpertRe
             if let Some(fallback) = extract_first_fenced_yaml(yaml_text) {
                 if let Ok(value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&fallback) {
                     if let Ok(report) = build_expert_report(expert_name, yaml_text, &value) {
-                        return Ok(report);
+                        return report;
                     }
                 }
             }
 
-            // Last resort: preserve the raw response with empty findings so the
-            // expert is not lost entirely.
-            let findings = Vec::new();
-            let markdown = renderer::render_expert_markdown(expert_name, &findings);
-            Ok(ExpertReport {
-                expert_name: expert_name.to_string(),
-                findings,
-                markdown,
-                raw_llm_response: yaml_text.to_string(),
-            })
+            fallback_report(expert_name, yaml_text)
         }
+    }
+}
+
+/// Build a best-effort report with empty findings so the expert is not lost entirely.
+fn fallback_report(expert_name: &str, yaml_text: &str) -> ExpertReport {
+    let findings = Vec::new();
+    let markdown = renderer::render_expert_markdown(expert_name, &findings);
+    ExpertReport {
+        expert_name: expert_name.to_string(),
+        findings,
+        markdown,
+        raw_llm_response: yaml_text.to_string(),
     }
 }
 
@@ -192,7 +205,7 @@ mod tests {
                            severity: \"high\"\n      \
                            title: \"Test issue\"\n      \
                            detail: \"Description\"\n```";
-        let report = parse_llm_response("test", yaml).unwrap();
+        let report = parse_llm_response("test", yaml);
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].file, "src/main.rs");
         assert_eq!(report.findings[0].severity, Severity::High);
@@ -211,7 +224,7 @@ mod tests {
         let cleaned = clean_yaml(input);
         assert_eq!(cleaned, "review:\n  findings: []\n");
 
-        let report = parse_llm_response("uppercase", input).unwrap();
+        let report = parse_llm_response("uppercase", input);
         assert!(report.findings.is_empty());
         assert!(report.raw_llm_response.contains("```YAML"));
     }
@@ -236,7 +249,7 @@ review:
       detail: "This string never ends
 ```
 "#;
-        let report = parse_llm_response("performance", yaml).unwrap();
+        let report = parse_llm_response("performance", yaml);
         assert!(report.findings.is_empty());
         assert!(!report.raw_llm_response.is_empty());
     }
@@ -254,7 +267,7 @@ review:
       detail: "This function does not handle the error case"
 ```
 "#;
-        let report = parse_llm_response("quality", yaml).unwrap();
+        let report = parse_llm_response("quality", yaml);
         assert_eq!(report.findings.len(), 1);
         assert_eq!(
             report.findings[0].summary,
@@ -271,7 +284,7 @@ review:
   findings: []
 ```
 "#;
-        let report = parse_llm_response("lead", yaml).unwrap();
+        let report = parse_llm_response("lead", yaml);
         assert!(report.findings.is_empty());
     }
 
@@ -296,7 +309,7 @@ review:
       expert_role: "Security Lead"
 ```
 "#;
-        let report = parse_llm_response("security", yaml).unwrap();
+        let report = parse_llm_response("security", yaml);
         assert_eq!(report.findings.len(), 1);
         let f = &report.findings[0];
         assert_eq!(f.file, "src/lib.rs");
@@ -347,7 +360,7 @@ review:
                            detail: \"Mixed content parse\"\n\
                      ```\n\
                      Text after the YAML block.";
-        let report = parse_llm_response("quality", input).unwrap();
+        let report = parse_llm_response("quality", input);
         assert_eq!(report.findings.len(), 1);
         let f = &report.findings[0];
         assert_eq!(f.file, "src/parser.rs");

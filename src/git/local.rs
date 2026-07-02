@@ -220,8 +220,22 @@ impl LocalGitBrowser {
 
 impl RepoBrowser for LocalGitBrowser {
     fn get_file(&self, path: &str, git_ref: &str) -> anyhow::Result<String> {
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(self.get_file_content(path, git_ref))
+        let git_ref = validate_ref(git_ref)?;
+        let path = validate_path(path)?;
+
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&self.repo_path)
+            .arg("show")
+            .arg("--")
+            .arg(format!("{}:{}", git_ref, path))
+            .output()
+            .map_err(|e| anyhow::anyhow!("failed to run git show: {}", e))?;
+
+        if !output.status.success() {
+            anyhow::bail!("git show failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
     }
 
     fn search_code(&self, query: &str) -> anyhow::Result<Vec<String>> {

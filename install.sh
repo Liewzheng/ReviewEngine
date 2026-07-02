@@ -240,16 +240,6 @@ download_file_with_auth() {
     return 0
 }
 
-print_token_help() {
-    error "Download failed with authentication/authorization error."
-    info "The GitHub API or release assets may require authentication for private repositories."
-    info "Set a personal access token and re-run:"
-    info ""
-    info "   export GITHUB_TOKEN='<your-token>'"
-    info ""
-    info "Then re-run the install command."
-}
-
 verify_checksum() {
     local file_path="$1"
     local checksum_path="$2"

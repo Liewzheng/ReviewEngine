@@ -6,6 +6,15 @@ use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences}
 use crate::scoring::expert_score;
 
 /// Render a full team report as markdown.
+///
+/// # Parameters
+/// * `team_name` — Title shown in the report header.
+/// * `reports` — Findings produced by each expert reviewer.
+/// * `metrics` — Per-expert latency and token usage.
+/// * `errors` — Non-fatal errors encountered during review.
+///
+/// # Returns
+/// A Markdown string containing the overall assessment, score table, findings grouped by severity, and any errors.
 pub fn render_team_report(
     team_name: &str,
     reports: &[crate::team::ExpertReport],

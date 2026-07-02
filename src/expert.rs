@@ -37,7 +37,7 @@ pub async fn run_single_expert(
     let config = crate::llm::select_llm_config(expert, llm_configs);
     let result = llm_client.complete_with_fallback(&config, &system, &user).await?;
 
-    parser::parse_llm_response(&expert.name, &result.content)
+    Ok(parser::parse_llm_response(&expert.name, &result.content))
 }
 
 /// Execute the aggregator expert to merge multiple expert reports.

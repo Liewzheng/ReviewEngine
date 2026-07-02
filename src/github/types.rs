@@ -13,6 +13,7 @@ pub struct PullRequest {
     pub merged: Option<bool>,
 }
 
+/// Branch reference for the head or base of a pull request.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrBranch {
     pub label: String,
@@ -21,6 +22,7 @@ pub struct PrBranch {
     pub sha: String,
 }
 
+/// Minimal GitHub user information returned with PR data.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PrUser {
     pub id: u64,

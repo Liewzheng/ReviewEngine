@@ -344,7 +344,7 @@ fn create_expert_task(
         };
         let llm_config = select_llm_config(&expert, &llm_configs);
         let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
-        let report = crate::output::parser::parse_llm_response(&expert.name, &result.content)?;
+        let report = crate::output::parser::parse_llm_response(&expert.name, &result.content);
         let latency_ms = task_start.elapsed().as_millis() as u64;
 
         crate::progress::update_expert_progress(progress_map.as_ref(), &review_id, &completed_count, total_tasks);

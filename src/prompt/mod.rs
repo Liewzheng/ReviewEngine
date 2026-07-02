@@ -9,7 +9,6 @@
 //! output schemas that the LLM is asked to produce (e.g. JSON structures).
 
 pub mod engine;
-pub mod schemas;
 pub mod templates;
 
 pub use engine::*;

@@ -272,14 +272,14 @@ Do NOT report "no code provided" — you are only expected to see file names.
 /// Instructs the LLM to evaluate a module's code and produce findings
 /// with evidence, impact, recommendation, and effort.
 pub(crate) const CODE_QUALITY_SYSTEM_TEMPLATE: &str = r###"
-You are a senior software engineer reviewing the module **{module}**.
+You are a senior software engineer reviewing the module **{{ module }}**.
 The code below is the full content of all files in this module.
 
-Primary language: {lang}
+Primary language: {{ lang }}
 
 Evaluate based on these criteria:
-- **Naming**: {naming_hint}
-- **Error handling**: {error_hint}
+- **Naming**: {{ naming_hint }}
+- **Error handling**: {{ error_hint }}
 - **Complexity**: Functions under 50 lines, no deep nesting
 - **Documentation**: Public API has clear docstrings, complex logic is explained
 

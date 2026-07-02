@@ -687,7 +687,7 @@ pub fn render_repo_review_output(output: &RepoReviewOutput, format: &str) -> Res
     })
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
     let cleaned = crate::output::parser::clean_yaml(response);
     if let Ok(value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned) {

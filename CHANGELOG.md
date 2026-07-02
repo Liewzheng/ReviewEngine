@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.3] - 2026-07-02
+
+### Fixed
+- Fixed malformed markdown code fences in repo-review reports when LLM evidence already includes its own fences.
+- Added `strip_markdown_fences` helper and applied final `close_unclosed_code_fences` safety net to repo-review and team report renderers.
+
 ## [0.6.2] - 2026-06-30
 
 ### Added

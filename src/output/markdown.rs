@@ -48,6 +48,30 @@ pub fn close_unclosed_code_fences(text: &str) -> String {
     }
 }
 
+/// Strip outer markdown code fences if both a leading and trailing fence exist.
+///
+/// This is useful when LLM-generated evidence is already wrapped in a fenced
+/// code block and we want to re-wrap it in our own consistent fence. Leading
+/// and trailing newline characters are normalised before checking.
+///
+/// # Examples
+///
+/// ```rust
+/// use review_engine::output::markdown::strip_markdown_fences;
+///
+/// let text = "```\nfoo\n```";
+/// assert_eq!(strip_markdown_fences(text), "foo");
+/// ```
+pub fn strip_markdown_fences(text: &str) -> String {
+    let trimmed = text.trim_start_matches('\n').trim_end_matches('\n');
+    let lines: Vec<&str> = trimmed.lines().collect();
+    if lines.len() >= 2 && lines[0].starts_with("```") && lines[lines.len() - 1].trim() == "```" {
+        lines[1..lines.len() - 1].join("\n")
+    } else {
+        text.to_string()
+    }
+}
+
 fn parse_fence_marker(line: &str) -> Option<&str> {
     if !line.starts_with("```") {
         return None;
@@ -98,5 +122,34 @@ mod tests {
     fn test_no_trailing_newline() {
         let text = "```\nfoo";
         assert_eq!(close_unclosed_code_fences(text), "```\nfoo\n```");
+    }
+
+    // ── strip_markdown_fences ──
+
+    #[test]
+    fn test_strip_markdown_fences_normal() {
+        assert_eq!(strip_markdown_fences("```\nfoo\n```"), "foo");
+    }
+
+    #[test]
+    fn test_strip_markdown_fences_with_language_tag() {
+        assert_eq!(strip_markdown_fences("```rust\nlet x = 1;\n```"), "let x = 1;");
+    }
+
+    #[test]
+    fn test_strip_markdown_fences_no_fence_unchanged() {
+        let text = "plain text";
+        assert_eq!(strip_markdown_fences(text), text);
+    }
+
+    #[test]
+    fn test_strip_markdown_fences_unbalanced_unchanged() {
+        let text = "```\nfoo";
+        assert_eq!(strip_markdown_fences(text), text);
+    }
+
+    #[test]
+    fn test_strip_markdown_fences_whitespace() {
+        assert_eq!(strip_markdown_fences("\n```\nfoo\n```\n"), "foo");
     }
 }

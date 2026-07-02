@@ -2,7 +2,7 @@
 //!
 //! @module review-engine: CodeReview Board platform
 use crate::models::*;
-use crate::output::markdown::close_unclosed_code_fences;
+use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
 use crate::scoring::expert_score;
 
 /// Render a full team report as markdown.
@@ -121,7 +121,8 @@ pub fn render_team_report(
                     f.line.unwrap_or(0),
                 ));
                 if !f.evidence.is_empty() {
-                    let evidence = close_unclosed_code_fences(&f.evidence);
+                    let evidence = strip_markdown_fences(&f.evidence);
+                    let evidence = close_unclosed_code_fences(&evidence);
                     out.push_str(&format!("**Evidence**:\n```\n{}\n```\n\n", evidence));
                 }
                 if !f.impact.is_empty() {

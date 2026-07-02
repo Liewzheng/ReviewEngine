@@ -127,7 +127,36 @@ pub fn score_repository(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::analysis::FileAnalysis;
+    use crate::repo::analysis::{FileAnalysis, SecurityFinding};
+    use crate::repo::FileEntry;
+
+    fn make_entry(path: &str, loc: usize, is_generated: bool) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            language: "Rust".to_string(),
+            loc,
+            is_binary: false,
+            is_generated,
+        }
+    }
+
+    fn make_large(path: &str, loc: usize) -> FileAnalysis {
+        FileAnalysis {
+            path: path.to_string(),
+            loc,
+            language: "Rust".to_string(),
+            issues: vec!["File is large".to_string()],
+        }
+    }
+
+    fn make_security(pattern: &str) -> SecurityFinding {
+        SecurityFinding {
+            file: "src/main.rs".to_string(),
+            pattern: pattern.to_string(),
+            line: 1,
+            severity: "medium".to_string(),
+        }
+    }
 
     #[test]
     fn test_score_perfect() {
@@ -178,5 +207,95 @@ mod tests {
         // Generated files should not be counted in large_files, but may be in generated count
         let score = score_repository(&[], &[], &[]);
         assert_eq!(score.health_score, 100);
+    }
+
+    #[test]
+    fn score_repository_empty_inputs_is_healthy() {
+        let score = score_repository(&[], &[], &[]);
+        assert_eq!(score.health_score, 100);
+        assert_eq!(score.risk_level, "healthy");
+    }
+
+    #[test]
+    fn score_repository_large_files_deduction_capped_at_40() {
+        let large: Vec<FileAnalysis> = (0..30).map(|i| make_large(&format!("big{i}.rs"), 600)).collect();
+        let score = score_repository(&[], &large, &[]);
+        assert_eq!(score.health_score, 60); // 100 - 40 (capped)
+        assert_eq!(score.risk_level, "high");
+
+        let fewer: Vec<FileAnalysis> = (0..20).map(|i| make_large(&format!("big{i}.rs"), 600)).collect();
+        let fewer_score = score_repository(&[], &fewer, &[]);
+        assert_eq!(fewer_score.health_score, score.health_score);
+    }
+
+    #[test]
+    fn score_repository_security_findings_capped_at_20_count() {
+        let few: Vec<SecurityFinding> = (0..3).map(|_| make_security("Hardcoded password")).collect();
+        let score = score_repository(&[], &[], &few);
+        assert_eq!(score.health_score, 76); // 100 - 3 * 8
+
+        let max: Vec<SecurityFinding> = (0..20).map(|_| make_security("Hardcoded password")).collect();
+        let max_score = score_repository(&[], &[], &max);
+        assert_eq!(max_score.health_score, 0);
+
+        let over: Vec<SecurityFinding> = (0..30).map(|_| make_security("Hardcoded password")).collect();
+        let over_score = score_repository(&[], &[], &over);
+        assert_eq!(over_score.health_score, max_score.health_score);
+    }
+
+    #[test]
+    fn score_repository_generated_files_deduction() {
+        let entries: Vec<FileEntry> = (0..10).map(|i| make_entry(&format!("gen{i}.rs"), 100, true)).collect();
+        let score = score_repository(&entries, &[], &[]);
+        assert_eq!(score.health_score, 80); // 100 - 10 * 2
+
+        let more: Vec<FileEntry> = (0..15).map(|i| make_entry(&format!("gen{i}.rs"), 100, true)).collect();
+        let more_score = score_repository(&more, &[], &[]);
+        assert_eq!(more_score.health_score, score.health_score);
+    }
+
+    #[test]
+    fn score_repository_combination_pushes_critical_risk() {
+        let large: Vec<FileAnalysis> = (0..20).map(|i| make_large(&format!("big{i}.rs"), 600)).collect();
+        let entries: Vec<FileEntry> = (0..10).map(|i| make_entry(&format!("gen{i}.rs"), 100, true)).collect();
+        let score = score_repository(&entries, &large, &[]);
+        assert_eq!(score.health_score, 40); // 100 - 40 - 20
+        assert_eq!(score.risk_level, "critical");
+    }
+
+    #[test]
+    fn score_repository_combination_pushes_high_risk() {
+        let large: Vec<FileAnalysis> = (0..15).map(|i| make_large(&format!("big{i}.rs"), 600)).collect();
+        let score = score_repository(&[], &large, &[]);
+        assert_eq!(score.health_score, 60);
+        assert_eq!(score.risk_level, "high");
+    }
+
+    #[test]
+    fn score_repository_combination_pushes_medium_risk() {
+        let large: Vec<FileAnalysis> = (0..12).map(|i| make_large(&format!("big{i}.rs"), 600)).collect();
+        let score = score_repository(&[], &large, &[]);
+        assert_eq!(score.health_score, 61); // 100 - 39
+        assert_eq!(score.risk_level, "medium");
+    }
+
+    #[test]
+    fn score_repository_combination_pushes_low_risk() {
+        let large = vec![
+            make_large("big.rs", 600),
+            make_large("big2.rs", 600),
+            make_large("big3.rs", 600),
+        ];
+        let score = score_repository(&[], &large, &[]);
+        assert_eq!(score.health_score, 85); // 100 - 15
+        assert_eq!(score.risk_level, "low");
+    }
+
+    #[test]
+    fn score_repository_combination_stays_healthy() {
+        let large = vec![make_large("big.rs", 600)];
+        let score = score_repository(&[], &large, &[]);
+        assert_eq!(score.health_score, 95); // 100 - 5
+        assert_eq!(score.risk_level, "healthy");
     }
 }

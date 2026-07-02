@@ -112,6 +112,21 @@ fn build_language_breakdown(entries: &[FileEntry]) -> Vec<LanguageBreakdown> {
 
 /// Scan files for common security patterns (API keys, passwords, etc).
 pub fn scan_security_patterns(entries: &[FileEntry]) -> Vec<SecurityFinding> {
+    let mut findings = Vec::new();
+
+    for entry in entries {
+        if entry.is_binary || entry.is_generated {
+            continue;
+        }
+        if let Ok(content) = std::fs::read_to_string(&entry.path) {
+            findings.extend(scan_security_patterns_in_text(&entry.path, &content));
+        }
+    }
+
+    findings
+}
+
+fn build_security_regexes() -> Vec<(regex::Regex, &'static str)> {
     let sensitive_patterns = [
         (r#"api.?key\s*[:=]\s*['"]?[A-Za-z0-9_]{16,}"#, "Possible API key"),
         (r"sk-[A-Za-z0-9]{20,}", "Possible secret key"),
@@ -120,28 +135,26 @@ pub fn scan_security_patterns(entries: &[FileEntry]) -> Vec<SecurityFinding> {
         (r"-----BEGIN (RSA |EC )?PRIVATE KEY-----", "Private key"),
     ];
 
-    let mut findings = Vec::new();
-    let re_list: Vec<(regex::Regex, &str)> = sensitive_patterns
+    sensitive_patterns
         .iter()
         .filter_map(|(pattern, desc)| regex::Regex::new(pattern).ok().map(|r| (r, *desc)))
-        .collect();
+        .collect()
+}
 
-    for entry in entries {
-        if entry.is_binary || entry.is_generated {
-            continue;
-        }
-        if let Ok(content) = std::fs::read_to_string(&entry.path) {
-            for (i, line) in content.lines().enumerate() {
-                for (re, desc) in &re_list {
-                    if re.is_match(line) {
-                        findings.push(SecurityFinding {
-                            file: entry.path.clone(),
-                            pattern: desc.to_string(),
-                            line: i + 1,
-                            severity: "medium".to_string(),
-                        });
-                    }
-                }
+/// Scan a single text block for security patterns. Exposed for unit testing.
+pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<SecurityFinding> {
+    let re_list = build_security_regexes();
+    let mut findings = Vec::new();
+
+    for (i, line) in content.lines().enumerate() {
+        for (re, desc) in &re_list {
+            if re.is_match(line) {
+                findings.push(SecurityFinding {
+                    file: file.to_string(),
+                    pattern: desc.to_string(),
+                    line: i + 1,
+                    severity: "medium".to_string(),
+                });
             }
         }
     }
@@ -199,5 +212,77 @@ mod tests {
         let breakdown = build_language_breakdown(&entries);
         assert_eq!(breakdown.len(), 2);
         assert!(breakdown[0].language == "Python" || breakdown[0].language == "Rust");
+    }
+
+    #[test]
+    fn find_large_files_uses_default_threshold_of_500_lines() {
+        let entries = [make_entry("exact.rs", "Rust", 500), make_entry("over.rs", "Rust", 501)];
+        let large = find_large_files(&entries);
+        assert_eq!(large.len(), 1);
+        assert_eq!(large[0].path, "over.rs");
+    }
+
+    #[test]
+    fn find_large_files_uses_documentation_threshold_of_1000_lines() {
+        let entries = [
+            make_entry("guide.md", "Documentation", 1000),
+            make_entry("huge.md", "Documentation", 1001),
+        ];
+        let large = find_large_files(&entries);
+        assert_eq!(large.len(), 1);
+        assert_eq!(large[0].path, "huge.md");
+    }
+
+    #[test]
+    fn find_large_files_skips_binary_files() {
+        let mut binary = make_entry("blob.bin", "Other", 5000);
+        binary.is_binary = true;
+        let entries = [binary, make_entry("big.rs", "Rust", 600)];
+        let large = find_large_files(&entries);
+        assert_eq!(large.len(), 1);
+        assert_eq!(large[0].path, "big.rs");
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_finds_api_key() {
+        let findings = scan_security_patterns_in_text("config.env", "api_key=abc123def456ghi789");
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.pattern == "Possible API key"));
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_finds_hardcoded_password() {
+        let findings = scan_security_patterns_in_text("main.rs", r#"password = "supersecret123""#);
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.pattern == "Hardcoded password"));
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_finds_secret_key() {
+        let findings = scan_security_patterns_in_text("keys.env", "sk-abcdefghijklmnopqrstuvwxyz123456");
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.pattern == "Possible secret key"));
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_finds_private_key() {
+        let content = "-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA...";
+        let findings = scan_security_patterns_in_text("key.pem", content);
+        assert!(!findings.is_empty());
+        assert!(findings.iter().any(|f| f.pattern == "Private key"));
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_reports_correct_line_numbers() {
+        let content = "safe\napi_key=abc123def456ghi789\nsafe again";
+        let findings = scan_security_patterns_in_text("config.env", content);
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].line, 2);
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_returns_empty_for_clean_content() {
+        let findings = scan_security_patterns_in_text("main.rs", "fn main() { println!(\"hello\"); }");
+        assert!(findings.is_empty());
     }
 }

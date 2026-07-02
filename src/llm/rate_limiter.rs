@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::Mutex;
+use tokio::time::Instant;
 
 pub struct RateLimiter {
     inner: Mutex<Inner>,
@@ -31,6 +32,14 @@ impl RateLimiter {
 
     /// Wait until both RPM and TPM limits allow a new request with `token_count` tokens.
     pub async fn acquire(&self, token_count: usize) -> anyhow::Result<()> {
+        let (max_rpm, max_tpm) = {
+            let inner = self.inner.lock().await;
+            (inner.max_rpm, inner.max_tpm)
+        };
+        if max_rpm == 0 || max_tpm == 0 {
+            return Err(anyhow::anyhow!("rate limits must be greater than zero"));
+        }
+
         loop {
             let wait = {
                 let mut inner = self.inner.lock().await;
@@ -112,5 +121,48 @@ impl RateLimiter {
 
             return Ok(());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_passes_when_under_limits() {
+        let limiter = RateLimiter::new(10, 1000, 60);
+        limiter.acquire(10).await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_waits_when_over_rpm() {
+        let limiter = RateLimiter::new(1, 1000, 60);
+        limiter.acquire(1).await.unwrap();
+
+        let start = Instant::now();
+        limiter.acquire(1).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_waits_when_over_tpm() {
+        let limiter = RateLimiter::new(10, 10, 60);
+        limiter.acquire(5).await.unwrap();
+
+        let start = Instant::now();
+        limiter.acquire(6).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_rejects_zero_rpm_limit() {
+        let limiter = RateLimiter::new(0, 1000, 60);
+        assert!(limiter.acquire(1).await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_rejects_zero_tpm_limit() {
+        let limiter = RateLimiter::new(10, 0, 60);
+        assert!(limiter.acquire(1).await.is_err());
     }
 }

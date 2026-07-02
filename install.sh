@@ -17,18 +17,18 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # ANSI colours & helpers
 # ---------------------------------------------------------------------------
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-BOLD='\033[1m'
-NC='\033[0m' # No Colour
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[1;33m'
+BLUE=$'\033[0;34m'
+BOLD=$'\033[1m'
+NC=$'\033[0m' # No Colour
 
-info()    { printf "${BLUE}ℹ️  %s${NC}\n" "$*"; }
-success() { printf "${GREEN}✅ %s${NC}\n" "$*"; }
-warn()    { printf "${YELLOW}⚠️  %s${NC}\n" "$*"; }
-error()   { printf "${RED}❌ %s${NC}\n" "$*"; }
-header()  { printf "\n${BOLD}━━━ %s ━━━${NC}\n" "$*"; }
+info()    { printf '%bℹ️  %s%b\n' "${BLUE}" "$*" "${NC}"; }
+success() { printf '%b✅ %s%b\n' "${GREEN}" "$*" "${NC}"; }
+warn()    { printf '%b⚠️  %s%b\n' "${YELLOW}" "$*" "${NC}"; }
+error()   { printf '%b❌ %s%b\n' "${RED}" "$*" "${NC}"; }
+header()  { printf '\n%b━━━ %s ━━━%b\n' "${BOLD}" "$*" "${NC}"; }
 
 usage() {
     cat <<EOF
@@ -332,7 +332,7 @@ sanitized_config_ref() {
         return 1
     fi
 
-    echo "${ref}" | jq -sRr '@uri'
+    printf '%s' "${ref}" | jq -sRr '@uri'
 }
 
 install_default_config() {

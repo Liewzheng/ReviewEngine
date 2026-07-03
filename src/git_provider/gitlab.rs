@@ -11,6 +11,8 @@ use crate::git_provider::GitProvider;
 use crate::gitlab::client::Client as GitLabClient;
 use crate::models::MRInfo;
 
+const BOT_DISCUSSION_TITLE: &str = "# CodeReview Board";
+
 /// GitLab implementation of GitProvider.
 pub struct GitLabProvider {
     client: GitLabClient,
@@ -47,5 +49,27 @@ impl GitProvider for GitLabProvider {
 
     async fn add_reaction(&self, comment_id: i64, reaction: &str) -> Result<()> {
         self.client.award_emoji(comment_id, reaction).await
+    }
+
+    async fn find_or_update_discussion(&self, body: &str) -> Result<String> {
+        let bot_user_id = self.client.get_current_user_id().await?;
+        let discussions = self.client.list_discussions().await?;
+
+        for discussion in &discussions {
+            for note in &discussion.notes {
+                if note.author.id == bot_user_id && note.body.starts_with(BOT_DISCUSSION_TITLE) {
+                    self.client.update_note(note.id, body).await?;
+                    return Ok(note.id.to_string());
+                }
+            }
+        }
+
+        let id = self.client.post_note(body).await?;
+        Ok(id.to_string())
+    }
+
+    async fn update_discussion(&self, discussion_id: &str, body: &str) -> Result<()> {
+        let note_id: i64 = discussion_id.parse()?;
+        self.client.update_note(note_id, body).await
     }
 }

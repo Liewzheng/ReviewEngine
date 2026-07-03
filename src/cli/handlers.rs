@@ -94,7 +94,7 @@ pub async fn run_improve(
     let config = review_engine::config::resolve_config(config_source).await?;
     let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
-    let client = review_engine::gitlab::client::Client::new(&token, mr_url)?;
+    let client = review_engine::git_provider::gitlab::client::Client::new(&token, mr_url)?;
     let mr_info = client.fetch_mr_info().await?;
     let diff = client.fetch_diff().await?;
 
@@ -147,7 +147,7 @@ pub async fn run_describe(
     let config = review_engine::config::resolve_config(config_source).await?;
     let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
-    let client = review_engine::gitlab::client::Client::new(&token, mr_url)?;
+    let client = review_engine::git_provider::gitlab::client::Client::new(&token, mr_url)?;
     let mr_info = client.fetch_mr_info().await?;
     let diff = client.fetch_diff().await?;
 

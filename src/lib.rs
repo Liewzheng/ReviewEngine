@@ -22,8 +22,6 @@ pub mod error;
 pub mod expert;
 pub mod git;
 pub mod git_provider;
-pub mod github;
-pub mod gitlab;
 pub mod input;
 pub mod language;
 pub mod llm;
@@ -68,7 +66,7 @@ pub async fn run_review(
 ) -> Result<ReviewOutput> {
     let config = config::resolve_config(config_source.clone()).await?;
 
-    let gitlab_client = gitlab::client::Client::new(gitlab_token, mr_url)?;
+    let gitlab_client = git_provider::gitlab::client::Client::new(gitlab_token, mr_url)?;
     let mr_info = gitlab_client.fetch_mr_info().await?;
     let diff = gitlab_client.fetch_diff().await?;
 

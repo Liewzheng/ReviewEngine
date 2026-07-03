@@ -230,7 +230,7 @@ async fn resolve_source(
 ) -> anyhow::Result<String> {
     match source {
         ReviewSource::GitLabMr { url, token } => {
-            let client = crate::gitlab::client::Client::new(&token, &url)?;
+            let client = crate::git_provider::gitlab::client::Client::new(&token, &url)?;
             let diff = client.fetch_diff().await?;
             Ok(diff)
         }

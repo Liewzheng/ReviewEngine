@@ -337,7 +337,7 @@ impl Publisher for GitLabPublisher {
 
 ---
 
-### 3.5 修改 `src/gitlab/client.rs`
+### 3.5 修改 `src/git_provider/gitlab/client.rs`
 
 ```rust
 #[derive(Deserialize)]
@@ -390,7 +390,7 @@ let ws_state = std::env::var("GITLAB_WEBHOOK_SECRET").ok().map(|secret| {
 | `src/server/gitlab.rs` | **修改** | handle_mr_hook 集成 dispatcher | +30 |
 | `src/publisher/mod.rs` | **修改** | Publisher trait 新增 find_or_update_discussion | +5 |
 | `src/publisher/gitlab.rs` | **修改** | 实现 find_or_update_discussion | +20 |
-| `src/gitlab/client.rs` | **修改** | 新增 list_discussions + Discussion 结构体 | +30 |
+| `src/git_provider/gitlab/client.rs` | **修改** | 新增 list_discussions + Discussion 结构体 | +30 |
 | `src/server/mod.rs` | **修改** | serve() 创建 dispatcher 注入 WebhookState | +3 |
 | **合计** | | | **~168 行** |
 
@@ -410,7 +410,7 @@ let ws_state = std::env::var("GITLAB_WEBHOOK_SECRET").ok().map(|secret| {
 
 | 步骤 | 内容 | 前置 |
 |------|------|------|
-| 1 | `src/gitlab/client.rs` — 新增 `list_discussions` + `Discussion` 结构体 | 无 |
+| 1 | `src/git_provider/gitlab/client.rs` — 新增 `list_discussions` + `Discussion` 结构体 | 无 |
 | 2 | `src/publisher/mod.rs` — trait 新增 `find_or_update_discussion` 默认方法 | 无 |
 | 3 | `src/publisher/gitlab.rs` — 实现 `find_or_update_discussion` | 1 |
 | 4 | `src/server/dispatcher.rs` — MrDispatcher | 无 |

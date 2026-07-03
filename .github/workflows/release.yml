@@ -39,7 +39,7 @@ jobs:
           - target: aarch64-pc-windows-msvc
             os: windows-latest
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
 
@@ -51,6 +51,10 @@ jobs:
         uses: taiki-e/setup-cross-toolchain-action@v1
         with:
           target: ${{ matrix.target }}
+
+      - name: Install x86_64-apple-darwin target
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: rustup target add x86_64-apple-darwin
 
       - uses: taiki-e/upload-rust-binary-action@v1
         with:

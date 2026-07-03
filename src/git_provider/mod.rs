@@ -2,12 +2,12 @@
 //!
 //! This module is part of the review-engine CodeReview Board platform.
 //!
-//! This module defines the [`GitProvider`] trait, which provides a single
-//! async interface for fetching MR/PR info, diffs, posting review comments,
-//! inline notes, reactions, and fetching repository configuration files.
-//! Concrete implementations live in the `github` and `gitlab` submodules,
-//! allowing the rest of the application to operate on any Git provider
-//! polymorphically. The trait is designed to be object-safe so that
+//! This module defines the [`GitProvider`] trait, which is the single unified
+//! async interface for both fetching MR/PR data (info, diff, config) and
+//! publishing review results (top-level discussions, inline comments,
+//! reactions). Concrete implementations live in the `github` and `gitlab`
+//! submodules, allowing the rest of the application to operate on any Git
+//! provider polymorphically. The trait is designed to be object-safe so that
 //! callers can hold a `Box<dyn GitProvider>`.
 
 pub mod github;
@@ -33,6 +33,19 @@ pub trait GitProvider: Send + Sync {
     async fn fetch_code_audit_toml(&self) -> Result<Option<String>>;
     /// Add a reaction (emoji) to a comment.
     async fn add_reaction(&self, comment_id: i64, reaction: &str) -> Result<()>;
+
+    /// Find an existing bot discussion and update it, or create a new one.
+    ///
+    /// Platform-specific implementations match on the bot's own posts and a
+    /// title prefix. The default implementation creates a new discussion via
+    /// `post_review_comment`.
+    async fn find_or_update_discussion(&self, body: &str) -> Result<String> {
+        let id = self.post_review_comment(body).await?;
+        Ok(id.to_string())
+    }
+
+    /// Update the body of an existing discussion identified by its ID.
+    async fn update_discussion(&self, discussion_id: &str, body: &str) -> Result<()>;
 }
 
 #[cfg(test)]

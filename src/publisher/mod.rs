@@ -1,17 +1,12 @@
-//! Publishing review results back to Git providers.
+//! Publishing helper functions for review results on Git providers.
 //!
-//! Defines the [`Publisher`] trait, which abstracts posting review
-//! discussions and inline notes to GitLab MRs or GitHub PRs. The
-//! [`InlineNote`] struct represents a file/line-specific annotation.
-//! The module-level [`publish_inline_notes`] function iterates over
-//! findings and posts inline notes for critical/high-severity issues.
-//! Concrete implementations live in the `github` and `gitlab` submodules.
+//! This module provides the [`InlineNote`] struct and helper functions that
+//! operate on a [`GitProvider`][crate::git_provider::GitProvider] to format and
+//! publish review output. Platform-specific logic lives in the
+//! `git_provider` implementations; this module only contains generic helpers
+//! such as inline-note publishing and suggestion formatting.
 
 use anyhow::Result;
-use async_trait::async_trait;
-
-pub mod github;
-pub mod gitlab;
 
 /// A note to be posted on a specific line of a file in a merge request.
 #[derive(Debug, Clone)]
@@ -24,45 +19,25 @@ pub struct InlineNote {
     pub body: String,
 }
 
-/// Unified interface for publishing review results back to a Git provider.
-#[async_trait]
-pub trait Publisher: Send + Sync {
-    /// Post a new top-level discussion on the MR/PR containing the review report.
-    async fn post_mr_discussion(&self, body: &str) -> Result<String>;
-    /// Post an inline comment on a specific file and line.
-    async fn post_inline_note(&self, note: &InlineNote) -> Result<()>;
-    /// Update the body of an existing discussion identified by its ID.
-    async fn update_discussion(&self, discussion_id: &str, body: &str) -> Result<()>;
-
-    /// Find an existing discussion by title prefix and update it, or create a new one.
-    ///
-    /// Default implementation falls back to `post_mr_discussion`.
-    /// Override in platform-specific publishers to implement find-or-create.
-    async fn find_or_update_discussion(&self, body: &str) -> Result<String> {
-        self.post_mr_discussion(body).await
-    }
-}
-
 /// Publish inline notes for critical and high-severity findings.
 ///
 /// Only posts notes for findings that have a line number. Lower-severity
 /// findings are included in the main discussion but not posted as inline
 /// comments to avoid noise.
-pub async fn publish_inline_notes(publisher: &dyn Publisher, findings: &[crate::models::Finding]) -> Result<()> {
+pub async fn publish_inline_notes(
+    provider: &dyn crate::git_provider::GitProvider,
+    findings: &[crate::models::Finding],
+) -> Result<()> {
     use crate::models::Severity;
 
     for finding in findings {
         if finding.severity == Severity::Critical || finding.severity == Severity::High {
             if let Some(line) = finding.line {
-                let note = InlineNote {
-                    file: finding.file.clone(),
-                    line,
-                    body: format!(
-                        "**[{}]** {} (Confidence: {}/10)\n\n{}",
-                        finding.expert_name, finding.title, finding.confidence, finding.recommendation,
-                    ),
-                };
-                publisher.post_inline_note(&note).await?;
+                let body = format!(
+                    "**[{}]** {} (Confidence: {}/10)\n\n{}",
+                    finding.expert_name, finding.title, finding.confidence, finding.recommendation,
+                );
+                provider.post_inline_comment(&finding.file, line, &body).await?;
             }
         }
     }
@@ -111,23 +86,38 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_inline_notes_skips_low_severity() {
-        use crate::models::{Effort, Finding, Severity};
+        use crate::git_provider::GitProvider;
+        use crate::models::{Effort, Finding, MRInfo, Severity};
+        use async_trait::async_trait;
 
-        // Create a mock publisher that records calls
-        struct MockPublisher {
+        // Create a mock provider that records inline-comment calls.
+        struct MockGitProvider {
             calls: std::sync::Mutex<Vec<String>>,
         }
+
         #[async_trait]
-        impl Publisher for MockPublisher {
-            async fn post_mr_discussion(&self, _body: &str) -> Result<String> {
-                Ok(String::new())
+        impl GitProvider for MockGitProvider {
+            async fn fetch_mr_info(&self) -> anyhow::Result<MRInfo> {
+                unimplemented!()
             }
-            async fn post_inline_note(&self, note: &InlineNote) -> Result<()> {
-                self.calls.lock().unwrap().push(note.file.clone());
+            async fn fetch_diff(&self) -> anyhow::Result<String> {
+                unimplemented!()
+            }
+            async fn post_review_comment(&self, _body: &str) -> anyhow::Result<i64> {
+                unimplemented!()
+            }
+            async fn post_inline_comment(&self, file: &str, _line: u32, _body: &str) -> anyhow::Result<()> {
+                self.calls.lock().unwrap().push(file.to_string());
                 Ok(())
             }
-            async fn update_discussion(&self, _id: &str, _body: &str) -> Result<()> {
-                Ok(())
+            async fn fetch_code_audit_toml(&self) -> anyhow::Result<Option<String>> {
+                unimplemented!()
+            }
+            async fn add_reaction(&self, _comment_id: i64, _reaction: &str) -> anyhow::Result<()> {
+                unimplemented!()
+            }
+            async fn update_discussion(&self, _discussion_id: &str, _body: &str) -> anyhow::Result<()> {
+                unimplemented!()
             }
         }
 
@@ -170,11 +160,11 @@ mod tests {
             },
         ];
 
-        let publisher = MockPublisher {
+        let provider = MockGitProvider {
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        publish_inline_notes(&publisher, &findings).await.unwrap();
-        let called_files = publisher.calls.lock().unwrap().clone();
+        publish_inline_notes(&provider, &findings).await.unwrap();
+        let called_files = provider.calls.lock().unwrap().clone();
         assert_eq!(called_files.len(), 1);
         assert!(called_files.contains(&"critical.rs".to_string()));
     }

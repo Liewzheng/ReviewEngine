@@ -7,8 +7,8 @@
 //! (GitLab, GitHub), parses diffs, dispatches reviews to a virtual team
 //! of LLM and static experts, scores findings, and publishes results
 //! back as MR/PR discussions or to local output files. The architecture
-//! is modular, with clear trait boundaries for providers, publishers,
-//! experts, and orchestrators, making it extensible to new platforms
+//! is modular, with clear trait boundaries for providers, experts,
+//! and orchestrators, making it extensible to new platforms
 //! and review strategies.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
@@ -131,22 +131,22 @@ pub async fn run_review(
 
 /// Publish review results back to an MR/PR discussion.
 ///
-/// Automatically selects the right Publisher based on the MR URL:
-/// - `github.com` → `GitHubPublisher`
-/// - everything else → `GitLabPublisher`
+/// Automatically selects the right Git provider based on the MR URL:
+/// - `github.com` → `GitHubProvider`
+/// - everything else → `GitLabProvider`
 ///
 /// On failure, only logs a warning — does not return an error,
 /// since the review itself has already completed successfully.
 pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) -> Result<()> {
-    let publisher: Box<dyn crate::publisher::Publisher> =
+    let provider: Box<dyn crate::git_provider::GitProvider> =
         if mr_url.contains(".github.") || mr_url.contains("github.com") {
-            crate::publisher::github::GitHubPublisher::new(token, mr_url)
-                .map(|p| Box::new(p) as Box<dyn crate::publisher::Publisher>)
-                .context("Failed to create GitHubPublisher")?
+            crate::git_provider::github::GitHubProvider::new(token, mr_url)
+                .map(|p| Box::new(p) as Box<dyn crate::git_provider::GitProvider>)
+                .context("Failed to create GitHubProvider")?
         } else {
-            crate::publisher::gitlab::GitLabPublisher::new(token, mr_url)
-                .map(|p| Box::new(p) as Box<dyn crate::publisher::Publisher>)
-                .context("Failed to create GitLabPublisher")?
+            crate::git_provider::gitlab::GitLabProvider::new(token, mr_url)
+                .map(|p| Box::new(p) as Box<dyn crate::git_provider::GitProvider>)
+                .context("Failed to create GitLabProvider")?
         };
 
     let mut md = String::from("# CodeReview Board\n\n");
@@ -157,12 +157,12 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
 
     let mut errors: Vec<anyhow::Error> = Vec::new();
 
-    if let Err(e) = publisher.find_or_update_discussion(&md).await {
+    if let Err(e) = provider.find_or_update_discussion(&md).await {
         errors.push(e.context("discussion"));
     }
 
     for report in &output.reports {
-        if let Err(e) = crate::publisher::publish_inline_notes(&*publisher, &report.findings).await {
+        if let Err(e) = crate::publisher::publish_inline_notes(&*provider, &report.findings).await {
             errors.push(e.context("inline notes"));
         }
     }

@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.6.8] - Unreleased
+## [0.6.8] - 2026-07-03
 
 ### Added
 - Added `tracing::warn!` calls for silent fallbacks in configuration parsing, describe response parsing, and diff token counting.

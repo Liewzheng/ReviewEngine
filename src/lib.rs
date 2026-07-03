@@ -15,7 +15,6 @@
 
 pub mod actions;
 pub mod config;
-pub mod context;
 pub mod diff;
 pub mod error;
 pub mod expert;
@@ -32,6 +31,7 @@ pub mod progress;
 pub mod prompt;
 pub mod publisher;
 pub mod repo;
+pub mod review_context;
 pub mod scoring;
 pub mod server;
 pub mod team;

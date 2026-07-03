@@ -41,7 +41,7 @@ impl CommandRegistry {
             .filter(|e| {
                 e.config.enabled
                     && !matches!(e.trigger, ExpertTrigger::OnDemand)
-                    && e.config.commands.iter().any(|c| c == command)
+                    && (e.config.commands.is_empty() || e.config.commands.iter().any(|c| c == command))
             })
             .collect()
     }
@@ -144,11 +144,11 @@ mod tests {
     }
 
     #[test]
-    fn test_select_experts_empty_commands() {
-        let reg = CommandRegistry::new(HashMap::new());
-        let experts = vec![make_expert("sam", vec!["review".to_string()], true)];
-        assert!(reg.select_experts_for_command("review", &experts).is_empty());
-        assert!(reg.select_experts_for_command("describe", &experts).is_empty());
-        assert!(reg.select_experts_for_command("improve", &experts).is_empty());
+    fn test_select_experts_empty_command_list_implies_all_commands() {
+        let reg = make_registry();
+        let experts = vec![make_expert("sam", vec![], true)];
+        let selected = reg.select_experts_for_command("review", &experts);
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].name, "sam");
     }
 }

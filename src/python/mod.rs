@@ -1,9 +1,21 @@
-//! Python bindings for the review-engine library. Allows calling review engine functionality from Python.
+//! Python bindings for the review-engine library.
 //!
-//! This module is part of the review-engine CodeReview Board platform.
+//! This module is only compiled when the `python` Cargo feature is enabled.
+//! It exposes a `review_engine` Python module with a `review` function:
+//! `review(mr_url, gitlab_token, llm_configs_json, config_toml=None)`.
 //!
+//! # Python usage
 //!
-//! @module review-engine
+//! Build with the `python` feature enabled, then from Python:
+//! ```python
+//! import review_engine
+//! result = review_engine.review(
+//!     "https://gitlab.com/owner/repo/-/merge_requests/1",
+//!     "glpat-xxx",
+//!     '[{"provider":"openai","model":"gpt-4","api_key":"sk-xxx"}]',
+//!     None,
+//! )
+//! ```
 use crate::models::*;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;

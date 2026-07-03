@@ -1,11 +1,8 @@
-//! Centralized error types for review-engine.
+//! Central error types for the review engine.
 //!
-//! This module is part of the review-engine CodeReview Board platform.
-//!
-//! It defines a single `ReviewEngineError` enum and a `Result<T>` alias
-//! that can be adopted incrementally across the codebase.  Existing uses
-//! of `anyhow` remain untouched in this PR; new code may return
-//! `crate::error::Result<T>` where a typed error is helpful.
+//! This module defines a shared `ReviewEngineError` enum and `Result` alias.
+//! Existing code largely uses `anyhow`; this module is introduced incrementally
+//! and new fallible code should prefer `crate::error::Result`.
 
 use thiserror::Error;
 

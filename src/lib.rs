@@ -24,6 +24,7 @@ pub mod git_provider;
 pub mod input;
 pub mod language;
 pub mod llm;
+/// Prometheus metrics used by the server, CLI, and LLM client.
 pub mod metrics;
 pub mod models;
 pub mod output;
@@ -36,6 +37,8 @@ pub mod server;
 pub mod team;
 pub mod tokenizer;
 
+/// Optional PyO3 bindings for calling review-engine from Python.
+/// Only compiled when the `python` feature is enabled.
 #[cfg(feature = "python")]
 pub mod python;
 

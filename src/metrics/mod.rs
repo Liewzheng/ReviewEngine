@@ -1,10 +1,21 @@
 //! Prometheus metrics for the review engine.
 //!
-//! This module is part of the review-engine CodeReview Board platform.
+//! This module exposes a global [`Registry`] and a set of lazily initialized
+//! counters, gauges, and histograms used by the server, CLI, and LLM client.
 //!
-//! It exposes a global [`Registry`] and a set of lazily initialized
-//! counters, gauges, and histograms used to track review requests,
-//! durations, and LLM API call outcomes.
+//! # Exported metrics
+//!
+//! - `REGISTRY`: Global Prometheus registry.
+//! - `REVIEW_REQUESTS`: Total number of review requests.
+//! - `REVIEW_DURATION`: Duration of review requests in seconds.
+//! - `LLM_REQUESTS`: LLM API requests by provider, model, and status.
+//!
+//! # Usage
+//!
+//! ```rust
+//! use review_engine::metrics::LLM_REQUESTS;
+//! LLM_REQUESTS.with_label_values(&["openai", "gpt-4", "ok"]).inc();
+//! ```
 
 use once_cell::sync::Lazy;
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, Opts, Registry};

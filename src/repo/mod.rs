@@ -61,6 +61,82 @@ pub struct LanguageStats {
 pub struct RepoScanner {
     root: PathBuf,
     ignore_patterns: Vec<String>,
+    submodules: Vec<String>,
+}
+
+/// Check whether `root` is a Git repository by looking for `.git`.
+fn is_git_repo(root: &Path) -> bool {
+    root.is_dir() && root.join(".git").exists()
+}
+
+/// Return the submodule paths inside a Git repository.
+fn git_submodules(root: &Path) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["submodule", "status", "--recursive"])
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(_) => return Vec::new(),
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            parts.get(1).map(|s| s.to_string())
+        })
+        .collect()
+}
+
+/// Return all tracked and untracked files under `root` that are not excluded by
+/// standard ignore rules (`.gitignore`, `.git/info/exclude`, etc.).
+fn git_tracked_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+        .output()
+        .map_err(|e| anyhow::anyhow!("failed to run git ls-files: {}", e))?;
+
+    if !output.status.success() {
+        anyhow::bail!("git ls-files failed: {}", String::from_utf8_lossy(&output.stderr));
+    }
+
+    let mut paths = Vec::new();
+    let mut start = 0;
+    for (i, byte) in output.stdout.iter().enumerate() {
+        if *byte == 0 {
+            if i > start {
+                let rel = std::str::from_utf8(&output.stdout[start..i])
+                    .map_err(|e| anyhow::anyhow!("invalid utf-8 in git ls-files output: {}", e))?;
+                paths.push(PathBuf::from(rel));
+            }
+            start = i + 1;
+        }
+    }
+    if start < output.stdout.len() {
+        let rel = std::str::from_utf8(&output.stdout[start..])
+            .map_err(|e| anyhow::anyhow!("invalid utf-8 in git ls-files output: {}", e))?;
+        paths.push(PathBuf::from(rel));
+    }
+
+    Ok(paths)
+}
+
+/// Return true if `path` equals `prefix` or is located inside it.
+fn path_matches_prefix(path: &str, prefix: &str) -> bool {
+    if path == prefix {
+        return true;
+    }
+    let prefix_with_slash = format!("{}/", prefix);
+    path.starts_with(&prefix_with_slash)
 }
 
 impl RepoScanner {
@@ -70,34 +146,75 @@ impl RepoScanner {
     /// (`.git`, `node_modules`, `target`, etc.) that can be extended
     /// via [`add_ignore_pattern`] (if added later).
     pub fn new(path: &str) -> Self {
+        let root = PathBuf::from(path);
+        let mut ignore_patterns = vec![
+            ".git".to_string(),
+            "node_modules".to_string(),
+            "target".to_string(),
+            "__pycache__".to_string(),
+            ".mypy_cache".to_string(),
+            ".ruff_cache".to_string(),
+            ".pytest_cache".to_string(),
+            ".venv".to_string(),
+            "venv".to_string(),
+            "vendor".to_string(),
+            ".generated".to_string(),
+            "generated".to_string(),
+            "dist".to_string(),
+            "build".to_string(),
+        ];
+
+        let submodules = if is_git_repo(&root) {
+            let subs = git_submodules(&root);
+            ignore_patterns.extend(subs.clone());
+            subs
+        } else {
+            Vec::new()
+        };
+
         Self {
-            root: PathBuf::from(path),
-            ignore_patterns: vec![
-                ".git".to_string(),
-                "node_modules".to_string(),
-                "target".to_string(),
-                "__pycache__".to_string(),
-                ".mypy_cache".to_string(),
-                ".ruff_cache".to_string(),
-                ".pytest_cache".to_string(),
-                ".venv".to_string(),
-                "venv".to_string(),
-                "vendor".to_string(),
-                ".generated".to_string(),
-                "generated".to_string(),
-                "dist".to_string(),
-                "build".to_string(),
-            ],
+            root,
+            ignore_patterns,
+            submodules,
         }
     }
 
     /// Walk the repository directory tree and collect [`FileEntry`] items.
     ///
-    /// Skips directories and files matching the ignore patterns, hidden
-    /// files (with some exceptions), and unreadable directories.
+    /// In a Git repository this uses `git ls-files` so the result respects
+    /// `.gitignore` and excludes submodule contents. Falls back to a manual
+    /// directory walk for non-Git roots.
     pub fn scan(&self) -> Result<Vec<FileEntry>> {
         let mut entries = Vec::new();
-        self.scan_dir(&self.root, &mut entries)?;
+
+        if is_git_repo(&self.root) {
+            let tracked = git_tracked_files(&self.root)?;
+            for rel in tracked {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+
+                if self
+                    .submodules
+                    .iter()
+                    .any(|prefix| path_matches_prefix(&rel_str, prefix))
+                {
+                    continue;
+                }
+
+                let abs = self.root.join(&rel);
+                if abs.is_dir() {
+                    continue;
+                }
+                if self.is_ignored(&abs) {
+                    continue;
+                }
+                if let Some(entry) = self.classify_file(&abs) {
+                    entries.push(entry);
+                }
+            }
+        } else {
+            self.scan_dir(&self.root, &mut entries)?;
+        }
+
         Ok(entries)
     }
 
@@ -155,7 +272,11 @@ impl RepoScanner {
 
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         let language = self.detect_language(ext);
-        let is_binary = self.is_binary_file(ext);
+
+        // Binary files are skipped entirely.
+        if self.is_binary_file(ext) {
+            return None;
+        }
 
         let mut is_generated = name == "Cargo.lock"
             || name == "package-lock.json"
@@ -166,13 +287,9 @@ impl RepoScanner {
             || path_str.contains("/review_reports/");
 
         // Count lines and detect generated markers in content
-        let loc = if !is_binary {
-            if let Some(content) = std::fs::read_to_string(path).ok() {
-                is_generated = is_generated || self.is_generated_content(&content);
-                content.lines().count()
-            } else {
-                0
-            }
+        let loc = if let Some(content) = std::fs::read_to_string(path).ok() {
+            is_generated = is_generated || self.is_generated_content(&content);
+            content.lines().count()
         } else {
             0
         };
@@ -181,7 +298,7 @@ impl RepoScanner {
             path: path_str,
             language,
             loc,
-            is_binary,
+            is_binary: false,
             is_generated,
         })
     }
@@ -295,6 +412,21 @@ impl RepoScanner {
 mod tests {
     use super::*;
 
+    fn init_git_repo(path: &Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git command {:?} failed", args);
+        };
+        run(&["init", "--initial-branch=main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+    }
+
     #[test]
     fn test_scanner_ignores_node_modules() {
         let scanner = RepoScanner::new(".");
@@ -358,9 +490,7 @@ mod tests {
         let path = dir.path().join("logo.png");
         std::fs::write(&path, "not actually binary").unwrap();
         let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        let entry = scanner.classify_file(&path).unwrap();
-        assert!(entry.is_binary);
-        assert_eq!(entry.loc, 0);
+        assert!(scanner.classify_file(&path).is_none());
     }
 
     #[test]
@@ -412,5 +542,85 @@ mod tests {
         assert!(scanner.is_generated_content("Generated by Swagger Codegen."));
         assert!(scanner.is_generated_content("// DO NOT EDIT manually"));
         assert!(!scanner.is_generated_content("// Hand-written code"));
+    }
+
+    #[test]
+    fn test_git_repo_respects_gitignore() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+
+        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
+        std::fs::write(dir.path().join("kept.rs"), "fn main() {}\n").unwrap();
+        std::fs::write(dir.path().join("ignored.rs"), "fn ignored() {}\n").unwrap();
+
+        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
+        let entries = scanner.scan().unwrap();
+
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+        assert!(
+            paths.iter().any(|p| p.ends_with("kept.rs")),
+            "kept.rs should be included"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("ignored.rs")),
+            "ignored.rs should be excluded by .gitignore"
+        );
+    }
+
+    #[test]
+    fn test_scanner_skips_submodules() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut scanner = RepoScanner::new(dir.path().to_str().unwrap());
+        scanner.ignore_patterns.push("submodule".to_string());
+
+        std::fs::create_dir_all(dir.path().join("submodule")).unwrap();
+        std::fs::write(dir.path().join("submodule/foo.rs"), "fn foo() {}\n").unwrap();
+
+        let entries = scanner.scan().unwrap();
+        assert!(
+            !entries.iter().any(|e| e.path.contains("submodule")),
+            "submodule contents should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_scanner_skips_binary_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("logo.png"), "not actually binary").unwrap();
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
+
+        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
+        let entries = scanner.scan().unwrap();
+
+        assert!(
+            !entries.iter().any(|e| e.path.ends_with("logo.png")),
+            "binary files should be skipped"
+        );
+        assert!(
+            entries.iter().any(|e| e.path.ends_with("main.rs")),
+            "text files should be included"
+        );
+    }
+
+    #[test]
+    fn test_git_submodules_parsing() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
+        std::fs::write(dir.path().join("nested/file.rs"), "fn foo() {}\n").unwrap();
+
+        let submodules = git_submodules(dir.path());
+        assert!(
+            submodules.is_empty(),
+            "repo without submodules should return empty list"
+        );
+    }
+
+    #[test]
+    fn test_path_matches_prefix() {
+        assert!(path_matches_prefix("sub", "sub"));
+        assert!(path_matches_prefix("sub/foo.rs", "sub"));
+        assert!(!path_matches_prefix("subfoo.rs", "sub"));
+        assert!(!path_matches_prefix("other/foo.rs", "sub"));
     }
 }

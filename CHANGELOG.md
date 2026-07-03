@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.6.7] - Unreleased
+
+### Fixed
+- `repo-review` scanner now respects `.gitignore` and excludes Git submodule directories by using `git ls-files` for file listing in Git repositories.
+- Binary files are now skipped entirely during repo-review scans instead of being included with `is_binary: true`.
+
 ## [0.6.6] - Unreleased
 
 ### Added

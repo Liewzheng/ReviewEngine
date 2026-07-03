@@ -364,13 +364,16 @@ pub async fn run() -> Result<()> {
             app_state.progress_map = Some(progress_map.clone());
             let state = Arc::new(app_state);
             let dispatcher = review_engine::server::dispatcher::MrDispatcher::new();
-            let ws_state = std::env::var("GITLAB_WEBHOOK_SECRET").ok().map(|secret| {
-                review_engine::server::gitlab::GitLabWebhookState {
-                    webhook_secret: secret,
-                    dispatcher: dispatcher.clone(),
-                }
-            });
-            let gh_ws_state = github_token
+            let mut handlers: Vec<Arc<dyn review_engine::server::webhook::WebhookHandler>> = vec![];
+            let gitlab_token = std::env::var("GITLAB_TOKEN").unwrap_or_default();
+            if let Some(secret) = std::env::var("GITLAB_WEBHOOK_SECRET").ok() {
+                handlers.push(Arc::new(review_engine::server::gitlab::GitLabWebhookHandler::new(
+                    secret,
+                    dispatcher.clone(),
+                    gitlab_token,
+                )));
+            }
+            if let Some((tok, secret)) = github_token
                 .or_else(|| std::env::var("GITHUB_TOKEN").ok())
                 .and_then(|tok| {
                     let secret = github_webhook_secret.or_else(|| std::env::var("GITHUB_WEBHOOK_SECRET").ok())?;
@@ -378,13 +381,16 @@ pub async fn run() -> Result<()> {
                         tracing::warn!("GITHUB_WEBHOOK_SECRET is empty — webhook will reject all requests");
                         return None;
                     }
-                    Some(review_engine::server::github::GitHubWebhookState {
-                        webhook_secret: secret,
-                        dispatcher: dispatcher.clone(),
-                        token: tok,
-                    })
-                });
-            review_engine::server::serve(port, &bind, state, auth, ws_state, gh_ws_state).await?;
+                    Some((tok, secret))
+                })
+            {
+                handlers.push(Arc::new(review_engine::server::github::GitHubWebhookHandler::new(
+                    secret,
+                    dispatcher.clone(),
+                    tok,
+                )));
+            }
+            review_engine::server::serve(port, &bind, state, auth, handlers).await?;
         }
         Commands::GenerateToken => {
             let token = review_engine::server::auth::generate_token();

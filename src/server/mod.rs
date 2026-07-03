@@ -2,11 +2,12 @@
 //!
 //! Built on Axum, this module exposes a web server that serves the
 //! review-engine REST API (routes under `api/`), handles incoming
-//! webhooks from GitLab and GitHub (via the `gitlab` and `github`
-//! submodules), manages review authentication via `auth`, and
-//! provides a background task queue (`task_queue`) for asynchronous
-//! review processing. Application state is defined in [`state`],
-//! and the Axum [`Router`] is constructed by the [`router`] submodule.
+//! webhooks from GitLab and GitHub (via the `gitlab`, `github`, and
+//! provider-agnostic `webhook` submodules), manages review
+//! authentication via `auth`, and provides a background task queue
+//! (`task_queue`) for asynchronous review processing. Application state
+//! is defined in [`state`], and the Axum [`Router`] is constructed by the
+//! [`router`] submodule.
 
 use std::sync::Arc;
 
@@ -19,6 +20,7 @@ pub mod router;
 pub mod routes;
 pub mod state;
 pub mod task_queue;
+pub mod webhook;
 
 pub use state::AppState;
 
@@ -132,10 +134,9 @@ pub async fn serve(
     bind: &str,
     state: Arc<AppState>,
     auth: Arc<AuthConfig>,
-    webhook_state: Option<gitlab::GitLabWebhookState>,
-    github_webhook_state: Option<github::GitHubWebhookState>,
+    webhook_handlers: Vec<Arc<dyn webhook::WebhookHandler>>,
 ) -> anyhow::Result<()> {
-    let app = router::build(state, auth, webhook_state, github_webhook_state);
+    let app = router::build(state, auth, webhook_handlers);
 
     let addr = format!("{}:{}", bind, port);
     tracing::info!("Health & webhook server listening on {}", addr);

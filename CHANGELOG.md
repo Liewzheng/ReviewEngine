@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.6.5] - 2026-07-03
+
+### Added
+- `WebhookHandler` trait in `src/server/webhook.rs` for provider-agnostic webhook dispatch.
+
+### Changed
+- Renamed `tools` module to `actions` to clarify command structure.
+- Split diff processor and unified filter logic in `src/diff/`.
+- Grouped standalone modules and added a centralized `error` module.
+- Unified `GitProvider` and `Publisher` abstractions.
+- Consolidated GitHub and GitLab client implementations under `src/git_provider/`.
+- `CommandRegistry` merged into `actions`; the standalone `commands` module removed.
+- `src/server/router.rs` no longer depends on concrete `github`/`gitlab` modules; it accepts a `Vec<Arc<dyn WebhookHandler>>` and registers each handler via a shared closure route.
+- `GitHubWebhookState` and `GitLabWebhookState` renamed to `GitHubWebhookHandler` and `GitLabWebhookHandler`; both implement `WebhookHandler` and expose `new` constructors.
+- GitLab webhook token is now read from `GITLAB_TOKEN` in `src/cli/mod.rs` and passed into `GitLabWebhookHandler::new` instead of being read from the environment inside the handler.
+- Documentation: clarified purpose of Python bindings, metrics, and the error module.
+
+### Fixed
+- Expert registry now includes experts configured with an empty commands list.
+
+### Removed
+- Removed top-level `github`/`gitlab` shims in favor of `git_provider`.
+
 ## [0.6.4] - 2026-07-02
 
 ### Added

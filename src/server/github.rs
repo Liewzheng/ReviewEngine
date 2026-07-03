@@ -1,23 +1,117 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::post, Json};
+use axum::{http::StatusCode, Json};
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
 
 use super::dispatcher::MrDispatcher;
+use super::webhook::WebhookHandler;
+
+use async_trait::async_trait;
+
+use axum::http::HeaderMap;
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Shared state for GitHub webhook handling.
+/// GitHub webhook handler.
 #[derive(Clone)]
-pub struct GitHubWebhookState {
+pub struct GitHubWebhookHandler {
     pub webhook_secret: String,
     pub dispatcher: MrDispatcher,
     pub token: String,
 }
 
-/// Register GitHub webhook routes on the given router.
-pub fn routes() -> axum::Router<GitHubWebhookState> {
-    axum::Router::new().route("/webhook/github", post(handle_webhook))
+impl GitHubWebhookHandler {
+    /// Create a new GitHub webhook handler.
+    pub fn new(webhook_secret: String, dispatcher: MrDispatcher, token: String) -> Self {
+        Self {
+            webhook_secret,
+            dispatcher,
+            token,
+        }
+    }
+}
+
+#[async_trait]
+impl WebhookHandler for GitHubWebhookHandler {
+    fn path(&self) -> &'static str {
+        "/webhook/github"
+    }
+
+    fn name(&self) -> &'static str {
+        "github"
+    }
+
+    async fn verify(&self, headers: &HeaderMap, body: &str) -> Result<(), (StatusCode, Json<Value>)> {
+        let signature_raw = headers.get("X-Hub-Signature-256");
+
+        if signature_raw.is_none() {
+            tracing::warn!("GitHub webhook missing X-Hub-Signature-256 header");
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "missing signature header"})),
+            ));
+        }
+
+        let signature_str = signature_raw.and_then(|v| v.to_str().ok()).unwrap_or("");
+
+        let signature = if let Some(s) = signature_str.strip_prefix("sha256=") {
+            s
+        } else {
+            tracing::warn!("GitHub webhook signature does not start with sha256=: {signature_str}");
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid signature format"})),
+            ));
+        };
+
+        if hex::decode(signature).is_err() {
+            tracing::warn!("GitHub webhook signature is not valid hex");
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid signature encoding"})),
+            ));
+        }
+
+        if !verify_signature(&self.webhook_secret, body, signature) {
+            tracing::warn!("GitHub webhook HMAC signature mismatch — check GITHUB_WEBHOOK_SECRET");
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid signature"})),
+            ));
+        }
+
+        Ok(())
+    }
+
+    async fn handle_event(&self, headers: &HeaderMap, body: &str) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+        let event = headers
+            .get("X-GitHub-Event")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        let result = match event {
+            "ping" => {
+                tracing::info!("GitHub ping event received");
+                Ok(Json(serde_json::json!({ "status": "ok" })))
+            }
+            "pull_request" => handle_pull_request(&body, &self.dispatcher, &self.token)
+                .await
+                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "issue_comment" => handle_issue_comment(&body, &self.dispatcher, &self.token)
+                .await
+                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "push" => {
+                tracing::info!("GitHub push event received");
+                Ok(Json(serde_json::json!({ "status": "received" })))
+            }
+            _ => {
+                tracing::debug!("Ignoring unsupported GitHub event: {}", event);
+                Ok(Json(serde_json::json!({ "status": "ignored" })))
+            }
+        };
+
+        result
+    }
 }
 
 /// Verify the X-Hub-Signature-256 header.
@@ -33,84 +127,6 @@ fn verify_signature(secret: &str, body: &str, signature: &str) -> bool {
     };
     mac.update(body.as_bytes());
     mac.verify_slice(&decoded).is_ok()
-}
-
-/// Handle incoming GitHub webhook events.
-async fn handle_webhook(
-    State(state): State<GitHubWebhookState>,
-    headers: axum::http::HeaderMap,
-    body: String,
-) -> impl axum::response::IntoResponse {
-    // Verify X-Hub-Signature-256
-    let signature_raw = headers.get("X-Hub-Signature-256");
-
-    if signature_raw.is_none() {
-        tracing::warn!("GitHub webhook missing X-Hub-Signature-256 header");
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "missing signature header"})),
-        )
-            .into_response();
-    }
-
-    let signature_str = signature_raw.and_then(|v| v.to_str().ok()).unwrap_or("");
-
-    let signature = if let Some(s) = signature_str.strip_prefix("sha256=") {
-        s
-    } else {
-        tracing::warn!("GitHub webhook signature does not start with sha256=: {signature_str}");
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "invalid signature format"})),
-        )
-            .into_response();
-    };
-
-    if hex::decode(signature).is_err() {
-        tracing::warn!("GitHub webhook signature is not valid hex");
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "invalid signature encoding"})),
-        )
-            .into_response();
-    }
-
-    if !verify_signature(&state.webhook_secret, &body, signature) {
-        tracing::warn!("GitHub webhook HMAC signature mismatch — check GITHUB_WEBHOOK_SECRET");
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "invalid signature"})),
-        )
-            .into_response();
-    }
-
-    // Parse event type
-    let event = headers
-        .get("X-GitHub-Event")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-
-    let result = match event {
-        "ping" => {
-            tracing::info!("GitHub ping event received");
-            Ok(Json(serde_json::json!({ "status": "ok" })))
-        }
-        "pull_request" => handle_pull_request(&body, &state.dispatcher, &state.token).await,
-        "issue_comment" => handle_issue_comment(&body, &state.dispatcher, &state.token).await,
-        "push" => {
-            tracing::info!("GitHub push event received");
-            Ok(Json(serde_json::json!({ "status": "received" })))
-        }
-        _ => {
-            tracing::debug!("Ignoring unsupported GitHub event: {}", event);
-            Ok(Json(serde_json::json!({ "status": "ignored" })))
-        }
-    };
-
-    match result {
-        Ok(json) => (StatusCode::OK, json).into_response(),
-        Err(status) => (status, Json(serde_json::json!({"error": "request failed"}))).into_response(),
-    }
 }
 
 async fn handle_pull_request(
@@ -297,5 +313,13 @@ mod tests {
         let sig = hex::encode(mac.finalize().into_bytes());
         // Different body should not match
         assert!(!verify_signature(secret, r#"{"action":"closed"}"#, &sig));
+    }
+
+    #[test]
+    fn test_handler_creation() {
+        let handler =
+            GitHubWebhookHandler::new("test-secret".to_string(), MrDispatcher::new(), "test-token".to_string());
+        assert_eq!(handler.path(), "/webhook/github");
+        assert_eq!(handler.name(), "github");
     }
 }

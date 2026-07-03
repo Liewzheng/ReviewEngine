@@ -1,26 +1,30 @@
-//! GitLab implementation of the GitProvider trait. Communicates with GitLab API for MR data and review comments.
+//! GitLab implementation of the GitProvider trait and supporting client module.
 //!
-//! This module is part of the review-engine CodeReview Board platform.
+//! This module is the single source of truth for GitLab integration in
+//! review-engine. The `client` submodule lives alongside the provider so all
+//! GitLab-specific code is co-located under `src/git_provider/gitlab/`.
 //!
 //!
 //! @module review-engine
+
+pub mod client;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::git_provider::GitProvider;
-use crate::gitlab::client::Client as GitLabClient;
 use crate::models::MRInfo;
 
 const BOT_DISCUSSION_TITLE: &str = "# CodeReview Board";
 
 /// GitLab implementation of GitProvider.
 pub struct GitLabProvider {
-    client: GitLabClient,
+    client: client::Client,
 }
 
 impl GitLabProvider {
     pub fn new(gitlab_token: &str, mr_url: &str) -> Result<Self> {
-        let client = GitLabClient::new(gitlab_token, mr_url)?;
+        let client = client::Client::new(gitlab_token, mr_url)?;
         Ok(Self { client })
     }
 }

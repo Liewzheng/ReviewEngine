@@ -1,15 +1,25 @@
+//! GitHub implementation of the GitProvider trait and supporting client modules.
+//!
+//! This module is the single source of truth for GitHub integration in
+//! review-engine. The `client`, `pagination`, and `types` submodules live
+//! alongside the provider so all GitHub-specific code is co-located under
+//! `src/git_provider/github/`.
+
+pub mod client;
+pub mod pagination;
+pub mod types;
+
 use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::git_provider::GitProvider;
-use crate::github::client::Client as GitHubClient;
 use crate::models::MRInfo;
 
 const BOT_REVIEW_TITLE: &str = "# CodeReview Board";
 
 /// GitHub implementation of GitProvider.
 pub struct GitHubProvider {
-    client: GitHubClient,
+    client: client::Client,
 }
 
 impl GitHubProvider {
@@ -22,7 +32,7 @@ impl GitHubProvider {
     /// # Errors
     /// Returns an error if `pr_url` cannot be parsed into a valid GitHub PR URL.
     pub fn new(token: &str, pr_url: &str) -> Result<Self> {
-        let client = GitHubClient::new(token, pr_url)?;
+        let client = client::Client::new(token, pr_url)?;
         Ok(Self { client })
     }
 }

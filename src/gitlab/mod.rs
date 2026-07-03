@@ -1,10 +1,7 @@
-//! GitLab API client and types.
+//! GitLab API client and types (compatibility re-exports).
 //!
-//! The `client` submodule implements the [`GitProvider`] trait for GitLab
-//! merge requests, providing methods to fetch MR metadata, diffs, and
-//! repository configuration, as well as posting discussions and inline
-//! comments via the GitLab REST API. This is a concrete provider that
-//! can be plugged into the review pipeline through the
-//! [`crate::git_provider`] abstraction layer.
+//! The concrete implementation now lives under `crate::git_provider::gitlab`.
+//! This module re-exports the same public items for backwards compatibility
+//! with existing callers.
 
-pub mod client;
+pub use crate::git_provider::gitlab::client;

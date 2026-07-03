@@ -1,14 +1,14 @@
-//! Unified trait abstraction over Git provider APIs (GitLab, GitHub).
+//! Unified trait abstraction and concrete implementations over Git provider APIs (GitLab, GitHub).
 //!
 //! This module is part of the review-engine CodeReview Board platform.
 //!
 //! This module defines the [`GitProvider`] trait, which is the single unified
 //! async interface for both fetching MR/PR data (info, diff, config) and
 //! publishing review results (top-level discussions, inline comments,
-//! reactions). Concrete implementations live in the `github` and `gitlab`
-//! submodules, allowing the rest of the application to operate on any Git
-//! provider polymorphically. The trait is designed to be object-safe so that
-//! callers can hold a `Box<dyn GitProvider>`.
+//! reactions). The concrete GitHub and GitLab implementations live in the
+//! `github` and `gitlab` submodules, making `src/git_provider/` the single
+//! entry point for all Git provider integrations. The trait is designed to be
+//! object-safe so that callers can hold a `Box<dyn GitProvider>`.
 
 pub mod github;
 pub mod gitlab;

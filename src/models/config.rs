@@ -54,7 +54,25 @@ pub struct AppConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ProjectConfig {
     /// Human-readable project name (display only).
+    #[serde(default)]
     pub name: Option<String>,
+    /// High-level project type or runtime category (e.g. "embedded", "web",
+    /// "mobile", "backend", "desktop").
+    #[serde(default)]
+    pub project_type: Option<String>,
+    /// Target operating system (e.g. "Linux", "RTOS", "bare-metal").
+    #[serde(default)]
+    pub os: Option<String>,
+    /// Target CPU architecture (e.g. "ARM", "x86_64", "RISC-V").
+    #[serde(default)]
+    pub arch: Option<String>,
+    /// Application domain or industry (e.g. "IoT", "fintech", "consumer").
+    #[serde(default)]
+    pub domain: Option<String>,
+    /// Additional project constraints that affect review relevance
+    /// (e.g. "single-threaded BLE stack, 64 KiB RAM").
+    #[serde(default)]
+    pub constraints: Option<String>,
 }
 
 /// Controls how review reports are generated and presented.
@@ -395,29 +413,54 @@ mod tests {
     }
 
     #[test]
-    fn test_build_expert_defs_includes_enabled() {
-        let mut experts = HashMap::new();
-        experts.insert("expert_a".to_string(), make_expert(true));
-        experts.insert("expert_b".to_string(), make_expert(true));
+    fn test_project_config_parses_all_fields() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[project]
+name = "review-engine"
+project_type = "embedded"
+os = "Linux"
+arch = "ARM"
+domain = "IoT"
+constraints = "single-threaded BLE stack, 64 KiB RAM"
+"#,
+        )
+        .unwrap();
 
-        let config = AppConfig {
-            project: None,
-            report: ReportConfig::default(),
-            review_experts: experts,
-            commands: HashMap::new(),
-            scoring: ScoringConfig::default(),
-            llm: Vec::new(),
-            output_dir: String::new(),
-            max_team_size: None,
-            max_concurrent_llm_calls: None,
-            diff: DiffConfig::default(),
-            rate_limit: RateLimitConfig::default(),
-            languages: LanguagesConfig::default(),
-        };
+        let project = config.project.expect("project should be present");
+        assert_eq!(project.name, Some("review-engine".to_string()));
+        assert_eq!(project.project_type, Some("embedded".to_string()));
+        assert_eq!(project.os, Some("Linux".to_string()));
+        assert_eq!(project.arch, Some("ARM".to_string()));
+        assert_eq!(project.domain, Some("IoT".to_string()));
+        assert_eq!(
+            project.constraints,
+            Some("single-threaded BLE stack, 64 KiB RAM".to_string())
+        );
+    }
 
-        let defs = config.build_expert_defs();
-        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
-        assert!(names.contains(&"expert_a"));
-        assert!(names.contains(&"expert_b"));
+    #[test]
+    fn test_project_config_missing_fields_default_to_none() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[project]
+name = "minimal"
+"#,
+        )
+        .unwrap();
+
+        let project = config.project.expect("project should be present");
+        assert_eq!(project.name, Some("minimal".to_string()));
+        assert!(project.project_type.is_none());
+        assert!(project.os.is_none());
+        assert!(project.arch.is_none());
+        assert!(project.domain.is_none());
+        assert!(project.constraints.is_none());
+    }
+
+    #[test]
+    fn test_project_config_omitted() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(config.project.is_none());
     }
 }

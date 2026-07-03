@@ -19,6 +19,11 @@ The config file uses TOML format. Below is the complete schema with all availabl
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | string (optional) | Project name for display |
+| `project_type` | string (optional) | Project type: `embedded`, `web`, `mobile`, `backend`, `desktop` |
+| `os` | string (optional) | Target operating system, e.g. `Linux`, `RTOS`, `bare-metal` |
+| `arch` | string (optional) | Target CPU architecture, e.g. `ARM`, `x86_64`, `RISC-V` |
+| `domain` | string (optional) | Application domain, e.g. `IoT`, `fintech`, `consumer` |
+| `constraints` | string (optional) | Extra project constraints that affect review relevance |
 
 ## `[report]`
 

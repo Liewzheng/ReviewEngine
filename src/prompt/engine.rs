@@ -82,11 +82,23 @@ impl PromptEngine {
 
         let system = self.env.get_template("review_system")?.render(&ctx_system)?;
 
+        let project = settings.project.as_ref();
+        let project_type = project.and_then(|p| p.project_type.as_deref()).unwrap_or("");
+        let os = project.and_then(|p| p.os.as_deref()).unwrap_or("");
+        let arch = project.and_then(|p| p.arch.as_deref()).unwrap_or("");
+        let domain = project.and_then(|p| p.domain.as_deref()).unwrap_or("");
+        let constraints = project.and_then(|p| p.constraints.as_deref()).unwrap_or("");
+
         let ctx_user = serde_json::json!({
             "title": mr.title,
             "branch": mr.source_branch,
             "description": mr.description,
             "diff": diff_text,
+            "project_type": project_type,
+            "os": os,
+            "arch": arch,
+            "domain": domain,
+            "constraints": constraints,
         });
 
         let user = self.env.get_template("review_user")?.render(&ctx_user)?;
@@ -301,6 +313,101 @@ impl Default for PromptEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
+    fn make_test_expert(prompt: &str) -> ExpertDef {
+        ExpertDef {
+            name: "test".to_string(),
+            trigger: ExpertTrigger::Always,
+            prompt: prompt.to_string(),
+            config: ExpertTomlDef::default(),
+        }
+    }
+
+    fn make_test_app_config(project: Option<ProjectConfig>) -> AppConfig {
+        AppConfig {
+            project,
+            report: ReportConfig::default(),
+            review_experts: HashMap::new(),
+            commands: HashMap::new(),
+            scoring: ScoringConfig::default(),
+            llm: Vec::new(),
+            output_dir: String::new(),
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            diff: DiffConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            languages: LanguagesConfig::default(),
+        }
+    }
+
+    fn make_test_mr() -> MRInfo {
+        MRInfo::new(
+            "owner/repo".to_string(),
+            "Add feature".to_string(),
+            "feat/test".to_string(),
+            "main".to_string(),
+        )
+    }
+
+    #[test]
+    fn test_review_prompt_with_project_context() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let project = ProjectConfig {
+            name: Some("review-engine".to_string()),
+            project_type: Some("embedded".to_string()),
+            os: Some("Linux".to_string()),
+            arch: Some("ARM".to_string()),
+            domain: Some("IoT".to_string()),
+            constraints: Some("single-threaded BLE stack, 64 KiB RAM".to_string()),
+        };
+        let settings = make_test_app_config(Some(project));
+        let mr = make_test_mr();
+        let (system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings)
+            .unwrap();
+
+        assert!(!system.is_empty());
+        assert!(!user.is_empty());
+        assert!(user.contains("## Project Context"));
+        assert!(user.contains("Type: embedded"));
+        assert!(user.contains("OS: Linux"));
+        assert!(user.contains("Architecture: ARM"));
+        assert!(user.contains("Domain: IoT"));
+        assert!(user.contains("Constraints: single-threaded BLE stack, 64 KiB RAM"));
+    }
+
+    #[test]
+    fn test_review_prompt_system_requires_structured_fields() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a performance expert.");
+        let settings = make_test_app_config(None);
+        let mr = make_test_mr();
+        let (system, _user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings)
+            .unwrap();
+
+        assert!(system.contains("evidence"));
+        assert!(system.contains("impact"));
+        assert!(system.contains("recommendation"));
+        assert!(system.contains("effort"));
+        assert!(system.contains("line_end"));
+        assert!(system.contains("Downgrade code-quality or style findings"));
+    }
+
+    #[test]
+    fn test_review_prompt_without_project_context() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a lead reviewer.");
+        let settings = make_test_app_config(None);
+        let mr = make_test_mr();
+        let (_system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings)
+            .unwrap();
+
+        assert!(!user.contains("## Project Context"));
+    }
 
     #[test]
     fn test_aggregator_prompt_without_pr_context() {

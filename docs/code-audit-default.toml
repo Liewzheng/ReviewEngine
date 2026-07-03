@@ -13,6 +13,11 @@
 
 [project]
 name = "default"
+# project_type = "embedded"    # "embedded", "web", "mobile", "backend", "desktop"
+# os = "Linux"                   # e.g., Linux, RTOS, bare-metal
+# arch = "ARM"                   # e.g., ARM, x86_64, RISC-V
+# domain = "IoT"                 # e.g., IoT, fintech, consumer
+# constraints = "single-threaded BLE stack, 64 KiB RAM"
 
 [report]
 aggregated = false

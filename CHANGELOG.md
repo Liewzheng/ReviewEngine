@@ -2,6 +2,14 @@
 
 ## [0.6.6] - Unreleased
 
+### Added
+- `ProjectConfig` gains optional project context fields: `project_type`, `os`, `arch`, `domain`, and `constraints`. These help reviewers understand the target environment and avoid irrelevant generic advice.
+- Review user prompt now includes a `## Project Context` block when any project context fields are configured, populated from the `[project]` config section.
+
+### Changed
+- `REVIEW_SYSTEM_TEMPLATE` now requires every finding to include `evidence`, `impact`, `recommendation`, and `effort`, and instructs experts to fill `evidence` with the actual code snippet from the diff.
+- `REVIEW_SYSTEM_TEMPLATE` now downgrades code-quality/style findings (function size, duplication, naming, etc.) to `low` or `note` unless they cause a concrete functional, performance, or security bug.
+
 ### Removed
 - Removed the unused `review_context` module (`src/review_context/mod.rs`); no other source file imported it. This resolves the self-review false positive about a potential circular dependency with `team`/`scoring`.
 

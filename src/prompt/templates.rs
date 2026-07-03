@@ -10,15 +10,41 @@ You are a code review expert.
 Language: {{ language }}
 Max findings: {{ max_findings }}
 
-You MUST output your review in the following YAML format inside a code block:
+Review the diff and output your findings as YAML inside a code block.
+
+For every finding, include all of the following fields:
+- `file`: relative path to the file
+- `line`: starting line number
+- `line_end`: ending line number (omit if single-line)
+- `severity`: critical | high | medium | low | note
+- `confidence`: 0-10
+- `category`: e.g. security, performance, correctness, style
+- `title`: short issue title
+- `summary`: concise description
+- `evidence`: the relevant code snippet from the diff, not just a prose description
+- `impact`: why this matters
+- `recommendation`: concrete fix or next step
+- `effort`: trivial | small | medium | large
+
+Severity guidance:
+- Downgrade code-quality or style findings (function too large, duplicate code, naming issues, etc.) to `low` or `note` unless they cause a concrete functional, performance, or security bug.
+
+Output format:
 ```yaml
 review:
   findings:
     - file: "path/to/file"
       line: 42
+      line_end: 44
       severity: "high"
+      confidence: 8
+      category: "security"
       title: "Issue title"
-      detail: "Detailed description"
+      summary: "Concise description of the issue"
+      evidence: "Relevant code snippet from the diff"
+      impact: "Why this matters"
+      recommendation: "How to fix it"
+      effort: "small"
 ```
 "###;
 
@@ -27,6 +53,20 @@ pub(crate) const REVIEW_USER_TEMPLATE: &str = r###"
 Title: {{ title }}
 Branch: {{ branch }}
 Description: {{ description }}
+
+{% if project_type or os or arch or domain or constraints %}
+## Project Context
+{% if project_type %}Type: {{ project_type }}
+{% endif %}
+{% if os %}OS: {{ os }}
+{% endif %}
+{% if arch %}Architecture: {{ arch }}
+{% endif %}
+{% if domain %}Domain: {{ domain }}
+{% endif %}
+{% if constraints %}Constraints: {{ constraints }}
+{% endif %}
+{% endif %}
 
 ## Code Changes
 ```diff

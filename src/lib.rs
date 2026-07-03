@@ -18,6 +18,7 @@ pub mod commands;
 pub mod config;
 pub mod context;
 pub mod diff;
+pub mod error;
 pub mod expert;
 pub mod git;
 pub mod git_provider;

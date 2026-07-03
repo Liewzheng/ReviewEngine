@@ -1,3 +1,11 @@
+//! Prometheus metrics for the review engine.
+//!
+//! This module is part of the review-engine CodeReview Board platform.
+//!
+//! It exposes a global [`Registry`] and a set of lazily initialized
+//! counters, gauges, and histograms used to track review requests,
+//! durations, and LLM API call outcomes.
+
 use once_cell::sync::Lazy;
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, Opts, Registry};
 

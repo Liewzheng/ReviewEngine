@@ -1,14 +1,14 @@
 # ========================================
-# review_engine CodeReview Board 默认配置
-# 当项目根目录无 .code-audit-config.toml 时使用此配置
-# 当前仍兼容 .pr-agent.toml 作为 fallback，但会在未来版本中移除
+# Default review_engine CodeReview Board configuration
+# Used when there is no .code-audit-config.toml in the project root
+# Currently still compatible with .pr-agent.toml as a fallback, but will be removed in a future version
 #
-# 重要说明：
-#   1. 以下专家不是代码中写死的，而是默认 TOML 配置的一部分
-#   2. 用户可在 .code-audit-config.toml 中启用/禁用、新增、修改任何专家
-#   3. 每个专家的所有字段（name/role/title/weight/principles/focus/model/trigger/commands 等）均可配置
-#   4. review-engine 只提供通用 ExpertDef 接口和编排器，不识别任何固定角色
-#   5. 命令（/review /describe /improve /ask /repo-review 等）默认全部关闭，需在 [commands] 中显式启用
+# Important notes:
+#   1. The experts below are not hard-coded; they are part of the default TOML configuration
+#   2. Users can enable, disable, add, or modify any expert in .code-audit-config.toml
+#   3. All fields of each expert (name/role/title/weight/principles/focus/model/trigger/commands, etc.) are configurable
+#   4. review-engine only provides the generic ExpertDef interface and orchestrator; it does not recognize any fixed roles
+#   5. Commands (/review /describe /improve /ask /repo-review, etc.) are disabled by default and must be explicitly enabled in [commands]
 # ========================================
 
 [project]
@@ -24,42 +24,42 @@ aggregated = false
 max_findings_per_expert = 5
 
 [scoring]
-# 专家权重：决定该专家在团队综合评分中的影响力，所有启用专家权重之和应为 100
-# 权重越高，该专家的 findings 对 overall score / risk level 影响越大
+# Expert weight: determines the influence of this expert in the team overall score; the sum of weights of all enabled experts should be 100
+# The higher the weight, the greater the impact of this expert's findings on the overall score / risk level
 enabled = true
 display_individual_scores = true
 display_weighted_score = true
 
 [diff]
-# 最大输入 token 数，超限触发压缩
+# Maximum input token count; exceeding this triggers compression
 max_input_tokens = 120000
-# 每个 chunk 的最大 token 数
+# Maximum token count per chunk
 max_tokens_per_chunk = 30000
-# 超过此文件数视为大型 PR（> 阈值）
+# PRs exceeding this file count are treated as large PRs (> threshold)
 large_pr_file_threshold = 21
-# 超过此变更行数视为大型 PR
+# PRs exceeding this changed-line count are treated as large PRs
 large_pr_line_threshold = 1000
-# 压缩级别：可选 "none"、"light"、"moderate"、"aggressive"
+# Compression level: one of "none", "light", "moderate", "aggressive"
 compression_level = "aggressive"
-# 分块策略：可选 "files"、"hunks"、"adaptive"
+# Chunking strategy: one of "files", "hunks", "adaptive"
 chunking_strategy = "adaptive"
-# 每个专家最多处理的 chunk 数
+# Maximum number of chunks each expert processes
 max_chunks_per_expert = 3
 
 [rate_limit]
-# max_rpm: 每分钟最大请求数（requests per minute）
+# max_rpm: maximum requests per minute
 max_rpm = 60
-# max_tpm: 每分钟最大 token 数（tokens per minute）
+# max_tpm: maximum tokens per minute
 max_tpm = 200000
-# 滑动窗口大小（秒）
+# Sliding window size in seconds
 window_seconds = 60
 
 # ========================================
-# 命令开关
-# 说明：
-#   - 每个命令都是 CodeReview Board 的一种行为，默认全部关闭
-#   - 用户必须在 .code-audit-config.toml 中显式启用需要的命令
-#   - 命令启用后，实际参与的专家由每个 review_experts.<name>.commands 列表决定
+# Command switches
+# Notes:
+#   - Each command is a CodeReview Board behavior; all are disabled by default
+#   - Users must explicitly enable the required commands in .code-audit-config.toml
+#   - Once enabled, the experts that actually participate are determined by each review_experts.<name>.commands list
 # ========================================
 
 [commands]
@@ -71,16 +71,16 @@ repo_review = false
 update_changelog = false
 
 # ========================================
-# CodeReview Board 默认核心团队
-# 说明：
-#   - 这是默认团队，可在 .code-audit-config.toml 中完全覆盖
-#   - 权重说明：
-#       - Lead 权重最高，代表全局判断
-#       - Security 权重次高，安全是硬性要求
-#       - Performance / Quality / Reuse / UX 权重中等
-#       - Database / DevOps / API / Dependency 权重最低，按需触发
-#       - Docs 权重最低，文档变更较少
-#   - 所有启用专家权重之和必须 = 100
+# CodeReview Board default core team
+# Notes:
+#   - This is the default team; it can be fully overridden in .code-audit-config.toml
+#   - Weight notes:
+#       - Lead has the highest weight and represents the overall judgment
+#       - Security has the second highest weight; security is a hard requirement
+#       - Performance / Quality / Reuse / UX have medium weights
+#       - Database / DevOps / API / Dependency have the lowest weights and are triggered on demand
+#       - Docs has the lowest weight; documentation changes are less frequent
+#   - The sum of weights of all enabled experts must be 100
 # ========================================
 
 [review_experts.lead]

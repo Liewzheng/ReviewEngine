@@ -16,7 +16,13 @@ pub fn apply_token_budget(files: &mut Vec<DiffFile>, max_tokens: usize) {
 
     for (i, file) in files.iter().enumerate() {
         let file_text = render_file_diff(file);
-        let file_tokens = count_tokens(&file_text, DEFAULT_TOKEN_MODEL).unwrap_or(0);
+        let file_tokens = match count_tokens(&file_text, DEFAULT_TOKEN_MODEL) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to count tokens for file budget; assuming 0");
+                0
+            }
+        };
         if tokens_used + file_tokens > max_tokens {
             truncation_point = i;
             break;

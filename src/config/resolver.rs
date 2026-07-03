@@ -20,9 +20,17 @@ pub fn load_and_apply(toml_content: &str) -> Result<AppConfig> {
 
 fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
     if let Ok(val) = std::env::var("CODE_AUDIT_COMMANDS") {
-        if let Ok(parsed) = toml::from_str::<HashMap<String, bool>>(&val) {
-            for (k, v) in parsed {
-                config.commands.insert(k, v);
+        match toml::from_str::<HashMap<String, bool>>(&val) {
+            Ok(parsed) => {
+                for (k, v) in parsed {
+                    config.commands.insert(k, v);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "CODE_AUDIT_COMMANDS is set but could not be parsed as a boolean map; ignoring"
+                );
             }
         }
     }
@@ -66,21 +74,27 @@ pub(crate) fn validate_experts(config: &AppConfig) -> Result<()> {
 fn take_llm(val: &toml::Value) -> Vec<crate::models::LLMConfig> {
     let mut wrapper = toml::map::Map::new();
     wrapper.insert("llm".to_string(), val.clone());
-    toml::from_str::<crate::models::AppConfig>(&toml::Value::Table(wrapper).to_string())
-        .map(|cfg| cfg.llm)
-        .unwrap_or_default()
+    match toml::from_str::<crate::models::AppConfig>(&toml::Value::Table(wrapper).to_string()) {
+        Ok(cfg) => cfg.llm,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to parse [[llm]] array from TOML; using empty LLM config");
+            Vec::new()
+        }
+    }
 }
 
 /// Extract boolean commands map from a parsed TOML value.
 fn take_commands(val: &toml::Value) -> HashMap<String, bool> {
-    val.as_table()
-        .map(|table| {
-            table
-                .iter()
-                .filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
-                .collect()
-        })
-        .unwrap_or_default()
+    match val.as_table() {
+        Some(table) => table
+            .iter()
+            .filter_map(|(k, v)| v.as_bool().map(|b| (k.clone(), b)))
+            .collect(),
+        None => {
+            tracing::warn!("commands value is not a TOML table; ignoring");
+            HashMap::new()
+        }
+    }
 }
 
 /// Resolve the application configuration from the given source (or auto-detect).
@@ -113,33 +127,60 @@ pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
             // 2. User-level config (~/.config/review-engine/) — fills gaps
             if let Some(ref user_path) = user_config_path {
                 if user_path.exists() {
-                    if let Ok(content) = std::fs::read_to_string(user_path) {
-                        if let Ok(val) = toml::from_str::<toml::Value>(&content) {
-                            if let Some(obj) = val.as_table() {
-                                // LLM: fill only if base has none
-                                if config.llm.is_empty() {
-                                    if let Some(llm) = obj.get("llm") {
-                                        let parsed = take_llm(llm);
-                                        if !parsed.is_empty() {
-                                            config.llm = parsed;
+                    match std::fs::read_to_string(user_path) {
+                        Ok(content) => {
+                            match toml::from_str::<toml::Value>(&content) {
+                                Ok(val) => {
+                                    if let Some(obj) = val.as_table() {
+                                        // LLM: fill only if base has none
+                                        if config.llm.is_empty() {
+                                            if let Some(llm) = obj.get("llm") {
+                                                let parsed = take_llm(llm);
+                                                if !parsed.is_empty() {
+                                                    config.llm = parsed;
+                                                }
+                                            }
+                                        }
+                                        // Commands: merge
+                                        if let Some(cmds) = obj.get("commands") {
+                                            config.commands.extend(take_commands(cmds));
+                                        }
+                                        // Experts: fill (don't override project)
+                                        if let Some(review_experts) = obj.get("review_experts") {
+                                            match toml::from_str::<HashMap<String, crate::models::ExpertTomlDef>>(
+                                                &review_experts.to_string(),
+                                            ) {
+                                                Ok(parsed) => {
+                                                    for (k, v) in parsed {
+                                                        config.review_experts.entry(k).or_insert(v);
+                                                    }
+                                                }
+                                                Err(e) => {
+                                                    tracing::warn!(
+                                                        path = %user_path.display(),
+                                                        error = %e,
+                                                        "Failed to parse user-level review_experts section; ignoring"
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                 }
-                                // Commands: merge
-                                if let Some(cmds) = obj.get("commands") {
-                                    config.commands.extend(take_commands(cmds));
-                                }
-                                // Experts: fill (don't override project)
-                                if let Some(review_experts) = obj.get("review_experts") {
-                                    if let Ok(parsed) = toml::from_str::<HashMap<String, crate::models::ExpertTomlDef>>(
-                                        &review_experts.to_string(),
-                                    ) {
-                                        for (k, v) in parsed {
-                                            config.review_experts.entry(k).or_insert(v);
-                                        }
-                                    }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        path = %user_path.display(),
+                                        error = %e,
+                                        "Failed to parse user-level config file as TOML; ignoring"
+                                    );
                                 }
                             }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %user_path.display(),
+                                error = %e,
+                                "Failed to read user-level config file; ignoring"
+                            );
                         }
                     }
                 }
@@ -147,28 +188,56 @@ pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
 
             // 3. Project-level config (.code-audit-config.toml) — overrides
             if std::path::Path::new(default_path).exists() {
-                let content = tokio::fs::read_to_string(default_path).await?;
-                if let Ok(val) = toml::from_str::<toml::Value>(&content) {
-                    if let Some(obj) = val.as_table() {
-                        // LLM: override only if project explicitly provides [[llm]]
-                        if let Some(llm) = obj.get("llm") {
-                            let parsed = take_llm(llm);
-                            if !parsed.is_empty() {
-                                config.llm = parsed;
+                match tokio::fs::read_to_string(default_path).await {
+                    Ok(content) => {
+                        match toml::from_str::<toml::Value>(&content) {
+                            Ok(val) => {
+                                if let Some(obj) = val.as_table() {
+                                    // LLM: override only if project explicitly provides [[llm]]
+                                    if let Some(llm) = obj.get("llm") {
+                                        let parsed = take_llm(llm);
+                                        if !parsed.is_empty() {
+                                            config.llm = parsed;
+                                        }
+                                    }
+                                    // Commands: override
+                                    if let Some(cmds) = obj.get("commands") {
+                                        config.commands.extend(take_commands(cmds));
+                                    }
+                                    // Experts: override (project wins over user)
+                                    if let Some(review_experts) = obj.get("review_experts") {
+                                        match toml::from_str::<HashMap<String, crate::models::ExpertTomlDef>>(
+                                            &review_experts.to_string(),
+                                        ) {
+                                            Ok(parsed) => {
+                                                config.review_experts.extend(parsed);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    path = default_path,
+                                                    error = %e,
+                                                    "Failed to parse project-level review_experts section; ignoring"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    path = default_path,
+                                    error = %e,
+                                    "Failed to parse project-level config file as TOML; ignoring"
+                                );
                             }
                         }
-                        // Commands: override
-                        if let Some(cmds) = obj.get("commands") {
-                            config.commands.extend(take_commands(cmds));
-                        }
-                        // Experts: override (project wins over user)
-                        if let Some(review_experts) = obj.get("review_experts") {
-                            if let Ok(parsed) = toml::from_str::<HashMap<String, crate::models::ExpertTomlDef>>(
-                                &review_experts.to_string(),
-                            ) {
-                                config.review_experts.extend(parsed);
-                            }
-                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            path = default_path,
+                            error = %e,
+                            "Failed to read project-level config file; ignoring"
+                        );
                     }
                 }
             }

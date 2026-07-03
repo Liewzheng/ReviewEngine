@@ -3,6 +3,7 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
 
+/// Async token-bucket rate limiter enforcing per-minute request and token limits.
 pub struct RateLimiter {
     inner: Mutex<Inner>,
 }

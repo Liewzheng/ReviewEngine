@@ -1,4 +1,4 @@
-//! Command registry and expert selection.
+//! Registry of enabled commands and expert selection.
 //!
 //! The [`CommandRegistry`] maps command names (e.g. "review", "describe")
 //! to enabled/disabled status, and provides filtering logic to select

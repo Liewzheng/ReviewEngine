@@ -11,5 +11,6 @@ pub mod ask;
 pub mod describe;
 pub mod improve;
 pub mod init;
+pub mod registry;
 pub mod repo_review;
 pub mod update_changelog;

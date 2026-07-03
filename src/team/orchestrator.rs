@@ -7,7 +7,7 @@ use std::time::Instant;
 use tokio::sync::Semaphore;
 use tracing::info;
 
-use crate::commands::CommandRegistry;
+use crate::actions::registry::CommandRegistry;
 use crate::diff::chunker;
 use crate::diff::filter;
 use crate::diff::large_pr;

@@ -314,6 +314,17 @@ pick_asset_link() {
     jq -r --arg name "${asset_name}" '.assets[]? | select(.name == $name) | .browser_download_url' "${release_path}" | head -n1
 }
 
+url_encode() {
+    if command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$1" | python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.stdin.read()), end="")'
+    elif command -v jq >/dev/null 2>&1; then
+        printf '%s' "$1" | jq -sRr '@uri'
+    else
+        # Minimal fallback for spaces and common URL-special characters.
+        printf '%s' "$1" | sed 's/ /%20/g; s/&/%26/g; s/?/%3F/g; s/=/%3D/g; s/#/%23/g; s/\[/%5B/g; s/\]/%5D/g'
+    fi
+}
+
 sanitized_config_ref() {
     local ref="$1"
 
@@ -322,7 +333,7 @@ sanitized_config_ref() {
         return 1
     fi
 
-    printf '%s' "${ref}" | jq -sRr '@uri'
+    url_encode "${ref}"
 }
 
 install_default_config() {

@@ -10,7 +10,9 @@ related:
   - ../.notes/full_repo_review_strategy.md
   - ../.notes/review_engine_rs_roadmap.md
   - professional_team_design.md
----
+--->
+> **Status:** Design proposal — future phases described here may not be fully implemented yet.
+
 # review_engine 仓库感知型 MR 审核方案
 
 > 目标：让 MR 审核专家不再只盯着 diff，而是能像真人工程师一样在仓库中查阅上下文、搜索模式、验证假设。

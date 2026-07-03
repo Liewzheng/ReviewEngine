@@ -22,7 +22,13 @@ pub fn chunk_by_files(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
 
     for file in files {
         let file_text = render_file_diff(file);
-        let file_tokens = count_tokens(&file_text, DEFAULT_TOKEN_MODEL).unwrap_or(0);
+        let file_tokens = match count_tokens(&file_text, DEFAULT_TOKEN_MODEL) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to count tokens for file diff; assuming 0");
+                0
+            }
+        };
 
         if current_tokens + file_tokens > max_tokens_per_chunk && !current_files.is_empty() {
             chunks.push(DiffChunk {
@@ -92,13 +98,25 @@ pub fn chunk_by_hunks(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
 /// Compute the token count for rendering a full file diff.
 fn compute_file_tokens(file: &DiffFile) -> usize {
     let file_text = render_file_diff(file);
-    count_tokens(&file_text, DEFAULT_TOKEN_MODEL).unwrap_or(0)
+    match count_tokens(&file_text, DEFAULT_TOKEN_MODEL) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to count tokens for file; assuming 0");
+            0
+        }
+    }
 }
 
 /// Compute the token count for a single hunk.
 fn compute_hunk_tokens(hunk: &DiffHunk) -> usize {
     let hunk_text = render_hunk(hunk);
-    count_tokens(&hunk_text, DEFAULT_TOKEN_MODEL).unwrap_or(0)
+    match count_tokens(&hunk_text, DEFAULT_TOKEN_MODEL) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to count tokens for hunk; assuming 0");
+            0
+        }
+    }
 }
 
 /// If adding `file_tokens` would exceed the budget, flush the current chunk first.
@@ -210,7 +228,13 @@ pub fn adaptive_chunk(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
     // Check if any chunk is too large
     let too_large = file_chunks.iter().any(|c| {
         let text: String = c.files.iter().map(render_file_diff).collect();
-        count_tokens(&text, DEFAULT_TOKEN_MODEL).unwrap_or(0) > max_tokens_per_chunk
+        match count_tokens(&text, DEFAULT_TOKEN_MODEL) {
+            Ok(n) => n > max_tokens_per_chunk,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to count tokens for chunk; treating as too large");
+                true
+            }
+        }
     });
 
     if too_large {

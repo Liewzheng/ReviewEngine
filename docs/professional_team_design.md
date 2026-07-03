@@ -11,6 +11,8 @@ related:
   - ../.notes/review_engine_rs_roadmap.md
   - repo_aware_review_strategy.md
 ---
+> **Status:** Design proposal — future phases described here may not be fully implemented yet.
+>
 > 视角：产品设计师。
 > 目标：让 AI 审核团队不仅“人多”，更要“专业”——像一支真实、可信、高效的 senior engineering team 那样工作。
 

@@ -95,6 +95,8 @@ fn fence_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"^```(?:yaml|YAML)?\s*$").unwrap())
 }
 
+/// Strip YAML code-fence markers from an LLM response so the remaining text
+/// can be parsed as plain YAML.
 pub(crate) fn clean_yaml(text: &str) -> String {
     let mut cleaned = String::new();
     let mut in_block = false;

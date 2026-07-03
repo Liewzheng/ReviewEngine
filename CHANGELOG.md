@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.6.8] - Unreleased
+
+### Added
+- Added `tracing::warn!` calls for silent fallbacks in configuration parsing, describe response parsing, and diff token counting.
+- Added missing doc comments for `RateLimiter`, `ProviderRegistry::from_configs`, and `clean_yaml`.
+- Added a one-line design-proposal status note to `docs/professional_team_design.md` and `docs/repo_aware_review_strategy.md`.
+
+### Changed
+- Translated the Chinese section/header comments in `docs/code-audit-default.toml` to English; all TOML keys and values are unchanged.
+- Made `install.sh` URL encoding portable by preferring Python and falling back to `jq` or a pure-shell implementation; the `sanitized_config_ref` signature and call sites are unchanged.
+
+### Fixed
+- Updated `notify` to 8.x and `inquire` to 0.9.4 to resolve cargo-audit unmaintained-dependency warnings (`fxhash`, `instant`).
+
 ## [0.6.7] - Unreleased
 
 ### Fixed

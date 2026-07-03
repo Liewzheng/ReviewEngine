@@ -36,20 +36,38 @@ fn parse_describe_response(response: &str) -> Result<DescribeOutput> {
     // Try to extract YAML/JSON from the response
     let cleaned = crate::output::parser::clean_yaml(response);
     if let Ok(value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned) {
-        let title = value["title"].as_str().unwrap_or("").to_string();
-        let description = value["description"].as_str().unwrap_or("").to_string();
-        let change_type = value["type"].as_str().unwrap_or("refactor").to_string();
+        let title = value["title"].as_str().map(String::from).unwrap_or_else(|| {
+            tracing::warn!("describe response missing 'title' field; using empty string");
+            String::new()
+        });
+        let description = value["description"].as_str().map(String::from).unwrap_or_else(|| {
+            tracing::warn!("describe response missing 'description' field; using empty string");
+            String::new()
+        });
+        let change_type = value["type"].as_str().map(String::from).unwrap_or_else(|| {
+            tracing::warn!("describe response missing 'type' field; defaulting to 'refactor'");
+            "refactor".to_string()
+        });
         let files = value["files"]
             .as_sequence()
             .map(|seq| {
                 seq.iter()
                     .map(|f| FileWalkthrough {
-                        file: f["file"].as_str().unwrap_or("").to_string(),
-                        summary: f["summary"].as_str().unwrap_or("").to_string(),
+                        file: f["file"].as_str().map(String::from).unwrap_or_else(|| {
+                            tracing::warn!("describe response file entry missing 'file' field");
+                            String::new()
+                        }),
+                        summary: f["summary"].as_str().map(String::from).unwrap_or_else(|| {
+                            tracing::warn!("describe response file entry missing 'summary' field");
+                            String::new()
+                        }),
                     })
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::warn!("describe response missing 'files' array; using empty list");
+                Vec::new()
+            });
         return Ok(DescribeOutput {
             title,
             description,
@@ -58,6 +76,7 @@ fn parse_describe_response(response: &str) -> Result<DescribeOutput> {
         });
     }
     // Fallback: return raw response as description
+    tracing::warn!("describe response is not parseable YAML; falling back to raw text");
     Ok(DescribeOutput {
         title: String::new(),
         description: response.to_string(),

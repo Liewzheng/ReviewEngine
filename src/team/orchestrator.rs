@@ -127,6 +127,11 @@ impl TeamOrchestrator for DefaultOrchestrator {
             }
         }
 
+        let (base_ref, head_ref) = match input {
+            ReviewInput::LocalRepo { base_ref, head_ref, .. } => (base_ref.clone(), head_ref.clone()),
+            _ => (None, None),
+        };
+
         let (reports, metrics, total_tokens, errors, _global_context) = run_experts_inner(
             &selected_defs,
             &mr_info,
@@ -135,6 +140,8 @@ impl TeamOrchestrator for DefaultOrchestrator {
             config,
             self.progress_map.as_ref(),
             &self.review_id,
+            base_ref.as_deref(),
+            head_ref.as_deref(),
         )
         .await?;
 
@@ -240,13 +247,15 @@ fn assess_and_chunk_diff(
     (non_aggregators, chunked_mode)
 }
 
-/// Run Pass 1 Lead Overview for large PRs — produces a `GlobalReviewContext`
-/// that is appended to each chunked expert's prompt.
+/// Run Pass 1 Lead Overview — produces a `GlobalReviewContext` that is
+/// appended to every expert's prompt, regardless of PR size.
 async fn build_lead_overview(
     mr_info: &MRInfo,
     files: &[DiffFile],
     non_aggregators: &[ExpertDef],
     llm_configs: &[LLMConfig],
+    project_config: Option<&crate::models::ProjectConfig>,
+    project_context: &crate::context::ProjectContext,
 ) -> Option<GlobalReviewContext> {
     let lead_expert = non_aggregators
         .iter()
@@ -263,13 +272,14 @@ async fn build_lead_overview(
     let prompt_engine = PromptEngine::new();
     let llm_client = LLMClient::new();
 
-    let (system, user) = match prompt_engine.build_overview_prompt(mr_info, &overview_diff) {
-        Ok(p) => p,
-        Err(e) => {
-            tracing::warn!("Failed to build overview prompt: {:?}", e);
-            return None;
-        }
-    };
+    let (system, user) =
+        match prompt_engine.build_overview_prompt(mr_info, project_config, project_context, &overview_diff) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("Failed to build overview prompt: {:?}", e);
+                return None;
+            }
+        };
 
     match llm_client
         .complete_with_fallback(&overview_config, &system, &user)
@@ -336,12 +346,14 @@ fn create_expert_task(
 
         let prompt_engine = PromptEngine::new();
         let llm_client = LLMClient::new();
-        let (system, user) = prompt_engine.build_review_prompt(&expert, &mr_info, &diff_text, &lang, &config)?;
-        let user = if let Some(ref ctx) = global_context {
-            format!("{}\n\n{}", user, ctx.to_prompt_section())
-        } else {
-            user
-        };
+        let (system, user) = prompt_engine.build_review_prompt(
+            &expert,
+            &mr_info,
+            &diff_text,
+            &lang,
+            &config,
+            global_context.as_ref(),
+        )?;
         let llm_config = select_llm_config(&expert, &llm_configs);
         let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
         let report = crate::output::parser::parse_llm_response(&expert.name, &result.content);
@@ -404,7 +416,7 @@ fn collect_expert_results(
 
 /// Run the core expert pipeline: diff parsing → large PR handling → parallel LLM execution.
 ///
-/// Returns (reports, per-expert metrics, total_tokens, error_messages).
+/// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context).
 pub(crate) async fn run_experts_inner(
     experts: &[ExpertDef],
     mr_info: &MRInfo,
@@ -413,6 +425,8 @@ pub(crate) async fn run_experts_inner(
     config: &AppConfig,
     progress_map: Option<&ProgressMap>,
     review_id: &str,
+    base_ref: Option<&str>,
+    head_ref: Option<&str>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Vec<ExpertMetrics>,
@@ -425,12 +439,29 @@ pub(crate) async fn run_experts_inner(
     // Assess large PR and set up chunking if needed
     let (non_aggregators, chunked_mode) = assess_and_chunk_diff(&mut files, experts, config);
 
-    // Pass 1: Lead Overview (only for large PRs with chunking)
-    let global_context: Option<GlobalReviewContext> = if chunked_mode.is_some() {
-        build_lead_overview(mr_info, &files, &non_aggregators, llm_configs).await
-    } else {
-        None
-    };
+    // Gather lightweight project context for the lead overview
+    let project_context =
+        crate::context::gather_project_context(std::path::Path::new(&mr_info.project_path), base_ref, head_ref)
+            .unwrap_or_default();
+
+    // Pass 1: Lead Overview (now runs for all PR sizes)
+    let global_context: Option<GlobalReviewContext> = build_lead_overview(
+        mr_info,
+        &files,
+        &non_aggregators,
+        llm_configs,
+        config.project.as_ref(),
+        &project_context,
+    )
+    .await;
+
+    if let Some(ref map) = progress_map {
+        if let Ok(mut p) = map.write() {
+            if let Some(progress) = p.get_mut(review_id) {
+                progress.complete_stage("lead_overview");
+            }
+        }
+    }
 
     processor::apply_token_budget(&mut files, 0);
 
@@ -498,7 +529,7 @@ pub(crate) async fn run_experts_inner(
                     total_tasks,
                     progress_map.cloned(),
                     review_id.to_string(),
-                    None,
+                    global_context.clone(),
                 )
             })
             .collect()
@@ -555,6 +586,8 @@ pub async fn run_experts(
         config,
         progress_map.as_ref(),
         review_id,
+        Some(&mr_info.target_branch),
+        Some(&mr_info.source_branch),
     )
     .await?;
 

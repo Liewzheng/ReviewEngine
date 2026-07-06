@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.9] - Unreleased
+
+### Added
+- All PRs (small and large) now run a lead overview before expert review.
+- Lead overview produces a branch summary (from the PR diff and branch commits) and a project overview (from project config, README, manifest, file tree, and git logs).
+- Both the branch summary and project overview are injected into every expert's prompt.
+
 ## [0.6.8] - 2026-07-03
 
 ### Added

@@ -4,8 +4,8 @@
 //!
 //! [`run_single_expert`] drives the full lifecycle of one expert:
 //! building the prompt via [`PromptEngine`], selecting the LLM
-//! configuration, calling the LLM via [`LLMClient`], and parsing
-//! the response into an [`ExpertReport`]. [`run_aggregator_expert`]
+//! configuration, calling the LLM via [`LLMClient`], and parsing the
+//! response into an [`ExpertReport`]. [`run_aggregator_expert`]
 //! performs the same flow for the aggregator role, which merges
 //! multiple expert reports into a single consolidated assessment.
 
@@ -29,10 +29,11 @@ pub async fn run_single_expert(
     settings: &AppConfig,
     prompt_engine: &PromptEngine,
     llm_client: &LLMClient,
+    lead_context: Option<&GlobalReviewContext>,
 ) -> Result<ExpertReport> {
     let lang = "Unknown";
 
-    let (system, user) = prompt_engine.build_review_prompt(expert, mr_info, diff_text, lang, settings)?;
+    let (system, user) = prompt_engine.build_review_prompt(expert, mr_info, diff_text, lang, settings, lead_context)?;
 
     let config = crate::llm::select_llm_config(expert, llm_configs);
     let result = llm_client.complete_with_fallback(&config, &system, &user).await?;
@@ -43,8 +44,8 @@ pub async fn run_single_expert(
 /// Execute the aggregator expert to merge multiple expert reports.
 ///
 /// Builds the aggregator prompt (including all per-expert reports and
-/// optional global context), calls the LLM with fallback, and parses
-/// the YAML response into an [`AggregatedReport`].
+/// optional global context), calls the LLM with fallback, and parses the
+/// response into an [`AggregatedReport`].
 pub async fn run_aggregator_expert(
     aggregator: &ExpertDef,
     reports: &[ExpertReport],

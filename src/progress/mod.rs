@@ -180,9 +180,14 @@ impl StageWeight {
                 weight: 0.05,
             },
             StageWeight {
+                name: "lead_overview",
+                label: "Lead overview (Pass 1)",
+                weight: 0.15,
+            },
+            StageWeight {
                 name: "expert_review",
                 label: "Expert review",
-                weight: 0.85,
+                weight: 0.70,
             },
             StageWeight {
                 name: "aggregate",

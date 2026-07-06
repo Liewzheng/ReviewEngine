@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
+use tracing;
 
 /// Project-level context gathered for the lead reviewer.
 #[derive(Debug, Clone, Serialize, Default)]
@@ -29,9 +30,9 @@ const MANIFEST_FILES: &[&str] = &["Cargo.toml", "package.json", "pyproject.toml"
 
 /// Extensions treated as binary when scanning the filesystem.
 const BINARY_EXTENSIONS: &[&str] = &[
-    "png", "jpg", "jpeg", "gif", "ico", "svg", "woff", "woff2", "ttf", "eot", "pdf", "doc", "docx", "xls", "xlsx",
-    "zip", "tar", "gz", "bz2", "7z", "rar", "exe", "dll", "so", "dylib", "wasm", "mp3", "mp4", "avi", "mov", "mkv",
-    "pyc", "class", "o",
+    "png", "jpg", "jpeg", "gif", "ico", "woff", "woff2", "ttf", "eot", "pdf", "doc", "docx", "xls", "xlsx", "zip",
+    "tar", "gz", "bz2", "7z", "rar", "exe", "dll", "so", "dylib", "wasm", "mp3", "mp4", "avi", "mov", "mkv", "pyc",
+    "class", "o",
 ];
 
 /// Gather a bounded, lightweight project context from `repo_path`.
@@ -57,17 +58,55 @@ pub fn gather_project_context(
 }
 
 fn gather_from_git(repo_path: &Path, base_ref: Option<&str>, head_ref: Option<&str>) -> Result<ProjectContext> {
-    let file_tree = git_ls_files(repo_path).unwrap_or_default();
-    let recent_commits = git_log_oneline(repo_path, &[]).unwrap_or_default();
+    let file_tree = match git_ls_files(repo_path) {
+        Ok(files) => files,
+        Err(err) => {
+            tracing::warn!("failed to list git files: {}", err);
+            Vec::new()
+        }
+    };
+
+    let recent_commits = match git_log_oneline(repo_path, &[]) {
+        Ok(commits) => commits,
+        Err(err) => {
+            tracing::warn!("failed to read recent commits: {}", err);
+            Vec::new()
+        }
+    };
+
     let branch_commits = match (base_ref, head_ref) {
         (Some(base), Some(head)) if !base.is_empty() && !head.is_empty() => {
-            git_log_oneline(repo_path, &[&format!("{}..{}", base, head)]).unwrap_or_default()
+            if is_valid_ref_name(base) && is_valid_ref_name(head) {
+                match git_log_oneline(repo_path, &[&format!("{}..{}", base, head)]) {
+                    Ok(commits) => commits,
+                    Err(err) => {
+                        tracing::warn!("failed to read branch commits: {}", err);
+                        Vec::new()
+                    }
+                }
+            } else {
+                tracing::warn!("skipping branch commit collection: invalid base or head ref");
+                Vec::new()
+            }
         }
         _ => Vec::new(),
     };
 
-    let readme_excerpt = read_git_or_file(repo_path, "README.md", 2000).unwrap_or_default();
-    let manifest_excerpt = first_manifest_excerpt(repo_path, 2000).unwrap_or_default();
+    let readme_excerpt = match read_git_or_file(repo_path, "README.md", 2000) {
+        Ok(content) => content,
+        Err(err) => {
+            tracing::warn!("failed to read README excerpt: {}", err);
+            String::new()
+        }
+    };
+
+    let manifest_excerpt = match first_manifest_excerpt(repo_path, 2000) {
+        Ok(content) => content,
+        Err(err) => {
+            tracing::warn!("failed to read manifest excerpt: {}", err);
+            String::new()
+        }
+    };
 
     Ok(ProjectContext {
         readme_excerpt,
@@ -78,11 +117,15 @@ fn gather_from_git(repo_path: &Path, base_ref: Option<&str>, head_ref: Option<&s
     })
 }
 
-/// Run `git -C <repo> ls-files` and keep at most the first `max_lines`.
+/// Returns true if `name` looks like a safe git ref name.
+fn is_valid_ref_name(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with('-') && !name.chars().any(|c| c.is_whitespace())
+}
+
+/// Run `git ls-files` in `repo_path` and keep at most the first `max_lines`.
 fn git_ls_files(repo_path: &Path) -> Result<Vec<String>> {
     let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
+        .current_dir(repo_path)
         .args(["ls-files"])
         .output()
         .context("failed to run git ls-files")?;
@@ -101,12 +144,19 @@ fn git_ls_files(repo_path: &Path) -> Result<Vec<String>> {
     Ok(lines)
 }
 
-/// Run `git -C <repo> log --oneline -n 30` with optional extra revision args.
+/// Run `git log --oneline -n 30` in `repo_path` with optional extra revision args.
 fn git_log_oneline(repo_path: &Path, extra_args: &[&str]) -> Result<Vec<String>> {
-    let mut args = vec!["-C", repo_path.to_str().unwrap_or("."), "log", "--oneline", "-n", "30"];
-    args.extend(extra_args);
+    let mut args = vec!["log", "--oneline", "-n", "30"];
+    for arg in extra_args {
+        if arg.starts_with('-') {
+            tracing::warn!("skipping user-controlled git log argument: {}", arg);
+            continue;
+        }
+        args.push(arg);
+    }
 
     let output = std::process::Command::new("git")
+        .current_dir(repo_path)
         .args(&args)
         .output()
         .context("failed to run git log")?;
@@ -141,11 +191,10 @@ fn read_git_or_file(repo_path: &Path, path: &str, max_bytes: usize) -> Result<St
     }
 }
 
-/// Run `git -C <repo> show HEAD:<path>` and return the content as a string.
+/// Run `git show HEAD:<path>` in `repo_path` and return the content as a string.
 fn git_show_head(repo_path: &Path, path: &str) -> Result<String> {
     let output = std::process::Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
+        .current_dir(repo_path)
         .arg("show")
         .arg(format!("HEAD:{}", path))
         .output()
@@ -244,11 +293,14 @@ fn is_binary_extension(path: &str) -> bool {
 
 fn truncate_string(s: String, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
-        s
-    } else {
-        let boundary = s.floor_char_boundary(max_bytes);
-        s[..boundary].to_string()
+        return s;
     }
+    // Find the largest byte boundary that does not split a multi-byte character.
+    let mut boundary = max_bytes;
+    while boundary > 0 && s.get(..boundary).is_none() {
+        boundary -= 1;
+    }
+    s.get(..boundary).map(|s| s.to_string()).unwrap_or(s)
 }
 
 #[cfg(test)]
@@ -259,14 +311,14 @@ mod tests {
     fn init_git_repo(path: &Path) {
         let run = |args: &[&str]| {
             let status = Command::new("git")
-                .arg("-C")
-                .arg(path)
+                .current_dir(path)
                 .args(args)
                 .status()
                 .expect("git command failed to run");
             assert!(status.success(), "git command {:?} failed", args);
         };
-        run(&["init", "--initial-branch=main"]);
+        run(&["init"]);
+        run(&["checkout", "-b", "main"]);
         run(&["config", "user.email", "test@example.com"]);
         run(&["config", "user.name", "Test User"]);
     }
@@ -278,15 +330,13 @@ mod tests {
         }
         std::fs::write(&full, content).unwrap();
         let status = Command::new("git")
-            .arg("-C")
-            .arg(path)
+            .current_dir(path)
             .args(["add", file])
             .status()
             .expect("git add failed");
         assert!(status.success());
         let status = Command::new("git")
-            .arg("-C")
-            .arg(path)
+            .current_dir(path)
             .args(["commit", "-m", message])
             .status()
             .expect("git commit failed");
@@ -306,8 +356,7 @@ mod tests {
 
         // Create a feature branch with an additional commit so branch_commits is non-empty.
         let status = Command::new("git")
-            .arg("-C")
-            .arg(dir.path())
+            .current_dir(dir.path())
             .args(["checkout", "-b", "feat/test"])
             .status()
             .expect("git checkout failed");
@@ -359,5 +408,28 @@ mod tests {
         let s = "Hello 世界".to_string();
         let truncated = truncate_string(s, 8);
         assert!(truncated.len() <= 8);
+    }
+
+    #[test]
+    fn test_invalid_branch_refs_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        commit_file(dir.path(), "README.md", "# Test\n", "add readme");
+
+        let ctx = gather_project_context(dir.path(), Some("--help"), Some("main")).unwrap();
+        assert!(ctx.branch_commits.is_empty());
+        assert!(ctx.readme_excerpt.contains("# Test"));
+    }
+
+    #[test]
+    fn test_truncate_string_multibyte() {
+        let s = "Hello 世界".to_string();
+        let truncated = truncate_string(s, 8);
+        assert!(truncated.len() <= 8);
+    }
+
+    #[test]
+    fn test_svg_not_binary() {
+        assert!(!is_binary_extension("assets/icon.svg"));
     }
 }

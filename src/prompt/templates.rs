@@ -58,7 +58,7 @@ Description: {{ description }}
 {{ lead_context }}
 {% endif %}
 
-{% if not lead_context and (project_type or os or arch or domain or constraints) %}
+{% if project_type or os or arch or domain or constraints %}
 ## Project Context
 {% if project_type %}Type: {{ project_type }}
 {% endif %}

@@ -7,6 +7,14 @@
 - Lead overview produces a branch summary (from the PR diff and branch commits) and a project overview (from project config, README, manifest, file tree, and git logs).
 - Both the branch summary and project overview are injected into every expert's prompt.
 
+### Fixed
+- Expert prompt now keeps `## Project Context` visible even when `## Lead Context` is present, so domain experts retain structured project config (`project_type`, `os`, `arch`, `domain`, `constraints`).
+- `gather_project_context` no longer silently swallows git/IO errors; failures are logged with `tracing::warn!` and fall back to empty defaults.
+- Replaced `String::floor_char_boundary` in `truncate_string` with a `String::get`-based implementation to avoid raising the Rust MSRV.
+- Hardened git command construction in `src/context/gather.rs`: uses `current_dir` instead of `-C`, validates branch ref names, and filters user-controlled arguments to prevent argument injection.
+- SVG files are no longer treated as binary when scanning the filesystem.
+- Test helper `init_git_repo` now uses `git init` + `git checkout -b main` instead of `--initial-branch=main` for broader git version compatibility.
+
 ## [0.6.8] - 2026-07-03
 
 ### Added

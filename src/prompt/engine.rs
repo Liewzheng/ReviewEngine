@@ -457,6 +457,40 @@ mod tests {
     }
 
     #[test]
+    fn test_review_prompt_with_lead_context_and_project_context() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let project = ProjectConfig {
+            name: Some("review-engine".to_string()),
+            project_type: Some("embedded".to_string()),
+            os: Some("Linux".to_string()),
+            arch: Some("ARM".to_string()),
+            domain: Some("IoT".to_string()),
+            constraints: Some("64 KiB RAM".to_string()),
+        };
+        let settings = make_test_app_config(Some(project));
+        let mr = make_test_mr();
+        let lead = GlobalReviewContext {
+            summary: "Add auth".to_string(),
+            risk_areas: vec!["Security".to_string()],
+            focus_files: vec!["src/auth.rs".to_string()],
+            guidance: "Check token handling".to_string(),
+            project_overview: "Rust web service".to_string(),
+        };
+        let (_system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, Some(&lead))
+            .unwrap();
+
+        assert!(user.contains("## Lead Context"));
+        assert!(user.contains("## Project Context"));
+        assert!(user.contains("Type: embedded"));
+        assert!(user.contains("OS: Linux"));
+        assert!(user.contains("Architecture: ARM"));
+        assert!(user.contains("Domain: IoT"));
+        assert!(user.contains("Constraints: 64 KiB RAM"));
+    }
+
+    #[test]
     fn test_overview_prompt_contains_project_context() {
         let engine = PromptEngine::new();
         let mr = make_test_mr();

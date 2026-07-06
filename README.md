@@ -238,6 +238,15 @@ Input → Config Resolution → Expert Selection → Parallel Review → Consoli
 - Optional **REST API** (`review-engine serve`) for webhooks and frontends.
 - Optional **repo-wide health check** (`review-engine repo-review`) for broader codebase analysis.
 
+### Lead overview
+
+Every review starts with a lead overview step. The lead reviewer analyzes the diff together with lightweight project metadata gathered from the repository (file tree, README/manifest excerpts, and recent git history in `src/context/gather.rs`) and produces two summaries:
+
+- **Branch summary** — what the PR does, risk areas, focus files, and guidance for domain experts.
+- **Project overview** — purpose, tech stack, architecture, and conventions inferred from the repo.
+
+Both summaries are injected into each expert reviewer’s prompt so that subsequent experts receive the same high-level context as the lead reviewer.
+
 ---
 
 ## Performance

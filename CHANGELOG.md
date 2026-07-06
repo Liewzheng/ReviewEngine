@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.0] - 2026-07-06
+
+### Added
+- **Scoring Configurability**: `PenaltyConfig` and `RiskThresholdConfig` added to `ScoringConfig` — expert penalties, risk thresholds, and consensus threshold now configurable via TOML.
+- **Test Coverage**: 150+ new tests across llm/client, config/resolver, context/gather, server/auth, output/parser, scoring/review, team_renderer, lead_consolidator.
+- **Security Hardening**: `MAX_DIFF_SIZE` (10 MiB), `MAX_TOML_SIZE` (1 MiB), `MAX_WEBHOOK_BODY_SIZE` (1 MiB) limits; `is_safe_diff_path` for path traversal rejection; `sanitize_user_arg` for shell metacharacter rejection; `subtle::ConstantTimeEq` for all token comparisons.
+- **Config**: `[commands] review = true` in default config (was `false`, blocked new users).
+- **CLI**: `--github-token` for review/improve/describe/serve; `Ask` and `UpdateChangelog` commands; `--diff`/`--local-path`/`--staged` for improve/describe.
+- **Security**: `AuthConfig` production `panic!` replaced with `Result`; `RateLimiter` race condition fixed (single-lock critical section).
+- **Code Quality**: `PromptEngine::try_new()` returning `Result`; tokenizer `expect()` replaced with graceful fallback; `parse_aggregator_response` fenced YAML fallback; aggregator language `zh` → `en`.
+
+### Changed
+- `docs/config-schema.md` and `docs/code-audit-default.toml` updated with new scoring options.
+- Config resolution order documented correctly (User → Project → Environment → CLI).
+- Removed stale `.pr-agent.toml` references from all documentation.
+- Synced version numbers across docs.
+
 ## [0.6.11] - 2026-07-06
 
 ### Fixed

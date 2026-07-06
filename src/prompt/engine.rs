@@ -63,7 +63,8 @@ impl PromptEngine {
     ///
     /// The system prompt includes the expert's perspective/role, the
     /// detected language, and max-findings limit. The user prompt
-    /// contains the MR title, branch, description, and the full diff.
+    /// contains the MR title, branch, description, optional lead context,
+    /// and the full diff.
     ///
     /// Returns `(system_prompt, user_prompt)`.
     pub fn build_review_prompt(
@@ -73,6 +74,7 @@ impl PromptEngine {
         diff_text: &str,
         lang: &str,
         settings: &AppConfig,
+        lead_context: Option<&GlobalReviewContext>,
     ) -> Result<(String, String)> {
         let ctx_system = serde_json::json!({
             "perspective": expert.prompt,
@@ -89,6 +91,8 @@ impl PromptEngine {
         let domain = project.and_then(|p| p.domain.as_deref()).unwrap_or("");
         let constraints = project.and_then(|p| p.constraints.as_deref()).unwrap_or("");
 
+        let lead_section = lead_context.map(|c| c.to_prompt_section());
+
         let ctx_user = serde_json::json!({
             "title": mr.title,
             "branch": mr.source_branch,
@@ -99,6 +103,7 @@ impl PromptEngine {
             "arch": arch,
             "domain": domain,
             "constraints": constraints,
+            "lead_context": lead_section,
         });
 
         let user = self.env.get_template("review_user")?.render(&ctx_user)?;
@@ -284,20 +289,39 @@ impl PromptEngine {
 
     /// Build a prompt that produces a lead-reviewer overview of the PR.
     ///
-    /// The LLM generates a summary, risk areas, focus files, and
-    /// guidance for domain experts.
+    /// The LLM generates a branch summary (summary, risk areas, focus files,
+    /// guidance) and a project overview from the project context.
     ///
     /// Returns `(system_prompt, user_prompt)`.
-    pub fn build_overview_prompt(&self, mr: &MRInfo, diff_text: &str) -> Result<(String, String)> {
+    pub fn build_overview_prompt(
+        &self,
+        mr: &MRInfo,
+        project_config: Option<&crate::models::ProjectConfig>,
+        project_context: &crate::context::ProjectContext,
+        diff_text: &str,
+    ) -> Result<(String, String)> {
         let system = self
             .env
             .get_template("overview_system")?
             .render(&serde_json::json!({}))?;
+
+        let project_type = project_config.and_then(|p| p.project_type.as_deref()).unwrap_or("");
+        let os = project_config.and_then(|p| p.os.as_deref()).unwrap_or("");
+        let arch = project_config.and_then(|p| p.arch.as_deref()).unwrap_or("");
+        let domain = project_config.and_then(|p| p.domain.as_deref()).unwrap_or("");
+        let constraints = project_config.and_then(|p| p.constraints.as_deref()).unwrap_or("");
+
         let ctx_user = serde_json::json!({
             "title": mr.title,
             "branch": mr.source_branch,
             "description": mr.description,
             "diff": diff_text,
+            "project_type": project_type,
+            "os": os,
+            "arch": arch,
+            "domain": domain,
+            "constraints": constraints,
+            "project_context": project_context,
         });
         let user = self.env.get_template("overview_user")?.render(&ctx_user)?;
         Ok((system, user))
@@ -365,7 +389,7 @@ mod tests {
         let settings = make_test_app_config(Some(project));
         let mr = make_test_mr();
         let (system, user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings)
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None)
             .unwrap();
 
         assert!(!system.is_empty());
@@ -385,7 +409,7 @@ mod tests {
         let settings = make_test_app_config(None);
         let mr = make_test_mr();
         let (system, _user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings)
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None)
             .unwrap();
 
         assert!(system.contains("evidence"));
@@ -403,10 +427,65 @@ mod tests {
         let settings = make_test_app_config(None);
         let mr = make_test_mr();
         let (_system, user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings)
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None)
             .unwrap();
 
         assert!(!user.contains("## Project Context"));
+    }
+
+    #[test]
+    fn test_review_prompt_with_lead_context() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let settings = make_test_app_config(None);
+        let mr = make_test_mr();
+        let lead = GlobalReviewContext {
+            summary: "Add auth".to_string(),
+            risk_areas: vec!["Security".to_string()],
+            focus_files: vec!["src/auth.rs".to_string()],
+            guidance: "Check token handling".to_string(),
+            project_overview: "Rust web service".to_string(),
+        };
+        let (_system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, Some(&lead))
+            .unwrap();
+
+        assert!(user.contains("## Lead Context"));
+        assert!(user.contains("### Branch Summary"));
+        assert!(user.contains("### Project Overview"));
+        assert!(user.contains("Rust web service"));
+    }
+
+    #[test]
+    fn test_overview_prompt_contains_project_context() {
+        let engine = PromptEngine::new();
+        let mr = make_test_mr();
+        let project_config = ProjectConfig {
+            name: Some("review-engine".to_string()),
+            project_type: Some("Rust library".to_string()),
+            os: None,
+            arch: None,
+            domain: None,
+            constraints: None,
+        };
+        let project_context = crate::context::ProjectContext {
+            readme_excerpt: "# Review Engine".to_string(),
+            manifest_excerpt: "[package]\nname = \"review-engine\"\n".to_string(),
+            file_tree: vec!["src/main.rs".to_string()],
+            recent_commits: vec!["abc123 add feature".to_string()],
+            branch_commits: vec!["def456 branch commit".to_string()],
+        };
+        let (system, user) = engine
+            .build_overview_prompt(&mr, Some(&project_config), &project_context, "diff")
+            .unwrap();
+
+        assert!(system.contains("project_overview"));
+        assert!(user.contains("# Review Engine"));
+        assert!(user.contains("[package]"));
+        assert!(user.contains("src/main.rs"));
+        assert!(user.contains("abc123 add feature"));
+        assert!(user.contains("def456 branch commit"));
+        assert!(user.contains("Type: Rust library"));
     }
 
     #[test]

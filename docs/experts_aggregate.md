@@ -94,10 +94,11 @@ pub async fn run_aggregator(
 **Risk Areas**: {{ global_context.risk_areas | join(", ") }}
 **Focus Files**: {{ global_context.focus_files | join(", ") }}
 **Guidance**: {{ global_context.guidance }}
+**Project Overview**: {{ global_context.project_overview }}
 {% endif %}
 ```
 
-这样 LLM 聚合时就知道 "这个 PR 是改什么的、风险在哪、Lead 重点关注什么"。
+这样 LLM 聚合时就知道 "这个 PR 是改什么的、风险在哪、Lead 重点关注什么、项目整体概况是什么"。
 
 ### 2.4 调用链更新
 

@@ -54,7 +54,11 @@ Title: {{ title }}
 Branch: {{ branch }}
 Description: {{ description }}
 
-{% if project_type or os or arch or domain or constraints %}
+{% if lead_context %}
+{{ lead_context }}
+{% endif %}
+
+{% if not lead_context and (project_type or os or arch or domain or constraints) %}
 ## Project Context
 {% if project_type %}Type: {{ project_type }}
 {% endif %}
@@ -101,6 +105,7 @@ pub(crate) const AGGREGATOR_USER_TEMPLATE: &str = r###"
 **Risk Areas**: {{ global_context.risk_areas | join(", ") }}
 **Focus Files**: {{ global_context.focus_files | join(", ") }}
 **Guidance**: {{ global_context.guidance }}
+**Project Overview**: {{ global_context.project_overview }}
 {% endif %}
 {% endif %}
 
@@ -116,12 +121,13 @@ Please produce a consolidated report.
 "###;
 
 pub(crate) const OVERVIEW_SYSTEM_TEMPLATE: &str = r###"
-You are the Lead Reviewer. Your job is to analyze the full PR diff and provide 
-a structured overview that guides domain experts during their review.
+You are the Lead Reviewer. Analyze the provided PR diff, branch commits, and project context to produce two distinct summaries that will guide domain experts during their review.
+
+The first summary is a **branch summary** focused on the changes in this PR (what the PR does, the risk areas, files that need attention, and guidance for experts). The second summary is a **project overview** focused on the project as a whole (purpose, tech stack, architecture, and conventions inferred from the README, manifest, file tree, and git history).
 
 Output ONLY valid YAML inside a code block:
 ```yaml
-summary: "One-paragraph summary of what this PR does and why"
+summary: "One-paragraph branch summary of what this PR does and why"
 risk_areas:
   - "Security: new auth middleware could affect permission checks"
   - "Performance: database query changes in src/db.rs"
@@ -129,6 +135,7 @@ focus_files:
   - "src/auth/middleware.rs"
   - "src/db/queries.rs"
 guidance: "Specific guidance for domain experts about what to focus on"
+project_overview: "Concise project overview describing the project purpose, tech stack, architecture, and conventions"
 ```
 Be specific and actionable. Focus on what matters most.
 "###;
@@ -138,6 +145,55 @@ pub(crate) const OVERVIEW_USER_TEMPLATE: &str = r###"
 Title: {{ title }}
 Branch: {{ branch }}
 Description: {{ description }}
+
+{% if project_type or os or arch or domain or constraints %}
+## Project Config
+{% if project_type %}Type: {{ project_type }}
+{% endif %}
+{% if os %}OS: {{ os }}
+{% endif %}
+{% if arch %}Architecture: {{ arch }}
+{% endif %}
+{% if domain %}Domain: {{ domain }}
+{% endif %}
+{% if constraints %}Constraints: {{ constraints }}
+{% endif %}
+{% endif %}
+
+{% if project_context.file_tree %}
+## File Tree (excerpt)
+{% for file in project_context.file_tree %}
+- {{ file }}
+{% endfor %}
+{% endif %}
+
+{% if project_context.readme_excerpt %}
+## README Excerpt
+```
+{{ project_context.readme_excerpt }}
+```
+{% endif %}
+
+{% if project_context.manifest_excerpt %}
+## Manifest Excerpt
+```
+{{ project_context.manifest_excerpt }}
+```
+{% endif %}
+
+{% if project_context.recent_commits %}
+## Recent Commits
+{% for msg in project_context.recent_commits %}
+- {{ msg }}
+{% endfor %}
+{% endif %}
+
+{% if project_context.branch_commits %}
+## Branch Commits
+{% for msg in project_context.branch_commits %}
+- {{ msg }}
+{% endfor %}
+{% endif %}
 
 ## Full Code Changes (compressed)
 ```diff

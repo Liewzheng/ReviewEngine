@@ -37,8 +37,23 @@ pub trait WebhookHandler: Send + Sync {
 /// Shared entry point for all webhook routes.
 ///
 /// Verifies the request, dispatches the event, and maps the result to an
-/// Axum response.
+/// Axum response. Rejects bodies larger than 1 MiB to prevent memory DoS.
+const MAX_WEBHOOK_BODY_SIZE: usize = 1024 * 1024;
+
 pub async fn handle_webhook(handler: Arc<dyn WebhookHandler>, headers: HeaderMap, body: String) -> impl IntoResponse {
+    if body.len() > MAX_WEBHOOK_BODY_SIZE {
+        tracing::warn!(
+            "{} webhook body exceeds {} bytes, rejecting",
+            handler.name(),
+            MAX_WEBHOOK_BODY_SIZE
+        );
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "payload too large"})),
+        )
+            .into_response();
+    }
+
     if let Err((status, json)) = handler.verify(&headers, &body).await {
         tracing::warn!("{} webhook verification failed", handler.name());
         return (status, json).into_response();

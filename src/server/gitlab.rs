@@ -315,4 +315,44 @@ mod tests {
         let handler = GitLabWebhookHandler::new(String::new(), MrDispatcher::new(), "test-token".to_string());
         assert!(handler.webhook_secret.is_empty());
     }
+
+    #[tokio::test]
+    async fn test_webhook_verify_valid_token() {
+        let handler = GitLabWebhookHandler::new("my-secret".to_string(), MrDispatcher::new(), "test-token".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Gitlab-Token", "my-secret".parse().unwrap());
+        let result = handler.verify(&headers, "").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_webhook_verify_invalid_token() {
+        let handler = GitLabWebhookHandler::new("my-secret".to_string(), MrDispatcher::new(), "test-token".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Gitlab-Token", "wrong-secret".parse().unwrap());
+        let result = handler.verify(&headers, "").await;
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_verify_missing_token() {
+        let handler = GitLabWebhookHandler::new("my-secret".to_string(), MrDispatcher::new(), "test-token".to_string());
+        let headers = HeaderMap::new();
+        let result = handler.verify(&headers, "").await;
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_verify_empty_secret_rejects_any_token() {
+        let handler = GitLabWebhookHandler::new(String::new(), MrDispatcher::new(), "test-token".to_string());
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Gitlab-Token", "anything".parse().unwrap());
+        let result = handler.verify(&headers, "").await;
+        // Empty secret vs non-empty token: length mismatch → rejected
+        assert!(result.is_err());
+    }
 }

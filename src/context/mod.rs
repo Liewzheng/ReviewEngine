@@ -2,4 +2,4 @@
 
 pub mod gather;
 
-pub use gather::{gather_project_context, ProjectContext};
+pub use gather::{gather_project_context, sanitize_user_arg, ProjectContext};

@@ -5,7 +5,19 @@
 
 use crate::models::*;
 
+/// Maximum allowed diff text size in bytes (10 MiB) to prevent memory DoS.
+const MAX_DIFF_SIZE: usize = 10 * 1024 * 1024;
+
+/// Parse a unified diff string into structured `DiffFile` representations.
+///
+/// Returns an empty vec if `diff_text` exceeds `MAX_DIFF_SIZE`.
+/// Validates file paths to reject path-traversal sequences.
 pub fn parse_unified_diff(diff_text: &str) -> Vec<DiffFile> {
+    if diff_text.len() > MAX_DIFF_SIZE {
+        tracing::warn!("diff text exceeds {} bytes, returning empty parse", MAX_DIFF_SIZE);
+        return Vec::new();
+    }
+
     let mut files = Vec::new();
     let mut current_file: Option<DiffFile> = None;
 
@@ -15,15 +27,20 @@ pub fn parse_unified_diff(diff_text: &str) -> Vec<DiffFile> {
                 files.push(file);
             }
             let path = parse_path_from_diff_header(line);
-            current_file = Some(DiffFile {
-                old_path: String::new(),
-                new_path: String::new(),
-                path,
-                status: "modified".to_string(),
-                additions: 0,
-                deletions: 0,
-                hunks: Vec::new(),
-            });
+            if is_safe_diff_path(&path) {
+                current_file = Some(DiffFile {
+                    old_path: String::new(),
+                    new_path: String::new(),
+                    path,
+                    status: "modified".to_string(),
+                    additions: 0,
+                    deletions: 0,
+                    hunks: Vec::new(),
+                });
+            } else {
+                tracing::warn!("diff contains unsafe path: {}", path);
+                // Skip this file by leaving current_file as None
+            }
         } else if let Some(ref mut file) = current_file {
             if line.starts_with("--- ") && file.old_path.is_empty() {
                 let raw = &line[4..];
@@ -68,13 +85,29 @@ pub fn parse_unified_diff(diff_text: &str) -> Vec<DiffFile> {
     files
 }
 
+/// Returns true if a path extracted from a diff header is safe.
+fn is_safe_diff_path(path: &str) -> bool {
+    if path.is_empty() || path.starts_with('/') || path.starts_with('~') {
+        return false;
+    }
+    if path.contains("..") || path.contains("\\") || path.contains(':') || path.contains('\0') {
+        return false;
+    }
+    true
+}
+
 fn parse_path_from_diff_header(line: &str) -> String {
     let parts: Vec<&str> = line.split_whitespace().collect();
     if parts.len() >= 4 {
         let a_path = parts[2].trim_start_matches("a/");
         let b_path = parts[3].trim_start_matches("b/");
         let path = if b_path == "/dev/null" { a_path } else { b_path };
-        path.to_string()
+        let path = path.to_string();
+        // Defensive: reject paths that could be used for traversal
+        if path.contains("..") || path.starts_with('/') {
+            return String::new();
+        }
+        path
     } else {
         "unknown".to_string()
     }
@@ -239,5 +272,43 @@ mod tests {
         assert_eq!(files[0].hunks[0].old_lines, 4);
         assert_eq!(files[0].hunks[0].new_start, 0);
         assert_eq!(files[0].hunks[0].new_lines, 0);
+    }
+
+    #[test]
+    fn test_is_safe_diff_path_rejects_traversal() {
+        assert!(!is_safe_diff_path("../etc/passwd"));
+        assert!(!is_safe_diff_path("/etc/passwd"));
+        assert!(!is_safe_diff_path("foo/../bar"));
+        assert!(!is_safe_diff_path("foo\\bar"));
+        assert!(!is_safe_diff_path("foo:bar"));
+        assert!(!is_safe_diff_path("~/.ssh/id_rsa"));
+        assert!(!is_safe_diff_path("foo\0bar"));
+    }
+
+    #[test]
+    fn test_is_safe_diff_path_accepts_valid() {
+        assert!(is_safe_diff_path("src/main.rs"));
+        assert!(is_safe_diff_path("a/b/c.txt"));
+        assert!(is_safe_diff_path(".gitignore"));
+    }
+
+    #[test]
+    fn test_parse_unified_diff_skips_unsafe_paths() {
+        let diff = "diff --git a/../etc/passwd b/../etc/passwd\n\
+                    --- a/../etc/passwd\n\
+                    +++ b/../etc/passwd\n\
+                    @@ -1,3 +1,4 @@\n\
+                     root:x:0:0\n\
+                    +injected\n\
+                     same";
+        let files = parse_unified_diff(diff);
+        assert!(files.is_empty());
+    }
+
+    #[test]
+    fn test_parse_unified_diff_max_size() {
+        let huge_diff = "a".repeat(MAX_DIFF_SIZE + 1);
+        let files = parse_unified_diff(&huge_diff);
+        assert!(files.is_empty());
     }
 }

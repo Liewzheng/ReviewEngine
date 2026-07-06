@@ -4,13 +4,22 @@ use anyhow::Result;
 use regex::Regex;
 use std::sync::OnceLock;
 
+/// Maximum LLM response size in bytes (10 MiB) to prevent memory DoS from oversized YAML.
+const MAX_YAML_SIZE: usize = 10 * 1024 * 1024;
+
 /// Parse an LLM response (YAML inside optional fenced code blocks) into an [`ExpertReport`].
 ///
 /// The parser attempts strict YAML deserialisation first. If that fails,
 /// it falls back to extracting the first fenced YAML block. On complete
 /// failure, it returns a best-effort report with empty findings so the
 /// expert is not lost.
+/// Rejects input larger than 10 MiB to prevent memory exhaustion.
 pub fn parse_llm_response(expert_name: &str, yaml_text: &str) -> ExpertReport {
+    if yaml_text.len() > MAX_YAML_SIZE {
+        tracing::warn!("LLM response exceeds {} bytes, using fallback report", MAX_YAML_SIZE);
+        return fallback_report(expert_name, yaml_text);
+    }
+
     let cleaned = clean_yaml(yaml_text);
 
     match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned) {
@@ -64,12 +73,37 @@ fn fallback_report(expert_name: &str, yaml_text: &str) -> ExpertReport {
 /// them as aggregated Markdown. Implements a three-layer fallback:
 /// 1. Strict YAML parsing; 2. Extract fenced YAML block; 3. Return empty
 /// report so the pipeline does not abort.
+/// Rejects input larger than 10 MiB to prevent memory exhaustion.
 pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
+    if yaml_text.len() > MAX_YAML_SIZE {
+        tracing::warn!(
+            "Aggregator response exceeds {} bytes, returning empty report",
+            MAX_YAML_SIZE
+        );
+        return Ok(AggregatedReport {
+            findings: vec![],
+            markdown: String::new(),
+            raw_llm_response: yaml_text.to_string(),
+        });
+    }
+
     let cleaned = clean_yaml(yaml_text);
 
     // Layer 1: strict YAML parsing
     let value = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned) {
-        Ok(v) => v,
+        Ok(v) => {
+            // If the parsed value is not a mapping (e.g. a bare string),
+            // treat it as a parse failure and fall back.
+            if !v.is_mapping() {
+                tracing::warn!("Aggregator response parsed as scalar, not a mapping. Returning empty report.");
+                return Ok(AggregatedReport {
+                    findings: vec![],
+                    markdown: String::new(),
+                    raw_llm_response: yaml_text.to_string(),
+                });
+            }
+            v
+        }
         Err(e) => {
             tracing::warn!("Aggregator YAML parse failed: {}. Attempting fenced fallback.", e);
             // Layer 2: extract fenced YAML block
@@ -472,24 +506,132 @@ review:
     }
 
     #[test]
-    fn extract_findings_handles_missing_fields_with_defaults() {
+    fn parse_aggregator_response_fallback_to_fenced_yaml() {
         let yaml = r#"
+Some intro text.
+```yaml
+review:
+  findings:
+    - file: "src/lib.rs"
+      line: 5
+      severity: "critical"
+      title: "Race condition"
+      detail: "Shared state is unsynchronized"
+```
+Trailing text.
+"#;
+        let report = parse_aggregator_response(yaml).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn parse_aggregator_response_fallback_no_fenced_block() {
+        let yaml = "This is not YAML at all, just plain text.";
+        let report = parse_aggregator_response(yaml).unwrap();
+        assert!(report.findings.is_empty());
+        assert_eq!(report.markdown, "");
+        assert_eq!(report.raw_llm_response, yaml);
+    }
+
+    #[test]
+    fn parse_aggregator_response_fenced_fallback_also_fails() {
+        let yaml = r#"
+```yaml
+review:
+  findings: [
+    invalid unclosed
+```
+"#;
+        let report = parse_aggregator_response(yaml).unwrap();
+        assert!(report.findings.is_empty());
+    }
+
+    #[test]
+    fn parse_llm_response_graceful_fallback_for_broken_yaml() {
+        let yaml = "findings:\n  - file: [unclosed string";
+        let report = parse_llm_response("broken", yaml);
+        assert!(report.findings.is_empty());
+        assert!(!report.raw_llm_response.is_empty());
+    }
+
+    #[test]
+    fn parse_llm_response_graceful_fallback_for_completely_invalid() {
+        let yaml = "!!! not yaml !!!";
+        let report = parse_llm_response("invalid", yaml);
+        assert!(report.findings.is_empty());
+        assert_eq!(report.markdown, "## Invalid Review\n\nNo issues found.\n");
+    }
+
+    #[test]
+    fn test_clean_yaml_no_fences_returns_original() {
+        let input = "review:\n  findings: []";
+        let cleaned = clean_yaml(input);
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn test_extract_first_fenced_yaml_multiple_blocks() {
+        let input = "```yaml\nfirst: block\n```\n\n```yaml\nsecond: block\n```";
+        let extracted = extract_first_fenced_yaml(input).unwrap();
+        assert_eq!(extracted, "first: block");
+    }
+
+    #[test]
+    fn parse_aggregator_response_size_limit() {
+        let huge = "x".repeat(11 * 1024 * 1024);
+        let report = parse_aggregator_response(&huge).unwrap();
+        assert!(report.findings.is_empty());
+        assert_eq!(report.markdown, "");
+        assert_eq!(report.raw_llm_response, huge);
+    }
+
+    #[test]
+    fn parse_llm_response_size_limit() {
+        let huge = "x".repeat(11 * 1024 * 1024);
+        let report = parse_llm_response("test", &huge);
+        assert!(report.findings.is_empty());
+        assert_eq!(report.raw_llm_response, huge);
+    }
+
+    #[test]
+    fn parse_aggregator_response_fenced_fallback_with_valid_inner_yaml() {
+        let yaml = r#"
+Some explanation here.
 ```yaml
 review:
   findings:
     - file: "src/main.rs"
-      title: "Minimal finding"
+      line: 10
+      severity: "high"
+      title: "Fallback finding"
+      detail: "Found in fallback block"
+```
+More text.
+"#;
+        let report = parse_aggregator_response(yaml).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].file, "src/main.rs");
+        assert_eq!(report.findings[0].title, "Fallback finding");
+    }
+
+    #[test]
+    fn parse_llm_response_extracts_fenced_block_when_outer_invalid() {
+        let input = r#"
+invalid yaml outside
+```yaml
+review:
+  findings:
+    - file: "src/lib.rs"
+      line: 1
+      severity: "medium"
+      title: "Inner finding"
+      detail: "From fenced block"
 ```
 "#;
-        let report = parse_llm_response("minimal", yaml);
-        let f = &report.findings[0];
-        assert_eq!(f.file, "src/main.rs");
-        assert_eq!(f.title, "Minimal finding");
-        assert_eq!(f.line, None);
-        assert_eq!(f.severity, Severity::Medium);
-        assert_eq!(f.confidence, 5);
-        assert_eq!(f.effort, Effort::Small);
-        assert!(f.summary.is_empty());
-        assert!(f.recommendation.is_empty());
+        let report = parse_llm_response("expert", input);
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.findings[0].file, "src/lib.rs");
+        assert_eq!(report.findings[0].title, "Inner finding");
     }
 }

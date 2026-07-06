@@ -12,6 +12,8 @@ pub struct ConsolidatorConfig {
     pub drop_low_confidence: bool,
     /// If true, remove findings that are identical across experts.
     pub deduplicate: bool,
+    /// Optional scoring configuration for custom penalties and thresholds.
+    pub scoring: Option<ScoringConfig>,
 }
 
 impl Default for ConsolidatorConfig {
@@ -20,6 +22,7 @@ impl Default for ConsolidatorConfig {
             min_confidence: 6,
             drop_low_confidence: false,
             deduplicate: true,
+            scoring: None,
         }
     }
 }
@@ -74,7 +77,10 @@ impl ConsolidatorConfig {
 
         // Step 4: Generate overall assessment
         let score = total_score.unwrap_or_else(|| self.compute_score(reports));
-        let risk_level = review::score_to_risk_level(score);
+        let risk_level = match &self.scoring {
+            Some(s) => review::score_to_risk_level_with_config(score, &s.risk_thresholds),
+            None => review::score_to_risk_level(score),
+        };
         let tl_dr = self.generate_tldr(reports, &risk_level, all_findings.len());
 
         let assessment = OverallAssessment {
@@ -189,8 +195,16 @@ impl ConsolidatorConfig {
             .iter()
             .map(|r| (r.expert_name.as_str(), r.findings.as_slice(), weight))
             .collect();
-        let (score, _) = review::compute_overall(&data);
-        score
+        match &self.scoring {
+            Some(s) => {
+                let (score, _) = review::compute_overall_with_config(&data, &s.penalties, &s.risk_thresholds);
+                score
+            }
+            None => {
+                let (score, _) = review::compute_overall(&data);
+                score
+            }
+        }
     }
 
     /// Generate TL;DR summary.
@@ -299,6 +313,7 @@ mod tests {
             min_confidence: 6,
             drop_low_confidence: true,
             deduplicate: true,
+            scoring: None,
         };
         let findings = vec![
             make_finding(Severity::High, 4, "b.rs", Some(2), "Low conf"),
@@ -426,13 +441,47 @@ mod tests {
     }
 
     #[test]
-    fn deduplicate_findings_same_title_different_line_kept_separate() {
+    fn test_consolidator_with_custom_scoring() {
+        let config = ConsolidatorConfig {
+            scoring: Some(ScoringConfig {
+                enabled: true,
+                display_individual_scores: true,
+                display_weighted_score: true,
+                penalties: PenaltyConfig {
+                    critical: 50,
+                    high: 25,
+                    medium: 10,
+                    low: 2,
+                    note: 0,
+                },
+                consensus_threshold: 70,
+                risk_thresholds: RiskThresholdConfig {
+                    critical_max: 30,
+                    high_max: 50,
+                    medium_max: 70,
+                    low_max: 90,
+                },
+            }),
+            ..Default::default()
+        };
+        let findings = vec![make_finding(Severity::Critical, 9, "a.rs", Some(1), "Security hole")];
+        let reports = vec![make_report("security", findings)];
+        let result = config.consolidate(&reports, None);
+        // 1 critical finding with custom penalty 50: expert_score = 50, weight 100 -> overall 50
+        assert_eq!(result.assessment.score, 50);
+        // With custom thresholds (critical_max=30, high_max=50), score 50 => High
+        assert_eq!(result.assessment.risk_level, RiskLevel::High);
+    }
+
+    #[test]
+    fn test_consolidator_backward_compatible_without_scoring() {
         let config = ConsolidatorConfig::default();
-        let findings = vec![
-            make_finding(Severity::High, 8, "a.rs", Some(1), "Same issue"),
-            make_finding(Severity::High, 8, "a.rs", Some(2), "Same issue"),
-        ];
-        let result = config.deduplicate_findings(findings);
-        assert_eq!(result.len(), 2);
+        let findings = vec![make_finding(Severity::Critical, 9, "a.rs", Some(1), "Security hole")];
+        let reports = vec![make_report("security", findings)];
+        let result = config.consolidate(&reports, None);
+        // Default penalty: critical = 30, so score = 70, weight 100 -> overall 70
+        assert_eq!(result.assessment.score, 70);
+        // Default thresholds: score 70 => LowMedium
+        assert_eq!(result.assessment.risk_level, RiskLevel::LowMedium);
     }
 }

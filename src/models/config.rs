@@ -175,6 +175,59 @@ pub struct ScoringConfig {
     /// Whether to show the overall weighted score in the report.
     #[serde(default = "default_true")]
     pub display_weighted_score: bool,
+    /// Penalty points for each severity level.
+    #[serde(default)]
+    pub penalties: PenaltyConfig,
+    /// Consensus threshold for high-confidence findings.
+    #[serde(default = "default_consensus_threshold")]
+    pub consensus_threshold: u8,
+    /// Risk level thresholds based on score ranges.
+    #[serde(default)]
+    pub risk_thresholds: RiskThresholdConfig,
+}
+
+/// Penalty points for each severity level.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PenaltyConfig {
+    pub critical: u8,
+    pub high: u8,
+    pub medium: u8,
+    pub low: u8,
+    pub note: u8,
+}
+
+impl Default for PenaltyConfig {
+    fn default() -> Self {
+        Self {
+            critical: 30,
+            high: 15,
+            medium: 5,
+            low: 1,
+            note: 0,
+        }
+    }
+}
+
+/// Risk level thresholds based on score ranges.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RiskThresholdConfig {
+    pub critical_max: u8, // score <= this → Critical
+    pub high_max: u8,     // score <= this → High
+    pub medium_max: u8,   // score <= this → Medium
+    pub low_max: u8,      // score <= this → Low
+}
+
+impl Default for RiskThresholdConfig {
+    fn default() -> Self {
+        Self {
+            critical_max: 40,
+            high_max: 60,
+            medium_max: 80,
+            low_max: 95,
+        }
+    }
 }
 
 /// Configuration for a single LLM provider connection.
@@ -261,6 +314,9 @@ impl Default for ScoringConfig {
             enabled: true,
             display_individual_scores: true,
             display_weighted_score: true,
+            penalties: PenaltyConfig::default(),
+            consensus_threshold: default_consensus_threshold(),
+            risk_thresholds: RiskThresholdConfig::default(),
         }
     }
 }
@@ -332,6 +388,9 @@ fn default_scoring_enabled() -> bool {
 }
 fn default_true() -> bool {
     true
+}
+fn default_consensus_threshold() -> u8 {
+    70
 }
 
 fn default_max_tokens() -> u32 {
@@ -462,5 +521,92 @@ name = "minimal"
     fn test_project_config_omitted() {
         let config: AppConfig = toml::from_str("").unwrap();
         assert!(config.project.is_none());
+    }
+
+    #[test]
+    fn test_scoring_config_defaults() {
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(config.scoring.enabled);
+        assert!(config.scoring.display_individual_scores);
+        assert!(config.scoring.display_weighted_score);
+        assert_eq!(config.scoring.consensus_threshold, 70);
+        assert_eq!(config.scoring.penalties.critical, 30);
+        assert_eq!(config.scoring.penalties.high, 15);
+        assert_eq!(config.scoring.penalties.medium, 5);
+        assert_eq!(config.scoring.penalties.low, 1);
+        assert_eq!(config.scoring.penalties.note, 0);
+        assert_eq!(config.scoring.risk_thresholds.critical_max, 40);
+        assert_eq!(config.scoring.risk_thresholds.high_max, 60);
+        assert_eq!(config.scoring.risk_thresholds.medium_max, 80);
+        assert_eq!(config.scoring.risk_thresholds.low_max, 95);
+    }
+
+    #[test]
+    fn test_scoring_config_custom_values() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[scoring]
+enabled = false
+consensus_threshold = 80
+
+[scoring.penalties]
+critical = 50
+high = 25
+medium = 10
+low = 2
+note = 0
+
+[scoring.risk_thresholds]
+critical_max = 30
+high_max = 50
+medium_max = 70
+low_max = 90
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.scoring.enabled);
+        assert_eq!(config.scoring.consensus_threshold, 80);
+        assert_eq!(config.scoring.penalties.critical, 50);
+        assert_eq!(config.scoring.penalties.high, 25);
+        assert_eq!(config.scoring.penalties.medium, 10);
+        assert_eq!(config.scoring.penalties.low, 2);
+        assert_eq!(config.scoring.penalties.note, 0);
+        assert_eq!(config.scoring.risk_thresholds.critical_max, 30);
+        assert_eq!(config.scoring.risk_thresholds.high_max, 50);
+        assert_eq!(config.scoring.risk_thresholds.medium_max, 70);
+        assert_eq!(config.scoring.risk_thresholds.low_max, 90);
+    }
+
+    #[test]
+    fn test_scoring_config_partial_penalties() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[scoring.penalties]
+critical = 50
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.scoring.penalties.critical, 50);
+        assert_eq!(config.scoring.penalties.high, 15); // default
+        assert_eq!(config.scoring.penalties.medium, 5); // default
+    }
+
+    #[test]
+    fn test_scoring_config_partial_risk_thresholds() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[scoring.risk_thresholds]
+critical_max = 20
+low_max = 85
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.scoring.risk_thresholds.critical_max, 20);
+        assert_eq!(config.scoring.risk_thresholds.high_max, 60); // default
+        assert_eq!(config.scoring.risk_thresholds.medium_max, 80); // default
+        assert_eq!(config.scoring.risk_thresholds.low_max, 85);
     }
 }

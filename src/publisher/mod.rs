@@ -33,11 +33,17 @@ pub async fn publish_inline_notes(
     for finding in findings {
         if finding.severity == Severity::Critical || finding.severity == Severity::High {
             if let Some(line) = finding.line {
+                // Defensive: validate file path before posting to prevent API abuse
+                let file = &finding.file;
+                if file.contains("..") || file.starts_with('/') || file.starts_with('~') || file.contains('\0') {
+                    tracing::warn!("Skipping inline note for unsafe file path: {}", file);
+                    continue;
+                }
                 let body = format!(
                     "**[{}]** {} (Confidence: {}/10)\n\n{}",
                     finding.expert_name, finding.title, finding.confidence, finding.recommendation,
                 );
-                provider.post_inline_comment(&finding.file, line, &body).await?;
+                provider.post_inline_comment(file, line, &body).await?;
             }
         }
     }
@@ -167,5 +173,107 @@ mod tests {
         let called_files = provider.calls.lock().unwrap().clone();
         assert_eq!(called_files.len(), 1);
         assert!(called_files.contains(&"critical.rs".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_publish_inline_notes_skips_unsafe_paths() {
+        use crate::git_provider::GitProvider;
+        use crate::models::{Effort, Finding, MRInfo, Severity};
+        use async_trait::async_trait;
+
+        struct MockGitProvider {
+            calls: std::sync::Mutex<Vec<String>>,
+        }
+
+        #[async_trait]
+        impl GitProvider for MockGitProvider {
+            async fn fetch_mr_info(&self) -> anyhow::Result<MRInfo> {
+                unimplemented!()
+            }
+            async fn fetch_diff(&self) -> anyhow::Result<String> {
+                unimplemented!()
+            }
+            async fn post_review_comment(&self, _body: &str) -> anyhow::Result<i64> {
+                unimplemented!()
+            }
+            async fn post_inline_comment(&self, file: &str, _line: u32, _body: &str) -> anyhow::Result<()> {
+                self.calls.lock().unwrap().push(file.to_string());
+                Ok(())
+            }
+            async fn fetch_code_audit_toml(&self) -> anyhow::Result<Option<String>> {
+                unimplemented!()
+            }
+            async fn add_reaction(&self, _comment_id: i64, _reaction: &str) -> anyhow::Result<()> {
+                unimplemented!()
+            }
+            async fn update_discussion(&self, _discussion_id: &str, _body: &str) -> anyhow::Result<()> {
+                unimplemented!()
+            }
+        }
+
+        let findings = vec![
+            Finding {
+                file: "../etc/passwd".to_string(),
+                line: Some(1),
+                line_end: None,
+                severity: Severity::Critical,
+                confidence: 9,
+                category: String::new(),
+                title: "Unsafe path".to_string(),
+                summary: String::new(),
+                evidence: String::new(),
+                impact: String::new(),
+                recommendation: "Fix it".to_string(),
+                effort: Effort::Small,
+                expert_name: String::new(),
+                expert_role: String::new(),
+                agrees_with: Vec::new(),
+                references: Vec::new(),
+            },
+            Finding {
+                file: "/etc/passwd".to_string(),
+                line: Some(1),
+                line_end: None,
+                severity: Severity::Critical,
+                confidence: 9,
+                category: String::new(),
+                title: "Absolute path".to_string(),
+                summary: String::new(),
+                evidence: String::new(),
+                impact: String::new(),
+                recommendation: "Fix it".to_string(),
+                effort: Effort::Small,
+                expert_name: String::new(),
+                expert_role: String::new(),
+                agrees_with: Vec::new(),
+                references: Vec::new(),
+            },
+            Finding {
+                file: "safe.rs".to_string(),
+                line: Some(1),
+                line_end: None,
+                severity: Severity::Critical,
+                confidence: 9,
+                category: String::new(),
+                title: "Safe path".to_string(),
+                summary: String::new(),
+                evidence: String::new(),
+                impact: String::new(),
+                recommendation: "Fix it".to_string(),
+                effort: Effort::Small,
+                expert_name: String::new(),
+                expert_role: String::new(),
+                agrees_with: Vec::new(),
+                references: Vec::new(),
+            },
+        ];
+
+        let provider = MockGitProvider {
+            calls: std::sync::Mutex::new(Vec::new()),
+        };
+        publish_inline_notes(&provider, &findings).await.unwrap();
+        let called_files = provider.calls.lock().unwrap().clone();
+        assert_eq!(called_files.len(), 1);
+        assert!(called_files.contains(&"safe.rs".to_string()));
     }
 }

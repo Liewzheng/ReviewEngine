@@ -3,7 +3,6 @@
 //! @module review-engine: CodeReview Board platform
 use crate::models::*;
 use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
-use crate::scoring::expert_score;
 
 /// Render a full team report as markdown.
 ///
@@ -12,14 +11,16 @@ use crate::scoring::expert_score;
 /// * `reports` — Findings produced by each expert reviewer.
 /// * `metrics` — Per-expert latency and token usage.
 /// * `errors` — Non-fatal errors encountered during review.
+/// * `scoring` — Optional scoring configuration for custom penalties and thresholds.
 ///
 /// # Returns
 /// A Markdown string containing the overall assessment, score table, findings grouped by severity, and any errors.
-pub fn render_team_report(
+pub fn render_team_report_with_scoring(
     team_name: &str,
     reports: &[crate::team::ExpertReport],
     metrics: &[crate::team::ExpertMetrics],
     errors: &[String],
+    scoring: Option<&ScoringConfig>,
 ) -> String {
     let num_reviewers = metrics.len();
     let total_duration_ms: u64 = metrics.iter().map(|m| m.latency_ms).sum();
@@ -42,7 +43,12 @@ pub fn render_team_report(
         })
         .collect();
 
-    let (overall_score, risk_level) = crate::scoring::review::compute_overall(&expert_findings);
+    let (overall_score, risk_level) = match scoring {
+        Some(s) => {
+            crate::scoring::review::compute_overall_with_config(&expert_findings, &s.penalties, &s.risk_thresholds)
+        }
+        None => crate::scoring::review::compute_overall(&expert_findings),
+    };
     let tl_dr = generate_tldr(reports, &risk_level);
 
     // Flatten all findings (needed for both Findings section and footer)
@@ -91,7 +97,10 @@ pub fn render_team_report(
     out.push_str("| Expert | Score | Weight | Contribution |\n");
     out.push_str("|--------|-------|--------|-------------|\n");
     for report in reports {
-        let score = expert_score(&report.findings);
+        let score = match scoring {
+            Some(s) => crate::scoring::expert_score_with_config(&report.findings, &s.penalties),
+            None => crate::scoring::expert_score(&report.findings),
+        };
         let weight = 100u8 / num_reviewers.max(1) as u8;
         let contribution = (score as f64 * weight as f64 / 100.0).round() as u8;
         out.push_str(&format!(
@@ -167,6 +176,16 @@ pub fn render_team_report(
     ));
 
     out
+}
+
+/// Backward-compatible wrapper that uses default scoring configuration.
+pub fn render_team_report(
+    team_name: &str,
+    reports: &[crate::team::ExpertReport],
+    metrics: &[crate::team::ExpertMetrics],
+    errors: &[String],
+) -> String {
+    render_team_report_with_scoring(team_name, reports, metrics, errors, None)
 }
 
 /// Generate a concise TL;DR summary from expert reports.
@@ -285,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn test_generate_tldr_with_critical() {
+    fn test_render_team_report_with_custom_scoring() {
         let findings = vec![make_test_finding(Severity::Critical, "src/main.rs")];
         let reports = vec![ExpertReport {
             expert_name: "security".to_string(),
@@ -293,7 +312,54 @@ mod tests {
             markdown: String::new(),
             raw_llm_response: String::new(),
         }];
-        let tl_dr = generate_tldr(&reports, &RiskLevel::Critical);
-        assert!(tl_dr.contains("critical"));
+        let metrics = vec![ExpertMetrics {
+            name: "security".to_string(),
+            latency_ms: 1500,
+            tokens_used: 500,
+        }];
+        let custom_scoring = ScoringConfig {
+            enabled: true,
+            display_individual_scores: true,
+            display_weighted_score: true,
+            penalties: PenaltyConfig {
+                critical: 50,
+                high: 25,
+                medium: 10,
+                low: 2,
+                note: 0,
+            },
+            consensus_threshold: 70,
+            risk_thresholds: RiskThresholdConfig {
+                critical_max: 30,
+                high_max: 50,
+                medium_max: 70,
+                low_max: 90,
+            },
+        };
+        let report =
+            render_team_report_with_scoring("CodeReview Board", &reports, &metrics, &[], Some(&custom_scoring));
+        assert!(report.contains("CodeReview Board"));
+        assert!(report.contains("50")); // custom critical penalty = 50
+        assert!(report.contains("Risk Level: high")); // 50 <= high_max=50
+    }
+
+    #[test]
+    fn test_render_team_report_backward_compatible() {
+        // The wrapper without scoring should produce the same result as with None
+        let findings = vec![make_test_finding(Severity::High, "src/main.rs")];
+        let reports = vec![ExpertReport {
+            expert_name: "security".to_string(),
+            findings,
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+        }];
+        let metrics = vec![ExpertMetrics {
+            name: "security".to_string(),
+            latency_ms: 1500,
+            tokens_used: 500,
+        }];
+        let report1 = render_team_report("Test", &reports, &metrics, &[]);
+        let report2 = render_team_report_with_scoring("Test", &reports, &metrics, &[], None);
+        assert_eq!(report1, report2);
     }
 }

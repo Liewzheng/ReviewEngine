@@ -29,6 +29,20 @@ max_findings_per_expert = 5
 enabled = true
 display_individual_scores = true
 display_weighted_score = true
+consensus_threshold = 70
+
+[scoring.penalties]
+critical = 30
+high = 15
+medium = 5
+low = 1
+note = 0
+
+[scoring.risk_thresholds]
+critical_max = 40
+high_max = 60
+medium_max = 80
+low_max = 95
 
 [diff]
 # Maximum input token count; exceeding this triggers compression
@@ -63,7 +77,7 @@ window_seconds = 60
 # ========================================
 
 [commands]
-review = false
+review = true
 describe = false
 improve = false
 ask = false

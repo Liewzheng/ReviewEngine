@@ -49,11 +49,19 @@ impl Client {
             anyhow::bail!("Invalid GitHub PR URL format: expected .../owner/repo/pull/<number>");
         }
 
-        let owner = parts[0].to_string();
-        let repo = parts[1].to_string();
+        let owner = parts[0];
+        let repo = parts[1];
         let pr_number: u32 = parts[3]
             .parse()
             .with_context(|| format!("Failed to parse PR number from URL: {pr_url}"))?;
+
+        // Validate owner and repo to prevent path traversal / command injection
+        if owner.is_empty() || owner.contains("..") || owner.contains('/') || owner.contains(':') {
+            anyhow::bail!("Invalid GitHub owner in PR URL: {pr_url}");
+        }
+        if repo.is_empty() || repo.contains("..") || repo.contains('/') || repo.contains(':') {
+            anyhow::bail!("Invalid GitHub repo in PR URL: {pr_url}");
+        }
 
         Ok(Self {
             http: HttpClient::builder()
@@ -61,8 +69,8 @@ impl Client {
                 .build()
                 .with_context(|| "Failed to create HTTP client")?,
             api_base: "https://api.github.com".to_string(),
-            owner,
-            repo,
+            owner: owner.to_string(),
+            repo: repo.to_string(),
             pr_number,
             token: token.to_string(),
             commit_sha: Arc::new(Mutex::new(None)),
@@ -203,6 +211,10 @@ impl Client {
 
     /// Create an inline review comment on a specific file/line.
     pub async fn create_review_comment(&self, file: &str, line: u32, body: &str) -> Result<()> {
+        // Defensive: validate file path to prevent API abuse from hallucinated paths
+        if file.contains("..") || file.starts_with('/') || file.starts_with('~') {
+            anyhow::bail!("Invalid file path for review comment: {}", file);
+        }
         info!("Posting inline comment on {}:{} in PR #{}", file, line, self.pr_number);
         let url = self.api_url(&format!("pulls/{}/comments", self.pr_number));
         let mut payload = serde_json::json!({

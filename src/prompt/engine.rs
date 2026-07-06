@@ -572,4 +572,123 @@ mod tests {
         // pr_author None should render as empty string, not cause error
         assert!(user.contains("**Author**:"));
     }
+
+    #[test]
+    fn test_try_new_success() {
+        let engine = PromptEngine::try_new();
+        assert!(engine.is_ok());
+    }
+
+    #[test]
+    fn test_all_templates_registered() {
+        let engine = PromptEngine::try_new().unwrap();
+        let template_names = [
+            "review_system",
+            "review_user",
+            "aggregator_system",
+            "aggregator_user",
+            "describe_system",
+            "describe_user",
+            "improve_system",
+            "improve_user",
+            "ask_system",
+            "ask_line_system",
+            "ask_user",
+            "ask_line_user",
+            "repo_review_system",
+            "repo_review_user",
+            "changelog_system",
+            "changelog_user",
+            "overview_system",
+            "overview_user",
+        ];
+        for name in &template_names {
+            assert!(
+                engine.env.get_template(name).is_ok(),
+                "template '{}' should be registered",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_describe_prompt_renders() {
+        let engine = PromptEngine::new();
+        let mr = make_test_mr();
+        let (system, user) = engine
+            .build_describe_prompt("diff", &mr, &["commit1".to_string()])
+            .unwrap();
+        assert!(!system.is_empty());
+        assert!(!user.is_empty());
+        assert!(user.contains("commit1"));
+        assert!(user.contains("feat/test"));
+    }
+
+    #[test]
+    fn test_build_improve_prompt_renders() {
+        let engine = PromptEngine::new();
+        let mr = make_test_mr();
+        let (system, user) = engine.build_improve_prompt("diff", &mr).unwrap();
+        assert!(!system.is_empty());
+        assert!(!user.is_empty());
+        assert!(user.contains("feat/test"));
+    }
+
+    #[test]
+    fn test_build_ask_prompt_renders() {
+        let engine = PromptEngine::new();
+        let mr = make_test_mr();
+        let (system, user) = engine.build_ask_prompt("What is this?", "diff", &mr).unwrap();
+        assert!(!system.is_empty());
+        assert!(!user.is_empty());
+        assert!(user.contains("What is this?"));
+    }
+
+    #[test]
+    fn test_build_ask_line_prompt_renders() {
+        let engine = PromptEngine::new();
+        let (system, user) = engine
+            .build_ask_line_prompt("Why?", "src/main.rs", 10, "fn main() {}")
+            .unwrap();
+        assert!(!system.is_empty());
+        assert!(!user.is_empty());
+        assert!(user.contains("src/main.rs"));
+        assert!(user.contains("fn main() {}"));
+        assert!(user.contains("Why?"));
+    }
+
+    #[test]
+    fn test_build_changelog_prompt_renders() {
+        let engine = PromptEngine::new();
+        let mr = make_test_mr();
+        let (system, user) = engine
+            .build_changelog_prompt("diff", &["commit1".to_string()], &mr)
+            .unwrap();
+        assert!(!system.is_empty());
+        assert!(!user.is_empty());
+        assert!(user.contains("commit1"));
+    }
+
+    #[test]
+    fn test_build_repo_review_prompt_renders() {
+        let engine = PromptEngine::new();
+        let mut stats = std::collections::HashMap::new();
+        stats.insert("Rust".to_string(), 1000u64);
+        let (system, user) = engine
+            .build_repo_review_prompt("repo info", &["src/main.rs".to_string()], &stats)
+            .unwrap();
+        assert!(!system.is_empty());
+        assert!(!user.is_empty());
+        assert!(user.contains("src/main.rs"));
+        assert!(user.contains("Rust"));
+    }
+
+    #[test]
+    fn test_try_new_fails_on_malformed_template() {
+        // Manually create an engine with a malformed template to verify error path
+        let mut env = minijinja::Environment::new();
+        // This is an invalid template (unclosed block)
+        let result = env.add_template("broken", "{% if true %}unclosed");
+        assert!(result.is_err());
+    }
 }

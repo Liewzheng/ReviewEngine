@@ -860,7 +860,13 @@ fn write_output(
 
     match output {
         Some(path) => {
-            // Explicit --output: only write to file, not stdout
+            // Explicit --output: validate path to prevent directory traversal
+            let path = std::path::Path::new(path);
+            for component in path.components() {
+                if let std::path::Component::ParentDir = component {
+                    anyhow::bail!("--output path must not contain '..'");
+                }
+            }
             std::fs::write(path, &text)?;
         }
         None => {
@@ -869,6 +875,12 @@ fn write_output(
             // And save to default directory if configured
             if let Some(dir) = output_dir {
                 let dir = std::path::Path::new(dir);
+                // Validate output_dir to prevent directory traversal
+                for component in dir.components() {
+                    if let std::path::Component::ParentDir = component {
+                        anyhow::bail!("output_dir must not contain '..'");
+                    }
+                }
                 if !dir.exists() {
                     std::fs::create_dir_all(dir)?;
                 }

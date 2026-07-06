@@ -8,7 +8,7 @@
 //! weighted by their configured importance. The module also defines
 //! [`ReviewScoreRecord`] and [`ExpertScoreRecord`] for reporting.
 
-use crate::models::{Finding, RiskLevel};
+use crate::models::{Finding, PenaltyConfig, RiskLevel, RiskThresholdConfig};
 
 /// A record of an expert's contribution to the overall score.
 #[derive(Debug, Clone)]
@@ -28,29 +28,36 @@ pub struct ReviewScoreRecord {
     pub expert_scores: Vec<ExpertScoreRecord>,
 }
 
-/// Compute an individual expert score from their findings.
+/// Compute an individual expert score from their findings using the configured penalties.
 ///
 /// Scoring logic:
 /// - Start at 100 (perfect score)
-/// - Critical findings: -30 each
-/// - High findings: -15 each
-/// - Medium findings: -5 each
-/// - Low findings: -1 each
+/// - Critical findings: -penalties.critical each
+/// - High findings: -penalties.high each
+/// - Medium findings: -penalties.medium each
+/// - Low findings: -penalties.low each
 /// - Note findings: no penalty
 /// - Clamp to 0-100 range
-pub fn expert_score(findings: &[Finding]) -> u8 {
+pub fn expert_score_with_config(findings: &[Finding], penalties: &PenaltyConfig) -> u8 {
     let mut penalty = 0i32;
     for finding in findings {
         match finding.severity {
-            crate::models::Severity::Critical => penalty += 30,
-            crate::models::Severity::High => penalty += 15,
-            crate::models::Severity::Medium => penalty += 5,
-            crate::models::Severity::Low => penalty += 1,
-            crate::models::Severity::Note => {}
+            crate::models::Severity::Critical => penalty += penalties.critical as i32,
+            crate::models::Severity::High => penalty += penalties.high as i32,
+            crate::models::Severity::Medium => penalty += penalties.medium as i32,
+            crate::models::Severity::Low => penalty += penalties.low as i32,
+            crate::models::Severity::Note => penalty += penalties.note as i32,
         }
     }
     let score = 100i32 - penalty;
     score.clamp(0, 100) as u8
+}
+
+/// Backward-compatible wrapper that uses the built-in default penalties.
+///
+/// Defaults: Critical -30, High -15, Medium -5, Low -1, Note -0.
+pub fn expert_score(findings: &[Finding]) -> u8 {
+    expert_score_with_config(findings, &PenaltyConfig::default())
 }
 
 /// Compute the weighted score from a list of (score, weight) pairs.
@@ -80,32 +87,82 @@ pub fn weighted_overall_score(expert_scores: &[(String, u8, u8)]) -> u8 {
     compute_weighted(&pairs)
 }
 
-/// Map an overall score (0-100) to a RiskLevel.
+/// Map an overall score (0-100) to a RiskLevel using configurable thresholds.
 ///
-/// Scores above 100 are treated as `Low` (defensively handles any `u8` input).
-pub fn score_to_risk_level(score: u8) -> RiskLevel {
-    match score {
-        0..=20 => RiskLevel::Critical,
-        21..=40 => RiskLevel::High,
-        41..=60 => RiskLevel::Medium,
-        61..=80 => RiskLevel::LowMedium,
-        _ => RiskLevel::Low, // 81..=u8::MAX
+/// Uses the provided `RiskThresholdConfig` to determine boundaries:
+/// - score <= thresholds.critical_max → Critical
+/// - score <= thresholds.high_max → High
+/// - score <= thresholds.medium_max → Medium
+/// - score <= thresholds.low_max → LowMedium
+/// - otherwise → Low
+pub fn score_to_risk_level_with_config(score: u8, thresholds: &RiskThresholdConfig) -> RiskLevel {
+    if score <= thresholds.critical_max {
+        RiskLevel::Critical
+    } else if score <= thresholds.high_max {
+        RiskLevel::High
+    } else if score <= thresholds.medium_max {
+        RiskLevel::Medium
+    } else if score <= thresholds.low_max {
+        RiskLevel::LowMedium
+    } else {
+        RiskLevel::Low
     }
 }
 
-/// Compute the overall review score and risk level from expert findings.
-pub fn compute_overall(expert_data: &[(&str, &[Finding], u8)]) -> (u8, RiskLevel) {
+/// Backward-compatible wrapper that uses the original hardcoded thresholds.
+///
+/// Original defaults: Critical (0-20), High (21-40), Medium (41-60), LowMedium (61-80), Low (81+).
+/// These values are frozen to preserve backward compatibility for callers that do not pass a config.
+pub fn score_to_risk_level(score: u8) -> RiskLevel {
+    let old_thresholds = RiskThresholdConfig {
+        critical_max: 20,
+        high_max: 40,
+        medium_max: 60,
+        low_max: 80,
+    };
+    score_to_risk_level_with_config(score, &old_thresholds)
+}
+
+/// Compute the overall review score and risk level from expert findings using configurable thresholds and penalties.
+pub fn compute_overall_with_config(
+    expert_data: &[(&str, &[Finding], u8)],
+    penalties: &PenaltyConfig,
+    thresholds: &RiskThresholdConfig,
+) -> (u8, RiskLevel) {
     let scores: Vec<(String, u8, u8)> = expert_data
         .iter()
         .map(|(name, findings, weight)| {
-            let score = expert_score(findings);
+            let score = expert_score_with_config(findings, penalties);
             (name.to_string(), score, *weight)
         })
         .collect();
 
     let overall = weighted_overall_score(&scores);
-    let risk = score_to_risk_level(overall);
+    let risk = score_to_risk_level_with_config(overall, thresholds);
     (overall, risk)
+}
+
+/// Backward-compatible wrapper that uses original hardcoded penalties and thresholds.
+///
+/// Preserves v0.6.11 scoring behavior exactly: penalties of 30/15/5/1/0 and
+/// risk thresholds of 20/40/60/80.
+pub fn compute_overall(expert_data: &[(&str, &[Finding], u8)]) -> (u8, RiskLevel) {
+    compute_overall_with_config(
+        expert_data,
+        &PenaltyConfig {
+            critical: 30,
+            high: 15,
+            medium: 5,
+            low: 1,
+            note: 0,
+        },
+        &RiskThresholdConfig {
+            critical_max: 20,
+            high_max: 40,
+            medium_max: 60,
+            low_max: 80,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -421,5 +478,128 @@ mod tests {
     fn test_compute_weighted_rounds_half_up() {
         let scores = [(33, 1), (34, 1)];
         assert_eq!(compute_weighted(&scores), 34);
+    }
+
+    // ─── _with_config tests ───────────────────────
+
+    #[test]
+    fn test_expert_score_with_config_custom_penalties() {
+        let penalties = PenaltyConfig {
+            critical: 50,
+            high: 25,
+            medium: 10,
+            low: 2,
+            note: 0,
+        };
+        let score = expert_score_with_config(&[make_finding(Severity::Critical)], &penalties);
+        assert_eq!(score, 50); // 100 - 50
+
+        let score = expert_score_with_config(&[make_finding(Severity::High)], &penalties);
+        assert_eq!(score, 75); // 100 - 25
+
+        let score = expert_score_with_config(&[make_finding(Severity::Medium)], &penalties);
+        assert_eq!(score, 90); // 100 - 10
+    }
+
+    #[test]
+    fn test_expert_score_with_config_note_penalty() {
+        let penalties = PenaltyConfig {
+            critical: 30,
+            high: 15,
+            medium: 5,
+            low: 1,
+            note: 5,
+        };
+        let findings = vec![make_finding(Severity::Note), make_finding(Severity::Note)];
+        let score = expert_score_with_config(&findings, &penalties);
+        assert_eq!(score, 90); // 100 - 5 - 5 = 90
+    }
+
+    #[test]
+    fn test_score_to_risk_level_with_config_custom_thresholds() {
+        let thresholds = RiskThresholdConfig {
+            critical_max: 30,
+            high_max: 50,
+            medium_max: 70,
+            low_max: 90,
+        };
+        assert_eq!(score_to_risk_level_with_config(25, &thresholds), RiskLevel::Critical);
+        assert_eq!(score_to_risk_level_with_config(40, &thresholds), RiskLevel::High);
+        assert_eq!(score_to_risk_level_with_config(60, &thresholds), RiskLevel::Medium);
+        assert_eq!(score_to_risk_level_with_config(80, &thresholds), RiskLevel::LowMedium);
+        assert_eq!(score_to_risk_level_with_config(95, &thresholds), RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_compute_overall_with_config() {
+        let penalties = PenaltyConfig {
+            critical: 50,
+            high: 25,
+            medium: 10,
+            low: 2,
+            note: 0,
+        };
+        let thresholds = RiskThresholdConfig {
+            critical_max: 30,
+            high_max: 50,
+            medium_max: 70,
+            low_max: 90,
+        };
+        let findings = [make_finding(Severity::Critical)];
+        let data = vec![("security", &findings[..], 100u8)];
+        let (score, risk) = compute_overall_with_config(&data, &penalties, &thresholds);
+        assert_eq!(score, 50); // 100 - 50
+        assert_eq!(risk, RiskLevel::High); // 50 <= high_max=50
+    }
+
+    #[test]
+    fn test_backward_compatible_expert_score_uses_defaults() {
+        // The wrapper should produce the same result as the _with_config with defaults
+        let findings = vec![
+            make_finding(Severity::Critical),
+            make_finding(Severity::High),
+            make_finding(Severity::Medium),
+        ];
+        let score1 = expert_score(&findings);
+        let score2 = expert_score_with_config(&findings, &PenaltyConfig::default());
+        assert_eq!(score1, score2);
+        assert_eq!(score1, 50); // 100 - 30 - 15 - 5
+    }
+
+    #[test]
+    fn test_backward_compatible_score_to_risk_level_uses_defaults() {
+        let score1 = score_to_risk_level(70);
+        let old_thresholds = RiskThresholdConfig {
+            critical_max: 20,
+            high_max: 40,
+            medium_max: 60,
+            low_max: 80,
+        };
+        let score2 = score_to_risk_level_with_config(70, &old_thresholds);
+        assert_eq!(score1, score2);
+        assert_eq!(score1, RiskLevel::LowMedium);
+    }
+
+    #[test]
+    fn test_backward_compatible_compute_overall_uses_defaults() {
+        let findings = [make_finding(Severity::Critical)];
+        let data = vec![("security", &findings[..], 100u8)];
+        let (score1, risk1) = compute_overall(&data);
+        let old_penalties = PenaltyConfig {
+            critical: 30,
+            high: 15,
+            medium: 5,
+            low: 1,
+            note: 0,
+        };
+        let old_thresholds = RiskThresholdConfig {
+            critical_max: 20,
+            high_max: 40,
+            medium_max: 60,
+            low_max: 80,
+        };
+        let (score2, risk2) = compute_overall_with_config(&data, &old_penalties, &old_thresholds);
+        assert_eq!(score1, score2);
+        assert_eq!(risk1, risk2);
     }
 }

@@ -20,11 +20,18 @@ pub(crate) fn load_embedded_default() -> Result<AppConfig> {
     default_config()
 }
 
+/// Maximum TOML content size in bytes (1 MiB) to prevent memory DoS from oversized configs.
+const MAX_TOML_SIZE: usize = 1024 * 1024;
+
 /// Parse a TOML string into an [`AppConfig`].
 ///
 /// Does *not* merge with defaults — call [`merge_default`] afterwards
 /// to fill in missing fields.
+/// Rejects input larger than 1 MiB to prevent memory exhaustion.
 pub fn parse_toml(content: &str) -> Result<AppConfig> {
+    if content.len() > MAX_TOML_SIZE {
+        anyhow::bail!("TOML config exceeds maximum size of {} bytes", MAX_TOML_SIZE);
+    }
     Ok(toml::from_str(content)?)
 }
 
@@ -47,6 +54,9 @@ pub fn merge_default(user: AppConfig) -> Result<AppConfig> {
             enabled: user.scoring.enabled,
             display_individual_scores: user.scoring.display_individual_scores,
             display_weighted_score: user.scoring.display_weighted_score,
+            penalties: user.scoring.penalties,
+            consensus_threshold: user.scoring.consensus_threshold,
+            risk_thresholds: user.scoring.risk_thresholds,
         },
         review_experts: {
             let mut experts = default.review_experts;
@@ -358,6 +368,29 @@ custom_cmd = true
         let user = parse_toml(user_toml).unwrap();
         let merged = merge_default(user).unwrap();
         assert_eq!(merged.max_team_size, None);
+    }
+
+    #[test]
+    fn test_merge_default_scoring_config_preserved() {
+        let user_toml = r#"
+[scoring]
+enabled = false
+consensus_threshold = 85
+
+[scoring.penalties]
+critical = 50
+
+[scoring.risk_thresholds]
+critical_max = 25
+"#;
+        let user = parse_toml(user_toml).unwrap();
+        let merged = merge_default(user).unwrap();
+        assert!(!merged.scoring.enabled);
+        assert_eq!(merged.scoring.consensus_threshold, 85);
+        assert_eq!(merged.scoring.penalties.critical, 50);
+        assert_eq!(merged.scoring.penalties.high, 15); // default preserved
+        assert_eq!(merged.scoring.risk_thresholds.critical_max, 25);
+        assert_eq!(merged.scoring.risk_thresholds.high_max, 60); // default preserved
     }
 
     // ─── load_embedded_default ───────────────────

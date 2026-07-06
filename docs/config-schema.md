@@ -39,6 +39,51 @@ The config file uses TOML format. Below is the complete schema with all availabl
 | `enabled` | boolean | `true` | Enable/disable scoring |
 | `display_individual_scores` | boolean | `true` | Show individual expert scores |
 | `display_weighted_score` | boolean | `true` | Show weighted overall score |
+| `consensus_threshold` | integer | `70` | Consensus threshold for high-confidence findings (1-100) |
+
+### `[scoring.penalties]`
+
+Penalty points deducted per finding severity. All default to built-in values.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `critical` | integer | `30` | Points deducted for each Critical finding |
+| `high` | integer | `15` | Points deducted for each High finding |
+| `medium` | integer | `5` | Points deducted for each Medium finding |
+| `low` | integer | `1` | Points deducted for each Low finding |
+| `note` | integer | `0` | Points deducted for each Note finding |
+
+### `[scoring.risk_thresholds]`
+
+Score-to-risk-level mapping thresholds. Scores are compared with `<=`.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `critical_max` | integer | `40` | Scores ≤ this are Critical |
+| `high_max` | integer | `60` | Scores ≤ this (but > critical_max) are High |
+| `medium_max` | integer | `80` | Scores ≤ this (but > high_max) are Medium |
+| `low_max` | integer | `95` | Scores ≤ this (but > medium_max) are LowMedium |
+
+```toml
+[scoring]
+enabled = true
+display_individual_scores = true
+display_weighted_score = true
+consensus_threshold = 70
+
+[scoring.penalties]
+critical = 30
+high = 15
+medium = 5
+low = 1
+note = 0
+
+[scoring.risk_thresholds]
+critical_max = 40
+high_max = 60
+medium_max = 80
+low_max = 95
+```
 
 ## `[commands]`
 

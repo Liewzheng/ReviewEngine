@@ -235,6 +235,21 @@ async fn resolve_source(
             Ok(diff)
         }
         ReviewSource::LocalRepo { path, base, head } => {
+            // Validate repo path before use to prevent directory traversal
+            let repo_path = std::path::Path::new(&path);
+            if !repo_path.exists() {
+                anyhow::bail!("Repository path does not exist: {}", path);
+            }
+            if !repo_path.is_dir() {
+                anyhow::bail!("Repository path is not a directory: {}", path);
+            }
+            // Validate base and head refs to prevent command injection
+            if let Some(ref base_ref) = base {
+                crate::git::local::validate_ref(base_ref)?;
+            }
+            if let Some(ref head_ref) = head {
+                crate::git::local::validate_ref(head_ref)?;
+            }
             let browser = crate::git::local::LocalGitBrowser::new(&path);
             let diff = browser
                 .get_diff(base.as_deref().unwrap_or("main"), head.as_deref(), false, None, None)
@@ -250,5 +265,98 @@ async fn resolve_source(
             }
             Ok(diff)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::api::types::ReviewSource;
+
+    #[tokio::test]
+    async fn test_resolve_source_static_diff_within_limit() {
+        let diff = "diff content".to_string();
+        let source = ReviewSource::StaticDiff { diff: diff.clone() };
+        let result = resolve_source(source, &None).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), diff);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_source_static_diff_exceeds_limit() {
+        let diff = "x".repeat(MAX_STATIC_DIFF_BYTES + 1);
+        let source = ReviewSource::StaticDiff { diff };
+        let result = resolve_source(source, &None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("exceeds maximum size"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_source_local_repo_nonexistent_path() {
+        let source = ReviewSource::LocalRepo {
+            path: "/tmp/nonexistent_repo_12345".to_string(),
+            base: None,
+            head: None,
+        };
+        let result = resolve_source(source, &None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_source_local_repo_invalid_base_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path().to_str().unwrap().to_string();
+        // Initialize a git repo so the path exists and is a dir
+        let status = std::process::Command::new("git")
+            .args(["-C", &repo_path, "init", "--initial-branch=main"])
+            .status()
+            .expect("git init failed");
+        assert!(status.success());
+
+        let source = ReviewSource::LocalRepo {
+            path: repo_path,
+            base: Some("--help".to_string()),
+            head: None,
+        };
+        let result = resolve_source(source, &None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("must not start with '-'"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_source_gitlab_mr_invalid_url() {
+        let source = ReviewSource::GitLabMr {
+            url: "not-a-valid-url".to_string(),
+            token: "test-token".to_string(),
+        };
+        let result = resolve_source(source, &None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Invalid MR URL format"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_source_local_repo_invalid_head_ref() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo_path = dir.path().to_str().unwrap().to_string();
+        let status = std::process::Command::new("git")
+            .args(["-C", &repo_path, "init", "--initial-branch=main"])
+            .status()
+            .expect("git init failed");
+        assert!(status.success());
+
+        let source = ReviewSource::LocalRepo {
+            path: repo_path,
+            base: Some("main".to_string()),
+            head: Some("; echo evil".to_string()),
+        };
+        let result = resolve_source(source, &None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("forbidden shell metacharacters"));
     }
 }

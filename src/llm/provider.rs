@@ -352,3 +352,106 @@ impl ProviderRegistry {
         (registry, order)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::LLMConfig;
+
+    #[test]
+    fn test_provider_registry_from_configs_empty() {
+        let (registry, order) = ProviderRegistry::from_configs(&[]);
+        assert!(registry.names().is_empty());
+        assert!(order.is_empty());
+    }
+
+    #[test]
+    fn test_provider_registry_from_configs_openai() {
+        let configs = vec![LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+        }];
+        let (registry, order) = ProviderRegistry::from_configs(&configs);
+        assert!(registry.get("openai").is_some());
+        assert_eq!(order, vec!["openai"]);
+    }
+
+    #[test]
+    fn test_provider_registry_from_configs_anthropic() {
+        let configs = vec![LLMConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-3".to_string(),
+            api_key: "test-key".to_string(),
+            api_base: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+        }];
+        let (registry, order) = ProviderRegistry::from_configs(&configs);
+        assert!(registry.get("anthropic").is_some());
+        assert_eq!(order, vec!["anthropic"]);
+    }
+
+    #[test]
+    fn test_provider_registry_from_configs_unknown_fallback() {
+        let configs = vec![LLMConfig {
+            provider: "unknown_provider".to_string(),
+            model: "test-model".to_string(),
+            api_key: "test-key".to_string(),
+            api_base: "https://custom.example.com/v1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+        }];
+        let (registry, order) = ProviderRegistry::from_configs(&configs);
+        // Unknown providers fall back to OpenAI-compatible
+        assert!(registry.get("unknown_provider").is_some());
+        assert_eq!(order, vec!["unknown_provider"]);
+    }
+
+    #[test]
+    fn test_provider_registry_get_missing() {
+        let registry = ProviderRegistry::new();
+        assert!(registry.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_provider_registry_names() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(OpenAIProvider::new(
+            "key".to_string(),
+            "https://api.openai.com/v1".to_string(),
+        )));
+        let names = registry.names();
+        assert_eq!(names.len(), 1);
+        assert_eq!(names[0], "openai");
+    }
+
+    #[test]
+    fn test_provider_registry_from_configs_multiple() {
+        let configs = vec![
+            LLMConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4".to_string(),
+                api_key: "sk-test".to_string(),
+                api_base: String::new(),
+                max_tokens: 4096,
+                temperature: 0.3,
+            },
+            LLMConfig {
+                provider: "anthropic".to_string(),
+                model: "claude-3".to_string(),
+                api_key: "test-key".to_string(),
+                api_base: String::new(),
+                max_tokens: 4096,
+                temperature: 0.3,
+            },
+        ];
+        let (registry, order) = ProviderRegistry::from_configs(&configs);
+        assert!(registry.get("openai").is_some());
+        assert!(registry.get("anthropic").is_some());
+        assert_eq!(order, vec!["openai", "anthropic"]);
+    }
+}

@@ -50,6 +50,14 @@ impl Client {
         let host = &host_and_path[..slash_idx];
         let project_path = &host_and_path[slash_idx + 1..];
 
+        // Validate host and project_path to prevent path traversal / command injection
+        if host.is_empty() || host.contains('/') || host.contains("..") || host.contains(':') {
+            anyhow::bail!("Invalid GitLab host in MR URL: {mr_url}");
+        }
+        if project_path.contains("..") || project_path.starts_with('/') || project_path.ends_with('/') {
+            anyhow::bail!("Invalid GitLab project path in MR URL: {mr_url}");
+        }
+
         let mr_iid: u32 = iid_str
             .parse()
             .with_context(|| format!("Failed to parse MR IID as integer: {iid_str}"))?;
@@ -431,6 +439,10 @@ impl Client {
 
     /// Post an inline comment (discussion) on a specific file and line.
     pub async fn post_inline_note(&self, file: &str, line: u32, body: &str) -> Result<()> {
+        // Defensive: validate file path to prevent API abuse from hallucinated paths
+        if file.contains("..") || file.starts_with('/') || file.starts_with('~') {
+            anyhow::bail!("Invalid file path for inline comment: {}", file);
+        }
         // Fetch MR info to obtain the SHA refs for the position
         let mr_info = self.fetch_mr_info().await?;
         let head_sha = &mr_info.git_hash;

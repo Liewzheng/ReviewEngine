@@ -46,7 +46,14 @@ pub fn gather_project_context(
     base_ref: Option<&str>,
     head_ref: Option<&str>,
 ) -> Result<ProjectContext> {
-    if repo_path.join(".git").exists() {
+    // Validate repo_path exists and is a directory
+    if !repo_path.exists() {
+        anyhow::bail!("Repository path does not exist: {}", repo_path.display());
+    }
+    if !repo_path.is_dir() {
+        anyhow::bail!("Repository path is not a directory: {}", repo_path.display());
+    }
+    if repo_path.join(".git").is_dir() {
         gather_from_git(repo_path, base_ref, head_ref)
     } else {
         let file_tree = list_files_from_fs(repo_path, 200)?;
@@ -138,18 +145,43 @@ fn is_valid_ref_name(name: &str) -> bool {
 
 /// Returns true if `path` is a safe repository-relative path for `git show`.
 ///
-/// The path must be non-empty, must not start with `/`, and must not contain
-/// `..` or characters such as `:`, `\n`, `\r`, or `\0` that could alter command
-/// semantics or path interpretation.
+/// The path must be non-empty, must not start with `/` or `~`, must not contain
+/// `..` or backslashes, and must not contain characters such as `:`, `\n`, `\r`,
+/// or `\0` that could alter command semantics or path interpretation.
 fn is_valid_repo_path(path: &str) -> bool {
     if path.is_empty() {
         return false;
     }
-    if path.starts_with('/') || path.contains("..") {
+    if path.starts_with('/') || path.starts_with('~') || path.starts_with("\\\\") {
         return false;
     }
-    let forbidden = |c: char| c == ':' || c == '\n' || c == '\r' || c == '\0';
+    if path.contains("..") || path.contains("\\") {
+        return false;
+    }
+    let forbidden = |c: char| {
+        c == ':' || c == '\n' || c == '\r' || c == '\0' || c == ';' || c == '|' || c == '&' || c == '$' || c == '`'
+    };
     !path.chars().any(forbidden)
+}
+
+/// Sanitize a user-controlled argument to prevent command injection.
+///
+/// Rejects strings that start with `-` (flag injection), contain `;` or `|`
+/// (shell metacharacters), or contain backticks.
+pub fn sanitize_user_arg(arg: &str) -> Option<&str> {
+    if arg.starts_with('-') {
+        return None;
+    }
+    if arg.contains(';')
+        || arg.contains('|')
+        || arg.contains('&')
+        || arg.contains('$')
+        || arg.contains('`')
+        || arg.contains('\0')
+    {
+        return None;
+    }
+    Some(arg)
 }
 
 /// Run `git ls-files` in `repo_path` and keep at most the first `max_lines`.
@@ -185,11 +217,16 @@ fn git_log_oneline(repo_path: &Path, extra_args: &[&str]) -> Result<Vec<String>>
             tracing::warn!("skipping user-controlled git log argument: {}", arg);
             continue;
         }
-        if !is_valid_ref_name(arg) {
-            tracing::warn!("skipping user-controlled git log argument: invalid ref '{}'", arg);
+        if let Some(sanitized) = sanitize_user_arg(arg) {
+            if !is_valid_ref_name(sanitized) {
+                tracing::warn!("skipping user-controlled git log argument: invalid ref '{}'", arg);
+                continue;
+            }
+            args.push(sanitized);
+        } else {
+            tracing::warn!("skipping user-controlled git log argument: unsafe characters '{}'", arg);
             continue;
         }
-        args.push(arg);
     }
 
     let output = std::process::Command::new("git")
@@ -280,6 +317,12 @@ fn list_files_from_fs(dir: &Path, max_entries: usize) -> Result<Vec<String>> {
 
         for entry in entries.flatten() {
             let path = entry.path();
+            // Skip symlinks to prevent directory traversal via symlink escape
+            if let Ok(metadata) = std::fs::symlink_metadata(&path) {
+                if metadata.file_type().is_symlink() {
+                    continue;
+                }
+            }
             if is_ignored_path(&path) {
                 continue;
             }
@@ -526,5 +569,114 @@ mod tests {
         assert!(!is_valid_repo_path("foo\nbar"));
         assert!(!is_valid_repo_path("foo\rbar"));
         assert!(!is_valid_repo_path("foo\0bar"));
+    }
+
+    #[test]
+    fn test_is_valid_repo_path_symlink_and_traversal() {
+        // Symlinks and path-traversal attempts should be rejected
+        assert!(!is_valid_repo_path("link/to/../etc/passwd"));
+        assert!(!is_valid_repo_path("foo/../../bar"));
+        assert!(!is_valid_repo_path(".hidden/../secret"));
+    }
+
+    #[test]
+    fn test_is_valid_repo_path_special_chars() {
+        // Shell metacharacters and injection vectors
+        assert!(!is_valid_repo_path("foo;bar"));
+        assert!(!is_valid_repo_path("foo|bar"));
+        assert!(!is_valid_repo_path("foo&bar"));
+        assert!(!is_valid_repo_path("foo$bar"));
+        assert!(!is_valid_repo_path("foo`bar"));
+        assert!(!is_valid_repo_path("foo\x00bar"));
+    }
+
+    #[test]
+    fn test_is_valid_repo_path_valid_edge_cases() {
+        assert!(is_valid_repo_path(".gitignore"));
+        assert!(is_valid_repo_path("a"));
+        assert!(is_valid_repo_path("src/deep/nested/file.rs"));
+        assert!(is_valid_repo_path("file_with-dashes.txt"));
+        assert!(is_valid_repo_path("file.with.dots.rs"));
+    }
+
+    #[test]
+    fn test_is_valid_ref_name_command_injection() {
+        // Refs starting with dash are dangerous (git treats them as flags)
+        assert!(!is_valid_ref_name("--help"));
+        assert!(!is_valid_ref_name("-option"));
+        assert!(!is_valid_ref_name("--output=/etc/passwd"));
+    }
+
+    #[test]
+    fn test_is_valid_ref_name_more_invalid() {
+        assert!(!is_valid_ref_name("foo;bar"));
+        assert!(!is_valid_ref_name("foo|bar"));
+        assert!(!is_valid_ref_name("foo bar"));
+        assert!(!is_valid_ref_name("foo\tbar"));
+        assert!(!is_valid_ref_name("foo\nbar"));
+        assert!(!is_valid_ref_name("foo\0bar"));
+    }
+
+    #[test]
+    fn test_list_files_from_fs_respects_max_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        std::fs::write(dir.path().join("c.txt"), "c").unwrap();
+
+        let files = list_files_from_fs(dir.path(), 2).unwrap();
+        assert!(files.len() <= 2);
+    }
+
+    #[test]
+    fn test_sanitize_user_arg_rejects_flags() {
+        assert!(sanitize_user_arg("--help").is_none());
+        assert!(sanitize_user_arg("-option").is_none());
+        assert!(sanitize_user_arg("-f").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_user_arg_rejects_shell_metacharacters() {
+        assert!(sanitize_user_arg("foo;bar").is_none());
+        assert!(sanitize_user_arg("foo|bar").is_none());
+        assert!(sanitize_user_arg("foo&bar").is_none());
+        assert!(sanitize_user_arg("foo$bar").is_none());
+        assert!(sanitize_user_arg("foo`bar").is_none());
+        assert!(sanitize_user_arg("foo\0bar").is_none());
+    }
+
+    #[test]
+    fn test_sanitize_user_arg_accepts_valid() {
+        assert_eq!(sanitize_user_arg("main"), Some("main"));
+        assert_eq!(sanitize_user_arg("feature/foo"), Some("feature/foo"));
+        assert_eq!(sanitize_user_arg("v1.0.0"), Some("v1.0.0"));
+    }
+
+    #[test]
+    fn test_is_valid_repo_path_rejects_tilde_and_backslash() {
+        assert!(!is_valid_repo_path("~/.ssh/id_rsa"));
+        assert!(!is_valid_repo_path("foo\\bar"));
+        assert!(!is_valid_repo_path("\\\\server\\share"));
+    }
+
+    #[test]
+    fn test_is_valid_repo_path_rejects_absolute_and_dotdot() {
+        assert!(!is_valid_repo_path("/etc/passwd"));
+        assert!(!is_valid_repo_path("../secret"));
+        assert!(!is_valid_repo_path("foo/../bar"));
+    }
+
+    #[test]
+    fn test_gather_project_context_plain_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(dir.path().join("README.md"), "# Test").unwrap();
+
+        let ctx = gather_project_context(dir.path(), None, None).unwrap();
+        assert!(ctx.file_tree.iter().any(|f| f == "src/main.rs"));
+        assert!(ctx.file_tree.iter().any(|f| f == "README.md"));
+        assert!(ctx.readme_excerpt.is_empty()); // plain dir, no git show
+        assert!(ctx.manifest_excerpt.is_empty());
     }
 }

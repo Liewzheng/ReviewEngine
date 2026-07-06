@@ -378,7 +378,9 @@ weight = 5
         env_guard.set("review = true\ndescribe = true");
 
         let config = default_config().unwrap();
-        assert!(!*config.commands.get("review").unwrap());
+        // review is true by default; describe is false by default
+        assert!(*config.commands.get("review").unwrap());
+        assert!(!*config.commands.get("describe").unwrap());
 
         let overridden = apply_env_overrides(config);
         assert!(*overridden.commands.get("review").unwrap());
@@ -613,7 +615,140 @@ describe = true
 
         let config = default_config().unwrap();
         let overridden = apply_env_overrides(config);
-        assert!(!*overridden.commands.get("review").unwrap());
+        // review is true by default; env var is unset so should remain true
+        assert!(*overridden.commands.get("review").unwrap());
+        // describe is false by default; env var is unset so should remain false
+        assert!(!*overridden.commands.get("describe").unwrap());
+    }
+
+    #[test]
+    fn test_load_and_apply_full_flow() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
+        env_guard.set("review = true\ndescribe = true");
+        let env_guard2 = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
+        env_guard2.set("false");
+
+        let user_toml = format!("output_dir = \"/tmp/test-reports\"\n\n[diff]\nmax_input_tokens = 50000\n\n{}\n\n[review_experts.alice]\nenabled = true\nweight = 100\n",
+            base_disabled_toml().trim()
+        );
+
+        let cfg = load_and_apply(&user_toml).unwrap();
+        assert_eq!(cfg.output_dir, "/tmp/test-reports");
+        assert_eq!(cfg.diff.max_input_tokens, 50000);
+        assert!(*cfg.commands.get("review").unwrap());
+        assert!(*cfg.commands.get("describe").unwrap());
+        assert!(!cfg.scoring.enabled);
+    }
+
+    #[test]
+    fn test_load_and_apply_env_override_precedence() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
+        env_guard.set("false");
+
+        let user_toml = r#"
+[scoring]
+enabled = true
+"#;
+
+        let cfg = load_and_apply(user_toml).unwrap();
+        // Environment override should take precedence over TOML
+        assert!(!cfg.scoring.enabled);
+    }
+
+    #[test]
+    fn test_validate_experts_weight_overflow() {
+        let user_toml = format!(
+            "{}[review_experts.alice]\nenabled = true\nweight = 255\n",
+            base_disabled_toml()
+        );
+        let parsed = parse_toml(&user_toml).unwrap();
+        let merged = merge_default(parsed).unwrap();
+        let cfg = apply_env_overrides(merged);
+        // Weight sum is 255, which should fail validation (must be 100)
+        let result = validate_experts(&cfg);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_apply_env_overrides_commands_multiple() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
+        env_guard.set("review = true\ndescribe = true\nimprove = false\nask = true");
+
+        let config = default_config().unwrap();
+        let overridden = apply_env_overrides(config);
+        assert!(*overridden.commands.get("review").unwrap());
+        assert!(*overridden.commands.get("describe").unwrap());
+        assert!(!*overridden.commands.get("improve").unwrap());
+        assert!(*overridden.commands.get("ask").unwrap());
+    }
+
+    #[test]
+    fn test_load_and_apply_invalid_weight_expert() {
+        let user_toml = format!(
+            "{}[review_experts.alice]\nenabled = true\nweight = 50\n[review_experts.bob]\nenabled = true\nweight = 60\n",
+            base_disabled_toml()
+        );
+        let result = load_and_apply(&user_toml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_load_and_apply_missing_required_model() {
+        // model is not required in ExpertTomlDef (it defaults to empty string)
+        let user_toml = format!(
+            "{}[review_experts.alice]\nenabled = true\nweight = 100\nrole = \"Test Role\"\n",
+            base_disabled_toml()
+        );
+        let cfg = load_and_apply(&user_toml).unwrap();
+        assert!(cfg.review_experts.contains_key("alice"));
+    }
+
+    #[tokio::test]
+    async fn test_resolve_config_with_scoring_penalties() {
+        let toml = r#"
+[scoring.penalties]
+critical = 50
+high = 25
+"#;
+        let cfg = resolve_config(Some(ConfigSource::Inline(toml.to_string())))
+            .await
+            .unwrap();
+        assert_eq!(cfg.scoring.penalties.critical, 50);
+        assert_eq!(cfg.scoring.penalties.high, 25);
+        // Defaults should be preserved for unspecified fields
+        assert_eq!(cfg.scoring.penalties.medium, 5);
+        assert_eq!(cfg.scoring.penalties.low, 1);
+    }
+
+    #[tokio::test]
+    async fn test_resolve_config_with_risk_thresholds() {
+        let toml = r#"
+[scoring.risk_thresholds]
+critical_max = 30
+high_max = 50
+"#;
+        let cfg = resolve_config(Some(ConfigSource::Inline(toml.to_string())))
+            .await
+            .unwrap();
+        assert_eq!(cfg.scoring.risk_thresholds.critical_max, 30);
+        assert_eq!(cfg.scoring.risk_thresholds.high_max, 50);
+        assert_eq!(cfg.scoring.risk_thresholds.medium_max, 80); // default
+        assert_eq!(cfg.scoring.risk_thresholds.low_max, 95); // default
+    }
+
+    #[tokio::test]
+    async fn test_resolve_config_with_consensus_threshold() {
+        let toml = r#"
+[scoring]
+consensus_threshold = 80
+"#;
+        let cfg = resolve_config(Some(ConfigSource::Inline(toml.to_string())))
+            .await
+            .unwrap();
+        assert_eq!(cfg.scoring.consensus_threshold, 80);
     }
 
     #[test]
@@ -733,15 +868,57 @@ display_individual_scores = false
     }
 
     #[test]
-    fn test_validate_experts_invalid_config_missing_fields() {
-        // Overriding lead weight to 100 without disabling other default experts
-        // causes the enabled experts' weights to sum to more than 100.
-        let user_toml = r#"
-[review_experts.lead]
-enabled = true
-weight = 100
-"#;
-        let result = load_and_apply(user_toml);
+    fn test_load_and_apply_full_pipeline() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
+        env_guard.set("true");
+
+        let user_toml = format!(
+            "output_dir = \"/tmp/test-reports\"\n\n[commands]\nreview = true\n\n{}\n\n[review_experts.alice]\nenabled = true\nweight = 100\nrole = \"Test\"\ntitle = \"Test\"\nstyle = \"test\"\nprinciples = [\"p1\"]\nfocus = [\"f1\"]\nstandards = [\"s1\"]\nprompt = \"test\"\ncommands = [\"review\"]\n",
+            base_disabled_toml().trim()
+        );
+        let cfg = load_and_apply(&user_toml).unwrap();
+        assert_eq!(cfg.output_dir, "/tmp/test-reports");
+        assert!(cfg.scoring.enabled);
+        assert!(cfg.review_experts.contains_key("alice"));
+    }
+
+    #[test]
+    fn test_apply_env_overrides_multiple_vars() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let cmd_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
+        cmd_guard.set("review = true\ndescribe = true");
+        let score_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
+        score_guard.set("1");
+
+        let config = default_config().unwrap();
+        let overridden = apply_env_overrides(config);
+        assert!(overridden.scoring.enabled);
+        assert!(*overridden.commands.get("review").unwrap());
+        assert!(*overridden.commands.get("describe").unwrap());
+    }
+
+    #[test]
+    fn test_validate_experts_fails_on_missing_role() {
+        // Expert without role is still accepted by ExpertTomlDef default (role defaults to "")
+        // but validate does not check role. The validation only checks weights sum to 100.
+        let user_toml = format!(
+            "{}[review_experts.alice]\nenabled = true\nweight = 100\n",
+            base_disabled_toml()
+        );
+        let cfg = load_and_apply(&user_toml).unwrap();
+        assert!(validate_experts(&cfg).is_ok());
+    }
+
+    #[test]
+    fn test_load_and_apply_invalid_expert_weight_sum() {
+        let user_toml = format!(
+            "{}[review_experts.alice]\nenabled = true\nweight = 30\n[review_experts.bob]\nenabled = true\nweight = 30\n",
+            base_disabled_toml()
+        );
+        let result = load_and_apply(&user_toml);
         assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("sum to"), "Error should mention weight sum: {}", err);
     }
 }

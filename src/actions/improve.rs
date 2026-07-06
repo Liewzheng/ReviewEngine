@@ -59,6 +59,7 @@ fn parse_improve_response(response: &str) -> Result<ImproveOutput> {
             code_suggestions: suggestions,
         });
     }
+    tracing::warn!("Failed to parse improve response as YAML, returning empty suggestions");
     Ok(ImproveOutput {
         code_suggestions: vec![],
     })

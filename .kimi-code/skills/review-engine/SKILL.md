@@ -14,7 +14,7 @@ compatibility:
   - agent-skills
 metadata:
   author: ReviewEngine contributors
-  version: 0.6.3
+  version: 0.6.10
 ---
 
 # ReviewEngine Skill
@@ -81,8 +81,8 @@ and more examples.
 
 ## Output formats and publishing
 
-- `--format markdown` (default) prints a human-readable report.
-- `--format json` emits structured data for CI pipelines.
+- `--format markdown` (default for `repo-review`) prints a human-readable report.
+- `--format json` (default for `review`) emits structured data for CI pipelines.
 - `--output report.md` writes the report to a file; otherwise a timestamped copy
   is saved under `~/.config/review-engine/reports/`.
 - `--publish` posts the report back to the GitHub PR or GitLab MR discussion.

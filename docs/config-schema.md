@@ -111,24 +111,24 @@ prompt = "You are the Lead Reviewer..."
 
 ## `[diff]`
 
-大 PR 检测和分块配置。控制何时触发压缩、分块、并行审核。
+Large PR detection and chunking configuration. Controls when compression, chunking, and parallel review are triggered.
 
-| 字段 | 类型 | 默认值 | 描述 |
-|------|------|--------|------|
-| `max_input_tokens` | integer | `120000` | LLM 上下文窗口上限（token），超过后触发分块 |
-| `max_tokens_per_chunk` | integer | `30000` | 每个 chunk 的 token 预算上限 |
-| `large_pr_file_threshold` | integer | `21` | 文件数超过此值视为大 PR |
-| `large_pr_line_threshold` | integer | `1000` | 变更行数超过此值视为大 PR |
-| `compression_level` | string | `"aggressive"` | 压缩级别：`"none"` / `"light"` / `"medium"` / `"aggressive"` |
-| `chunking_strategy` | string | `"adaptive"` | 分块策略：`"files"` / `"hunks"` / `"adaptive"` |
-| `max_chunks_per_expert` | integer | `3` | 每位专家最多接收多少个 chunk |
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_input_tokens` | integer | `120000` | LLM context window limit (tokens); exceeding this triggers chunking |
+| `max_tokens_per_chunk` | integer | `30000` | Token budget per chunk |
+| `large_pr_file_threshold` | integer | `21` | PRs with more files than this are treated as large PRs |
+| `large_pr_line_threshold` | integer | `1000` | PRs with more changed lines than this are treated as large PRs |
+| `compression_level` | string | `"aggressive"` | Compression level: `"none"` / `"light"` / `"medium"` / `"aggressive"` |
+| `chunking_strategy` | string | `"adaptive"` | Chunking strategy: `"files"` / `"hunks"` / `"adaptive"` |
+| `max_chunks_per_expert` | integer | `3` | Maximum number of chunks each expert receives |
 
-**判定机制：**
+**Detection logic:**
 
-大 PR 的判定分两个阶段：
+Large PR detection happens in two phases:
 
-1. **预判（parse diff 前）**：从 `large_pr_line_threshold × 50` 估算字节阈值（默认 1000 × 50 = 50000 bytes），用于选择合适的进度阶段（`small_pr` / `large_pr`）。
-2. **精确判定（parse diff 后）**：`assess_large_pr()` 检查三个维度（文件数 > `large_pr_file_threshold`、变更行数 > `large_pr_line_threshold`、预估 token > `max_input_tokens`），任一超标即触发压缩/分块流程。
+1. **Pre-parse estimate**: A byte threshold is estimated from `large_pr_line_threshold × 50` (default 1000 × 50 = 50000 bytes), used to choose the appropriate progress stage (`small_pr` / `large_pr`).
+2. **Exact assessment (post-parse)**: `assess_large_pr()` checks three dimensions (file count > `large_pr_file_threshold`, changed lines > `large_pr_line_threshold`, estimated tokens > `max_input_tokens`). If any exceed the threshold, the compression/chunking pipeline is triggered.
 
 ```toml
 [diff]
@@ -143,13 +143,13 @@ max_chunks_per_expert = 3
 
 ## `[rate_limit]`
 
-LLM API 速率限制配置。控制并发请求数和 token 消耗速率，防止触发 429 限流。
+LLM API rate-limit configuration. Controls concurrent request count and token consumption rate to avoid hitting 429 limits.
 
-| 字段 | 类型 | 默认值 | 描述 |
-|------|------|--------|------|
-| `max_rpm` | integer | `60` | 每分钟最大请求数 |
-| `max_tpm` | integer | `200000` | 每分钟最大 token 消耗（输入+输出）|
-| `window_seconds` | integer | `60` | 滑动窗口大小（秒）|
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `max_rpm` | integer | `60` | Maximum requests per minute |
+| `max_tpm` | integer | `200000` | Maximum tokens per minute (input + output) |
+| `window_seconds` | integer | `60` | Sliding window size in seconds |
 
 ```toml
 [rate_limit]
@@ -160,9 +160,8 @@ window_seconds = 60
 
 ## Configuration Loading Order
 
-1. Built-in defaults (`docs/code-audit-default.toml`)
-2. Project config (`.code-audit-config.toml` in project root)
-3. Legacy config (`.pr-agent.toml` — deprecated)
-4. User-level config (`~/.config/review-engine/.code-audit-config.toml`)
-5. Environment variables (`LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.)
-6. CLI arguments (`--llm-config`, `--config`)
+1. Built-in defaults (`docs/code-audit-default.toml`) with environment overrides
+2. User-level config (`~/.config/review-engine/.code-audit-config.toml`)
+3. Project-level config (`.code-audit-config.toml` in the project root)
+4. Environment variables (`LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.)
+5. CLI arguments (`--llm-config`, `--config`)

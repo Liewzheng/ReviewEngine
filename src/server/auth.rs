@@ -19,15 +19,15 @@ pub struct AuthConfig {
 }
 
 impl AuthConfig {
-    pub fn new(token: Option<String>, bind_addr: &str) -> Self {
+    pub fn new(token: Option<String>, bind_addr: &str) -> anyhow::Result<Self> {
         if bind_addr != "127.0.0.1" && token.is_none() {
-            panic!(
+            return Err(anyhow::anyhow!(
                 "Binding to '{bind_addr}' requires an API token. \
                  Use --api-token <token> or set REVIEW_API_TOKEN. \
                  For local-only access, bind to 127.0.0.1 (default)."
-            );
+            ));
         }
-        Self { token }
+        Ok(Self { token })
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -47,7 +47,12 @@ impl AuthConfig {
             .or_else(|| req.headers().get("X-API-Key").and_then(|v| v.to_str().ok()))
             .unwrap_or("");
 
-        provided == expected
+        let provided_bytes = provided.as_bytes();
+        let expected_bytes = expected.as_bytes();
+        if provided_bytes.len() != expected_bytes.len() {
+            return false;
+        }
+        subtle::ConstantTimeEq::ct_eq(provided_bytes, expected_bytes).into()
     }
 }
 

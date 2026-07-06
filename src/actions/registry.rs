@@ -10,6 +10,12 @@
 use crate::models::*;
 use std::collections::HashMap;
 
+pub enum ExpertSelection<'a> {
+    Selected(Vec<&'a ExpertDef>),
+    CommandDisabled,
+    NoMatchingExperts,
+}
+
 /// Registry that maps command names to enabled/disabled status and
 /// filters eligible experts for a given command.
 pub struct CommandRegistry {
@@ -32,18 +38,23 @@ impl CommandRegistry {
     /// Filters by command enablement and by each expert's `commands` list.
     /// Only enabled experts whose command list includes the given command
     /// (or has an empty command list, implying all commands) are returned.
-    pub fn select_experts_for_command<'a>(&self, command: &str, experts: &'a [ExpertDef]) -> Vec<&'a ExpertDef> {
+    pub fn select_experts_for_command<'a>(&self, command: &str, experts: &'a [ExpertDef]) -> ExpertSelection<'a> {
         if !self.is_enabled(command) {
-            return vec![];
+            return ExpertSelection::CommandDisabled;
         }
-        experts
+        let selected: Vec<&'a ExpertDef> = experts
             .iter()
             .filter(|e| {
                 e.config.enabled
                     && !matches!(e.trigger, ExpertTrigger::OnDemand)
                     && (e.config.commands.is_empty() || e.config.commands.iter().any(|c| c == command))
             })
-            .collect()
+            .collect();
+        if selected.is_empty() {
+            ExpertSelection::NoMatchingExperts
+        } else {
+            ExpertSelection::Selected(selected)
+        }
     }
 }
 
@@ -97,8 +108,13 @@ mod tests {
             make_expert("jordan", vec!["improve".to_string()], true),
         ];
         let selected = reg.select_experts_for_command("review", &experts);
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name, "sam");
+        match selected {
+            ExpertSelection::Selected(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].name, "sam");
+            }
+            _ => panic!("Expected Selected"),
+        }
     }
 
     #[test]
@@ -106,7 +122,7 @@ mod tests {
         let reg = make_registry();
         let experts = vec![make_expert("sam", vec!["describe".to_string()], true)];
         let selected = reg.select_experts_for_command("describe", &experts);
-        assert!(selected.is_empty());
+        assert!(matches!(selected, ExpertSelection::CommandDisabled));
     }
 
     #[test]
@@ -114,7 +130,7 @@ mod tests {
         let reg = make_registry();
         let experts = vec![make_expert("sam", vec!["improve".to_string()], true)];
         let selected = reg.select_experts_for_command("review", &experts);
-        assert!(selected.is_empty());
+        assert!(matches!(selected, ExpertSelection::NoMatchingExperts));
     }
 
     #[test]
@@ -122,7 +138,7 @@ mod tests {
         let reg = make_registry();
         let experts = vec![make_expert("sam", vec!["review".to_string()], false)];
         let selected = reg.select_experts_for_command("review", &experts);
-        assert!(selected.is_empty());
+        assert!(matches!(selected, ExpertSelection::NoMatchingExperts));
     }
 
     #[test]
@@ -140,7 +156,7 @@ mod tests {
         };
         let experts = [on_demand];
         let selected = reg.select_experts_for_command("review", &experts);
-        assert!(selected.is_empty());
+        assert!(matches!(selected, ExpertSelection::NoMatchingExperts));
     }
 
     #[test]
@@ -148,7 +164,12 @@ mod tests {
         let reg = make_registry();
         let experts = vec![make_expert("sam", vec![], true)];
         let selected = reg.select_experts_for_command("review", &experts);
-        assert_eq!(selected.len(), 1);
-        assert_eq!(selected[0].name, "sam");
+        match selected {
+            ExpertSelection::Selected(v) => {
+                assert_eq!(v.len(), 1);
+                assert_eq!(v[0].name, "sam");
+            }
+            _ => panic!("Expected Selected"),
+        }
     }
 }

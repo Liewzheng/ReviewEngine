@@ -39,7 +39,7 @@ max_tokens_per_chunk = 30000
 large_pr_file_threshold = 21
 # PRs exceeding this changed-line count are treated as large PRs
 large_pr_line_threshold = 1000
-# Compression level: one of "none", "light", "moderate", "aggressive"
+# Compression level: one of "none", "light", "medium", "aggressive"
 compression_level = "aggressive"
 # Chunking strategy: one of "files", "hunks", "adaptive"
 chunking_strategy = "adaptive"

@@ -77,6 +77,10 @@ enum Commands {
         #[arg(long)]
         gitlab_token: Option<String>,
 
+        /// GitHub personal access token
+        #[arg(long)]
+        github_token: Option<String>,
+
         /// LLM config JSON (can be repeated)
         #[arg(long, name = "llm-config")]
         llm_config: Vec<String>,
@@ -98,7 +102,7 @@ enum Commands {
     Validate {
         /// Path to config file
         #[arg(long)]
-        config: String,
+        config: Option<String>,
     },
 
     /// Print the default config
@@ -125,6 +129,14 @@ enum Commands {
         /// GitHub webhook secret
         #[arg(long)]
         github_webhook_secret: Option<String>,
+
+        /// GitLab personal access token
+        #[arg(long)]
+        gitlab_token: Option<String>,
+
+        /// GitLab webhook secret
+        #[arg(long)]
+        gitlab_webhook_secret: Option<String>,
     },
 
     /// Generate a random API token
@@ -147,6 +159,34 @@ enum Commands {
         #[arg(long)]
         mr_url: Option<String>,
 
+        /// Path to local git repository
+        #[arg(long)]
+        local_path: Option<String>,
+
+        /// Path to local diff file
+        #[arg(long)]
+        diff: Option<String>,
+
+        /// Review staged changes
+        #[arg(long)]
+        staged: bool,
+
+        /// Base ref for local diff
+        #[arg(long)]
+        base: Option<String>,
+
+        /// Head ref for local diff
+        #[arg(long)]
+        head: Option<String>,
+
+        /// Since commit range
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Until commit range
+        #[arg(long)]
+        until: Option<String>,
+
         /// Path to .code-audit-config.toml config
         #[arg(long)]
         config: Option<String>,
@@ -154,6 +194,10 @@ enum Commands {
         /// GitLab personal access token
         #[arg(long)]
         gitlab_token: Option<String>,
+
+        /// GitHub personal access token
+        #[arg(long)]
+        github_token: Option<String>,
 
         /// LLM config JSON (can be repeated)
         #[arg(long, name = "llm-config")]
@@ -178,6 +222,34 @@ enum Commands {
         #[arg(long)]
         mr_url: Option<String>,
 
+        /// Path to local git repository
+        #[arg(long)]
+        local_path: Option<String>,
+
+        /// Path to local diff file
+        #[arg(long)]
+        diff: Option<String>,
+
+        /// Review staged changes
+        #[arg(long)]
+        staged: bool,
+
+        /// Base ref for local diff
+        #[arg(long)]
+        base: Option<String>,
+
+        /// Head ref for local diff
+        #[arg(long)]
+        head: Option<String>,
+
+        /// Since commit range
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Until commit range
+        #[arg(long)]
+        until: Option<String>,
+
         /// Path to .code-audit-config.toml config
         #[arg(long)]
         config: Option<String>,
@@ -185,6 +257,10 @@ enum Commands {
         /// GitLab personal access token
         #[arg(long)]
         gitlab_token: Option<String>,
+
+        /// GitHub personal access token
+        #[arg(long)]
+        github_token: Option<String>,
 
         /// LLM config JSON (can be repeated)
         #[arg(long, name = "llm-config")]
@@ -201,6 +277,84 @@ enum Commands {
         /// Publish results back to the MR/PR discussion
         #[arg(long)]
         publish: bool,
+    },
+
+    /// Ask a question about the code changes
+    Ask {
+        /// Question to ask
+        #[arg(long)]
+        question: Option<String>,
+
+        /// Merge request URL
+        #[arg(long)]
+        mr_url: Option<String>,
+
+        /// Path to local git repository
+        #[arg(long)]
+        local_path: Option<String>,
+
+        /// Path to local diff file
+        #[arg(long)]
+        diff: Option<String>,
+
+        /// Read diff from stdin
+        #[arg(long)]
+        stdin: bool,
+
+        /// Path to .code-audit-config.toml config
+        #[arg(long)]
+        config: Option<String>,
+
+        /// GitLab personal access token
+        #[arg(long)]
+        gitlab_token: Option<String>,
+
+        /// GitHub personal access token
+        #[arg(long)]
+        github_token: Option<String>,
+
+        /// LLM config JSON (can be repeated)
+        #[arg(long, name = "llm-config")]
+        llm_config: Vec<String>,
+
+        /// Output format
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// Output file (default: stdout)
+        #[arg(long)]
+        output: Option<String>,
+    },
+
+    /// Update CHANGELOG from commit history
+    UpdateChangelog {
+        /// Path to local git repository
+        #[arg(long)]
+        local_path: Option<String>,
+
+        /// Since commit range
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Until commit range
+        #[arg(long)]
+        until: Option<String>,
+
+        /// Path to .code-audit-config.toml config
+        #[arg(long)]
+        config: Option<String>,
+
+        /// LLM config JSON (can be repeated)
+        #[arg(long, name = "llm-config")]
+        llm_config: Vec<String>,
+
+        /// Output format
+        #[arg(long, default_value = "json")]
+        format: String,
+
+        /// Output file (default: stdout)
+        #[arg(long)]
+        output: Option<String>,
     },
 
     /// Run a full repository health review
@@ -250,6 +404,7 @@ pub async fn run() -> Result<()> {
             mr_url: Some(url),
             config,
             gitlab_token,
+            github_token,
             llm_config,
             format,
             output,
@@ -261,6 +416,7 @@ pub async fn run() -> Result<()> {
                 &url,
                 config,
                 gitlab_token,
+                github_token,
                 llm_config,
                 &format,
                 &output,
@@ -323,6 +479,25 @@ pub async fn run() -> Result<()> {
             anyhow::bail!("Please specify --mr-url, --diff, --stdin, or --local-path");
         }
         Commands::Validate { config } => {
+            let config = match config {
+                Some(path) => path,
+                None => {
+                    let candidates = [
+                        std::env::current_dir().ok().map(|p| p.join(".code-audit-config.toml")),
+                        home::home_dir()
+                            .map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml")),
+                    ];
+                    candidates
+                        .into_iter()
+                        .flatten()
+                        .find(|p| p.exists())
+                        .ok_or_else(|| {
+                            anyhow::anyhow!("No config file found. Use --config or run review-engine init.")
+                        })?
+                        .to_string_lossy()
+                        .to_string()
+                }
+            };
             let content = tokio::fs::read_to_string(&config).await?;
             let parsed = review_engine::config::load_and_apply(&content)?;
             println!("✓ Valid config: {} experts defined", parsed.review_experts.len());
@@ -337,10 +512,12 @@ pub async fn run() -> Result<()> {
             api_token,
             github_token,
             github_webhook_secret,
+            gitlab_token,
+            gitlab_webhook_secret,
         } => {
             // Resolve API token: CLI arg > env var
             let api_token = api_token.or_else(|| std::env::var("REVIEW_API_TOKEN").ok());
-            let auth = Arc::new(review_engine::server::auth::AuthConfig::new(api_token, &bind));
+            let auth = Arc::new(review_engine::server::auth::AuthConfig::new(api_token, &bind)?);
 
             // Config file watching for hot-reload (server only)
             let config_candidates = [
@@ -365,13 +542,17 @@ pub async fn run() -> Result<()> {
             let state = Arc::new(app_state);
             let dispatcher = review_engine::server::dispatcher::MrDispatcher::new();
             let mut handlers: Vec<Arc<dyn review_engine::server::webhook::WebhookHandler>> = vec![];
-            let gitlab_token = std::env::var("GITLAB_TOKEN").unwrap_or_default();
-            if let Some(secret) = std::env::var("GITLAB_WEBHOOK_SECRET").ok() {
-                handlers.push(Arc::new(review_engine::server::gitlab::GitLabWebhookHandler::new(
-                    secret,
-                    dispatcher.clone(),
-                    gitlab_token,
-                )));
+            let gitlab_token = gitlab_token
+                .or_else(|| std::env::var("GITLAB_TOKEN").ok())
+                .unwrap_or_default();
+            if let Some(secret) = gitlab_webhook_secret.or_else(|| std::env::var("GITLAB_WEBHOOK_SECRET").ok()) {
+                if !secret.is_empty() {
+                    handlers.push(Arc::new(review_engine::server::gitlab::GitLabWebhookHandler::new(
+                        secret,
+                        dispatcher.clone(),
+                        gitlab_token,
+                    )));
+                }
             }
             if let Some((tok, secret)) = github_token
                 .or_else(|| std::env::var("GITHUB_TOKEN").ok())
@@ -407,29 +588,217 @@ pub async fn run() -> Result<()> {
             mr_url: Some(url),
             config,
             gitlab_token,
+            github_token,
             llm_config,
             format,
             output,
             publish,
+            ..
         } => {
-            handlers::run_improve(&url, config, gitlab_token, llm_config, &format, &output, publish).await?;
+            handlers::run_improve(
+                &url,
+                config,
+                gitlab_token,
+                github_token,
+                llm_config,
+                &format,
+                &output,
+                publish,
+            )
+            .await?;
+        }
+        Commands::Improve {
+            diff: Some(diff_path),
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            handlers::run_improve_local_diff(&diff_path, config, llm_config, &format, &output).await?;
+        }
+        Commands::Improve {
+            local_path: Some(path),
+            base,
+            head,
+            staged,
+            since,
+            until,
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            handlers::run_improve_local_repo(
+                &path,
+                base.as_deref(),
+                head.as_deref(),
+                staged,
+                since.as_deref(),
+                until.as_deref(),
+                config,
+                llm_config,
+                &format,
+                &output,
+            )
+            .await?;
         }
         Commands::Improve { .. } => {
-            anyhow::bail!("Please specify --mr-url");
+            anyhow::bail!("Please specify --mr-url, --diff, or --local-path");
         }
         Commands::Describe {
             mr_url: Some(url),
             config,
             gitlab_token,
+            github_token,
             llm_config,
             format,
             output,
             publish,
+            ..
         } => {
-            handlers::run_describe(&url, config, gitlab_token, llm_config, &format, &output, publish).await?;
+            handlers::run_describe(
+                &url,
+                config,
+                gitlab_token,
+                github_token,
+                llm_config,
+                &format,
+                &output,
+                publish,
+            )
+            .await?;
+        }
+        Commands::Describe {
+            diff: Some(diff_path),
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            handlers::run_describe_local_diff(&diff_path, config, llm_config, &format, &output).await?;
+        }
+        Commands::Describe {
+            local_path: Some(path),
+            base,
+            head,
+            staged,
+            since,
+            until,
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            handlers::run_describe_local_repo(
+                &path,
+                base.as_deref(),
+                head.as_deref(),
+                staged,
+                since.as_deref(),
+                until.as_deref(),
+                config,
+                llm_config,
+                &format,
+                &output,
+            )
+            .await?;
         }
         Commands::Describe { .. } => {
-            anyhow::bail!("Please specify --mr-url");
+            anyhow::bail!("Please specify --mr-url, --diff, or --local-path");
+        }
+        Commands::Ask {
+            question,
+            mr_url: Some(url),
+            config,
+            gitlab_token,
+            github_token,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            let q = question.unwrap_or_default();
+            handlers::run_ask(
+                &q,
+                &url,
+                config,
+                gitlab_token,
+                github_token,
+                llm_config,
+                &format,
+                &output,
+            )
+            .await?;
+        }
+        Commands::Ask {
+            question,
+            diff: Some(diff_path),
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            let q = question.unwrap_or_default();
+            handlers::run_ask_local_diff(&q, &diff_path, config, llm_config, &format, &output).await?;
+        }
+        Commands::Ask {
+            question,
+            local_path: Some(path),
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            let q = question.unwrap_or_default();
+            handlers::run_ask_local_repo(
+                &q, &path, None, None, false, None, None, config, llm_config, &format, &output,
+            )
+            .await?;
+        }
+        Commands::Ask {
+            question,
+            stdin: true,
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            let q = question.unwrap_or_default();
+            handlers::run_ask_stdin(&q, config, llm_config, &format, &output).await?;
+        }
+        Commands::Ask { .. } => {
+            anyhow::bail!("Please specify --mr-url, --diff, --local-path, or --stdin");
+        }
+        Commands::UpdateChangelog {
+            local_path: Some(path),
+            since,
+            until,
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            handlers::run_update_changelog(
+                &path,
+                since.as_deref(),
+                until.as_deref(),
+                config,
+                llm_config,
+                &format,
+                &output,
+            )
+            .await?;
+        }
+        Commands::UpdateChangelog { .. } => {
+            anyhow::bail!("Please specify --local-path");
         }
         Commands::RepoReview {
             local_path: Some(path),

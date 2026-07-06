@@ -245,7 +245,7 @@ VSCode Extension 可用此接口展示可选专家、让用户开关。
 ```
 Response 200:
 {
-  "version": "0.4.0",
+  "version": "0.6.10",
   "commit": "3be7ac1",
   "features": ["cli", "python"]
 }

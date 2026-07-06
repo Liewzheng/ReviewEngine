@@ -42,7 +42,16 @@ impl WebhookHandler for GitLabWebhookHandler {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        if token != self.webhook_secret {
+        let token_bytes = token.as_bytes();
+        let secret_bytes = self.webhook_secret.as_bytes();
+        if token_bytes.len() != secret_bytes.len() {
+            tracing::warn!("GitLab webhook received with invalid token");
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid token"})),
+            ));
+        }
+        if !bool::from(subtle::ConstantTimeEq::ct_eq(token_bytes, secret_bytes)) {
             tracing::warn!("GitLab webhook received with invalid token");
             return Err((
                 StatusCode::FORBIDDEN,

@@ -1590,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "review-engine"
-version = "0.6.10"
+version = "0.6.11"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1616,6 +1616,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "similar",
+ "subtle",
  "tempfile",
  "thiserror",
  "tiktoken-rs",

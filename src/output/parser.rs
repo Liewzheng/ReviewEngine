@@ -61,13 +61,46 @@ fn fallback_report(expert_name: &str, yaml_text: &str) -> ExpertReport {
 /// Parse the aggregator expert's YAML response into an [`AggregatedReport`].
 ///
 /// Cleans the YAML (strips fences), then extracts findings and renders
-/// them as aggregated Markdown. Unlike [`parse_llm_response`], this does
-/// not attempt fallback parsing — a malformed response returns an error.
+/// them as aggregated Markdown. Implements a three-layer fallback:
+/// 1. Strict YAML parsing; 2. Extract fenced YAML block; 3. Return empty
+/// report so the pipeline does not abort.
 pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
     let cleaned = clean_yaml(yaml_text);
-    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&cleaned)?;
-    let findings = extract_findings(&value, "aggregator")?;
 
+    // Layer 1: strict YAML parsing
+    let value = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!("Aggregator YAML parse failed: {}. Attempting fenced fallback.", e);
+            // Layer 2: extract fenced YAML block
+            if let Some(fallback) = extract_first_fenced_yaml(yaml_text) {
+                match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&fallback) {
+                    Ok(v) => v,
+                    Err(e2) => {
+                        tracing::warn!(
+                            "Aggregator fenced YAML fallback also failed: {}. Returning empty report.",
+                            e2
+                        );
+                        // Layer 3: empty report
+                        return Ok(AggregatedReport {
+                            findings: vec![],
+                            markdown: String::new(),
+                            raw_llm_response: yaml_text.to_string(),
+                        });
+                    }
+                }
+            } else {
+                tracing::warn!("No fenced YAML block found in aggregator response. Returning empty report.");
+                return Ok(AggregatedReport {
+                    findings: vec![],
+                    markdown: String::new(),
+                    raw_llm_response: yaml_text.to_string(),
+                });
+            }
+        }
+    };
+
+    let findings = extract_findings(&value, "aggregator").unwrap_or_default();
     let markdown = renderer::render_aggregated_markdown(&findings);
 
     Ok(AggregatedReport {
@@ -431,9 +464,11 @@ review:
     }
 
     #[test]
-    fn parse_aggregator_response_returns_error_for_malformed_content() {
+    fn parse_aggregator_response_returns_empty_report_for_malformed_content() {
         let yaml = "review:\n  findings: [\n    not a valid sequence";
-        assert!(parse_aggregator_response(yaml).is_err());
+        let report = parse_aggregator_response(yaml).unwrap();
+        assert!(report.findings.is_empty());
+        assert_eq!(report.markdown, "");
     }
 
     #[test]

@@ -27,7 +27,7 @@ const AVAILABLE_EXPERTS: &[(&str, u8, &str, &str)] = &[
 
 const AVAILABLE_COMMANDS: &[(&str, &str)] = &[
     ("review", "MR/PR code review"),
-    ("repo-review", "full repo health check"),
+    ("repo_review", "full repo health check"),
     ("improve", "code improvement suggestions"),
     ("describe", "PR description / summary"),
     ("ask", "free-form Q&A about the diff"),
@@ -217,10 +217,21 @@ fn compute_weights(selected: &[&(&str, u8, &str, &str)]) -> Result<Vec<u8>> {
 
     if is_auto {
         let total_default: u32 = selected.iter().map(|(_, w, _, _)| *w as u32).sum();
-        Ok(selected
+        let mut weights: Vec<u8> = selected
             .iter()
             .map(|(_, w, _, _)| ((*w as f64 / total_default as f64) * 100.0).round() as u8)
-            .collect())
+            .collect();
+
+        // Ensure the sum of weights is exactly 100 after rounding
+        let sum: u32 = weights.iter().map(|&w| w as u32).sum();
+        if sum != 100 {
+            let diff = (100i32 - sum as i32) as i8;
+            if let Some(max_idx) = weights.iter().enumerate().max_by_key(|(_, w)| *w).map(|(i, _)| i) {
+                let adjusted = (weights[max_idx] as i16 + diff as i16).clamp(0, 255) as u8;
+                weights[max_idx] = adjusted;
+            }
+        }
+        Ok(weights)
     } else {
         let mut ws = Vec::new();
         for (name, _def_w, _role, _desc) in selected {
@@ -306,7 +317,8 @@ fn generate_toml(
     toml.push_str("[commands]\n");
     for (i, (name, _)) in AVAILABLE_COMMANDS.iter().enumerate() {
         let enabled = cmd_indices.contains(&i);
-        toml.push_str(&format!("{} = {}\n", name, enabled));
+        let snake_name = name.replace('-', "_");
+        toml.push_str(&format!("{} = {}\n", snake_name, enabled));
     }
     toml.push('\n');
 
@@ -329,11 +341,24 @@ fn generate_toml(
 
     for (idx, (name, _def_w, role, _desc)) in selected.iter().enumerate() {
         let weight = weights[idx];
+        let expert_cmds: Vec<String> = cmd_indices
+            .iter()
+            .map(|&i| AVAILABLE_COMMANDS[i].0.replace('-', "_"))
+            .collect();
+        let cmds_str = if expert_cmds.is_empty() {
+            "[]".to_string()
+        } else {
+            expert_cmds
+                .iter()
+                .map(|c| format!("\"{}\"", c))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         toml.push_str(&format!("[review_experts.{name}]\n"));
         toml.push_str("enabled = true\n");
         toml.push_str(&format!("role = \"{role}\"\n"));
         toml.push_str(&format!("weight = {weight}\n"));
-        toml.push_str("commands = [\"review\", \"repo-review\"]\n\n");
+        toml.push_str(&format!("commands = [{cmds_str}]\n\n"));
     }
 
     toml

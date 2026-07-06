@@ -335,7 +335,7 @@ fn default_true() -> bool {
 }
 
 fn default_max_tokens() -> u32 {
-    2048
+    4096
 }
 fn default_temperature() -> f32 {
     0.3

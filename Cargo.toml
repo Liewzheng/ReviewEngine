@@ -1,6 +1,6 @@
 [package]
 name = "review-engine"
-version = "0.6.10"
+version = "0.6.11"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -42,6 +42,9 @@ rand = "0.8"
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+
+# Constant-time comparison
+subtle = "2"
 
 # HTTP client
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

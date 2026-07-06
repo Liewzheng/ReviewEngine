@@ -19,44 +19,38 @@ impl PromptEngine {
     /// Templates are loaded from `const` string constants embedded in
     /// the binary. Panics if any template fails to parse (this is
     /// considered a programming error).
-    #[allow(clippy::unwrap_used)]
     pub fn new() -> Self {
+        match Self::try_new() {
+            Ok(engine) => engine,
+            Err(_) => panic!("Failed to initialize PromptEngine: one or more built-in templates failed to parse"),
+        }
+    }
+
+    /// Try to create a new `PromptEngine` and register all built-in templates.
+    ///
+    /// Returns `Err` if any template fails to parse, which may happen if
+    /// a built-in template string is malformed.
+    pub fn try_new() -> Result<Self> {
         let mut env = Environment::new();
-        env.add_template("review_system", templates::REVIEW_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("review_user", templates::REVIEW_USER_TEMPLATE)
-            .unwrap();
-        env.add_template("aggregator_system", templates::AGGREGATOR_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("aggregator_user", templates::AGGREGATOR_USER_TEMPLATE)
-            .unwrap();
-        env.add_template("describe_system", templates::DESCRIBE_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("describe_user", templates::DESCRIBE_USER_TEMPLATE)
-            .unwrap();
-        env.add_template("improve_system", templates::IMPROVE_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("improve_user", templates::IMPROVE_USER_TEMPLATE)
-            .unwrap();
-        env.add_template("ask_system", templates::ASK_SYSTEM_TEMPLATE).unwrap();
-        env.add_template("ask_line_system", templates::ASK_LINE_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("ask_user", templates::ASK_USER_TEMPLATE).unwrap();
-        env.add_template("ask_line_user", templates::ASK_LINE_USER_TEMPLATE)
-            .unwrap();
-        env.add_template("repo_review_system", templates::REPO_REVIEW_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("repo_review_user", templates::REPO_REVIEW_USER_TEMPLATE)
-            .unwrap();
-        env.add_template("changelog_system", templates::CHANGELOG_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("changelog_user", templates::CHANGELOG_USER_TEMPLATE)
-            .unwrap();
-        env.add_template("overview_system", templates::OVERVIEW_SYSTEM_TEMPLATE)
-            .unwrap();
-        env.add_template("overview_user", templates::OVERVIEW_USER_TEMPLATE)
-            .unwrap();
-        Self { env }
+        env.add_template("review_system", templates::REVIEW_SYSTEM_TEMPLATE)?;
+        env.add_template("review_user", templates::REVIEW_USER_TEMPLATE)?;
+        env.add_template("aggregator_system", templates::AGGREGATOR_SYSTEM_TEMPLATE)?;
+        env.add_template("aggregator_user", templates::AGGREGATOR_USER_TEMPLATE)?;
+        env.add_template("describe_system", templates::DESCRIBE_SYSTEM_TEMPLATE)?;
+        env.add_template("describe_user", templates::DESCRIBE_USER_TEMPLATE)?;
+        env.add_template("improve_system", templates::IMPROVE_SYSTEM_TEMPLATE)?;
+        env.add_template("improve_user", templates::IMPROVE_USER_TEMPLATE)?;
+        env.add_template("ask_system", templates::ASK_SYSTEM_TEMPLATE)?;
+        env.add_template("ask_line_system", templates::ASK_LINE_SYSTEM_TEMPLATE)?;
+        env.add_template("ask_user", templates::ASK_USER_TEMPLATE)?;
+        env.add_template("ask_line_user", templates::ASK_LINE_USER_TEMPLATE)?;
+        env.add_template("repo_review_system", templates::REPO_REVIEW_SYSTEM_TEMPLATE)?;
+        env.add_template("repo_review_user", templates::REPO_REVIEW_USER_TEMPLATE)?;
+        env.add_template("changelog_system", templates::CHANGELOG_SYSTEM_TEMPLATE)?;
+        env.add_template("changelog_user", templates::CHANGELOG_USER_TEMPLATE)?;
+        env.add_template("overview_system", templates::OVERVIEW_SYSTEM_TEMPLATE)?;
+        env.add_template("overview_user", templates::OVERVIEW_USER_TEMPLATE)?;
+        Ok(Self { env })
     }
 
     /// Build a review system+user prompt pair for an individual expert.

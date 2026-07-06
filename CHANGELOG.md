@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.6.11] - 2026-07-06
+
+### Fixed
+- **Config**: Set `[commands] review = true` in default config so `review-engine review` works out of the box.
+- **Config**: Fixed `init` weight auto-allocation rounding so the total always equals 100.
+- **Config**: Fixed `init` commands generation to use snake_case (`repo_review`) matching the config schema.
+- **Config**: Added `validate_experts` check to `POST /api/v1/config/validate` endpoint.
+- **Docs**: Corrected config resolution order (User config → Project config, not reversed).
+- **Docs**: Removed stale `.pr-agent.toml` references from all documentation.
+- **Docs**: Translated Chinese sections in `config-schema.md` to English.
+- **Docs**: Synced version numbers: `rest-api.md` (0.4.0→0.6.11), `SKILL.md` (0.6.3→0.6.11).
+- **Docs**: Fixed `enterprise.md` filename reference and `CHANGELOG.md` Unreleased dates.
+- **Security**: Replaced `server/auth.rs` production `panic!` with `Result`-based error handling.
+- **Security**: Fixed `RateLimiter` race condition by merging RPM/TPM check and request record into a single `lock`.
+- **Security**: Used `subtle::ConstantTimeEq` for GitLab webhook token comparison (timing attack fix).
+- **Security**: Used `subtle::ConstantTimeEq` for API token comparison (timing attack fix).
+- **CLI**: Added `--github-token` to `review`, `improve`, `describe`, and `serve` commands.
+- **CLI**: Added `Ask` and `UpdateChangelog` CLI commands.
+- **CLI**: Auto-detects GitLab vs GitHub provider from URL in `run_mr`, `run_improve`, `run_describe`.
+- **CLI**: Added `--diff`, `--local-path`, and `--staged` options to `improve` and `describe`.
+- **CLI**: Added `--gitlab-token` and `--gitlab-webhook-secret` to `serve`.
+- **CLI**: Made `--config` optional in `validate` (auto-loads default path).
+- **Code Quality**: Added `PromptEngine::try_new()` returning `Result`; `new()` is a thin wrapper.
+- **Code Quality**: Replaced `tokenizer` `expect()` with graceful fallback to char counting.
+- **Code Quality**: Added `parse_aggregator_response` fallback (fenced YAML → empty report).
+- **Code Quality**: Added `tracing::warn!` for `parse_improve_response` failure (was silent).
+- **Code Quality**: Fixed `DefaultOrchestrator` command string matching (`repo_review` not `reporeview`).
+- **Code Quality**: Improved error messages distinguishing "command disabled" vs "no expert matched".
+- **Code Quality**: Fixed `max_tokens` default 2048 → 4096 (matching docs).
+- **Code Quality**: Fixed hardcoded aggregator language `"zh"` → `"en"`.
+
 ## [0.6.10] - 2026-07-06
 
 ### Fixed
@@ -36,13 +67,13 @@
 ### Fixed
 - Updated `notify` to 8.x and `inquire` to 0.9.4 to resolve cargo-audit unmaintained-dependency warnings (`fxhash`, `instant`).
 
-## [0.6.7] - Unreleased
+## [0.6.7] - 2026-07-03
 
 ### Fixed
 - `repo-review` scanner now respects `.gitignore` and excludes Git submodule directories by using `git ls-files` for file listing in Git repositories.
 - Binary files are now skipped entirely during repo-review scans instead of being included with `is_binary: true`.
 
-## [0.6.6] - Unreleased
+## [0.6.6] - 2026-07-03
 
 ### Added
 - `ProjectConfig` gains optional project context fields: `project_type`, `os`, `arch`, `domain`, and `constraints`. These help reviewers understand the target environment and avoid irrelevant generic advice.
@@ -251,7 +282,7 @@
 ### Changed
 - Upgraded from 0.4.0 to 0.4.1
 
-## Unreleased
+## [0.3.0] - 2026-06-26
 
 ### Added
 - `install.sh` — One-curl installer for Linux/macOS

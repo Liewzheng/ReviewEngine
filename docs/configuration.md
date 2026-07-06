@@ -8,9 +8,9 @@ review-engine is driven by a TOML config file named `.code-audit-config.toml`. Y
 
 Configuration is merged from multiple sources. Later sources override earlier ones:
 
-1. **Embedded default** — `docs/code-audit-default.toml` built into the binary.
-2. **Project config** — `.code-audit-config.toml` in the current working directory.
-3. **User config** — `~/.config/review-engine/.code-audit-config.toml`.
+1. **Embedded default** — `docs/code-audit-default.toml` built into the binary (plus environment overrides for built-in values).
+2. **User-level config** — `~/.config/review-engine/.code-audit-config.toml`.
+3. **Project-level config** — `.code-audit-config.toml` in the current working directory.
 4. **Environment variables** — `LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.
 5. **CLI arguments** — `--config`, `--llm-config`, etc.
 

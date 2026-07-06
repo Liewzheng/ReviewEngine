@@ -11,7 +11,7 @@ The core engine is licensed under the Apache License 2.0 and is free for individ
 - GitLab MR and GitHub PR review via CLI or webhook.
 - The REST API and webhook server (`review-engine serve`).
 - Configurable CodeReview Board experts and weighted scoring.
-- The default expert team shipped in `docs/code-audit-config.toml`.
+- The default expert team shipped in `docs/code-audit-default.toml`.
 
 ## Enterprise edition
 

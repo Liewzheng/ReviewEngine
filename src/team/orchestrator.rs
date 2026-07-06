@@ -8,6 +8,7 @@ use tokio::sync::Semaphore;
 use tracing::info;
 
 use crate::actions::registry::CommandRegistry;
+use crate::actions::registry::ExpertSelection;
 use crate::diff::chunker;
 use crate::diff::filter;
 use crate::diff::large_pr;
@@ -56,7 +57,7 @@ fn select_experts_for_command<'a>(
     command: &str,
     experts: &'a [ExpertDef],
     registry: &HashMap<String, bool>,
-) -> Vec<&'a ExpertDef> {
+) -> ExpertSelection<'a> {
     let cmd_registry = CommandRegistry::new(registry.clone());
     cmd_registry.select_experts_for_command(command, experts)
 }
@@ -69,7 +70,10 @@ impl TeamOrchestrator for DefaultOrchestrator {
         experts: &'a [ExpertDef],
         registry: &HashMap<String, bool>,
     ) -> Vec<&'a ExpertDef> {
-        select_experts_for_command(command, experts, registry)
+        match select_experts_for_command(command, experts, registry) {
+            ExpertSelection::Selected(v) => v,
+            _ => vec![],
+        }
     }
 
     async fn run(
@@ -101,11 +105,21 @@ impl TeamOrchestrator for DefaultOrchestrator {
         let experts = config.build_expert_defs();
         let registry = &config.commands;
         let cmd_str = format!("{:?}", command).to_lowercase();
-        let selected = select_experts_for_command(&cmd_str, &experts, registry);
-
-        if selected.is_empty() {
-            anyhow::bail!("No experts selected for command '{}'", cmd_str);
-        }
+        let selected = match select_experts_for_command(&cmd_str, &experts, registry) {
+            ExpertSelection::Selected(v) => v,
+            ExpertSelection::CommandDisabled => {
+                anyhow::bail!(
+                    "Command '{}' is disabled in the config. Set [commands]\n{} = true to enable it, or run review-engine init.",
+                    cmd_str, cmd_str
+                );
+            }
+            ExpertSelection::NoMatchingExperts => {
+                anyhow::bail!(
+                    "No experts are configured for command '{}'. Check each expert's 'commands' list.",
+                    cmd_str
+                );
+            }
+        };
 
         // Enforce max_team_size
         let max_size = config.max_team_size.unwrap_or(self.max_team_size);
@@ -151,7 +165,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
                 let prompt_engine = PromptEngine::new();
                 let llm_client = LLMClient::new();
                 let (system, user) =
-                    prompt_engine.build_aggregator_prompt(&reports, &mr_info, _global_context.as_ref(), "zh")?;
+                    prompt_engine.build_aggregator_prompt(&reports, &mr_info, _global_context.as_ref(), "en")?;
                 let llm_config = select_llm_config(aggregator, llm_configs);
                 let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
                 let agg_report = crate::output::parser::parse_aggregator_response(&result.content)?;
@@ -617,7 +631,7 @@ pub async fn run_aggregator(
     let prompt_engine = PromptEngine::new();
     let llm_client = LLMClient::new();
 
-    let (system, user) = prompt_engine.build_aggregator_prompt(reports, mr_info, global_context, "zh")?;
+    let (system, user) = prompt_engine.build_aggregator_prompt(reports, mr_info, global_context, "en")?;
     let config = select_llm_config(aggregator, llm_configs);
     let result = llm_client.complete_with_fallback(&config, &system, &user).await?;
 

@@ -27,6 +27,10 @@ pub fn resolve_llm_configs(argv_llm_configs: &[String], config: &AppConfig) -> a
     Ok(Vec::new())
 }
 
+fn is_github_url(url: &str) -> bool {
+    url.contains(".github.") || url.contains("github.com")
+}
+
 pub async fn run_stdin(format: &str, output: &Option<String>) -> Result<()> {
     use tokio::io::AsyncReadExt;
     let mut buf = String::new();
@@ -34,7 +38,10 @@ pub async fn run_stdin(format: &str, output: &Option<String>) -> Result<()> {
     let req: serde_json::Value = serde_json::from_str(&buf)?;
 
     let mr_url = req["mr_url"].as_str().unwrap_or_default();
-    let token = req["gitlab_token"].as_str().unwrap_or_default();
+    let token = req["github_token"]
+        .as_str()
+        .or_else(|| req["gitlab_token"].as_str())
+        .unwrap_or_default();
     let llm_configs: Vec<LLMConfig> = serde_json::from_value(req["llm_configs"].clone())?;
     let config_toml = req["config"].as_str().map(|s| s.to_string());
 
@@ -49,6 +56,7 @@ pub async fn run_mr(
     mr_url: &str,
     config_path: Option<String>,
     gitlab_token: Option<String>,
+    github_token: Option<String>,
     llm_configs: Vec<String>,
     format: &str,
     output: &Option<String>,
@@ -56,7 +64,11 @@ pub async fn run_mr(
     progress_map: Option<ProgressMap>,
     review_id: &str,
 ) -> Result<()> {
-    let token = gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default());
+    let token = if is_github_url(mr_url) {
+        github_token.unwrap_or_else(|| std::env::var("GITHUB_TOKEN").unwrap_or_default())
+    } else {
+        gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default())
+    };
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source.clone()).await?;
     let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
@@ -84,19 +96,32 @@ pub async fn run_improve(
     mr_url: &str,
     config_path: Option<String>,
     gitlab_token: Option<String>,
+    github_token: Option<String>,
     llm_configs: Vec<String>,
     format: &str,
     output: &Option<String>,
     publish: bool,
 ) -> Result<()> {
-    let token = gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default());
+    let token = if is_github_url(mr_url) {
+        github_token.unwrap_or_else(|| std::env::var("GITHUB_TOKEN").unwrap_or_default())
+    } else {
+        gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default())
+    };
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
     let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
-    let client = review_engine::git_provider::gitlab::client::Client::new(&token, mr_url)?;
-    let mr_info = client.fetch_mr_info().await?;
-    let diff = client.fetch_diff().await?;
+    let (diff, mr_info) = if is_github_url(mr_url) {
+        let client = review_engine::git_provider::github::client::Client::new(&token, mr_url)?;
+        let mr_info = client.fetch_pr_info().await?;
+        let diff = client.fetch_diff().await?;
+        (diff, mr_info)
+    } else {
+        let client = review_engine::git_provider::gitlab::client::Client::new(&token, mr_url)?;
+        let mr_info = client.fetch_mr_info().await?;
+        let diff = client.fetch_diff().await?;
+        (diff, mr_info)
+    };
 
     let llm_client = review_engine::llm::client::LLMClient::new();
     let result = review_engine::actions::improve::run_improve(&llm_client, &configs, &diff, &mr_info).await?;
@@ -133,23 +158,135 @@ pub async fn run_improve(
     Ok(())
 }
 
+pub async fn run_improve_local_diff(
+    diff_path: &str,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    let diff = tokio::fs::read_to_string(diff_path).await?;
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let mr_info = MRInfo::new(
+        "local".to_string(),
+        "Local improve".to_string(),
+        "local".to_string(),
+        "main".to_string(),
+    );
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let result = review_engine::actions::improve::run_improve(&llm_client, &configs, &diff, &mr_info).await?;
+
+    let md = format!(
+        "## Code Improvement Suggestions\n\nGenerated {} suggestions.\n\n```json\n{}\n```",
+        result.code_suggestions.len(),
+        serde_json::to_string_pretty(&result).unwrap_or_default(),
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "improve".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_improve_local_repo(
+    local_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+    staged: bool,
+    since: Option<&str>,
+    until: Option<&str>,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    use review_engine::git::local::LocalGitBrowser;
+
+    let base_ref = base.unwrap_or("main");
+    let repo = LocalGitBrowser::new(local_path);
+    let diff = repo.get_diff(base_ref, head, staged, since, until).await?;
+
+    if diff.is_empty() {
+        println!("No changes to improve (empty diff)");
+        return Ok(());
+    }
+
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let mr_info = MRInfo::new(
+        local_path.to_string(),
+        format!("Local improve: {}", local_path),
+        "local".to_string(),
+        base_ref.to_string(),
+    );
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let result = review_engine::actions::improve::run_improve(&llm_client, &configs, &diff, &mr_info).await?;
+
+    let md = format!(
+        "## Code Improvement Suggestions\n\nGenerated {} suggestions.\n\n```json\n{}\n```",
+        result.code_suggestions.len(),
+        serde_json::to_string_pretty(&result).unwrap_or_default(),
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "improve".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
 pub async fn run_describe(
     mr_url: &str,
     config_path: Option<String>,
     gitlab_token: Option<String>,
+    github_token: Option<String>,
     llm_configs: Vec<String>,
     format: &str,
     output: &Option<String>,
     publish: bool,
 ) -> Result<()> {
-    let token = gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default());
+    let token = if is_github_url(mr_url) {
+        github_token.unwrap_or_else(|| std::env::var("GITHUB_TOKEN").unwrap_or_default())
+    } else {
+        gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default())
+    };
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
     let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
-    let client = review_engine::git_provider::gitlab::client::Client::new(&token, mr_url)?;
-    let mr_info = client.fetch_mr_info().await?;
-    let diff = client.fetch_diff().await?;
+    let (diff, mr_info) = if is_github_url(mr_url) {
+        let client = review_engine::git_provider::github::client::Client::new(&token, mr_url)?;
+        let mr_info = client.fetch_pr_info().await?;
+        let diff = client.fetch_diff().await?;
+        (diff, mr_info)
+    } else {
+        let client = review_engine::git_provider::gitlab::client::Client::new(&token, mr_url)?;
+        let mr_info = client.fetch_mr_info().await?;
+        let diff = client.fetch_diff().await?;
+        (diff, mr_info)
+    };
 
     let llm_client = review_engine::llm::client::LLMClient::new();
     let commit_messages = vec![];
@@ -186,6 +323,341 @@ pub async fn run_describe(
     }
 
     Ok(())
+}
+
+pub async fn run_describe_local_diff(
+    diff_path: &str,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    let diff = tokio::fs::read_to_string(diff_path).await?;
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let mr_info = MRInfo::new(
+        "local".to_string(),
+        "Local describe".to_string(),
+        "local".to_string(),
+        "main".to_string(),
+    );
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let commit_messages = vec![];
+    let result =
+        review_engine::actions::describe::run_describe(&llm_client, &configs, &diff, &mr_info, &commit_messages)
+            .await?;
+
+    let md = format!(
+        "## PR Description\n\n**Title**: {}\n\n**Description**: {}\n\n**Type**: {}",
+        result.title, result.description, result.change_type,
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "describe".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_describe_local_repo(
+    local_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+    staged: bool,
+    since: Option<&str>,
+    until: Option<&str>,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    use review_engine::git::local::LocalGitBrowser;
+
+    let base_ref = base.unwrap_or("main");
+    let repo = LocalGitBrowser::new(local_path);
+    let diff = repo.get_diff(base_ref, head, staged, since, until).await?;
+
+    if diff.is_empty() {
+        println!("No changes to describe (empty diff)");
+        return Ok(());
+    }
+
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let mr_info = MRInfo::new(
+        local_path.to_string(),
+        format!("Local describe: {}", local_path),
+        "local".to_string(),
+        base_ref.to_string(),
+    );
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let commit_messages = vec![];
+    let result =
+        review_engine::actions::describe::run_describe(&llm_client, &configs, &diff, &mr_info, &commit_messages)
+            .await?;
+
+    let md = format!(
+        "## PR Description\n\n**Title**: {}\n\n**Description**: {}\n\n**Type**: {}",
+        result.title, result.description, result.change_type,
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "describe".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_ask(
+    question: &str,
+    mr_url: &str,
+    config_path: Option<String>,
+    gitlab_token: Option<String>,
+    github_token: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    let token = if is_github_url(mr_url) {
+        github_token.unwrap_or_else(|| std::env::var("GITHUB_TOKEN").unwrap_or_default())
+    } else {
+        gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default())
+    };
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let (diff, mr_info) = if is_github_url(mr_url) {
+        let client = review_engine::git_provider::github::client::Client::new(&token, mr_url)?;
+        let mr_info = client.fetch_pr_info().await?;
+        let diff = client.fetch_diff().await?;
+        (diff, mr_info)
+    } else {
+        let client = review_engine::git_provider::gitlab::client::Client::new(&token, mr_url)?;
+        let mr_info = client.fetch_mr_info().await?;
+        let diff = client.fetch_diff().await?;
+        (diff, mr_info)
+    };
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let result = review_engine::actions::ask::run_ask(&llm_client, &configs, question, &diff, &mr_info, None).await?;
+
+    let md = format!(
+        "## Ask\n\n**Question**: {}\n\n**Answer**: {}\n",
+        question, result.answer
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "ask".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_ask_local_diff(
+    question: &str,
+    diff_path: &str,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    let diff = tokio::fs::read_to_string(diff_path).await?;
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let mr_info = MRInfo::new(
+        "local".to_string(),
+        "Local ask".to_string(),
+        "local".to_string(),
+        "main".to_string(),
+    );
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let result = review_engine::actions::ask::run_ask(&llm_client, &configs, question, &diff, &mr_info, None).await?;
+
+    let md = format!(
+        "## Ask\n\n**Question**: {}\n\n**Answer**: {}\n",
+        question, result.answer
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "ask".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_ask_local_repo(
+    question: &str,
+    local_path: &str,
+    base: Option<&str>,
+    head: Option<&str>,
+    staged: bool,
+    since: Option<&str>,
+    until: Option<&str>,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    use review_engine::git::local::LocalGitBrowser;
+
+    let base_ref = base.unwrap_or("main");
+    let repo = LocalGitBrowser::new(local_path);
+    let diff = repo.get_diff(base_ref, head, staged, since, until).await?;
+
+    if diff.is_empty() {
+        println!("No changes to ask about (empty diff)");
+        return Ok(());
+    }
+
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let mr_info = MRInfo::new(
+        local_path.to_string(),
+        format!("Local ask: {}", local_path),
+        "local".to_string(),
+        base_ref.to_string(),
+    );
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let result = review_engine::actions::ask::run_ask(&llm_client, &configs, question, &diff, &mr_info, None).await?;
+
+    let md = format!(
+        "## Ask\n\n**Question**: {}\n\n**Answer**: {}\n",
+        question, result.answer
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "ask".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_update_changelog(
+    local_path: &str,
+    since: Option<&str>,
+    until: Option<&str>,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    use review_engine::git::local::LocalGitBrowser;
+
+    let repo = LocalGitBrowser::new(local_path);
+    let diff = repo.get_diff("main", None, false, since, until).await?;
+
+    if diff.is_empty() {
+        println!("No changes to changelog (empty diff)");
+        return Ok(());
+    }
+
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    let mr_info = MRInfo::new(
+        local_path.to_string(),
+        format!("Local changelog: {}", local_path),
+        "local".to_string(),
+        "main".to_string(),
+    );
+
+    let llm_client = review_engine::llm::client::LLMClient::new();
+    let commit_messages = vec![];
+    let result = review_engine::actions::update_changelog::run_update_changelog(
+        &llm_client,
+        &configs,
+        &diff,
+        &commit_messages,
+        &mr_info,
+    )
+    .await?;
+
+    let md = format!(
+        "## Changelog Update\n\n{} entries generated.\n\n```json\n{}\n```",
+        result.entries.len(),
+        serde_json::to_string_pretty(&result).unwrap_or_default(),
+    );
+
+    let review_out = ReviewOutput {
+        reports: vec![ExpertReport {
+            expert_name: "update_changelog".to_string(),
+            findings: vec![],
+            markdown: md,
+            raw_llm_response: String::new(),
+        }],
+        aggregated: None,
+    };
+    write_output(&review_out, format, output, None, None)?;
+
+    Ok(())
+}
+
+pub async fn run_ask_stdin(
+    question: &str,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut diff = String::new();
+    tokio::io::stdin().read_to_string(&mut diff).await?;
+
+    if diff.trim().is_empty() {
+        println!("No diff provided on stdin");
+        return Ok(());
+    }
+
+    run_ask_local_diff(&diff, question, config_path, llm_configs, format, output).await
 }
 
 pub async fn run_local(

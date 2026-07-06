@@ -67,19 +67,36 @@ async fn get_schema() -> Json<serde_json::Value> {
 }
 
 async fn validate_config(Json(body): Json<ConfigValidateRequest>) -> impl IntoResponse {
+    let mut errors = Vec::new();
+
     match crate::config::parse_toml(&body.body) {
         Ok(parsed) => match crate::config::merge_default(parsed) {
             Ok(config) => {
+                if let Err(e) = crate::config::resolver::validate_experts(&config) {
+                    errors.push(e.to_string());
+                }
                 let count = config.build_expert_defs().len();
-                (
-                    StatusCode::OK,
-                    Json(ConfigValidateResponse {
-                        valid: true,
-                        experts_count: Some(count),
-                        errors: Vec::new(),
-                    }),
-                )
-                    .into_response()
+                if errors.is_empty() {
+                    (
+                        StatusCode::OK,
+                        Json(ConfigValidateResponse {
+                            valid: true,
+                            experts_count: Some(count),
+                            errors: Vec::new(),
+                        }),
+                    )
+                        .into_response()
+                } else {
+                    (
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        Json(ConfigValidateResponse {
+                            valid: false,
+                            experts_count: Some(count),
+                            errors,
+                        }),
+                    )
+                        .into_response()
+                }
             }
             Err(e) => (
                 StatusCode::UNPROCESSABLE_ENTITY,

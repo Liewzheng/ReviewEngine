@@ -61,25 +61,35 @@ use models::*;
 /// * `progress_override` - Optional progress map and review ID for tracking.
 pub async fn run_review(
     mr_url: &str,
-    gitlab_token: &str,
+    token: &str,
     llm_configs: Vec<LLMConfig>,
     config_source: Option<ConfigSource>,
     progress_override: Option<(crate::progress::ProgressMap, String)>,
 ) -> Result<ReviewOutput> {
     let config = config::resolve_config(config_source.clone()).await?;
 
-    let gitlab_client = git_provider::gitlab::client::Client::new(gitlab_token, mr_url)?;
-    let mr_info = gitlab_client.fetch_mr_info().await?;
-    let diff = gitlab_client.fetch_diff().await?;
-
-    let app_config = match config_source {
-        Some(ConfigSource::Inline(_)) => config.clone(),
-        Some(ConfigSource::Path(_)) => config.clone(),
-        None => match gitlab_client.fetch_config_toml().await {
-            Ok(Some(toml_content)) => config::merge_default(config::parse_toml(&toml_content)?),
-            Ok(None) => Ok(config),
-            Err(_) => Ok(config),
-        }?,
+    let is_github = mr_url.contains(".github.") || mr_url.contains("github.com");
+    let (mr_info, diff, app_config) = if is_github {
+        let github_client = git_provider::github::client::Client::new(token, mr_url)?;
+        let mr_info = github_client.fetch_pr_info().await?;
+        let diff = github_client.fetch_diff().await?;
+        // GitHub client does not support fetching config TOML from repo
+        let app_config = config.clone();
+        (mr_info, diff, app_config)
+    } else {
+        let gitlab_client = git_provider::gitlab::client::Client::new(token, mr_url)?;
+        let mr_info = gitlab_client.fetch_mr_info().await?;
+        let diff = gitlab_client.fetch_diff().await?;
+        let app_config = match config_source {
+            Some(ConfigSource::Inline(_)) => config.clone(),
+            Some(ConfigSource::Path(_)) => config.clone(),
+            None => match gitlab_client.fetch_config_toml().await {
+                Ok(Some(toml_content)) => config::merge_default(config::parse_toml(&toml_content)?),
+                Ok(None) => Ok(config),
+                Err(_) => Ok(config),
+            }?,
+        };
+        (mr_info, diff, app_config)
     };
 
     let experts = app_config.build_expert_defs();

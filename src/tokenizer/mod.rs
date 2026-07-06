@@ -28,14 +28,27 @@ fn encoding_for_model(model: &str) -> &'static str {
     }
 }
 
-#[allow(clippy::expect_used)]
 fn get_bpe(encoding: &str) -> Result<&'static CoreBPE> {
     static O200K: OnceLock<CoreBPE> = OnceLock::new();
     static CL100K: OnceLock<CoreBPE> = OnceLock::new();
 
     match encoding {
-        "o200k_base" => Ok(O200K.get_or_init(|| o200k_base().expect("failed to load o200k_base"))),
-        _ => Ok(CL100K.get_or_init(|| cl100k_base().expect("failed to load cl100k_base"))),
+        "o200k_base" => {
+            if O200K.get().is_none() {
+                let bpe = o200k_base().map_err(|e| anyhow::anyhow!("failed to load o200k_base: {}", e))?;
+                O200K.set(bpe).ok();
+            }
+            O200K.get().ok_or_else(|| anyhow::anyhow!("failed to load o200k_base"))
+        }
+        _ => {
+            if CL100K.get().is_none() {
+                let bpe = cl100k_base().map_err(|e| anyhow::anyhow!("failed to load cl100k_base: {}", e))?;
+                CL100K.set(bpe).ok();
+            }
+            CL100K
+                .get()
+                .ok_or_else(|| anyhow::anyhow!("failed to load cl100k_base"))
+        }
     }
 }
 
@@ -53,9 +66,20 @@ fn get_bpe(encoding: &str) -> Result<&'static CoreBPE> {
 /// ```
 pub fn count_tokens(text: &str, model: &str) -> Result<usize> {
     let encoding = encoding_for_model(model);
-    let bpe = get_bpe(encoding)?;
-    let tokens = bpe.encode_with_special_tokens(text);
-    Ok(tokens.len())
+    match get_bpe(encoding) {
+        Ok(bpe) => {
+            let tokens = bpe.encode_with_special_tokens(text);
+            Ok(tokens.len())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Tokenizer load failed for model '{}': {}. Falling back to whitespace word count.",
+                model,
+                e
+            );
+            Ok(text.split_whitespace().count())
+        }
+    }
 }
 
 /// Count tokens using a specific encoding name directly (e.g. `"cl100k_base"`, `"o200k_base"`).
@@ -63,9 +87,20 @@ pub fn count_tokens(text: &str, model: &str) -> Result<usize> {
 /// Bypasses model-name detection; useful when the encoding is known
 /// ahead of time or for non-standard model mappings.
 pub fn count_tokens_with_encoding(text: &str, encoding: &str) -> Result<usize> {
-    let bpe = get_bpe(encoding)?;
-    let tokens = bpe.encode_with_special_tokens(text);
-    Ok(tokens.len())
+    match get_bpe(encoding) {
+        Ok(bpe) => {
+            let tokens = bpe.encode_with_special_tokens(text);
+            Ok(tokens.len())
+        }
+        Err(e) => {
+            tracing::warn!(
+                "Tokenizer load failed for encoding '{}': {}. Falling back to whitespace word count.",
+                encoding,
+                e
+            );
+            Ok(text.split_whitespace().count())
+        }
+    }
 }
 
 #[cfg(test)]

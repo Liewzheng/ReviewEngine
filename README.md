@@ -240,7 +240,7 @@ Input → Config Resolution → Expert Selection → Parallel Review → Consoli
 
 ### Lead overview
 
-Every review starts with a lead overview step. The lead reviewer analyzes the diff together with lightweight project metadata gathered from the repository (file tree, README/manifest excerpts, and recent git history in `src/context/gather.rs`) and produces two summaries:
+When possible, each review starts with a lead overview step. If the lead overview fails, the review falls back to the raw project context and continues. The lead reviewer analyzes the diff together with lightweight project metadata gathered from the repository (file tree, README/manifest excerpts, and recent git history in `src/context/gather.rs`) and produces two summaries:
 
 - **Branch summary** — what the PR does, risk areas, focus files, and guidance for domain experts.
 - **Project overview** — purpose, tech stack, architecture, and conventions inferred from the repo.

@@ -441,8 +441,13 @@ pub(crate) async fn run_experts_inner(
 
     // Gather lightweight project context for the lead overview
     let project_context =
-        crate::context::gather_project_context(std::path::Path::new(&mr_info.project_path), base_ref, head_ref)
-            .unwrap_or_default();
+        match crate::context::gather_project_context(std::path::Path::new(&mr_info.project_path), base_ref, head_ref) {
+            Ok(ctx) => ctx,
+            Err(err) => {
+                tracing::warn!("failed to gather project context: {}", err);
+                crate::context::ProjectContext::default()
+            }
+        };
 
     // Pass 1: Lead Overview (now runs for all PR sizes)
     let global_context: Option<GlobalReviewContext> = build_lead_overview(

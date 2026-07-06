@@ -118,8 +118,38 @@ fn gather_from_git(repo_path: &Path, base_ref: Option<&str>, head_ref: Option<&s
 }
 
 /// Returns true if `name` looks like a safe git ref name.
+///
+/// Allowed characters are ASCII letters, digits, `.`, `-`, `_`, and `/`.
+/// Rejects empty names, leading `.` or `-`, trailing `.`, the sequences `..`,
+/// `@{`, `.lock` suffixes, and any other Git revision metacharacters.
 fn is_valid_ref_name(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('-') && !name.chars().any(|c| c.is_whitespace())
+    if name.is_empty() || name.starts_with('.') || name.starts_with('-') || name.ends_with('.') {
+        return false;
+    }
+    if name.starts_with('/') || name.ends_with('/') || name.contains("//") {
+        return false;
+    }
+    if name.contains("..") || name.contains("@{") || name.ends_with(".lock") {
+        return false;
+    }
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' || c == '/')
+}
+
+/// Returns true if `path` is a safe repository-relative path for `git show`.
+///
+/// The path must be non-empty, must not start with `/`, and must not contain
+/// `..` or characters such as `:`, `\n`, `\r`, or `\0` that could alter command
+/// semantics or path interpretation.
+fn is_valid_repo_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    if path.starts_with('/') || path.contains("..") {
+        return false;
+    }
+    let forbidden = |c: char| c == ':' || c == '\n' || c == '\r' || c == '\0';
+    !path.chars().any(forbidden)
 }
 
 /// Run `git ls-files` in `repo_path` and keep at most the first `max_lines`.
@@ -145,11 +175,18 @@ fn git_ls_files(repo_path: &Path) -> Result<Vec<String>> {
 }
 
 /// Run `git log --oneline -n 30` in `repo_path` with optional extra revision args.
+///
+/// User-controlled arguments starting with `-` and arguments that do not pass
+/// `is_valid_ref_name` are skipped and logged as warnings.
 fn git_log_oneline(repo_path: &Path, extra_args: &[&str]) -> Result<Vec<String>> {
     let mut args = vec!["log", "--oneline", "-n", "30"];
     for arg in extra_args {
         if arg.starts_with('-') {
             tracing::warn!("skipping user-controlled git log argument: {}", arg);
+            continue;
+        }
+        if !is_valid_ref_name(arg) {
+            tracing::warn!("skipping user-controlled git log argument: invalid ref '{}'", arg);
             continue;
         }
         args.push(arg);
@@ -172,8 +209,13 @@ fn git_log_oneline(repo_path: &Path, extra_args: &[&str]) -> Result<Vec<String>>
 }
 
 /// Read a file from `git show HEAD:<path>` or the filesystem, keeping at most
-/// `max_bytes`.
+/// `max_bytes`. Invalid `path` values are rejected with a warning and return an
+/// empty string.
 fn read_git_or_file(repo_path: &Path, path: &str, max_bytes: usize) -> Result<String> {
+    if !is_valid_repo_path(path) {
+        tracing::warn!("skipping read of invalid repo path: {}", path);
+        return Ok(String::new());
+    }
     if let Ok(content) = git_show_head(repo_path, path) {
         Ok(truncate_string(content, max_bytes))
     } else {
@@ -192,7 +234,13 @@ fn read_git_or_file(repo_path: &Path, path: &str, max_bytes: usize) -> Result<St
 }
 
 /// Run `git show HEAD:<path>` in `repo_path` and return the content as a string.
+///
+/// `path` is validated defensively with `is_valid_repo_path`; invalid paths
+/// return an error before invoking `git`.
 fn git_show_head(repo_path: &Path, path: &str) -> Result<String> {
+    if !is_valid_repo_path(path) {
+        anyhow::bail!("invalid repo path for git show: {}", path);
+    }
     let output = std::process::Command::new("git")
         .current_dir(repo_path)
         .arg("show")
@@ -431,5 +479,52 @@ mod tests {
     #[test]
     fn test_svg_not_binary() {
         assert!(!is_binary_extension("assets/icon.svg"));
+    }
+
+    #[test]
+    fn test_valid_ref_names() {
+        assert!(is_valid_ref_name("main"));
+        assert!(is_valid_ref_name("feature/foo"));
+        assert!(is_valid_ref_name("v1.0.0"));
+        assert!(is_valid_ref_name("fix_issue-123"));
+    }
+
+    #[test]
+    fn test_invalid_ref_names() {
+        assert!(!is_valid_ref_name(""));
+        assert!(!is_valid_ref_name("@{upstream}"));
+        assert!(!is_valid_ref_name(".."));
+        assert!(!is_valid_ref_name("foo:bar"));
+        assert!(!is_valid_ref_name("foo bar"));
+        assert!(!is_valid_ref_name("-foo"));
+        assert!(!is_valid_ref_name(".lock"));
+        assert!(!is_valid_ref_name("foo~bar"));
+        assert!(!is_valid_ref_name("foo^bar"));
+        assert!(!is_valid_ref_name("foo{bar}"));
+        assert!(!is_valid_ref_name("foo\\bar"));
+        assert!(!is_valid_ref_name("foo[bar]"));
+        assert!(!is_valid_ref_name("foo*bar"));
+        assert!(!is_valid_ref_name("foo?bar"));
+        assert!(!is_valid_ref_name("/feature"));
+        assert!(!is_valid_ref_name("feature/"));
+        assert!(!is_valid_ref_name("foo//bar"));
+    }
+
+    #[test]
+    fn test_valid_repo_paths() {
+        assert!(is_valid_repo_path("README.md"));
+        assert!(is_valid_repo_path("src/main.rs"));
+        assert!(is_valid_repo_path("Cargo.toml"));
+    }
+
+    #[test]
+    fn test_invalid_repo_paths() {
+        assert!(!is_valid_repo_path(""));
+        assert!(!is_valid_repo_path("../etc/passwd"));
+        assert!(!is_valid_repo_path("/etc/passwd"));
+        assert!(!is_valid_repo_path("foo:bar"));
+        assert!(!is_valid_repo_path("foo\nbar"));
+        assert!(!is_valid_repo_path("foo\rbar"));
+        assert!(!is_valid_repo_path("foo\0bar"));
     }
 }

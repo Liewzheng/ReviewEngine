@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.10] - 2026-07-06
+
+### Fixed
+- Harden git ref/path validation in `src/context/gather.rs` to prevent argument injection via branch names, paths, and user-controlled `git log` arguments. This validation is stricter than before; ref names or paths that previously slipped through are now skipped with a warning.
+- Log a warning when project context gathering fails instead of silently swallowing the error.
+- Corrected README wording about lead overview fallback behavior.
+
 ## [0.6.9] - 2026-07-06
 
 ### Added

@@ -103,6 +103,7 @@ const handleEdit = () => {
       <div class="header-right">
         <el-tooltip :content="expert.enabled ? 'Enabled' : 'Disabled'" placement="top">
           <el-switch
+            :aria-label="expert.enabled ? 'Enabled' : 'Disabled'"
             :model-value="expert.enabled"
             @update:model-value="handleToggle"
             :active-color="'var(--success)'"
@@ -143,11 +144,13 @@ const handleEdit = () => {
 
     <!-- Actions -->
     <div class="card-actions">
-      <el-button size="small" @click="handleViewDetails">
+      <el-button size="small" :aria-label="'View Details for ' + expert.name"
+        @click="handleViewDetails">
         <el-icon><IconView /></el-icon>
         View Details
       </el-button>
-      <el-button size="small" type="primary" @click="handleEdit">
+      <el-button size="small" type="primary" :aria-label="'Edit ' + expert.name"
+        @click="handleEdit">
         <el-icon><Edit /></el-icon>
         Edit
       </el-button>
@@ -163,6 +166,7 @@ const handleEdit = () => {
   padding: 20px;
   box-shadow: var(--shadow-card);
   transition: opacity 0.2s ease, filter 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
+  max-width: 360px;
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -171,12 +175,8 @@ const handleEdit = () => {
 }
 
 .expert-card:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 8px 12px -2px rgba(0, 0, 0, 0.4), 0 4px 6px -1px rgba(0, 0, 0, 0.3);
-}
-
-[data-theme="light"] .expert-card:hover {
-  box-shadow: 0 8px 12px -2px rgba(0, 0, 0, 0.1), 0 4px 6px -1px rgba(0, 0, 0, 0.06);
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand), var(--shadow-card);
 }
 
 @keyframes cardEnter {
@@ -290,6 +290,7 @@ const handleEdit = () => {
 
 :deep(.weight-slider .el-slider__button) {
   border-color: var(--brand);
+  transition: all 0.1s ease;
 }
 
 .description-section {

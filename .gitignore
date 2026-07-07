@@ -5,3 +5,16 @@ __pycache__
 review_reports/
 review-report*.md
 review-engine-run.log
+
+// Local debug files
+*.png
+*.log
+
+// Local anlysis files
+test*.md
+review*.md
+ux*.md
+plan*.md
+
+// Local test case files
+*.xlsx

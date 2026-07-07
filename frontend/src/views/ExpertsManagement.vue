@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Plus,
@@ -363,9 +363,39 @@ const getScoreType = (score?: number): 'success' | 'warning' | 'danger' | 'info'
   return 'danger'
 }
 
+// ========== Unsaved Changes Guard ==========
+const hasUnsavedChanges = computed(() => isEditing.value)
+
+const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+  if (hasUnsavedChanges.value) {
+    e.preventDefault()
+    e.returnValue = ''
+  }
+}
+
+const unregisterGuard = router.beforeEach((to, from, next) => {
+  if (hasUnsavedChanges.value && to.path !== from.path) {
+    const confirm = window.confirm('You have unsaved changes. Leave without saving?')
+    if (confirm) {
+      isEditing.value = false
+      next()
+    } else {
+      next(false)
+    }
+  } else {
+    next()
+  }
+})
+
 // ========== Lifecycle ==========
 onMounted(() => {
   fetchExperts()
+  window.addEventListener('beforeunload', handleBeforeUnload)
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', handleBeforeUnload)
+  unregisterGuard()
 })
 </script>
 
@@ -380,15 +410,18 @@ onMounted(() => {
       <div class="header-actions">
         <el-button
           :type="isEditing ? 'success' : 'default'"
+:aria-label="isEditing ? 'Done editing' : 'Enter edit mode'"
           @click="toggleGlobalEdit"
         >
           <el-icon><component :is="isEditing ? Check : IconEdit" /></el-icon>
           {{ isEditing ? 'Done Editing' : 'Edit Mode' }}
         </el-button>
-        <el-button type="primary">
-          <el-icon><Plus /></el-icon>
-          Add Expert
-        </el-button>
+        <el-tooltip content="Coming soon" placement="top">
+          <el-button type="primary" disabled :aria-label="'Add Expert (Coming soon)'">
+            <el-icon><Plus /></el-icon>
+            Add Expert
+          </el-button>
+        </el-tooltip>
       </div>
     </div>
 
@@ -485,6 +518,7 @@ onMounted(() => {
       title="Expert Details"
       width="600px"
       class="expert-dialog"
+:aria-label="'Expert details dialog'"
       destroy-on-close
     >
       <div v-if="selectedExpert" class="detail-content">
@@ -509,6 +543,7 @@ onMounted(() => {
           <div class="detail-row">
             <span class="detail-label">Enabled:</span>
             <el-switch
+              :aria-label="'Toggle ' + selectedExpert.name"
               :model-value="selectedExpert.enabled"
               @update:model-value="(val: boolean) => handleToggle(selectedExpert!.id, val)"
               :active-color="'var(--success)'"
@@ -517,7 +552,17 @@ onMounted(() => {
           </div>
           <div class="detail-row">
             <span class="detail-label">Weight:</span>
-            <span class="detail-value">{{ selectedExpert.weight }}%</span>
+            <div class="detail-value" style="flex: 1;">
+              <el-slider
+                :model-value="selectedExpert.weight"
+                :max="100"
+                :step="5"
+                :show-stops="true"
+                disabled
+                style="width: 100%;"
+              />
+              <span class="weight-text">{{ selectedExpert.weight }}%</span>
+            </div>
           </div>
         </div>
 
@@ -572,6 +617,12 @@ onMounted(() => {
           </el-table>
         </div>
       </div>
+      <template #footer>
+        <el-button @click="detailModalVisible = false">
+          <el-icon><Close /></el-icon>
+          Close
+        </el-button>
+      </template>
     </el-dialog>
 
     <!-- Edit Modal -->
@@ -580,6 +631,7 @@ onMounted(() => {
       title="Edit Expert"
       width="500px"
       class="expert-dialog"
+:aria-label="'Expert details dialog'"
       destroy-on-close
     >
       <el-form v-if="editingExpert" label-position="top">
@@ -622,11 +674,18 @@ onMounted(() => {
         </el-form-item>
       </el-form>
       <template #footer>
-        <el-button @click="editModalVisible = false">
+        <el-button
+          :aria-label="'Cancel editing'"
+          @click="editModalVisible = false"
+        >
           <el-icon><Close /></el-icon>
           Cancel
         </el-button>
-        <el-button type="primary" @click="saveEdit">
+        <el-button
+          type="primary"
+          :aria-label="'Save changes'"
+          @click="saveEdit"
+        >
           <el-icon><Check /></el-icon>
           Save Changes
         </el-button>

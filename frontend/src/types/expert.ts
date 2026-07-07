@@ -24,11 +24,11 @@ export const categoryColorMap: Record<ExpertCategory, string> = {
   performance: '#f59e0b',
   quality: '#22c55e',
   maintainability: '#3b82f6',
-  'test-coverage': '#8b5cf6',
-  documentation: '#06b6d4',
-  dependencies: '#ec4899',
-  accessibility: '#10b981',
-  architecture: '#6366f1',
+  'test-coverage': '#a855f7',
+  documentation: '#6b7280',
+  dependencies: '#6366f1',
+  accessibility: '#ec4899',
+  architecture: '#14b8a6',
 }
 
 export const categoryLabelMap: Record<ExpertCategory, string> = {

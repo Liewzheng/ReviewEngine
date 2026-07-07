@@ -100,7 +100,11 @@ const pageTitle = computed(() => {
 
       <!-- Content -->
       <main class="main-content">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <Transition name="page" mode="out-in">
+            <component :is="Component" />
+          </Transition>
+        </router-view>
       </main>
     </div>
   </div>

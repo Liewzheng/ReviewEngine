@@ -66,7 +66,53 @@ a:hover {
   color: var(--brand-hover);
 }
 
-/* Element Plus dark theme override */
+/* Focus ring for accessibility */
+*:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+/* Page transition */
+.page-enter-active,
+.page-leave-active {
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+.page-enter-from {
+  opacity: 0;
+  transform: translateY(6px);
+}
+.page-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+/* SSE flash border animation */
+@keyframes flash-border {
+  0% {
+    border-color: var(--brand);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.3);
+  }
+  100% {
+    border-color: var(--border-color);
+    box-shadow: none;
+  }
+}
+.sse-update {
+  animation: flash-border 0.6s ease-out;
+}
+
+/* Pulse animation for running status */
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+/* Card hover global override */
+.el-card:hover {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand), var(--shadow-card);
+  transition: all 0.2s ease;
+}
 .el-card {
   background-color: var(--bg-card);
   border-color: var(--border-color);

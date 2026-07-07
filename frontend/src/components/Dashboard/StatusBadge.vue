@@ -64,8 +64,8 @@ const displayText = computed(() => statusTextMap[props.status] || props.status)
   box-shadow: 0 0 0 2px rgba(107, 114, 128, 0.2);
 }
 .status-dot.status-running {
-  background: var(--info);
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+  background: var(--success);
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
   animation: pulse-dot 2s infinite;
 }
 .status-dot.status-queued {

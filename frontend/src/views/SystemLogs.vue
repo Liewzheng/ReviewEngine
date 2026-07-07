@@ -61,7 +61,7 @@
         <!-- Keyword Search -->
         <div class="search-group">
           <el-input
-            v-model="keyword"
+            v-model="searchInput"
             placeholder="Filter logs..."
             clearable
             size="small"
@@ -115,20 +115,29 @@
     <div v-else ref="terminalRef" class="log-terminal" @scroll="handleScroll">
       <!-- Empty: Cleared -->
       <div v-if="isCleared && logs.length === 0" class="empty-state">
-        <el-icon class="empty-icon" size="48"><Check /></el-icon>
-        <p>Logs cleared. New entries will appear here.</p>
+        <el-empty description="Logs cleared. New entries will appear here.">
+          <template #image>
+            <el-icon size="48" color="#6b7280"><Check /></el-icon>
+          </template>
+        </el-empty>
       </div>
 
       <!-- Empty: No logs yet -->
       <div v-else-if="logs.length === 0" class="empty-state">
-        <el-icon class="empty-icon" size="48"><Loading /></el-icon>
-        <p>Waiting for logs...</p>
+        <el-empty description="Waiting for logs...">
+          <template #image>
+            <el-icon size="48" color="#6b7280" class="is-loading"><Loading /></el-icon>
+          </template>
+        </el-empty>
       </div>
 
       <!-- Empty: All filtered out -->
       <div v-else-if="filteredLogs.length === 0 && logs.length > 0" class="empty-state">
-        <el-icon class="empty-icon" size="48"><InfoFilled /></el-icon>
-        <p>No logs match current filters</p>
+        <el-empty description="No logs match current filters">
+          <template #image>
+            <el-icon size="48" color="#6b7280"><InfoFilled /></el-icon>
+          </template>
+        </el-empty>
       </div>
 
       <!-- Log Lines -->
@@ -163,13 +172,13 @@
     <!-- Floating New Logs Button -->
     <transition name="slide-up">
       <el-button
-        v-if="newLogCount > 0 && !autoScroll"
+        v-if="(newLogCount > 0 && !autoScroll) || (isPaused && bufferedLogs.length > 0)"
         type="primary"
         class="new-logs-btn"
         :icon="ArrowDown"
         @click="scrollToBottom"
       >
-        {{ newLogCount }} new logs
+        {{ isPaused ? bufferedLogs.length : newLogCount }} new logs
       </el-button>
     </transition>
   </div>
@@ -195,7 +204,6 @@ import type { LogEntry, LogLevel, TimestampFormat } from '../types/logs'
 const loading = ref(true)
 const logs = ref<LogEntry[]>([])
 const selectedLevels = ref<LogLevel[]>(['INFO', 'WARN', 'ERROR', 'DEBUG'])
-const keyword = ref('')
 const autoScroll = ref(true)
 const timestampFormat = ref<TimestampFormat>('relative')
 const isPaused = ref(false)
@@ -204,10 +212,21 @@ const isCleared = ref(false)
 const newLogCount = ref(0)
 const downloading = ref(false)
 const terminalRef = ref<HTMLElement | null>(null)
+const searchInput = ref('')
+const keyword = ref('')
 
+let keywordDebounceTimer: number | null = null
 let autoScrollInterval: number | null = null
 let newLogDismissTimer: number | null = null
 let mockInterval: number | null = null
+
+// ==================== Debounce ====================
+watch(searchInput, (val) => {
+  if (keywordDebounceTimer) window.clearTimeout(keywordDebounceTimer)
+  keywordDebounceTimer = window.setTimeout(() => {
+    keyword.value = val
+  }, 150)
+})
 
 // ==================== Computed ====================
 const filteredLogs = computed(() => {
@@ -349,10 +368,18 @@ function getLevelTagType(level: LogLevel): 'info' | 'warning' | 'danger' | undef
 }
 
 function highlightMessage(msg: string): string {
+  let html = escapeHtml(msg)
+
   const kw = keyword.value.trim()
-  if (!kw) return escapeHtml(msg)
-  const re = new RegExp(`(${escapeRegExp(kw)})`, 'gi')
-  return escapeHtml(msg).replace(re, '<mark>$1</mark>')
+  if (kw) {
+    const re = new RegExp(`(${escapeRegExp(kw)})`, 'gi')
+    html = html.replace(re, '<mark>$1</mark>')
+  }
+
+  // Linkify review IDs
+  html = html.replace(/MR !(\d+)/g, '<a href="#/history?reviewId=$1" class="log-link">MR !$1</a>')
+
+  return html
 }
 
 function escapeHtml(s: string): string {
@@ -427,6 +454,13 @@ function downloadLogs() {
 }
 
 function scrollToBottom() {
+  if (isPaused.value) {
+    logs.value = [...logs.value, ...bufferedLogs.value]
+    trimLogs()
+    bufferedLogs.value = []
+    isPaused.value = false
+  }
+  if (newLogDismissTimer) window.clearTimeout(newLogDismissTimer)
   nextTick(() => {
     if (terminalRef.value) {
       terminalRef.value.scrollTop = terminalRef.value.scrollHeight
@@ -555,7 +589,7 @@ watch(autoScroll, (val) => {
 }
 
 .toolbar.paused {
-  background-color: rgba(245, 158, 11, 0.08);
+  background-color: rgba(245, 158, 11, 0.1);
   border-color: var(--warning);
 }
 
@@ -661,6 +695,7 @@ watch(autoScroll, (val) => {
   font-size: 13px;
   line-height: 1.6;
   min-height: 200px;
+  max-height: calc(100vh - 240px);
 }
 
 /* Empty States */
@@ -670,19 +705,16 @@ watch(autoScroll, (val) => {
   align-items: center;
   justify-content: center;
   height: 100%;
-  color: #6b7280;
-  gap: 12px;
   padding: 48px 0;
 }
 
-.empty-icon {
-  color: #6b7280;
-  opacity: 0.6;
+.empty-state .el-empty {
+  --el-empty-description-color: #9ca3af;
 }
 
-.empty-state p {
-  margin: 0;
-  font-size: 14px;
+.empty-state .el-empty__image {
+  width: auto;
+  height: auto;
 }
 
 /* Log Lines */
@@ -760,6 +792,15 @@ watch(autoScroll, (val) => {
   color: #e5e7eb;
   padding: 0 2px;
   border-radius: 2px;
+}
+
+.log-link {
+  color: #6366f1;
+  text-decoration: underline;
+}
+
+.log-link:hover {
+  color: #4f46e5;
 }
 
 .log-meta {

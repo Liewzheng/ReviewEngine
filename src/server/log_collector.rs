@@ -214,6 +214,5 @@ pub fn get_global_collector() -> Option<Arc<Mutex<LogCollector>>> {
 }
 
 fn default_ndjson_path() -> Option<PathBuf> {
-    home::home_dir()
-        .map(|p| p.join(".config").join("review-engine").join("logs.ndjson"))
+    home::home_dir().map(|p| p.join(".config").join("review-engine").join("logs.ndjson"))
 }

@@ -16,15 +16,11 @@ async fn main() -> anyhow::Result<()> {
             .json()
             .with_current_span(false)
             .with_target(true)
-            .with_writer(move || {
-                review_engine::server::log_collector::LogWriter::new(collector.clone())
-            })
+            .with_writer(move || review_engine::server::log_collector::LogWriter::new(collector.clone()))
             .init();
     } else {
         tracing_subscriber::fmt()
-            .with_writer(move || {
-                review_engine::server::log_collector::LogWriter::new(collector.clone())
-            })
+            .with_writer(move || review_engine::server::log_collector::LogWriter::new(collector.clone()))
             .init();
     }
     cli::run().await

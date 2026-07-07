@@ -50,9 +50,11 @@ async fn test_provider(
 ) -> Json<serde_json::Value> {
     let cfg = {
         let guard = state.llm_configs.read().unwrap();
-        guard.iter().enumerate().find(|(i, c)| {
-            format!("{}-{}", c.provider, i) == id
-        }).map(|(_, c)| c.clone())
+        guard
+            .iter()
+            .enumerate()
+            .find(|(i, c)| format!("{}-{}", c.provider, i) == id)
+            .map(|(_, c)| c.clone())
     };
 
     let cfg = match cfg {

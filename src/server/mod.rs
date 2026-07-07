@@ -8,6 +8,7 @@
 //! (`task_queue`) for asynchronous review processing. Application state
 //! is defined in [`state`], and the Axum [`Router`] is constructed by the
 //! [`router`] submodule.
+#![allow(clippy::unwrap_used)]
 
 use std::sync::Arc;
 

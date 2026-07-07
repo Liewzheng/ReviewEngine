@@ -199,11 +199,7 @@ async fn update_expert(
         }
     };
 
-    let expert_name = cfg
-        .review_experts
-        .keys()
-        .find(|name| slugify(name) == id)
-        .cloned();
+    let expert_name = cfg.review_experts.keys().find(|name| slugify(name) == id).cloned();
 
     let name = match expert_name {
         Some(n) => n,

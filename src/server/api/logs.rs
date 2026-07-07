@@ -26,11 +26,7 @@ async fn log_stream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let collector = match state.log_collector.as_ref() {
         Some(c) => c.clone(),
         None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Log collector not initialized",
-            )
-                .into_response();
+            return (StatusCode::SERVICE_UNAVAILABLE, "Log collector not initialized").into_response();
         }
     };
 
@@ -39,16 +35,14 @@ async fn log_stream(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         c.subscribe()
     };
 
-    let stream = BroadcastStream::new(rx).filter_map(|result| {
-        match result {
-            Ok(entry) => {
-                let data = serde_json::to_string(&entry).ok()?;
-                Some(Ok::<_, std::convert::Infallible>(
-                    axum::response::sse::Event::default().data(data),
-                ))
-            }
-            Err(_) => None,
+    let stream = BroadcastStream::new(rx).filter_map(|result| match result {
+        Ok(entry) => {
+            let data = serde_json::to_string(&entry).ok()?;
+            Some(Ok::<_, std::convert::Infallible>(
+                axum::response::sse::Event::default().data(data),
+            ))
         }
+        Err(_) => None,
     });
 
     Sse::new(stream)
@@ -64,11 +58,7 @@ async fn download_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let collector = match state.log_collector.as_ref() {
         Some(c) => c.clone(),
         None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "Log collector not initialized",
-            )
-                .into_response();
+            return (StatusCode::SERVICE_UNAVAILABLE, "Log collector not initialized").into_response();
         }
     };
 
@@ -85,10 +75,5 @@ async fn download_logs(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         }
     }
 
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/x-ndjson")],
-        body,
-    )
-        .into_response()
+    (StatusCode::OK, [("Content-Type", "application/x-ndjson")], body).into_response()
 }

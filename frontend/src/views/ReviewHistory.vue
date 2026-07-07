@@ -18,21 +18,18 @@ import {
   Folder,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
-import type {
-  ReviewListItem,
-  ReviewDetail,
-  HistoryFilters,
-  ReviewStatus,
-} from '../types/history'
+import type { ReviewListItem, HistoryFilters } from '../types/history'
+import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 
-/* ─────────────── Router & State ─────────────── */
+/* ─────────────── Router & Composable ─────────────── */
 const route = useRoute()
 const router = useRouter()
+const reviews = useReviews()
 
-const loading = ref(false)
+const loading = reviews.loading
 const drawerOpen = ref(false)
-const selectedReview = ref<ReviewDetail | null>(null)
+const selectedReview = reviews.selectedReview
 
 const page = ref(1)
 const pageSize = ref(25)
@@ -62,168 +59,29 @@ const dateRange = computed({
   },
 })
 
-/* ─────────────── Mock Data ─────────────── */
-const projects = ['frontend', 'backend', 'mobile-app', 'api-gateway', 'docs']
-const repositories = ['review-engine', 'dashboard', 'mobile-sdk', 'auth-service', 'core-api']
-const authors = [
-  { name: 'Alice Chen', avatarUrl: '' },
-  { name: 'Bob Smith', avatarUrl: '' },
-  { name: 'Carol Jones', avatarUrl: '' },
-  { name: 'David Lee', avatarUrl: '' },
-  { name: 'Eve Wang', avatarUrl: '' },
-  { name: 'Frank Zhao', avatarUrl: '' },
-  { name: 'Grace Liu', avatarUrl: '' },
-]
-
-const mrTitles = [
-  'feat: add OAuth2 login support',
-  'fix: resolve memory leak in worker pool',
-  'refactor: simplify review queue dispatcher',
-  'feat: implement dark mode toggle',
-  'chore: upgrade Element Plus to v2.15',
-  'fix: correct pagination offset on page resize',
-  'docs: update API reference for v3',
-  'feat: add export to CSV for history page',
-  'test: add e2e coverage for review flow',
-  'fix: handle null pointer in expert parser',
-  'refactor: migrate Pinia stores to v3',
-  'feat: support multi-tenant project isolation',
-  'fix: GitLab webhook signature verification',
-  'chore: update ESLint config and fix warnings',
-  'feat: introduce pluggable expert system',
-  'fix: retry logic for LLM rate limiting',
-  'docs: add architecture decision records',
-  'perf: reduce bundle size by 40%',
-  'feat: add real-time queue monitoring',
-  'fix: CSS variable fallback in light mode',
-  'refactor: consolidate TypeScript types',
-  'feat: implement review history search',
-  'fix: drawer overflow on mobile screens',
-  'test: mock data helpers for unit tests',
-  'chore: configure Dependabot for frontend',
-  'feat: add review detail drawer',
-  'fix: correct status badge color mapping',
-  'docs: add setup instructions for new devs',
-  'perf: optimize table rendering for large lists',
-  'feat: support GitHub PR reviews',
-  'fix: timezone handling in date pickers',
-  'refactor: extract reusable status components',
-  'chore: clean up dead code in dashboard',
-  'feat: add bulk re-review action',
-  'fix: websocket reconnect logic',
-  'test: snapshot tests for UI components',
-  'docs: document environment variables',
-  'feat: implement notification preferences',
-  'fix: race condition in concurrent reviews',
-  'perf: cache project list for 5 minutes',
-  'feat: add keyboard shortcuts for navigation',
-  'fix: broken link in error page',
-  'chore: update Docker base image',
-  'test: add contract tests for LLM providers',
-  'feat: support custom expert templates',
-  'fix: correct pluralization in status labels',
-  'docs: add troubleshooting guide',
-  'perf: lazy load chart components',
-  'feat: add user profile settings',
-  'fix: sidebar collapse animation jitter',
-]
-
-function randomDate(daysBack: number): string {
-  const d = new Date()
-  d.setDate(d.getDate() - Math.floor(Math.random() * daysBack))
-  d.setHours(Math.floor(Math.random() * 24), Math.floor(Math.random() * 60))
-  return d.toISOString()
-}
-
-function randomItem<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)]
-}
-
-function randomStatus(): ReviewStatus {
-  const weights: ReviewStatus[] = ['completed', 'completed', 'completed', 'completed', 'running', 'queued', 'failed', 'failed', 'cancelled']
-  return randomItem(weights)
-}
-
-const allReviews = ref<ReviewListItem[]>([])
-
-function generateMockData() {
-  const data: ReviewListItem[] = []
-  for (let i = 0; i < 120; i++) {
-    const status = randomStatus()
-    const project = randomItem(projects)
-    const repo = randomItem(repositories)
-    const author = randomItem(authors)
-    const mrTitle = randomItem(mrTitles)
-    const branch = `feature/${mrTitle.split(':')[0].replace(/\s/g, '-')}-${Math.floor(Math.random() * 100)}`
-    const createdAt = randomDate(30)
-    const durationMs = status === 'running' || status === 'queued' ? 0 : Math.floor(Math.random() * 300000) + 5000
-
-    data.push({
-      id: `rev-${1000 + i}`,
-      mrTitle,
-      project,
-      repository: repo,
-      branch,
-      targetBranch: 'main',
-      author,
-      status,
-      durationMs,
-      createdAt,
-      gitlabMrUrl: `https://gitlab.example.com/${repo}/-/merge_requests/${i + 1}`,
+/* ─────────────── Error Handling ─────────────── */
+watch(() => reviews.error.value, (err) => {
+  if (err) {
+    ElNotification({
+      title: 'Error',
+      message: err,
+      type: 'error',
+      duration: 5000,
     })
   }
-  // Sort by createdAt descending
-  data.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
-  allReviews.value = data
+})
+
+/* ─────────────── Data & Pagination ─────────────── */
+const items = reviews.items
+const total = reviews.total
+const pagedReviews = items
+
+const projects = computed(() => [...new Set(items.value.map(i => i.project).filter((p): p is string => !!p))])
+const repositories = computed(() => [...new Set(items.value.map(i => i.repository).filter((r): r is string => !!r))])
+
+async function fetchReviewsData() {
+  await reviews.fetchReviews(filters.value, page.value, pageSize.value)
 }
-
-/* ─────────────── Filtering ─────────────── */
-const filteredReviews = computed(() => {
-  let result = [...allReviews.value]
-
-  if (filters.value.q) {
-    const q = filters.value.q.toLowerCase()
-    result = result.filter(
-      (r) =>
-        r.mrTitle.toLowerCase().includes(q) ||
-        r.author.name.toLowerCase().includes(q) ||
-        r.branch.toLowerCase().includes(q) ||
-        r.project.toLowerCase().includes(q)
-    )
-  }
-
-  if (filters.value.project) {
-    result = result.filter((r) => r.project === filters.value.project)
-  }
-
-  if (filters.value.status) {
-    result = result.filter((r) => r.status === filters.value.status)
-  }
-
-  if (filters.value.repository) {
-    result = result.filter((r) => r.repository === filters.value.repository)
-  }
-
-  if (filters.value.dateFrom) {
-    const from = new Date(filters.value.dateFrom)
-    result = result.filter((r) => new Date(r.createdAt) >= from)
-  }
-
-  if (filters.value.dateTo) {
-    const to = new Date(filters.value.dateTo)
-    to.setHours(23, 59, 59, 999)
-    result = result.filter((r) => new Date(r.createdAt) <= to)
-  }
-
-  return result
-})
-
-const total = computed(() => filteredReviews.value.length)
-
-const pagedReviews = computed(() => {
-  const start = (page.value - 1) * pageSize.value
-  return filteredReviews.value.slice(start, start + pageSize.value)
-})
 
 /* ─────────────── URL Sync ─────────────── */
 function updateUrl() {
@@ -258,12 +116,14 @@ function onSearchInput() {
   searchTimeout = setTimeout(() => {
     page.value = 1
     updateUrl()
+    fetchReviewsData()
   }, 300)
 }
 
 function onFilterChange() {
   page.value = 1
   updateUrl()
+  fetchReviewsData()
 }
 
 function resetFilters() {
@@ -278,66 +138,15 @@ function resetFilters() {
   page.value = 1
   pageSize.value = 25
   updateUrl()
+  fetchReviewsData()
 }
 
 /* ─────────────── Drawer ─────────────── */
-function openDrawer(row: ReviewListItem) {
-  const detail: ReviewDetail = {
-    ...row,
-    completedAt: row.status === 'completed' || row.status === 'failed' || row.status === 'cancelled'
-      ? new Date(new Date(row.createdAt).getTime() + row.durationMs).toISOString()
-      : undefined,
-    commitSha: Array.from({ length: 8 }, () => '0123456789abcdef'[Math.floor(Math.random() * 16)]).join(''),
-    experts: [
-      {
-        expertId: 'exp-1',
-        expertName: 'Code Quality Expert',
-        status: randomItem(['success', 'warning', 'error']),
-        score: Math.floor(Math.random() * 40) + 60,
-        summary: 'Code follows most style guidelines. A few minor issues with variable naming and missing JSDoc comments.',
-        details: 'Detailed analysis shows 3 warnings in `src/utils/parser.ts` and 1 error in `src/components/Form.vue`.',
-      },
-      {
-        expertId: 'exp-2',
-        expertName: 'Security Expert',
-        status: randomItem(['success', 'warning', 'success']),
-        score: Math.floor(Math.random() * 30) + 70,
-        summary: 'No critical security vulnerabilities detected. One potential XSS vector in user-generated content rendering.',
-        details: 'The `v-html` directive in `RichText.vue` should be sanitized using DOMPurify before rendering.',
-      },
-      {
-        expertId: 'exp-3',
-        expertName: 'Performance Expert',
-        status: randomItem(['success', 'warning', 'error', 'skipped']),
-        score: Math.floor(Math.random() * 50) + 50,
-        summary: 'Bundle size increased by 12%. Consider code-splitting the chart components.',
-        details: 'The main bundle now includes `echarts` and `d3` which are only used in the dashboard. Use dynamic imports.',
-      },
-      {
-        expertId: 'exp-4',
-        expertName: 'Accessibility Expert',
-        status: randomItem(['success', 'success', 'warning']),
-        score: Math.floor(Math.random() * 25) + 75,
-        summary: 'Good ARIA usage overall. Missing `aria-label` on 2 icon-only buttons.',
-        details: 'Buttons in `Toolbar.vue` (lines 45 and 78) need aria-labels for screen reader compatibility.',
-      },
-    ],
-    rawComment: `## Review Summary\n\nOverall the changes look good. There are a few areas that could use improvement:\n\n1. **Code Quality**: Minor style inconsistencies in the new components.\n2. **Security**: Potential XSS vector needs addressing.\n3. **Performance**: Consider lazy loading heavy dependencies.\n4. **Accessibility**: Add aria-labels to icon-only buttons.\n\nPlease address the security concern before merging.`,
-    rawApiResponse: {
-      reviewId: row.id,
-      mrTitle: row.mrTitle,
-      status: row.status,
-      experts: ['exp-1', 'exp-2', 'exp-3', 'exp-4'],
-      metadata: {
-        modelVersion: 'gpt-4o-2024-05-13',
-        tokensUsed: 3421,
-        costUsd: 0.042,
-        latencyMs: 1250,
-      },
-    },
+async function openDrawer(row: ReviewListItem) {
+  await reviews.fetchReview(row.id)
+  if (reviews.selectedReview.value) {
+    drawerOpen.value = true
   }
-  selectedReview.value = detail
-  drawerOpen.value = true
 }
 
 /* ─────────────── Actions ─────────────── */
@@ -347,11 +156,10 @@ function handleRerun(row: ReviewListItem) {
     'Re-run Review',
     { confirmButtonText: 'Re-run', cancelButtonText: 'Cancel', type: 'warning' }
   ).then(() => {
-    ElNotification.success({ title: 'Review re-queued', message: `A new review has been queued for ${row.mrTitle}.` })
-    const idx = allReviews.value.findIndex((r) => r.id === row.id)
-    if (idx !== -1) {
-      allReviews.value[idx] = { ...allReviews.value[idx], status: 'queued', durationMs: 0 }
-    }
+    reviews.rerun(row.id).then(() => {
+      ElNotification.success({ title: 'Review re-queued', message: `A new review has been queued for ${row.mrTitle}.` })
+      fetchReviewsData()
+    })
   }).catch(() => {})
 }
 
@@ -428,15 +236,14 @@ const paginationInfo = computed(() => {
 
 /* ─────────────── Init ─────────────── */
 onMounted(() => {
-  loading.value = true
   readUrl()
-  generateMockData()
-  setTimeout(() => {
-    loading.value = false
-  }, 600)
+  fetchReviewsData()
 })
 
-watch(() => route.query, readUrl, { deep: true })
+watch(() => route.query, () => {
+  readUrl()
+  fetchReviewsData()
+}, { deep: true })
 </script>
 
 <template>

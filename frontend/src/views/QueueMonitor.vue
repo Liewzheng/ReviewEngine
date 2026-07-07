@@ -1,195 +1,58 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
 import type { QueueStats, QueueTask } from '../types/queue'
 import StatsCard from '../components/QueueMonitor/StatsCard.vue'
 import TaskCard from '../components/QueueMonitor/TaskCard.vue'
+import { useQueue } from '../composables/useQueue'
 
-// --- Loading state ---
-const loading = ref(true)
+// --- Composable ---
+const queue = useQueue()
 
-// --- Queue state ---
-const tasks = ref<QueueTask[]>([])
+// --- Local UI state ---
 const isPaused = ref(false)
 const sseConnected = ref(false)
+const recentlyUpdated = ref<string[]>([])
+let refreshInterval: ReturnType<typeof setInterval> | null = null
 
-// --- Computed stats ---
-const stats = computed<QueueStats>(() => {
-  const active = activeTasks.value.length
-  const queued = queuedTasks.value.length
-  const failed = failedTasks.value.length
-  return {
-    active,
-    queued,
-    failed,
-    totalDepth: active + queued,
-    maxConcurrent: 8,
-    queueCapacity: 20,
-    failedLast24h: failed + 3,
-    totalLast24h: active + queued + failed + 37,
-  }
+// --- Computed stats with fallback ---
+const stats = computed<QueueStats>(() => queue.stats.value ?? {
+  active: 0,
+  queued: 0,
+  failed: 0,
+  totalDepth: 0,
+  maxConcurrent: 8,
+  queueCapacity: 20,
+  failedLast24h: 0,
+  totalLast24h: 0,
 })
 
 // --- Computed task lists ---
-const activeTasks = computed(() => tasks.value.filter(t => t.status === 'running'))
-const queuedTasks = computed(() => tasks.value.filter(t => t.status === 'queued'))
-const failedTasks = computed(() => tasks.value.filter(t => t.status === 'failed'))
-const allTasks = computed(() => tasks.value)
-const recentlyUpdated = ref<string[]>([])
-
-// --- Mock data generation ---
-const generateMockTasks = (): QueueTask[] => {
-  const now = Date.now()
-  return [
-    {
-      id: 'task-001',
-      mrTitle: 'feat: add authentication middleware',
-      project: 'backend',
-      repository: 'api-gateway',
-      status: 'running',
-      progress: 67,
-      expertName: 'Security',
-      elapsedMs: 150000,
-      createdAt: new Date(now - 200000).toISOString(),
-      startedAt: new Date(now - 150000).toISOString(),
-    },
-    {
-      id: 'task-002',
-      mrTitle: 'fix: resolve memory leak in worker pool',
-      project: 'backend',
-      repository: 'review-engine',
-      status: 'running',
-      progress: 34,
-      expertName: 'Performance',
-      elapsedMs: 45000,
-      createdAt: new Date(now - 120000).toISOString(),
-      startedAt: new Date(now - 45000).toISOString(),
-    },
-    {
-      id: 'task-003',
-      mrTitle: 'refactor: update UI components to composition API',
-      project: 'frontend',
-      repository: 'dashboard',
-      status: 'running',
-      progress: 89,
-      expertName: 'Code Quality',
-      elapsedMs: 312000,
-      createdAt: new Date(now - 400000).toISOString(),
-      startedAt: new Date(now - 312000).toISOString(),
-    },
-    {
-      id: 'task-004',
-      mrTitle: 'docs: update API documentation for v2 endpoints',
-      project: 'backend',
-      repository: 'api-gateway',
-      status: 'running',
-      progress: 12,
-      expertName: 'Documentation',
-      elapsedMs: 15000,
-      createdAt: new Date(now - 60000).toISOString(),
-      startedAt: new Date(now - 15000).toISOString(),
-    },
-    {
-      id: 'task-005',
-      mrTitle: 'feat: implement Redis caching layer',
-      project: 'backend',
-      repository: 'api-gateway',
-      status: 'queued',
-      progress: 0,
-      expertName: 'Performance',
-      elapsedMs: 0,
-      createdAt: new Date(now - 80000).toISOString(),
-    },
-    {
-      id: 'task-006',
-      mrTitle: 'test: add integration tests for review pipeline',
-      project: 'backend',
-      repository: 'review-engine',
-      status: 'queued',
-      progress: 0,
-      expertName: 'Testing',
-      elapsedMs: 0,
-      createdAt: new Date(now - 70000).toISOString(),
-    },
-    {
-      id: 'task-007',
-      mrTitle: 'chore: update frontend dependencies to latest',
-      project: 'frontend',
-      repository: 'dashboard',
-      status: 'queued',
-      progress: 0,
-      expertName: 'Maintenance',
-      elapsedMs: 0,
-      createdAt: new Date(now - 50000).toISOString(),
-    },
-    {
-      id: 'task-008',
-      mrTitle: 'fix: database connection timeout under load',
-      project: 'backend',
-      repository: 'review-engine',
-      status: 'failed',
-      progress: 0,
-      expertName: 'Reliability',
-      elapsedMs: 30000,
-      createdAt: new Date(now - 500000).toISOString(),
-      startedAt: new Date(now - 470000).toISOString(),
-      errorMessage: 'Connection refused after 30s timeout',
-    },
-    {
-      id: 'task-009',
-      mrTitle: 'feat: add OAuth2 provider support',
-      project: 'backend',
-      repository: 'api-gateway',
-      status: 'failed',
-      progress: 0,
-      expertName: 'Security',
-      elapsedMs: 45000,
-      createdAt: new Date(now - 600000).toISOString(),
-      startedAt: new Date(now - 555000).toISOString(),
-      errorMessage: 'Invalid client configuration: redirect_uri mismatch',
-    },
-  ]
-}
+const activeTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'running'))
+const queuedTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'queued'))
+const failedTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'failed'))
+const allTasks = computed(() => queue.items.value)
 
 // --- Load queue data ---
 const loadQueueData = async () => {
-  loading.value = true
-  // Simulate API delay
-  await new Promise(resolve => setTimeout(resolve, 800))
-  tasks.value = generateMockTasks()
-  loading.value = false
+  await queue.fetchStats()
+  await queue.fetchTasks()
   sseConnected.value = true
 }
 
-// --- Mock SSE progress updates ---
-let sseInterval: ReturnType<typeof setInterval> | null = null
+// --- Auto refresh ---
+const startAutoRefresh = () => {
+  refreshInterval = setInterval(() => {
+    queue.fetchStats()
+    queue.fetchTasks()
+  }, 3000)
+}
 
-const startMockSse = () => {
-  sseInterval = setInterval(() => {
-    tasks.value.forEach(task => {
-      if (task.status === 'running' && task.progress < 100) {
-        const increment = Math.floor(Math.random() * 4) + 1
-        task.progress = Math.min(task.progress + increment, 100)
-        recentlyUpdated.value = [...recentlyUpdated.value, task.id]
-        setTimeout(() => {
-          recentlyUpdated.value = recentlyUpdated.value.filter(id => id !== task.id)
-        }, 600)
-        if (task.progress === 100) {
-          task.status = 'completed'
-          task.elapsedMs = task.startedAt
-            ? Date.now() - new Date(task.startedAt).getTime()
-            : task.elapsedMs
-          // Auto-remove completed after 5 seconds
-          setTimeout(() => {
-            const idx = tasks.value.findIndex(t => t.id === task.id)
-            if (idx !== -1) {
-              tasks.value.splice(idx, 1)
-            }
-          }, 5000)
-        }
-      }
-    })
-  }, 2000)
+const stopAutoRefresh = () => {
+  if (refreshInterval) {
+    clearInterval(refreshInterval)
+    refreshInterval = null
+  }
 }
 
 // --- Pause / Resume ---
@@ -218,7 +81,9 @@ const handleCancelAllFailed = async () => {
         type: 'warning',
       }
     )
-    tasks.value = tasks.value.filter(t => t.status !== 'failed')
+    await Promise.all(failedTasks.value.map(t => queue.cancel(t.id)))
+    await queue.fetchTasks()
+    await queue.fetchStats()
     ElNotification({
       type: 'success',
       message: 'All failed tasks cancelled',
@@ -231,7 +96,7 @@ const handleCancelAllFailed = async () => {
 
 // --- Task actions ---
 const handleCancel = async (taskId: string) => {
-  const task = tasks.value.find(t => t.id === taskId)
+  const task = queue.items.value.find((t: QueueTask) => t.id === taskId)
   if (!task) return
   try {
     await ElMessageBox.confirm(
@@ -243,10 +108,9 @@ const handleCancel = async (taskId: string) => {
         type: 'warning',
       }
     )
-    const idx = tasks.value.findIndex(t => t.id === taskId)
-    if (idx !== -1) {
-      tasks.value.splice(idx, 1)
-    }
+    await queue.cancel(taskId)
+    await queue.fetchTasks()
+    await queue.fetchStats()
     ElNotification({
       type: 'success',
       message: 'Task cancelled',
@@ -258,7 +122,7 @@ const handleCancel = async (taskId: string) => {
 }
 
 const handleRetry = (taskId: string) => {
-  const task = tasks.value.find(t => t.id === taskId)
+  const task = queue.items.value.find((t: QueueTask) => t.id === taskId)
   if (!task) return
   task.status = 'queued'
   task.progress = 0
@@ -280,17 +144,26 @@ const handleViewLogs = (taskId: string) => {
   })
 }
 
+// --- Error handling ---
+watch(() => queue.error.value, (err) => {
+  if (err) {
+    ElNotification({
+      type: 'error',
+      message: err,
+      duration: 5000,
+    })
+  }
+})
+
 // --- Lifecycle ---
 onMounted(() => {
   loadQueueData().then(() => {
-    startMockSse()
+    startAutoRefresh()
   })
 })
 
 onUnmounted(() => {
-  if (sseInterval) {
-    clearInterval(sseInterval)
-  }
+  stopAutoRefresh()
 })
 </script>
 
@@ -324,7 +197,7 @@ onUnmounted(() => {
     </div>
 
     <!-- Loading Skeleton -->
-    <template v-if="loading">
+    <template v-if="queue.loading">
       <div class="stats-skeleton">
         <div v-for="i in 4" :key="`s-${i}`" class="skeleton-item">
           <el-skeleton :rows="2" animated />

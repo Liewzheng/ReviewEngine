@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Document,
@@ -13,8 +13,12 @@ import {
   RefreshRight,
 } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
+import { createChart, LineSeries, LineStyle, CrosshairMode, type IChartApi, type ISeriesApi } from 'lightweight-charts'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
+import CardPanel from '../components/common/CardPanel.vue'
+import DataTable from '../components/common/DataTable.vue'
+import PageHeader from '../components/common/PageHeader.vue'
 import type { KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
 
 const router = useRouter()
@@ -30,6 +34,11 @@ const trend = ref<TrendPoint[]>([])
 const health = ref<SystemHealth | null>(null)
 const recentReviews = ref<RecentReview[]>([])
 
+// Chart refs
+const chartContainer = ref<HTMLElement | null>(null)
+let chart: IChartApi | null = null
+let lineSeries: ISeriesApi<'Line'> | null = null
+
 // Auto-refresh timer
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
@@ -37,14 +46,14 @@ let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 function generateMockTrend(): TrendPoint[] {
   const points: TrendPoint[] = []
-  const now = new Date()
+  const now = Math.floor(Date.now() / 1000)
   for (let i = 23; i >= 0; i--) {
-    const t = new Date(now.getTime() - i * 60 * 60 * 1000)
-    const hour = t.getHours()
+    const t = now - i * 3600
+    const hour = new Date(t * 1000).getHours()
     const base = 10 + Math.random() * 20
     const peak = hour >= 9 && hour <= 18 ? 15 + Math.random() * 25 : 0
     points.push({
-      time: `${hour.toString().padStart(2, '0')}:00`,
+      time: t,
       value: Math.round(base + peak),
     })
   }
@@ -181,16 +190,68 @@ function formatTime(iso: string): string {
   })
 }
 
-// ─── Trend Chart Helpers ────────────────────────────
+// ─── Lightweight Charts ───────────────────────────────
 
-const maxTrendValue = computed(() => {
-  if (!trend.value.length) return 1
-  return Math.max(...trend.value.map(p => p.value), 1)
-})
+function initChart() {
+  if (!chartContainer.value) return
+  if (chart) {
+    chart.remove()
+    chart = null
+    lineSeries = null
+  }
 
-function barHeight(value: number): string {
-  return `${(value / maxTrendValue.value) * 100}%`
+  chart = createChart(chartContainer.value, {
+    layout: {
+      background: { color: 'transparent' },
+      textColor: 'var(--text-secondary)',
+    },
+    grid: {
+      vertLines: { color: 'var(--border-color)', style: LineStyle.SparseDotted },
+      horzLines: { color: 'var(--border-color)', style: LineStyle.SparseDotted },
+    },
+    crosshair: { mode: CrosshairMode.Magnet },
+    rightPriceScale: { borderColor: 'var(--border-color)' },
+    timeScale: { borderColor: 'var(--border-color)', timeVisible: true },
+    handleScroll: false,
+    handleScale: false,
+    width: chartContainer.value.clientWidth,
+    height: 280,
+  })
+
+  lineSeries = chart.addSeries(LineSeries, {
+    color: 'var(--brand)',
+    lineWidth: 2,
+    crosshairMarkerVisible: true,
+    crosshairMarkerRadius: 4,
+    crosshairMarkerBorderColor: 'var(--brand)',
+    crosshairMarkerBackgroundColor: 'var(--bg-primary)',
+  })
+
+  updateChartData()
+
+  const resizeObserver = new ResizeObserver(() => {
+    if (chart && chartContainer.value) {
+      chart.applyOptions({ width: chartContainer.value.clientWidth, height: 280 })
+    }
+  })
+  resizeObserver.observe(chartContainer.value)
 }
+
+function updateChartData() {
+  if (!lineSeries || !trend.value.length) return
+  const data: any[] = trend.value.map(p => ({
+    time: p.time,
+    value: p.value,
+  }))
+  lineSeries.setData(data)
+}
+
+watch(() => trend.value, () => {
+  nextTick(() => {
+    if (!chart) initChart()
+    else updateChartData()
+  })
+}, { deep: true })
 
 // ─── Table Helpers ──────────────────────────────────
 
@@ -228,18 +289,18 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (autoRefreshTimer) clearInterval(autoRefreshTimer)
+  if (chart) {
+    chart.remove()
+    chart = null
+  }
 })
 </script>
 
 <template>
   <div class="dashboard-page">
     <!-- Page Header -->
-    <div class="page-header">
-      <div class="page-header-left">
-        <h2 class="page-title">Dashboard</h2>
-        <p class="page-subtitle">System overview and recent activity</p>
-      </div>
-      <div class="page-header-right">
+    <PageHeader title="Dashboard" subtitle="System overview and recent activity">
+      <template #actions>
         <span v-if="lastUpdated" class="last-updated">
           Updated {{ formatTime(lastUpdated) }}
         </span>
@@ -247,12 +308,13 @@ onUnmounted(() => {
           :icon="Refresh"
           :loading="isRefreshing"
           size="small"
+          aria-label="Refresh dashboard"
           @click="onRefresh"
         >
           Refresh
         </el-button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <!-- Row 1: KPI Cards -->
     <div class="kpi-grid">
@@ -280,6 +342,7 @@ onUnmounted(() => {
           :value="kpis.activeQueue"
           format="number"
           :icon="Refresh"
+          style="animation-delay: 50ms"
         />
         <KpiCard
           label="Success Rate"
@@ -288,7 +351,7 @@ onUnmounted(() => {
           :icon="Check"
           :trend="kpis.successTrend"
           trend-label="vs yesterday"
-          style="animation-delay: 50ms"
+          style="animation-delay: 100ms"
         />
         <KpiCard
           label="Avg Duration"
@@ -297,7 +360,7 @@ onUnmounted(() => {
           :icon="Timer"
           :trend="kpis.durationTrend"
           trend-label="vs last week"
-          style="animation-delay: 100ms"
+          style="animation-delay: 150ms"
         />
       </template>
     </div>
@@ -305,7 +368,7 @@ onUnmounted(() => {
     <!-- Row 2: Trend + Health -->
     <div class="row-two">
       <!-- 24h Activity Trend -->
-      <el-card class="trend-card" :body-style="{ padding: '0' }">
+      <CardPanel :body-style="{ padding: '0' }">
         <template #header>
           <div class="card-header">
             <div class="card-header-left">
@@ -317,29 +380,7 @@ onUnmounted(() => {
         <div class="trend-body">
           <el-skeleton v-if="loading" :rows="5" animated />
           <template v-else-if="trend.length > 0">
-            <div class="trend-chart">
-              <div class="trend-bars">
-                <div
-                  v-for="(point, idx) in trend"
-                  :key="idx"
-                  class="trend-bar-wrapper"
-                >
-                  <div
-                    class="trend-bar"
-                    :style="{ height: barHeight(point.value) }"
-                  >
-                    <el-tooltip
-                      :content="`${point.time}: ${point.value} reviews`"
-                      placement="top"
-                      effect="dark"
-                    >
-                      <div class="trend-bar-hitbox"></div>
-                    </el-tooltip>
-                  </div>
-                  <span v-if="idx % 4 === 0" class="trend-bar-label">{{ point.time }}</span>
-                </div>
-              </div>
-            </div>
+            <div ref="chartContainer" class="chart-container" />
             <div class="trend-summary">
               <span class="trend-total">Total: {{ trend.reduce((a, b) => a + b.value, 0) }} reviews</span>
             </div>
@@ -349,10 +390,10 @@ onUnmounted(() => {
             <p>No activity in the last 24 hours</p>
           </div>
         </div>
-      </el-card>
+      </CardPanel>
 
       <!-- System Health -->
-      <el-card class="health-card" :body-style="{ padding: '0' }">
+      <CardPanel :body-style="{ padding: '0' }">
         <template #header>
           <div class="card-header">
             <div class="card-header-left">
@@ -363,6 +404,7 @@ onUnmounted(() => {
               :icon="RefreshRight"
               size="small"
               text
+              aria-label="Refresh health data"
               @click="onRefresh"
             />
           </div>
@@ -418,11 +460,11 @@ onUnmounted(() => {
             </div>
           </template>
         </div>
-      </el-card>
+      </CardPanel>
     </div>
 
     <!-- Row 3: Recent Activity Table -->
-    <el-card class="recent-card" :body-style="{ padding: '0' }">
+    <CardPanel :body-style="{ padding: '0' }">
       <template #header>
         <div class="card-header">
           <div class="card-header-left">
@@ -438,11 +480,7 @@ onUnmounted(() => {
         <el-skeleton v-if="loading" :rows="5" animated />
         <template v-else-if="recentReviews.length > 0">
           <div class="table-wrapper">
-            <el-table
-              :data="recentReviews"
-              style="width: 100%"
-              @row-click="onRowClick"
-            >
+            <DataTable :data="recentReviews" @row-click="onRowClick">
               <el-table-column label="MR Title" min-width="200">
                 <template #default="{ row }">
                   <div class="mr-title-cell">
@@ -452,7 +490,7 @@ onUnmounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column label="Author" width="160">
+              <el-table-column label="Author" width="140">
                 <template #default="{ row }">
                   <div class="author-cell">
                     <div class="author-avatar">{{ row.author.name.charAt(0) }}</div>
@@ -461,7 +499,7 @@ onUnmounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column label="Status" width="120">
+              <el-table-column label="Status" width="100">
                 <template #default="{ row }">
                   <StatusBadge :status="statusToBadgeStatus(row.status)" :show-text="false" size="small" />
                   <span style="margin-left: 6px; font-size: 12px; color: var(--text-primary);">{{ statusLabel(row.status) }}</span>
@@ -481,7 +519,7 @@ onUnmounted(() => {
                   </el-tooltip>
                 </template>
               </el-table-column>
-            </el-table>
+            </DataTable>
           </div>
         </template>
         <div v-else class="recent-empty">
@@ -489,7 +527,7 @@ onUnmounted(() => {
           <p>No recent reviews</p>
         </div>
       </div>
-    </el-card>
+    </CardPanel>
   </div>
 </template>
 
@@ -497,35 +535,6 @@ onUnmounted(() => {
 .dashboard-page {
   max-width: 1400px;
   margin: 0 auto;
-}
-
-/* Page Header */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.page-title {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 4px;
-}
-
-.page-subtitle {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.page-header-right {
-  display: flex;
-  align-items: center;
-  gap: 12px;
 }
 
 .last-updated {
@@ -553,13 +562,9 @@ onUnmounted(() => {
 /* Row 2 */
 .row-two {
   display: grid;
-  grid-template-columns: 2fr 1fr;
+  grid-template-columns: 70% 30%;
   gap: 16px;
   margin-bottom: 24px;
-}
-
-.trend-card, .health-card, .recent-card {
-  overflow: hidden;
 }
 
 /* Card Header */
@@ -596,57 +601,9 @@ onUnmounted(() => {
   padding: 16px 20px 20px;
 }
 
-.trend-chart {
-  height: 240px;
-  display: flex;
-  align-items: flex-end;
-}
-
-.trend-bars {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
+.chart-container {
+  height: 280px;
   width: 100%;
-  height: 200px;
-  gap: 2px;
-  padding: 0 4px;
-}
-
-.trend-bar-wrapper {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: flex-end;
-  height: 100%;
-  gap: 4px;
-}
-
-.trend-bar {
-  width: 100%;
-  background: var(--brand);
-  border-radius: 2px 2px 0 0;
-  opacity: 0.85;
-  transition: opacity 0.2s ease;
-  position: relative;
-  min-width: 4px;
-}
-
-.trend-bar:hover {
-  opacity: 1;
-}
-
-.trend-bar-hitbox {
-  position: absolute;
-  inset: 0;
-  cursor: pointer;
-}
-
-.trend-bar-label {
-  font-size: 10px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  white-space: nowrap;
 }
 
 .trend-summary {
@@ -802,7 +759,13 @@ onUnmounted(() => {
 }
 
 /* Responsive */
-@media (max-width: 1024px) {
+@media (max-width: 1279px) {
+  .row-two {
+    grid-template-columns: 60% 40%;
+  }
+}
+
+@media (max-width: 1023px) {
   .kpi-grid {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -811,13 +774,13 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 640px) {
+@media (max-width: 767px) {
   .kpi-grid {
     grid-template-columns: 1fr;
   }
-  .page-header {
-    flex-direction: column;
-  }
+}
+
+@media (max-width: 640px) {
   .trend-bars {
     gap: 1px;
   }

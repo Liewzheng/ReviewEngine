@@ -163,7 +163,7 @@ function handleRefreshAll() {
       title: 'Providers Refreshed',
       message: `All providers tested — ${healthy} healthy, ${issues} issues`,
       type: issues === 0 ? 'success' : 'warning',
-      duration: 4000,
+      duration: issues === 0 ? 3000 : 5000,
     })
   }, 1200)
 }
@@ -319,6 +319,7 @@ onUnmounted(() => {
           :provider="provider"
           :index="idx"
           :testing="testingMap[provider.id]"
+          :loading="loading"
           @test="handleTestSingle"
         />
       </div>
@@ -334,7 +335,7 @@ onUnmounted(() => {
 
 .page-header {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 24px;
@@ -350,6 +351,8 @@ onUnmounted(() => {
   font-weight: 600;
   color: var(--text-primary);
   margin-bottom: 4px;
+  letter-spacing: -0.02em;
+  line-height: 1.3;
 }
 
 .page-subtitle {

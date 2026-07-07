@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   ArrowRight,
@@ -11,6 +11,7 @@ const props = defineProps<{
   provider: LlmProvider
   index: number
   testing?: boolean
+  loading?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -22,6 +23,14 @@ const router = useRouter()
 const testResult = ref<TestResult | null>(null)
 const showAlert = ref(false)
 const alertHovered = ref(false)
+
+// Animation states
+const statusChanging = ref(false)
+const sparklineAnimated = ref(false)
+
+// Latency smooth transition
+const displayLatency = ref(props.provider.latencyMs)
+const animatingLatency = ref(false)
 
 const statusConfig: Record<
   LlmProviderStatus,
@@ -35,8 +44,40 @@ const statusConfig: Record<
 
 const statusInfo = computed(() => statusConfig[props.provider.status])
 
+// Watch status changes for flash-border animation
+watch(() => props.provider.status, (newVal, oldVal) => {
+  if (newVal !== oldVal && oldVal !== undefined) {
+    statusChanging.value = true
+    setTimeout(() => {
+      statusChanging.value = false
+    }, 600)
+  }
+})
+
+// Watch latency changes with smooth number transition (0.3s)
+watch(() => props.provider.latencyMs, (newVal, oldVal) => {
+  if (newVal === oldVal || animatingLatency.value) return
+  const start = oldVal ?? 0
+  const end = newVal
+  const duration = 300
+  const startTime = performance.now()
+
+  animatingLatency.value = true
+  function animate(currentTime: number) {
+    const elapsed = currentTime - startTime
+    const progress = Math.min(elapsed / duration, 1)
+    displayLatency.value = Math.round(start + (end - start) * progress)
+    if (progress < 1) {
+      requestAnimationFrame(animate)
+    } else {
+      animatingLatency.value = false
+    }
+  }
+  requestAnimationFrame(animate)
+})
+
 const latencyColor = computed(() => {
-  const ms = props.provider.latencyMs
+  const ms = displayLatency.value
   if (ms === 0 || !props.provider.configured || props.provider.status === 'offline') return ''
   if (ms < 500) return 'var(--success)'
   if (ms <= 1500) return 'var(--warning)'
@@ -49,6 +90,8 @@ const latencyStyle = computed(() => {
 })
 
 const errorRateColor = computed(() => {
+  // When status is error, force red regardless of error rate value
+  if (props.provider.status === 'error') return 'var(--error)'
   const rate = props.provider.errorRate
   if (rate < 0.01) return 'var(--success)'
   if (rate <= 0.05) return 'var(--warning)'
@@ -65,7 +108,7 @@ const formattedRequests = computed(() => {
 
 const formattedLatency = computed(() => {
   if (!props.provider.configured || props.provider.status === 'offline') return '—'
-  return `${props.provider.latencyMs} ms`
+  return `${displayLatency.value} ms`
 })
 
 const formattedRequestsDisplay = computed(() => {
@@ -143,6 +186,16 @@ function onAlertLeave() {
   }
 }
 
+// Sparkline mount animation
+onMounted(() => {
+  if (hasSparkline.value) {
+    // Trigger animation after a short delay to ensure DOM is ready
+    setTimeout(() => {
+      sparklineAnimated.value = true
+    }, 100)
+  }
+})
+
 // Expose for parent
 defineExpose({
   showTestResult,
@@ -155,11 +208,16 @@ defineExpose({
     class="provider-card"
     :class="[
       `status-${provider.status}`,
-      { 'not-configured': !provider.configured },
+      { 'not-configured': !provider.configured, 'status-change': statusChanging },
     ]"
     :style="{ animationDelay: `${index * 50}ms` }"
   >
-    <el-card shadow="hover" :body-style="{ padding: '20px' }">
+    <el-card
+      v-loading="loading"
+      shadow="hover"
+      :body-style="{ padding: '20px' }"
+      class="provider-card-inner"
+    >
       <!-- Header Row -->
       <div class="card-header">
         <div class="provider-info">
@@ -171,6 +229,7 @@ defineExpose({
           effect="dark"
           size="small"
           class="status-badge"
+          :class="{ 'offline-badge': provider.status === 'offline' }"
         >
           {{ statusInfo.label }}
         </el-tag>
@@ -206,9 +265,7 @@ defineExpose({
         <el-progress
           :percentage="usagePercent"
           :stroke-width="6"
-          :color="{
-            custom: 'var(--brand)',
-          }"
+          :color="'var(--brand)'"
           :show-text="false"
         />
         <span class="usage-label">{{ usagePercent }}% capacity</span>
@@ -227,31 +284,35 @@ defineExpose({
             stroke="var(--brand)"
             stroke-width="2"
             opacity="0.6"
+            class="sparkline-line"
+            :class="{ animated: sparklineAnimated }"
           />
         </svg>
       </div>
 
-      <!-- Test Result Alert -->
-      <div
-        v-if="showAlert && testResult"
-        class="test-alert"
-        @mouseenter="onAlertEnter"
-        @mouseleave="onAlertLeave"
-      >
-        <el-alert
-          :title="testResult.success ? 'Connected' : 'Connection failed'"
-          :type="testResult.success ? 'success' : 'error'"
-          :closable="true"
-          @close="showAlert = false"
+      <!-- Test Result Alert with fade-out transition -->
+      <Transition name="alert-fade">
+        <div
+          v-if="showAlert && testResult"
+          class="test-alert"
+          @mouseenter="onAlertEnter"
+          @mouseleave="onAlertLeave"
         >
-          <template #default>
-            <span v-if="testResult.success && testResult.latencyMs">
-              Latency: {{ testResult.latencyMs }}ms
-            </span>
-            <span v-else-if="testResult.error">{{ testResult.error }}</span>
-          </template>
-        </el-alert>
-      </div>
+          <el-alert
+            :title="testResult.success ? 'Connected' : 'Connection failed'"
+            :type="testResult.success ? 'success' : 'error'"
+            :closable="true"
+            @close="showAlert = false"
+          >
+            <template #default>
+              <span v-if="testResult.success && testResult.latencyMs">
+                Latency: {{ testResult.latencyMs }}ms
+              </span>
+              <span v-else-if="testResult.error">{{ testResult.error }}</span>
+            </template>
+          </el-alert>
+        </div>
+      </Transition>
 
       <!-- Action Row -->
       <div class="action-row">
@@ -286,8 +347,8 @@ defineExpose({
 .provider-card {
   opacity: 0;
   animation: card-enter 0.25s ease forwards;
-  min-width: 280px;
-  max-width: 100%;
+  min-width: 320px;
+  max-width: 400px;
 }
 
 @keyframes card-enter {
@@ -313,8 +374,18 @@ defineExpose({
   }
 }
 
-.provider-card.status-change {
+.provider-card.status-change .provider-card-inner :deep(.el-card) {
   animation: flash-border 0.6s ease;
+}
+
+.provider-card-inner :deep(.el-card) {
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, transform 0.2s ease;
+}
+
+.provider-card-inner:hover :deep(.el-card) {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand), var(--shadow-card);
+  transform: translateY(-2px);
 }
 
 .card-header {
@@ -331,7 +402,7 @@ defineExpose({
 }
 
 .provider-logo {
-  font-size: 28px;
+  font-size: 32px;
   line-height: 1;
 }
 
@@ -339,6 +410,12 @@ defineExpose({
   font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
+}
+
+.status-badge.offline-badge {
+  background-color: var(--offline) !important;
+  border-color: var(--offline) !important;
+  color: #fff !important;
 }
 
 .metrics-row {
@@ -391,12 +468,34 @@ defineExpose({
   display: block;
 }
 
-.test-alert {
-  margin-bottom: 12px;
-  animation: alert-slide 0.2s ease;
+.sparkline-line {
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
 }
 
-@keyframes alert-slide {
+.sparkline-line.animated {
+  animation: sparkline-draw 1s ease forwards;
+}
+
+@keyframes sparkline-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.test-alert {
+  margin-bottom: 12px;
+}
+
+.alert-fade-enter-active {
+  animation: alert-slide-in 0.2s ease;
+}
+
+.alert-fade-leave-active {
+  animation: alert-fade-out 0.3s ease forwards;
+}
+
+@keyframes alert-slide-in {
   from {
     opacity: 0;
     transform: translateY(-6px);
@@ -404,6 +503,17 @@ defineExpose({
   to {
     opacity: 1;
     transform: translateY(0);
+  }
+}
+
+@keyframes alert-fade-out {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-4px);
   }
 }
 

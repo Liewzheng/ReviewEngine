@@ -1,0 +1,118 @@
+version: "3.8"
+
+# Review-Engine SaaS Deployment for GitLab EE
+# Usage: cp .env.example .env && docker compose up -d
+
+services:
+  # ─── Main Review-Engine Service ───────────────────────────────────────
+  review-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: review-engine
+    restart: unless-stopped
+
+    ports:
+      - "${REVIEW_ENGINE_PORT:-8080}:8080"
+
+    environment:
+      # ── API Authentication ──
+      # Required for non-localhost binding
+      REVIEW_API_TOKEN: ${REVIEW_API_TOKEN:?REVIEW_API_TOKEN is required}
+
+      # ── GitLab EE Integration ──
+      GITLAB_TOKEN: ${GITLAB_TOKEN:?GITLAB_TOKEN is required}
+      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:?GITLAB_WEBHOOK_SECRET is required}
+
+      # ── GitLab EE URL (self-hosted) ──
+      # Set this to your GitLab EE instance URL
+      GITLAB_URL: ${GITLAB_URL:-https://gitlab.example.com}
+
+      # ── LLM Configuration ──
+      # JSON array of LLM provider configs (OpenAI, Anthropic, etc.)
+      # Example: [{"provider":"openai","model":"gpt-4o","api_key":"sk-..."}]
+      LLM_CONFIG: ${LLM_CONFIG:?LLM_CONFIG is required}
+
+      # ── Logging ──
+      RUST_LOG: ${RUST_LOG:-info}
+      RUST_LOG_FORMAT: ${RUST_LOG_FORMAT:-json}
+
+      # ── Config & Output Paths ──
+      REVIEW_ENGINE_CONFIG_DIR: /app/config
+      REVIEW_ENGINE_REPORT_DIR: /app/reports
+
+    volumes:
+      # Persist config file (mounted from host or created via init)
+      - type: bind
+        source: ${CONFIG_PATH:-./config}
+        target: /app/config
+        read_only: true
+
+      # Persist review reports
+      - type: bind
+        source: ${REPORTS_PATH:-./reports}
+        target: /app/reports
+
+      # SSH keys for GitLab access (if using SSH clone)
+      - type: bind
+        source: ${SSH_KEY_PATH:-~/.ssh}
+        target: /app/.ssh
+        read_only: true
+
+    # Resource limits for SaaS stability
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - review-engine-net
+
+  # ─── Optional: Caddy Reverse Proxy (HTTPS) ────────────────────────────
+  # Uncomment this section if you need HTTPS termination
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: review-engine-caddy
+  #   restart: unless-stopped
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   depends_on:
+  #     - review-engine
+  #   networks:
+  #     - review-engine-net
+
+  # ─── Optional: Redis for Task Queue (future scaling) ──────────────────
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: review-engine-redis
+  #   restart: unless-stopped
+  #   volumes:
+  #     - redis-data:/data
+  #   networks:
+  #     - review-engine-net
+
+networks:
+  review-engine-net:
+    driver: bridge
+
+volumes:
+  # caddy-data:
+  # caddy-config:
+  # redis-data:

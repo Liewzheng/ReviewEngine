@@ -1,0 +1,77 @@
+# Git ignore patterns for Docker build context
+# This prevents unnecessary files from being copied into the Docker build
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Git
+.git/
+.gitignore
+.github/
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation (not needed at runtime)
+docs/*.md
+!docs/code-audit-default.toml
+
+# Review reports and runtime data
+reports/
+*.log
+review-engine*.log
+
+# Docker files themselves (avoid recursion issues)
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+.env
+.env.*
+!.env.example
+
+# CI/CD
+.github/workflows/
+
+# Test data and artifacts
+test_data/
+tmp/
+temp/
+
+# Python bindings (not included in SaaS build)
+python/
+*.py
+*.pyc
+__pycache__/
+
+# Node.js (if any frontend exists)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Local development configs
+.code-audit-config.toml
+.pr-agent.toml
+
+# Misc
+*.md
+!README.md
+CHANGELOG.md
+LICENSE
+
+# Plan and review artifacts
+plan.md
+review-feedback-*.md

@@ -5,3 +5,19 @@ __pycache__
 review_reports/
 review-report*.md
 review-engine-run.log
+
+# Subagent artifacts
+screenshot*.png
+screenshot-*.png
+queue-*.png
+backend-*.log
+test-report*.md
+frontend-test-cases.xlsx
+ux-review-*.md
+ux-review-*.xlsx
+plan.md
+AGENTS.md
+
+# Directories
+config/
+screenshots/

@@ -6,6 +6,7 @@
 
 use axum::{
     http::HeaderMap,
+    response::Html,
     routing::{get, post},
     Router,
 };
@@ -13,6 +14,10 @@ use std::sync::Arc;
 
 use super::{api, auth::AuthConfig, routes, webhook, AppState};
 use webhook::WebhookHandler;
+
+async fn serve_frontend() -> Html<&'static str> {
+    Html("<h1>Review Engine</h1><p>Dashboard coming soon. Run <code>npm run build</code> in frontend/ to build the Vue app.</p>")
+}
 
 /// Build the complete Axum application router.
 ///
@@ -22,6 +27,7 @@ pub fn build(state: Arc<AppState>, auth: Arc<AuthConfig>, webhook_handlers: Vec<
     let api_routes = api::routes(state.clone(), auth);
 
     let mut app = Router::new()
+        .route("/", get(serve_frontend))
         .route("/health", get(routes::health::health))
         .route("/health/ready", get(routes::health::health_ready))
         .route("/metrics", get(routes::metrics::metrics))

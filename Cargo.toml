@@ -22,7 +22,7 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # HTTP server (health check, webhook)
 axum = "0.8"
-tower-http = { version = "0.6", features = ["cors"] }
+tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Metrics and monitoring
 prometheus = { version = "0.14", default-features = false, features = ["process"] }

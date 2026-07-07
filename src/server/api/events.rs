@@ -28,11 +28,26 @@ async fn event_stream(
 
     let stream = BroadcastStream::new(rx).filter_map(|result| match result {
         Ok(event) => {
-            let data = serde_json::json!({
+            let mut data = serde_json::json!({
                 "task_id": event.task_id,
                 "status": event.status,
                 "event": event.event,
             });
+            if let Some(v) = event.mr_title {
+                data["mr_title"] = serde_json::json!(v);
+            }
+            if let Some(v) = event.project {
+                data["project"] = serde_json::json!(v);
+            }
+            if let Some(v) = event.progress {
+                data["progress"] = serde_json::json!(v);
+            }
+            if let Some(v) = event.expert_name {
+                data["expert_name"] = serde_json::json!(v);
+            }
+            if let Some(v) = event.elapsed_ms {
+                data["elapsed_ms"] = serde_json::json!(v);
+            }
             Some(Ok::<_, Infallible>(Event::default().data(data.to_string())))
         }
         Err(_) => None,

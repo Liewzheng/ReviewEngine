@@ -12,7 +12,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::server::task_queue::{TaskEntry, TaskState};
+use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 use crate::server::AppState;
 use crate::team::orchestrator;
 
@@ -40,7 +40,8 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
         }
     };
 
-    let task_id = store.create().await;
+    let source_meta = source_meta_from_request(&body.source);
+    let task_id = store.create(Some(source_meta)).await;
     let store_clone = store.clone();
     let source = body.source.clone();
     let config_toml = body.config.clone();
@@ -115,9 +116,13 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
         task_id,
         state: TaskState::Pending,
         created_at: chrono::Utc::now(),
+        started_at: None,
         completed_at: None,
         result: None,
         error: None,
+        source_meta: SourceMeta::default(),
+        progress: None,
+        expert_name: None,
     });
 
     (StatusCode::ACCEPTED, Json(status)).into_response()
@@ -208,6 +213,7 @@ async fn delete_review(State(state): State<Arc<AppState>>, Path(task_id): Path<U
 }
 
 fn task_to_status(entry: &TaskEntry) -> TaskStatus {
+    let meta = &entry.source_meta;
     TaskStatus {
         task_id: entry.task_id,
         status: match entry.state {
@@ -221,6 +227,42 @@ fn task_to_status(entry: &TaskEntry) -> TaskStatus {
         duration_ms: entry.duration_ms(),
         result: entry.result.clone(),
         error: entry.error.clone(),
+        mr_title: meta.mr_title.clone(),
+        project: meta.project.clone(),
+        repository: meta.repository.clone(),
+        branch: meta.branch.clone(),
+        target_branch: meta.target_branch.clone(),
+        author_name: meta.author_name.clone(),
+        author_avatar_url: meta.author_avatar_url.clone(),
+        gitlab_mr_url: meta.gitlab_mr_url.clone(),
+        commit_sha: meta.commit_sha.clone(),
+        progress: entry.progress,
+        expert_name: entry.expert_name.clone(),
+    }
+}
+
+fn source_meta_from_request(source: &ReviewSource) -> SourceMeta {
+    match source {
+        ReviewSource::GitLabMr { url, .. } => {
+            let mut meta = SourceMeta::default();
+            // Extract project path from GitLab MR URL: https://gitlab.com/group/project/-/merge_requests/1
+            if let Some((path_part, _)) = url.split_once("/-/merge_requests/") {
+                if let Some((_proto, rest)) = path_part.split_once("://") {
+                    if let Some((_, path)) = rest.split_once('/') {
+                        meta.project = Some(path.to_string());
+                        meta.repository = Some(path.to_string());
+                        meta.gitlab_mr_url = Some(url.clone());
+                    }
+                }
+            }
+            meta
+        }
+        ReviewSource::LocalRepo { path, .. } => SourceMeta {
+            project: Some(path.clone()),
+            repository: Some(path.clone()),
+            ..SourceMeta::default()
+        },
+        ReviewSource::StaticDiff { .. } => SourceMeta::default(),
     }
 }
 

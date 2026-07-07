@@ -15,6 +15,18 @@ pub struct TaskStatus {
     pub duration_ms: Option<u64>,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+    // MR metadata fields (added for frontend integration)
+    pub mr_title: Option<String>,
+    pub project: Option<String>,
+    pub repository: Option<String>,
+    pub branch: Option<String>,
+    pub target_branch: Option<String>,
+    pub author_name: Option<String>,
+    pub author_avatar_url: Option<String>,
+    pub gitlab_mr_url: Option<String>,
+    pub commit_sha: Option<String>,
+    pub progress: Option<u8>,
+    pub expert_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

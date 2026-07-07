@@ -15,7 +15,7 @@ test-report*.md
 frontend-test-cases.xlsx
 ux-review-*.md
 ux-review-*.xlsx
-plan.md
+plan*.md
 AGENTS.md
 
 # Directories

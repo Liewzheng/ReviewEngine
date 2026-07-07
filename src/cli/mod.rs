@@ -536,9 +536,10 @@ pub async fn run() -> Result<()> {
             let config = review_engine::config::resolve_config(None).await?;
             let mut app_state = review_engine::server::AppState::new(config.llm.clone());
             app_state.task_store = Some(Arc::new(review_engine::server::task_queue::TaskStore::new()));
-            app_state.app_config = Some(Arc::new(config));
+            app_state.app_config = std::sync::RwLock::new(Some(Arc::new(config)));
             app_state.registry = Some(review_engine::metrics::REGISTRY.clone());
             app_state.progress_map = Some(progress_map.clone());
+            app_state.log_collector = Some(review_engine::server::log_collector::init_global_collector());
             let state = Arc::new(app_state);
             let dispatcher = review_engine::server::dispatcher::MrDispatcher::new();
             let mut handlers: Vec<Arc<dyn review_engine::server::webhook::WebhookHandler>> = vec![];

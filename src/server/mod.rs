@@ -16,6 +16,7 @@ pub mod auth;
 pub mod dispatcher;
 pub mod github;
 pub mod gitlab;
+pub mod log_collector;
 pub mod router;
 pub mod routes;
 pub mod state;

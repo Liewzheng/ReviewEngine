@@ -10,14 +10,22 @@ mod cli;
 #[cfg(feature = "cli")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let collector = review_engine::server::log_collector::init_global_collector();
     if std::env::var("REVIEW_LOG_FORMAT").as_deref() == Ok("json") {
         tracing_subscriber::fmt()
             .json()
             .with_current_span(false)
             .with_target(true)
+            .with_writer(move || {
+                review_engine::server::log_collector::LogWriter::new(collector.clone())
+            })
             .init();
     } else {
-        tracing_subscriber::fmt::init();
+        tracing_subscriber::fmt()
+            .with_writer(move || {
+                review_engine::server::log_collector::LogWriter::new(collector.clone())
+            })
+            .init();
     }
     cli::run().await
 }

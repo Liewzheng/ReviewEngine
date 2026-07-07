@@ -1,7 +1,13 @@
 //! REST API endpoints for system information: expert list, version, health status.
 //!
 //! @module review-engine: part of the CodeReview Board virtual engineering team
-use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use axum::{
+    extract::{Path, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, put},
+    Json, Router,
+};
 use std::sync::Arc;
 
 use crate::server::AppState;
@@ -9,12 +15,14 @@ use crate::server::AppState;
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/experts", get(list_experts))
+        .route("/experts/{id}", put(update_expert))
         .route("/version", get(version_info))
         .route("/health", get(system_health))
 }
 
 async fn list_experts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cfg = match &state.app_config {
+    let cfg_opt = state.app_config.read().unwrap();
+    let cfg = match cfg_opt.as_ref() {
         Some(c) => c,
         None => {
             return (
@@ -68,9 +76,10 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let mut integrations = Vec::new();
     let mut llm_providers = Vec::new();
 
+    let llm_configs = state.llm_configs.read().unwrap();
+
     // GitLab integration check
-    let gitlab_configured = state
-        .llm_configs
+    let gitlab_configured = llm_configs
         .iter()
         .any(|c| c.provider.to_lowercase().contains("gitlab") || c.api_base.to_lowercase().contains("gitlab"));
     integrations.push(serde_json::json!({
@@ -82,8 +91,7 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     }));
 
     // GitHub integration check
-    let github_configured = state
-        .llm_configs
+    let github_configured = llm_configs
         .iter()
         .any(|c| c.provider.to_lowercase().contains("github") || c.api_base.to_lowercase().contains("github"));
     integrations.push(serde_json::json!({
@@ -94,7 +102,7 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         "message": if github_configured { "Configured" } else { "Not configured" },
     }));
 
-    for llm in &state.llm_configs {
+    for llm in llm_configs.iter() {
         let has_key = !llm.api_key.is_empty();
         llm_providers.push(serde_json::json!({
             "service": format!("{} {}", llm.provider, llm.model),
@@ -166,4 +174,75 @@ fn icon_for_category(category: &str) -> String {
         _ => "Star",
     }
     .to_string()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct UpdateExpertRequest {
+    enabled: Option<bool>,
+    weight: Option<u8>,
+}
+
+async fn update_expert(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<UpdateExpertRequest>,
+) -> impl IntoResponse {
+    let mut cfg_opt = state.app_config.write().unwrap();
+    let cfg = match cfg_opt.as_mut() {
+        Some(arc) => Arc::make_mut(arc),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "config not loaded"})),
+            )
+                .into_response();
+        }
+    };
+
+    let expert_name = cfg
+        .review_experts
+        .keys()
+        .find(|name| slugify(name) == id)
+        .cloned();
+
+    let name = match expert_name {
+        Some(n) => n,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "expert not found"})),
+            )
+                .into_response();
+        }
+    };
+
+    if let Some(expert) = cfg.review_experts.get_mut(&name) {
+        if let Some(enabled) = body.enabled {
+            expert.enabled = enabled;
+        }
+        if let Some(weight) = body.weight {
+            expert.weight = weight;
+        }
+
+        let category = derive_category(&name, &expert.role);
+        let icon = icon_for_category(&category);
+        let response = serde_json::json!({
+            "id": id,
+            "name": if expert.title.is_empty() { &name } else { &expert.title },
+            "category": category,
+            "icon": icon,
+            "enabled": expert.enabled,
+            "weight": expert.weight,
+            "description": expert.role,
+            "promptPreview": expert.prompt.clone().unwrap_or_default(),
+            "lastReviews": [],
+        });
+        Json(response).into_response()
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "expert not found"})),
+        )
+            .into_response()
+    }
 }

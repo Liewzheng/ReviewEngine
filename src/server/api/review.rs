@@ -46,7 +46,7 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
     let source = body.source.clone();
     let config_toml = body.config.clone();
     let llm_configs = body.llm_configs.clone().unwrap_or_default();
-    let cfg = state.app_config.clone();
+    let cfg = state.app_config.read().unwrap().clone();
 
     tokio::spawn(async move {
         store_clone.update(task_id, TaskState::Running, None, None).await;

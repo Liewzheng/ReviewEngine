@@ -17,6 +17,8 @@ use crate::server::auth::AuthConfig;
 pub mod config;
 pub mod dashboard;
 pub mod events;
+pub mod llm;
+pub mod logs;
 pub mod queue;
 pub mod review;
 pub mod system;
@@ -32,6 +34,8 @@ pub fn routes(state: Arc<AppState>, auth: Arc<AuthConfig>) -> Router<Arc<AppStat
         .nest("/events", events::routes())
         .nest("/dashboard", dashboard::routes())
         .nest("/queue", queue::routes())
+        .nest("/llm", llm::routes())
+        .nest("/logs", logs::routes())
         .layer(cors);
 
     if auth.is_enabled() {

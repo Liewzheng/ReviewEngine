@@ -10,7 +10,7 @@ pub async fn health() -> Json<serde_json::Value> {
 }
 
 pub async fn health_ready(State(state): State<Arc<AppState>>) -> (axum::http::StatusCode, Json<serde_json::Value>) {
-    if state.llm_configs.is_empty() {
+    if state.llm_configs.read().unwrap().is_empty() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({ "status": "not ready", "reason": "no LLM configs configured" })),

@@ -96,9 +96,10 @@ fn compute_trend(items: &[TaskEntry]) -> Vec<serde_json::Value> {
 async fn compute_health(state: &AppState) -> serde_json::Value {
     let mut integrations = Vec::new();
 
+    let llm_configs = state.llm_configs.read().unwrap();
+
     // GitLab integration check (presence of token implies configured)
-    let gitlab_configured = state
-        .llm_configs
+    let gitlab_configured = llm_configs
         .iter()
         .any(|c| c.provider.to_lowercase().contains("gitlab") || c.api_base.to_lowercase().contains("gitlab"));
     integrations.push(serde_json::json!({
@@ -110,8 +111,7 @@ async fn compute_health(state: &AppState) -> serde_json::Value {
     }));
 
     // GitHub integration check
-    let github_configured = state
-        .llm_configs
+    let github_configured = llm_configs
         .iter()
         .any(|c| c.provider.to_lowercase().contains("github") || c.api_base.to_lowercase().contains("github"));
     integrations.push(serde_json::json!({
@@ -123,7 +123,7 @@ async fn compute_health(state: &AppState) -> serde_json::Value {
     }));
 
     let mut llm_providers = Vec::new();
-    for llm in &state.llm_configs {
+    for llm in llm_configs.iter() {
         let has_key = !llm.api_key.is_empty();
         llm_providers.push(serde_json::json!({
             "service": format!("{} {}", llm.provider, llm.model),

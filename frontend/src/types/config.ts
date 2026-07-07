@@ -44,6 +44,16 @@ export interface AppConfig {
   llm: LLMConfig
   rules: ReviewRules
   advanced: AdvancedConfig
+  /** Optional server-side metadata (populated when reading from backend). */
+  version?: string
+  /** Optional expert summary (populated when reading from backend). */
+  experts?: { name: string; role: string; title: string; trigger: string; enabled: boolean }[]
+  /** Optional command toggles (populated when reading from backend). */
+  commands?: Record<string, boolean>
+  /** Optional max team size (populated when reading from backend). */
+  maxTeamSize?: number
+  /** Optional max concurrent LLM calls (populated when reading from backend). */
+  maxConcurrentLlmCalls?: number
 }
 
 export interface TestResult {

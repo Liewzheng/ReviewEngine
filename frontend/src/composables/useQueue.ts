@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue';
-import { getQueueStats, getQueueTasks, cancelTask } from '../services/queue';
+import { getQueueStats, getQueueTasks, cancelTask, pauseQueue, resumeQueue, setMaxConcurrent } from '../services/queue';
 import type { QueueTasksResponse } from '../services/queue';
 import type { QueueStats } from '../types/queue';
 
@@ -45,6 +45,40 @@ export function useQueue() {
     }
   }
 
+  async function pause() {
+    error.value = null;
+    try {
+      await pauseQueue();
+      await fetchStats();
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Unknown error';
+      throw e;
+    }
+  }
+
+  async function resume() {
+    error.value = null;
+    try {
+      await resumeQueue();
+      await fetchStats();
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Unknown error';
+      throw e;
+    }
+  }
+
+  async function updateMaxConcurrent(value: number) {
+    error.value = null;
+    try {
+      await setMaxConcurrent(value);
+      await fetchStats();
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Unknown error';
+      throw e;
+    }
+  }
+
+  const isPaused = computed(() => stats.value?.isPaused ?? false);
   const items = computed(() => data.value?.items ?? []);
   const total = computed(() => data.value?.total ?? 0);
 
@@ -52,10 +86,14 @@ export function useQueue() {
     stats,
     items,
     total,
+    isPaused,
     loading,
     error,
     fetchStats,
     fetchTasks,
     cancel,
+    pause,
+    resume,
+    updateMaxConcurrent,
   };
 }

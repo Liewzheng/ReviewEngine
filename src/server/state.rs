@@ -9,6 +9,7 @@ use prometheus::Registry;
 use std::sync::{Arc, Mutex, RwLock};
 
 use crate::models::LLMConfig;
+use crate::server::api::config::UiConfig;
 use crate::server::log_collector::LogCollector;
 use crate::server::task_queue::TaskStore;
 
@@ -26,6 +27,8 @@ pub struct AppState {
     pub app_config: RwLock<Option<Arc<crate::models::AppConfig>>>,
     /// In-memory log collector for SSE streaming (optional).
     pub log_collector: Option<Arc<Mutex<LogCollector>>>,
+    /// UI-facing configuration (frontend-compatible shape, persisted in-memory).
+    pub ui_config: RwLock<UiConfig>,
 }
 
 impl AppState {
@@ -41,6 +44,7 @@ impl AppState {
             task_store: None,
             app_config: RwLock::new(None),
             log_collector: None,
+            ui_config: RwLock::new(UiConfig::default()),
         }
     }
 }

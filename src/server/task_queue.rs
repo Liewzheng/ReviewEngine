@@ -55,6 +55,9 @@ pub struct TaskEvent {
 pub struct TaskStore {
     inner: Arc<RwLock<HashMap<Uuid, TaskEntry>>>,
     tx: tokio::sync::broadcast::Sender<TaskEvent>,
+    is_paused: Arc<RwLock<bool>>,
+    max_concurrent: Arc<RwLock<usize>>,
+    queue_capacity: Arc<RwLock<usize>>,
 }
 
 impl TaskStore {
@@ -76,7 +79,13 @@ impl TaskStore {
             }
         });
 
-        Self { inner, tx }
+        Self {
+            inner,
+            tx,
+            is_paused: Arc::new(RwLock::new(false)),
+            max_concurrent: Arc::new(RwLock::new(8)),
+            queue_capacity: Arc::new(RwLock::new(16)),
+        }
     }
 
     pub async fn cleanup_expired(&self) {
@@ -264,16 +273,76 @@ impl TaskStore {
             }
         }
 
+        let max_concurrent = *self.max_concurrent.read().await as u64;
+        let queue_capacity = *self.queue_capacity.read().await as u64;
+        let is_paused = *self.is_paused.read().await;
+
         QueueStats {
             active,
             queued,
             failed,
             total_depth: active + queued,
-            max_concurrent: 8,  // TODO: derive from config
-            queue_capacity: 16, // TODO: derive from config
+            max_concurrent,
+            queue_capacity,
             failed_last_24h,
             total_last_24h,
+            is_paused,
         }
+    }
+
+    /// Pause the queue: new tasks will remain pending but will not be started.
+    pub async fn pause(&self) {
+        let mut paused = self.is_paused.write().await;
+        *paused = true;
+    }
+
+    /// Resume the queue: allow new tasks to be started up to max_concurrent.
+    pub async fn resume(&self) {
+        let mut paused = self.is_paused.write().await;
+        *paused = false;
+    }
+
+    /// Check whether the queue is currently paused.
+    pub async fn is_paused(&self) -> bool {
+        *self.is_paused.read().await
+    }
+
+    /// Set the maximum number of concurrently running tasks.
+    pub async fn set_max_concurrent(&self, n: usize) {
+        let mut mc = self.max_concurrent.write().await;
+        *mc = n;
+    }
+
+    /// Get the current maximum number of concurrently running tasks.
+    pub async fn get_max_concurrent(&self) -> usize {
+        *self.max_concurrent.read().await
+    }
+
+    /// Set the queue capacity (max total depth).
+    pub async fn set_queue_capacity(&self, n: usize) {
+        let mut qc = self.queue_capacity.write().await;
+        *qc = n;
+    }
+
+    /// Get the current queue capacity.
+    pub async fn get_queue_capacity(&self) -> usize {
+        *self.queue_capacity.read().await
+    }
+
+    /// Determine whether a new task may be started given pause and concurrency limits.
+    pub async fn can_start_new_task(&self) -> bool {
+        if *self.is_paused.read().await {
+            return false;
+        }
+        let max = *self.max_concurrent.read().await;
+        let active = self.active_count().await;
+        active < max
+    }
+
+    /// Count currently running tasks.
+    pub async fn active_count(&self) -> usize {
+        let map = self.inner.read().await;
+        map.values().filter(|e| e.state == TaskState::Running).count()
     }
 }
 
@@ -302,4 +371,5 @@ pub struct QueueStats {
     pub queue_capacity: u64,
     pub failed_last_24h: u64,
     pub total_last_24h: u64,
+    pub is_paused: bool,
 }

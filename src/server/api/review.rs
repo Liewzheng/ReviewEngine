@@ -49,6 +49,9 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
     let cfg = state.app_config.read().unwrap().clone();
 
     tokio::spawn(async move {
+        while !store_clone.can_start_new_task().await {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
         store_clone.update(task_id, TaskState::Running, None, None).await;
 
         let diff_raw = match resolve_source(source, &cfg).await {

@@ -4,14 +4,15 @@
 //! queue monitor view.
 
 use axum::{
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::get,
+    routing::{delete, get, post},
     Json, Router,
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use uuid::Uuid;
 
 use crate::server::task_queue::{TaskEntry, TaskState};
 use crate::server::AppState;
@@ -20,6 +21,10 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/stats", get(get_queue_stats))
         .route("/tasks", get(get_queue_tasks))
+        .route("/tasks/{task_id}", delete(delete_queue_task))
+        .route("/pause", post(post_pause))
+        .route("/resume", post(post_resume))
+        .route("/max-concurrent", post(post_max_concurrent))
 }
 
 async fn get_queue_stats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -35,6 +40,7 @@ async fn get_queue_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
                 "queueCapacity": 16,
                 "failedLast24h": 0,
                 "totalLast24h": 0,
+                "isPaused": false,
             }))
             .into_response()
         }
@@ -50,6 +56,7 @@ async fn get_queue_stats(State(state): State<Arc<AppState>>) -> impl IntoRespons
         "queueCapacity": stats.queue_capacity,
         "failedLast24h": stats.failed_last_24h,
         "totalLast24h": stats.total_last_24h,
+        "isPaused": stats.is_paused,
     }))
     .into_response()
 }
@@ -97,6 +104,81 @@ async fn get_queue_tasks(
         "per_page": per_page,
     }))
     .into_response()
+}
+
+async fn delete_queue_task(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
+    let store = match &state.task_store {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "task store not initialized"})),
+            )
+                .into_response()
+        }
+    };
+    if store.delete(task_id).await {
+        (StatusCode::OK, Json(serde_json::json!({"status": "deleted"}))).into_response()
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "task not found or cannot be cancelled"})),
+        )
+            .into_response()
+    }
+}
+
+async fn post_pause(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let store = match &state.task_store {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "task store not initialized"})),
+            )
+                .into_response()
+        }
+    };
+    store.pause().await;
+    Json(serde_json::json!({"status": "paused"})).into_response()
+}
+
+async fn post_resume(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let store = match &state.task_store {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "task store not initialized"})),
+            )
+                .into_response()
+        }
+    };
+    store.resume().await;
+    Json(serde_json::json!({"status": "resumed"})).into_response()
+}
+
+#[derive(Deserialize)]
+pub struct MaxConcurrentRequest {
+    max_concurrent: usize,
+}
+
+async fn post_max_concurrent(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<MaxConcurrentRequest>,
+) -> impl IntoResponse {
+    let store = match &state.task_store {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "task store not initialized"})),
+            )
+                .into_response()
+        }
+    };
+    store.set_max_concurrent(body.max_concurrent).await;
+    Json(serde_json::json!({"maxConcurrent": body.max_concurrent})).into_response()
 }
 
 fn task_to_queue_task(entry: &TaskEntry) -> serde_json::Value {

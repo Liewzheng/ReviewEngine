@@ -297,7 +297,8 @@
       <!-- Advanced Toggle -->
       <div class="advanced-toggle">
         <el-button link type="primary" @click="showAdvanced = !showAdvanced">
-          <el-icon><component :is="showAdvanced ? 'ArrowUp' : 'ArrowDown'" /></el-icon>
+          <el-icon v-if="showAdvanced"><ArrowUp /></el-icon>
+          <el-icon v-else><ArrowDown /></el-icon>
           {{ showAdvanced ? 'Hide Advanced' : 'Show Advanced' }}
         </el-button>
       </div>

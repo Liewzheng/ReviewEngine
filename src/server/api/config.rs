@@ -25,41 +25,8 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let cfg_opt = state.app_config.read().unwrap();
-    let cfg = match cfg_opt.as_ref() {
-        Some(c) => c,
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "config not loaded"})),
-            )
-                .into_response()
-        }
-    };
-
-    let experts: Vec<serde_json::Value> = cfg
-        .build_expert_defs()
-        .into_iter()
-        .map(|e| {
-            serde_json::json!({
-                "name": e.name,
-                "role": e.config.role,
-                "title": e.config.title,
-                "trigger": format!("{:?}", e.trigger),
-                "enabled": e.config.enabled,
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "version": env!("CARGO_PKG_VERSION"),
-        "experts": experts,
-        "commands": cfg.commands,
-        "max_team_size": cfg.max_team_size,
-        "max_concurrent_llm_calls": cfg.max_concurrent_llm_calls,
-        // NOTE: sensitive fields (llm[].api_key, webhook_secret, etc.) are intentionally excluded
-    }))
-    .into_response()
+    let ui = state.ui_config.read().unwrap();
+    Json(ui.clone()).into_response()
 }
 
 async fn get_schema() -> Json<serde_json::Value> {
@@ -122,98 +89,196 @@ async fn validate_config(Json(body): Json<ConfigValidateRequest>) -> impl IntoRe
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
-struct UiConfig {
-    gitlab: Option<UiGitLabConfig>,
-    llm: Option<UiLlmConfig>,
-    rules: Option<UiRulesConfig>,
-    advanced: Option<UiAdvancedConfig>,
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiConfig {
+    #[serde(default)]
+    pub gitlab: UiGitLabConfig,
+    #[serde(default)]
+    pub llm: UiLlmConfig,
+    #[serde(default)]
+    pub rules: UiRulesConfig,
+    #[serde(default)]
+    pub advanced: UiAdvancedConfig,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
-struct UiGitLabConfig {
-    url: String,
-    api_token: String,
-    webhook_secret: String,
-    default_project: String,
-    mr_label: String,
-    auto_review: bool,
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiGitLabConfig {
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub api_token: String,
+    #[serde(default)]
+    pub webhook_secret: String,
+    #[serde(default)]
+    pub default_project: String,
+    #[serde(default)]
+    pub mr_label: String,
+    #[serde(default)]
+    pub auto_review: bool,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
-struct UiLlmConfig {
-    primary_provider: String,
-    openai_api_key: String,
-    anthropic_api_key: String,
-    ollama_url: String,
-    default_model: String,
-    max_tokens: u32,
-    temperature: f32,
-    timeout_seconds: u32,
-    retry_attempts: u32,
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiLlmConfig {
+    #[serde(default)]
+    pub primary_provider: String,
+    #[serde(default)]
+    pub openai_api_key: String,
+    #[serde(default)]
+    pub anthropic_api_key: String,
+    #[serde(default)]
+    pub ollama_url: String,
+    #[serde(default)]
+    pub default_model: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: u32,
+    #[serde(default = "default_retry_attempts")]
+    pub retry_attempts: u32,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
-struct UiRulesConfig {
-    min_score: u32,
-    block_on_critical: bool,
-    auto_comment_on_pass: bool,
-    comment_template: String,
-    excluded_patterns: Vec<String>,
-    required_experts: Vec<String>,
-    max_review_duration_seconds: u32,
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiRulesConfig {
+    #[serde(default = "default_min_score")]
+    pub min_score: u32,
+    #[serde(default)]
+    pub block_on_critical: bool,
+    #[serde(default)]
+    pub auto_comment_on_pass: bool,
+    #[serde(default = "default_comment_template")]
+    pub comment_template: String,
+    #[serde(default)]
+    pub excluded_patterns: Vec<String>,
+    #[serde(default = "default_required_experts")]
+    pub required_experts: Vec<String>,
+    #[serde(default = "default_max_review_duration_seconds")]
+    pub max_review_duration_seconds: u32,
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[allow(dead_code)]
-struct UiAdvancedConfig {
-    log_level: String,
-    log_retention_days: u32,
-    sse_heartbeat_interval: u32,
-    max_concurrent_reviews: u32,
-    request_timeout: u32,
-    enable_metrics: bool,
-    debug_mode: bool,
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiAdvancedConfig {
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+    #[serde(default = "default_log_retention_days")]
+    pub log_retention_days: u32,
+    #[serde(default = "default_sse_heartbeat_interval")]
+    pub sse_heartbeat_interval: u32,
+    #[serde(default = "default_max_concurrent_reviews")]
+    pub max_concurrent_reviews: u32,
+    #[serde(default = "default_request_timeout")]
+    pub request_timeout: u32,
+    #[serde(default = "default_enable_metrics")]
+    pub enable_metrics: bool,
+    #[serde(default)]
+    pub debug_mode: bool,
+}
+
+fn default_max_tokens() -> u32 { 4096 }
+fn default_temperature() -> f32 { 0.7 }
+fn default_timeout_seconds() -> u32 { 60 }
+fn default_retry_attempts() -> u32 { 3 }
+fn default_min_score() -> u32 { 75 }
+fn default_comment_template() -> String { "Code review completed. Overall score: {{score}}/100. {{summary}}".to_string() }
+fn default_required_experts() -> Vec<String> { vec!["Security".to_string(), "Performance".to_string(), "Quality".to_string()] }
+fn default_max_review_duration_seconds() -> u32 { 300 }
+fn default_log_level() -> String { "info".to_string() }
+fn default_log_retention_days() -> u32 { 30 }
+fn default_sse_heartbeat_interval() -> u32 { 15 }
+fn default_max_concurrent_reviews() -> u32 { 5 }
+fn default_request_timeout() -> u32 { 120 }
+fn default_enable_metrics() -> bool { true }
+
+impl UiConfig {
+    /// Build a `UiConfig` from the backend-native `AppConfig`, filling in
+    /// sensible defaults for fields that only exist in the UI layer.
+    pub fn from_app_config(app: &crate::models::AppConfig) -> Self {
+        let mut ui = UiConfig::default();
+
+        // Map LLM configs
+        for l in &app.llm {
+            match l.provider.as_str() {
+                "openai" => {
+                    ui.llm.primary_provider = "openai".to_string();
+                    ui.llm.openai_api_key = l.api_key.clone();
+                    ui.llm.default_model = l.model.clone();
+                    ui.llm.max_tokens = l.max_tokens;
+                    ui.llm.temperature = l.temperature;
+                }
+                "anthropic" => {
+                    ui.llm.primary_provider = "anthropic".to_string();
+                    ui.llm.anthropic_api_key = l.api_key.clone();
+                    ui.llm.default_model = l.model.clone();
+                    ui.llm.max_tokens = l.max_tokens;
+                    ui.llm.temperature = l.temperature;
+                }
+                "ollama" => {
+                    ui.llm.primary_provider = "ollama".to_string();
+                    ui.llm.ollama_url = l.api_base.clone();
+                    ui.llm.default_model = l.model.clone();
+                    ui.llm.max_tokens = l.max_tokens;
+                    ui.llm.temperature = l.temperature;
+                }
+                _ => {}
+            }
+        }
+        // If primary_provider is still empty but we have at least one config
+        if ui.llm.primary_provider.is_empty() {
+            if let Some(first) = app.llm.first() {
+                ui.llm.primary_provider = first.provider.clone();
+                ui.llm.default_model = first.model.clone();
+                ui.llm.max_tokens = first.max_tokens;
+                ui.llm.temperature = first.temperature;
+            }
+        }
+
+        // Map advanced settings
+        ui.advanced.max_concurrent_reviews = app.max_concurrent_llm_calls.unwrap_or(5) as u32;
+        ui.advanced.enable_metrics = true; // Default, overridden at runtime if needed
+
+        ui
+    }
 }
 
 async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfig>) -> impl IntoResponse {
     let mut new_llm_configs = Vec::new();
 
-    if let Some(ui_llm) = body.llm {
-        if !ui_llm.openai_api_key.is_empty() {
-            new_llm_configs.push(crate::models::LLMConfig {
-                provider: "openai".to_string(),
-                model: ui_llm.default_model.clone(),
-                api_key: ui_llm.openai_api_key,
-                api_base: String::new(),
-                max_tokens: ui_llm.max_tokens,
-                temperature: ui_llm.temperature,
-            });
-        }
-        if !ui_llm.anthropic_api_key.is_empty() {
-            new_llm_configs.push(crate::models::LLMConfig {
-                provider: "anthropic".to_string(),
-                model: ui_llm.default_model.clone(),
-                api_key: ui_llm.anthropic_api_key,
-                api_base: String::new(),
-                max_tokens: ui_llm.max_tokens,
-                temperature: ui_llm.temperature,
-            });
-        }
-        if !ui_llm.ollama_url.is_empty() {
-            new_llm_configs.push(crate::models::LLMConfig {
-                provider: "ollama".to_string(),
-                model: ui_llm.default_model.clone(),
-                api_key: String::new(),
-                api_base: ui_llm.ollama_url,
-                max_tokens: ui_llm.max_tokens,
-                temperature: ui_llm.temperature,
-            });
-        }
+    // Build LLM configs from UI fields (all non-empty keys are kept)
+    if !body.llm.openai_api_key.is_empty() {
+        new_llm_configs.push(crate::models::LLMConfig {
+            provider: "openai".to_string(),
+            model: body.llm.default_model.clone(),
+            api_key: body.llm.openai_api_key.clone(),
+            api_base: String::new(),
+            max_tokens: body.llm.max_tokens,
+            temperature: body.llm.temperature,
+        });
+    }
+    if !body.llm.anthropic_api_key.is_empty() {
+        new_llm_configs.push(crate::models::LLMConfig {
+            provider: "anthropic".to_string(),
+            model: body.llm.default_model.clone(),
+            api_key: body.llm.anthropic_api_key.clone(),
+            api_base: String::new(),
+            max_tokens: body.llm.max_tokens,
+            temperature: body.llm.temperature,
+        });
+    }
+    if !body.llm.ollama_url.is_empty() {
+        new_llm_configs.push(crate::models::LLMConfig {
+            provider: "ollama".to_string(),
+            model: body.llm.default_model.clone(),
+            api_key: String::new(),
+            api_base: body.llm.ollama_url.clone(),
+            max_tokens: body.llm.max_tokens,
+            temperature: body.llm.temperature,
+        });
     }
 
     let mut cfg_opt = state.app_config.write().unwrap();
@@ -222,10 +287,8 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
         if !new_llm_configs.is_empty() {
             new_cfg.llm = new_llm_configs.clone();
         }
-        if let Some(ui_advanced) = body.advanced {
-            new_cfg.max_concurrent_llm_calls = Some(ui_advanced.max_concurrent_reviews as usize);
-            new_cfg.max_team_size = Some(ui_advanced.max_concurrent_reviews as usize);
-        }
+        new_cfg.max_concurrent_llm_calls = Some(body.advanced.max_concurrent_reviews as usize);
+        new_cfg.max_team_size = Some(body.advanced.max_concurrent_reviews as usize);
         *cfg_opt = Some(Arc::new(new_cfg));
     } else {
         return (
@@ -240,6 +303,10 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
         let mut llm = state.llm_configs.write().unwrap();
         *llm = new_llm_configs;
     }
+
+    // Persist full UI config so GET /config returns exactly what was saved
+    let mut ui = state.ui_config.write().unwrap();
+    *ui = body;
 
     Json(serde_json::json!({"status": "saved"})).into_response()
 }

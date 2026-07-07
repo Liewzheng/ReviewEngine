@@ -10,7 +10,6 @@ import { useQueue } from '../composables/useQueue'
 const queue = useQueue()
 
 // --- Local UI state ---
-const isPaused = ref(false)
 const sseConnected = ref(false)
 const recentlyUpdated = ref<string[]>([])
 let refreshInterval: ReturnType<typeof setInterval> | null = null
@@ -25,6 +24,7 @@ const stats = computed<QueueStats>(() => queue.stats.value ?? {
   queueCapacity: 20,
   failedLast24h: 0,
   totalLast24h: 0,
+  isPaused: false,
 })
 
 // --- Computed task lists ---
@@ -56,13 +56,56 @@ const stopAutoRefresh = () => {
 }
 
 // --- Pause / Resume ---
-const togglePause = () => {
-  isPaused.value = !isPaused.value
-  ElNotification({
-    type: isPaused.value ? 'warning' : 'success',
-    message: isPaused.value ? 'Queue paused' : 'Queue resumed',
-    duration: 3000,
-  })
+const togglePause = async () => {
+  try {
+    if (queue.isPaused.value) {
+      await queue.resume()
+      ElNotification({
+        type: 'success',
+        message: 'Queue resumed',
+        duration: 3000,
+      })
+    } else {
+      await queue.pause()
+      ElNotification({
+        type: 'warning',
+        message: 'Queue paused',
+        duration: 3000,
+      })
+    }
+  } catch (e) {
+    ElNotification({
+      type: 'error',
+      message: e instanceof Error ? e.message : 'Failed to toggle queue',
+      duration: 5000,
+    })
+  }
+}
+
+// --- Max concurrent ---
+const maxConcurrentInput = ref(8)
+
+watch(() => stats.value.maxConcurrent, (val) => {
+  maxConcurrentInput.value = val
+}, { immediate: true })
+
+const handleMaxConcurrentChange = async () => {
+  const value = Math.max(1, Math.min(64, maxConcurrentInput.value))
+  maxConcurrentInput.value = value
+  try {
+    await queue.updateMaxConcurrent(value)
+    ElNotification({
+      type: 'success',
+      message: `Max concurrent set to ${value}`,
+      duration: 3000,
+    })
+  } catch (e) {
+    ElNotification({
+      type: 'error',
+      message: e instanceof Error ? e.message : 'Failed to update max concurrent',
+      duration: 5000,
+    })
+  }
 }
 
 // --- Cancel all failed ---
@@ -177,14 +220,22 @@ onUnmounted(() => {
       </div>
       <div class="page-header-right">
         <el-button
-          :type="isPaused ? 'success' : 'warning'"
+          :type="queue.isPaused ? 'success' : 'warning'"
           @click="togglePause"
         >
           <el-icon class="btn-icon">
-            <component :is="isPaused ? 'VideoPlay' : 'VideoPause'" />
+            <component :is="queue.isPaused ? 'VideoPlay' : 'VideoPause'" />
           </el-icon>
-          <span>{{ isPaused ? 'Resume Queue' : 'Pause Queue' }}</span>
+          <span>{{ queue.isPaused ? 'Resume Queue' : 'Pause Queue' }}</span>
         </el-button>
+        <el-input-number
+          v-model="maxConcurrentInput"
+          :min="1"
+          :max="64"
+          size="default"
+          style="width: 120px"
+          @change="handleMaxConcurrentChange"
+        />
         <el-button type="danger" @click="handleCancelAllFailed">
           <el-icon class="btn-icon"><Delete /></el-icon>
           <span>Cancel All Failed</span>
@@ -260,7 +311,7 @@ onUnmounted(() => {
             v-for="task in activeTasks"
             :key="task.id"
             :task="task"
-            :is-paused="isPaused"
+            :is-paused="queue.isPaused.value"
             :was-updated="recentlyUpdated.includes(task.id)"
             @cancel="handleCancel"
             @retry="handleRetry"
@@ -285,7 +336,7 @@ onUnmounted(() => {
             v-for="task in queuedTasks"
             :key="task.id"
             :task="task"
-            :is-paused="isPaused"
+            :is-paused="queue.isPaused.value"
             :was-updated="recentlyUpdated.includes(task.id)"
             @cancel="handleCancel"
             @retry="handleRetry"
@@ -310,7 +361,7 @@ onUnmounted(() => {
             v-for="task in failedTasks"
             :key="task.id"
             :task="task"
-            :is-paused="isPaused"
+            :is-paused="queue.isPaused.value"
             :was-updated="recentlyUpdated.includes(task.id)"
             @cancel="handleCancel"
             @retry="handleRetry"

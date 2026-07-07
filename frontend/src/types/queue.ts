@@ -7,6 +7,7 @@ export interface QueueStats {
   queueCapacity: number;
   failedLast24h: number;
   totalLast24h: number;
+  isPaused: boolean;
 }
 
 export type TaskStatus = 'running' | 'queued' | 'failed' | 'completed';

@@ -5,11 +5,13 @@
 //! 1000 entries. Also exposes a `tokio::sync::broadcast` channel
 //! for real-time SSE streaming.
 
-use std::io::Write;
+use std::fs::OpenOptions;
+use std::io::{BufRead, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogEntry {
     pub id: String,
     pub timestamp: String,
@@ -18,7 +20,7 @@ pub struct LogEntry {
     pub metadata: Option<LogMetadata>,
 }
 
-#[derive(Debug, Clone, serde::Serialize, Default)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 pub struct LogMetadata {
     pub request_id: Option<String>,
     pub duration_ms: Option<u64>,
@@ -31,17 +33,43 @@ pub struct LogCollector {
     entries: Vec<LogEntry>,
     tx: broadcast::Sender<LogEntry>,
     _rx: broadcast::Receiver<LogEntry>,
+    #[allow(dead_code)]
+    file_path: Option<PathBuf>,
+    file: Option<std::fs::File>,
 }
 
 impl LogCollector {
     pub fn new() -> Self {
+        Self::new_with_path(default_ndjson_path())
+    }
+
+    pub fn new_with_path(file_path: Option<PathBuf>) -> Self {
         let (tx, _rx) = broadcast::channel(1000);
-        Self {
+        let mut collector = Self {
             buffer: Vec::new(),
             entries: Vec::new(),
             tx,
             _rx,
+            file_path: file_path.clone(),
+            file: None,
+        };
+        if let Some(path) = file_path {
+            if let Some(parent) = path.parent() {
+                if !parent.exists() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+            }
+            if path.exists() {
+                if let Err(e) = collector.load_from_file(&path) {
+                    eprintln!("Failed to load log history from {:?}: {}", path, e);
+                }
+            }
+            match OpenOptions::new().create(true).append(true).open(&path) {
+                Ok(f) => collector.file = Some(f),
+                Err(e) => eprintln!("Failed to open log file {:?} for appending: {}", path, e),
+            }
         }
+        collector
     }
 
     pub fn subscribe(&self) -> broadcast::Receiver<LogEntry> {
@@ -65,8 +93,37 @@ impl LogCollector {
         }
     }
 
+    fn load_from_file(&mut self, path: &PathBuf) -> std::io::Result<()> {
+        let file = std::fs::File::open(path)?;
+        let reader = std::io::BufReader::new(file);
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(entry) = serde_json::from_str::<LogEntry>(&line) {
+                self.entries.push(entry);
+            }
+        }
+        if self.entries.len() > 1000 {
+            let remove_count = self.entries.len() - 1000;
+            self.entries.drain(0..remove_count);
+        }
+        Ok(())
+    }
+
+    fn append_entry_to_file(&mut self, entry: &LogEntry) {
+        if let Some(file) = &mut self.file {
+            if let Ok(line) = serde_json::to_string(entry) {
+                if writeln!(file, "{}", line).is_err() {
+                    // Silently ignore write failures to avoid disrupting log collection
+                }
+            }
+        }
+    }
+
     fn parse_line(&mut self, line: &str) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
+        let entry = if let Ok(json) = serde_json::from_str::<serde_json::Value>(line) {
             let level = json
                 .get("level")
                 .and_then(|v| v.as_str())
@@ -83,26 +140,25 @@ impl LogCollector {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
-            let entry = LogEntry {
+            LogEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 timestamp,
                 level,
                 message,
                 metadata: None,
-            };
-            self.entries.push(entry.clone());
-            let _ = self.tx.send(entry);
+            }
         } else {
-            let entry = LogEntry {
+            LogEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
                 level: "INFO".to_string(),
                 message: line.to_string(),
                 metadata: None,
-            };
-            self.entries.push(entry.clone());
-            let _ = self.tx.send(entry);
-        }
+            }
+        };
+        self.entries.push(entry.clone());
+        let _ = self.tx.send(entry.clone());
+        self.append_entry_to_file(&entry);
         if self.entries.len() > 1000 {
             self.entries.remove(0);
         }
@@ -144,11 +200,20 @@ use std::sync::OnceLock;
 static GLOBAL_COLLECTOR: OnceLock<Arc<Mutex<LogCollector>>> = OnceLock::new();
 
 pub fn init_global_collector() -> Arc<Mutex<LogCollector>> {
-    let collector = Arc::new(Mutex::new(LogCollector::new()));
+    init_global_collector_with_path(default_ndjson_path())
+}
+
+pub fn init_global_collector_with_path(path: Option<PathBuf>) -> Arc<Mutex<LogCollector>> {
+    let collector = Arc::new(Mutex::new(LogCollector::new_with_path(path)));
     GLOBAL_COLLECTOR.set(collector.clone()).ok();
     collector
 }
 
 pub fn get_global_collector() -> Option<Arc<Mutex<LogCollector>>> {
     GLOBAL_COLLECTOR.get().cloned()
+}
+
+fn default_ndjson_path() -> Option<PathBuf> {
+    home::home_dir()
+        .map(|p| p.join(".config").join("review-engine").join("logs.ndjson"))
 }

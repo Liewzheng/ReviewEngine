@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Document,
@@ -14,6 +14,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
 import { createChart, LineSeries, LineStyle, CrosshairMode, type IChartApi, type ISeriesApi } from 'lightweight-charts'
+import { useDashboard } from '../composables/useDashboard'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
@@ -22,17 +23,18 @@ import PageHeader from '../components/common/PageHeader.vue'
 import type { KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
 
 const router = useRouter()
+const dashboard = useDashboard()
 
 // Loading & refresh state
-const loading = ref(true)
+const loading = dashboard.loading
 const isRefreshing = ref(false)
 const lastUpdated = ref<string | null>(null)
 
-// Data refs
-const kpis = ref<KpiData | null>(null)
-const trend = ref<TrendPoint[]>([])
-const health = ref<SystemHealth | null>(null)
-const recentReviews = ref<RecentReview[]>([])
+// Data refs (computed from composable)
+const kpis = computed<KpiData | null>(() => dashboard.data.value?.kpis ?? null)
+const trend = computed<TrendPoint[]>(() => dashboard.data.value?.trend ?? [])
+const health = computed<SystemHealth | null>(() => dashboard.data.value?.health ?? null)
+const recentReviews = computed<RecentReview[]>(() => dashboard.data.value?.recentReviews ?? [])
 
 // Chart refs
 const chartContainer = ref<HTMLElement | null>(null)
@@ -42,112 +44,31 @@ let lineSeries: ISeriesApi<'Line'> | null = null
 // Auto-refresh timer
 let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 
-// ─── Mock Data ──────────────────────────────────────
+// ─── Error Handling ─────────────────────────────────
 
-function generateMockTrend(): TrendPoint[] {
-  const points: TrendPoint[] = []
-  const now = Math.floor(Date.now() / 1000)
-  for (let i = 23; i >= 0; i--) {
-    const t = now - i * 3600
-    const hour = new Date(t * 1000).getHours()
-    const base = 10 + Math.random() * 20
-    const peak = hour >= 9 && hour <= 18 ? 15 + Math.random() * 25 : 0
-    points.push({
-      time: t,
-      value: Math.round(base + peak),
+watch(() => dashboard.error.value, (err) => {
+  if (err) {
+    ElNotification({
+      title: 'Error',
+      message: err,
+      type: 'error',
+      duration: 5000,
     })
   }
-  return points
-}
-
-function generateMockKpis(): KpiData {
-  return {
-    reviewsThisWeek: 1234,
-    reviewsTrend: 5.2,
-    activeQueue: 12,
-    successRate: 98.2,
-    successTrend: 0.3,
-    avgDurationMs: 4 * 60 * 1000 + 32 * 1000,
-    durationTrend: -12.0,
-  }
-}
-
-function generateMockHealth(): SystemHealth {
-  return {
-    integrations: [
-      { service: 'GitLab API', type: 'integration', status: 'success', latencyMs: 234, message: 'Connected' },
-      { service: 'GitHub API', type: 'integration', status: 'offline', message: 'Not Configured' },
-    ],
-    llmProviders: [
-      { service: 'OpenAI GPT-4', type: 'llm', status: 'success', latencyMs: 234, message: 'Healthy' },
-      { service: 'Anthropic Claude', type: 'llm', status: 'warning', latencyMs: 1200, message: 'Degraded' },
-      { service: 'Local Ollama', type: 'llm', status: 'error', message: 'Connection refused' },
-    ],
-    overall: 'warning',
-    lastChecked: new Date().toISOString(),
-  }
-}
-
-function generateMockReviews(): RecentReview[] {
-  const statuses: RecentReview['status'][] = ['success', 'failed', 'running', 'queued', 'success', 'success', 'failed', 'running', 'success', 'queued']
-  const authors = ['Alice Chen', 'Bob Smith', 'Carol Wu', 'David Li', 'Eva Park', 'Frank Zhang', 'Grace Liu', 'Henry Wang', 'Ivy Zhao', 'Jack Ma']
-  const projects = ['frontend/webapp', 'backend/api', 'infra/terraform', 'frontend/webapp', 'backend/api', 'mobile/app', 'backend/api', 'frontend/webapp', 'infra/docker', 'data/pipeline']
-  const titles = [
-    'Fix login redirect loop on OAuth callback',
-    'Add rate limiting middleware to API gateway',
-    'Update Terraform module for EKS cluster',
-    'Refactor dashboard layout component',
-    'Implement batch review queue processor',
-    'Add biometric authentication flow',
-    'Fix memory leak in review worker pool',
-    'Update sidebar navigation for mobile',
-    'Optimize Docker build caching layers',
-    'Add data pipeline health check endpoint',
-  ]
-
-  const reviews: RecentReview[] = []
-  const now = Date.now()
-  for (let i = 0; i < 10; i++) {
-    const durationMs = Math.round(1e3 * (60 + Math.random() * 600)) // 1s ~ 10m
-    reviews.push({
-      id: `rev-${1000 + i}`,
-      mrTitle: titles[i],
-      project: projects[i],
-      author: { name: authors[i], avatarUrl: undefined },
-      status: statuses[i],
-      durationMs,
-      createdAt: new Date(now - i * 15 * 60 * 1000).toISOString(),
-    })
-  }
-  return reviews
-}
+})
 
 // ─── Data Fetching ──────────────────────────────────
 
-async function fetchDashboardData() {
-  // Simulate API delay
-  await new Promise(r => setTimeout(r, 800))
-  kpis.value = generateMockKpis()
-  trend.value = generateMockTrend()
-  health.value = generateMockHealth()
-  recentReviews.value = generateMockReviews()
+async function refreshData() {
+  await dashboard.refresh()
   lastUpdated.value = new Date().toISOString()
-}
-
-async function loadAll() {
-  loading.value = true
-  try {
-    await fetchDashboardData()
-  } finally {
-    loading.value = false
-  }
 }
 
 async function onRefresh() {
   if (isRefreshing.value) return
   isRefreshing.value = true
   try {
-    await fetchDashboardData()
+    await refreshData()
     ElNotification({
       title: 'Success',
       message: 'Dashboard refreshed',
@@ -281,9 +202,9 @@ function onRowClick(row: RecentReview) {
 // ─── Lifecycle ──────────────────────────────────────
 
 onMounted(() => {
-  loadAll()
+  refreshData()
   autoRefreshTimer = setInterval(() => {
-    fetchDashboardData()
+    refreshData()
   }, 60000)
 })
 

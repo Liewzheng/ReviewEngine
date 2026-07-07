@@ -8,11 +8,11 @@
       </div>
       <div class="header-actions">
         <el-button
-          :type="isPaused ? 'warning' : 'default'"
-          :icon="isPaused ? VideoPlay : VideoPause"
+          :type="logs.isPaused ? 'warning' : 'default'"
+          :icon="logs.isPaused ? VideoPlay : VideoPause"
           @click="togglePause"
         >
-          {{ isPaused ? 'Resume' : 'Pause' }}
+          {{ logs.isPaused ? 'Resume' : 'Pause' }}
         </el-button>
         <el-button
           type="primary"
@@ -33,12 +33,12 @@
     </div>
 
     <!-- Toolbar -->
-    <div class="toolbar" :class="{ paused: isPaused }">
+    <div class="toolbar" :class="{ paused: logs.isPaused }">
       <div class="toolbar-row">
         <!-- Level Filter -->
         <div class="filter-group">
           <span class="filter-label">Levels:</span>
-          <el-checkbox-group v-model="selectedLevels" size="small">
+          <el-checkbox-group v-model="logs.levels" size="small">
             <el-checkbox label="INFO">
               <span class="level-dot" style="background-color: var(--info)"></span>
               INFO
@@ -95,26 +95,26 @@
         </div>
 
         <div class="toolbar-right">
-          <span v-if="isPaused" class="pause-indicator">
+          <span v-if="logs.isPaused" class="pause-indicator">
             <el-icon><VideoPause /></el-icon>
-            Paused — {{ bufferedLogs.length }} buffered
+            Paused
           </span>
           <span class="filter-count">
-            Showing {{ filteredLogs.length }} of {{ logs.length }} logs
+            Showing {{ filteredLogs.length }} of {{ logItems.length }} logs
           </span>
         </div>
       </div>
     </div>
 
     <!-- Loading State -->
-    <div v-if="loading" class="loading-container">
+    <div v-if="logs.loading" class="loading-container">
       <el-skeleton :rows="15" animated />
     </div>
 
     <!-- Log Terminal -->
     <div v-else ref="terminalRef" class="log-terminal" @scroll="handleScroll">
       <!-- Empty: Cleared -->
-      <div v-if="isCleared && logs.length === 0" class="empty-state">
+      <div v-if="isCleared && logItems.length === 0" class="empty-state">
         <el-empty description="Logs cleared. New entries will appear here.">
           <template #image>
             <el-icon size="48" color="#6b7280"><Check /></el-icon>
@@ -123,7 +123,7 @@
       </div>
 
       <!-- Empty: No logs yet -->
-      <div v-else-if="logs.length === 0" class="empty-state">
+      <div v-else-if="logItems.length === 0" class="empty-state">
         <el-empty description="Waiting for logs...">
           <template #image>
             <el-icon size="48" color="#6b7280" class="is-loading"><Loading /></el-icon>
@@ -132,7 +132,7 @@
       </div>
 
       <!-- Empty: All filtered out -->
-      <div v-else-if="filteredLogs.length === 0 && logs.length > 0" class="empty-state">
+      <div v-else-if="filteredLogs.length === 0 && logItems.length > 0" class="empty-state">
         <el-empty description="No logs match current filters">
           <template #image>
             <el-icon size="48" color="#6b7280"><InfoFilled /></el-icon>
@@ -172,13 +172,13 @@
     <!-- Floating New Logs Button -->
     <transition name="slide-up">
       <el-button
-        v-if="(newLogCount > 0 && !autoScroll) || (isPaused && bufferedLogs.length > 0)"
+        v-if="(newLogCount > 0 && !autoScroll) || logs.isPaused"
         type="primary"
         class="new-logs-btn"
         :icon="ArrowDown"
         @click="scrollToBottom"
       >
-        {{ isPaused ? bufferedLogs.length : newLogCount }} new logs
+        {{ logs.isPaused ? 'Resume' : newLogCount + ' new logs' }}
       </el-button>
     </transition>
   </div>
@@ -198,147 +198,35 @@ import {
   ArrowDown,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
-import type { LogEntry, LogLevel, TimestampFormat } from '../types/logs'
+import type { LogLevel, TimestampFormat } from '../types/logs'
+import { useLogs } from '../composables/useLogs'
 
-// ==================== State ====================
-const loading = ref(true)
-const logs = ref<LogEntry[]>([])
-const selectedLevels = ref<LogLevel[]>(['INFO', 'WARN', 'ERROR', 'DEBUG'])
+// ==================== Composable ====================
+const logs = useLogs()
+
+// ==================== Local State ====================
 const autoScroll = ref(true)
 const timestampFormat = ref<TimestampFormat>('relative')
-const isPaused = ref(false)
-const bufferedLogs = ref<LogEntry[]>([])
 const isCleared = ref(false)
 const newLogCount = ref(0)
 const downloading = ref(false)
 const terminalRef = ref<HTMLElement | null>(null)
 const searchInput = ref('')
-const keyword = ref('')
 
 let keywordDebounceTimer: number | null = null
-let autoScrollInterval: number | null = null
 let newLogDismissTimer: number | null = null
-let mockInterval: number | null = null
 
 // ==================== Debounce ====================
 watch(searchInput, (val) => {
   if (keywordDebounceTimer) window.clearTimeout(keywordDebounceTimer)
   keywordDebounceTimer = window.setTimeout(() => {
-    keyword.value = val
+    logs.keyword.value = val
   }, 150)
 })
 
 // ==================== Computed ====================
-const filteredLogs = computed(() => {
-  const kw = keyword.value.trim().toLowerCase()
-  return logs.value.filter((log) => {
-    const levelMatch = selectedLevels.value.includes(log.level)
-    const keywordMatch = !kw || log.message.toLowerCase().includes(kw)
-    return levelMatch && keywordMatch
-  })
-})
-
-// ==================== Mock Data Generator ====================
-const mockMessages: Record<LogLevel, string[]> = {
-  INFO: [
-    'Review completed for MR !{id}',
-    'LLM provider initialized: {provider}',
-    'Queue consumer started, {n} workers active',
-    'Configuration reloaded from {path}',
-    'Expert {name} registered successfully',
-    'Webhook delivered to {url}',
-    'Review batch processed: {n} items',
-    'Token usage: {n} tokens this minute',
-  ],
-  WARN: [
-    'LLM API rate limit approaching ({pct}%)',
-    'Queue backlog growing: {n} pending reviews',
-    'Retry attempt {n} for review {id}',
-    'Slow response from {provider}: {ms}ms',
-    'Memory usage at {pct}%',
-    'Connection pool nearing limit: {n}/{max}',
-  ],
-  ERROR: [
-    'LLM API timeout after {ms}ms',
-    'Failed to parse review result for MR !{id}',
-    'Database connection failed: {err}',
-    'Authentication error for expert {id}',
-    'Webhook delivery failed: {url} returned {code}',
-    'Queue worker crashed, restarting...',
-  ],
-  DEBUG: [
-    'Request payload: {json}',
-    'Cache hit for key {key}',
-    'Processing review {id} with prompt v{ver}',
-    'Response headers: {headers}',
-    'Parsed diff: {n} hunks, {m} lines',
-  ],
-}
-
-const mockProviders = ['OpenAI', 'Anthropic', 'Gemini', 'Local']
-const mockPaths = ['/etc/review-engine/config.yaml', '~/.review-engine/config.toml']
-const mockNames = ['Security Expert', 'Performance Expert', 'Style Expert', 'Architecture Expert']
-const mockUrls = ['https://gitlab.example.com/hooks/review', 'https://github.example.com/webhooks']
-
-function rand<T>(arr: T[]): T { return arr[Math.floor(Math.random() * arr.length)] }
-function randInt(min: number, max: number): number { return Math.floor(Math.random() * (max - min + 1)) + min }
-function uid(): string { return Math.random().toString(36).slice(2, 10) }
-
-function generateMockLog(index: number): LogEntry {
-  const levels: LogLevel[] = ['INFO', 'WARN', 'ERROR', 'DEBUG']
-  const weights = [0.5, 0.2, 0.1, 0.2]
-  const r = Math.random()
-  let cum = 0
-  let level: LogLevel = 'INFO'
-  for (let i = 0; i < levels.length; i++) {
-    cum += weights[i]
-    if (r < cum) { level = levels[i]; break }
-  }
-
-  const templates = mockMessages[level]
-  let msg = rand(templates)
-  msg = msg.replace('{id}', String(randInt(100, 9999)))
-  msg = msg.replace('{provider}', rand(mockProviders))
-  msg = msg.replace('{path}', rand(mockPaths))
-  msg = msg.replace('{name}', rand(mockNames))
-  msg = msg.replace('{url}', rand(mockUrls))
-  msg = msg.replace('{n}', String(randInt(1, 500)))
-  msg = msg.replace('{m}', String(randInt(10, 2000)))
-  msg = msg.replace('{ms}', String(randInt(50, 5000)))
-  msg = msg.replace('{pct}', String(randInt(60, 99)))
-  msg = msg.replace('{max}', String(randInt(50, 100)))
-  msg = msg.replace('{code}', String(randInt(400, 599)))
-  msg = msg.replace('{err}', rand(['ECONNREFUSED', 'ETIMEDOUT', 'ENOTFOUND', 'EPIPE']))
-  msg = msg.replace('{json}', '{"model":"gpt-4","temperature":0.2}')
-  msg = msg.replace('{key}', `review:${uid()}`)
-  msg = msg.replace('{ver}', String(randInt(1, 5)))
-  msg = msg.replace('{headers}', 'content-type: application/json')
-  msg = msg.replace('{headers}', 'x-request-id: ' + uid())
-
-  const metadata: LogEntry['metadata'] = {}
-  if (Math.random() > 0.5) metadata.durationMs = randInt(10, 2000)
-  if (Math.random() > 0.7) metadata.requestId = uid()
-  if (Math.random() > 0.8) metadata.reviewId = String(randInt(100, 9999))
-  if (Math.random() > 0.9) metadata.expertId = String(randInt(1, 10))
-
-  const now = new Date(Date.now() - index * randInt(100, 5000))
-
-  return {
-    id: uid() + '-' + index,
-    timestamp: now.toISOString(),
-    level,
-    message: msg,
-    metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
-  }
-}
-
-function generateMockLogs(count: number): LogEntry[] {
-  const arr: LogEntry[] = []
-  for (let i = count - 1; i >= 0; i--) {
-    arr.push(generateMockLog(i))
-  }
-  return arr
-}
+const filteredLogs = computed(() => logs.filteredLogs.value)
+const logItems = computed(() => logs.logs.value)
 
 // ==================== Formatting ====================
 function formatTimestamp(iso: string): string {
@@ -370,7 +258,7 @@ function getLevelTagType(level: LogLevel): 'info' | 'warning' | 'danger' | undef
 function highlightMessage(msg: string): string {
   let html = escapeHtml(msg)
 
-  const kw = keyword.value.trim()
+  const kw = logs.keyword.value.trim()
   if (kw) {
     const re = new RegExp(`(${escapeRegExp(kw)})`, 'gi')
     html = html.replace(re, '<mark>$1</mark>')
@@ -395,23 +283,14 @@ function escapeRegExp(s: string): string {
 
 // ==================== Actions ====================
 function togglePause() {
-  if (isPaused.value) {
-    // Resume: flush buffered logs
-    logs.value.push(...bufferedLogs.value)
-    trimLogs()
-    bufferedLogs.value = []
-    isPaused.value = false
-    if (autoScroll.value) scrollToBottom()
-  } else {
-    isPaused.value = true
-  }
+  logs.togglePause()
 }
 
-function trimLogs() {
-  if (logs.value.length > 5000) {
-    logs.value = logs.value.slice(-5000)
-  }
-}
+// function trimLogs() {
+//   if (logs.logs.value.length > 5000) {
+//     logs.logs.value = logs.logs.value.slice(-5000)
+//   }
+// }
 
 function confirmClear() {
   ElMessageBox.confirm(
@@ -419,46 +298,32 @@ function confirmClear() {
     'Clear Logs',
     { confirmButtonText: 'Clear', cancelButtonText: 'Cancel', type: 'warning' }
   ).then(() => {
-    logs.value = []
+    logs.clearLogs()
     isCleared.value = true
     newLogCount.value = 0
-    // 暂停 mock stream 3 秒
-    if (mockInterval) clearInterval(mockInterval)
-    setTimeout(() => {
-      startMockStream()
-    }, 3000)
   }).catch(() => {})
 }
 
-function downloadLogs() {
+async function downloadLogs() {
   downloading.value = true
-  setTimeout(() => {
-    const content = logs.value
-      .map(l => `[${l.timestamp}] [${l.level}] ${l.message}`)
-      .join('\n')
-    const blob = new Blob([content], { type: 'text/plain' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `system-logs-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.log`
-    a.click()
-    URL.revokeObjectURL(url)
-    downloading.value = false
+  try {
+    await logs.download()
     ElNotification({
       title: 'Download Started',
       message: 'Your log file is being downloaded.',
       type: 'success',
       duration: 3000,
     })
-  }, 800)
+  } catch {
+    // error handled by composable
+  } finally {
+    downloading.value = false
+  }
 }
 
 function scrollToBottom() {
-  if (isPaused.value) {
-    logs.value = [...logs.value, ...bufferedLogs.value]
-    trimLogs()
-    bufferedLogs.value = []
-    isPaused.value = false
+  if (logs.isPaused.value) {
+    logs.togglePause()
   }
   if (newLogDismissTimer) window.clearTimeout(newLogDismissTimer)
   nextTick(() => {
@@ -478,58 +343,45 @@ function handleScroll() {
   }
 }
 
-// ==================== SSE / Mock Stream ====================
-function addLogEntry(entry: LogEntry) {
-  if (isPaused.value) {
-    if (bufferedLogs.value.length < 1000) {
-      bufferedLogs.value.push(entry)
-    }
-  } else {
-    logs.value.push(entry)
-    trimLogs()
-    if (autoScroll.value) {
-      scrollToBottom()
-    } else {
+// ==================== Error handling ====================
+watch(() => logs.error.value, (err) => {
+  if (err) {
+    ElNotification({
+      type: 'error',
+      title: 'Log Stream Error',
+      message: err,
+      duration: 5000,
+    })
+  }
+})
+
+// Watch for new logs to clear isCleared and update newLogCount
+watch(() => logs.logs.value.length, (newLength, oldLength) => {
+  if (oldLength !== undefined && newLength > oldLength) {
+    isCleared.value = false
+    if (!autoScroll.value && !logs.isPaused.value) {
       newLogCount.value++
       if (newLogDismissTimer) window.clearTimeout(newLogDismissTimer)
       newLogDismissTimer = window.setTimeout(() => { newLogCount.value = 0 }, 10000)
     }
   }
-  isCleared.value = false
-}
-
-function startMockStream() {
-  mockInterval = window.setInterval(() => {
-    if (Math.random() > 0.7) return
-    const entry = generateMockLog(0)
-    entry.timestamp = new Date().toISOString()
-    entry.id = uid() + '-' + Date.now()
-    addLogEntry(entry)
-  }, 2000)
-}
+})
 
 // ==================== Lifecycle ====================
 onMounted(() => {
-  // Simulate initial fetch
-  setTimeout(() => {
-    logs.value = generateMockLogs(80)
-    loading.value = false
-    nextTick(() => {
-      if (autoScroll.value) scrollToBottom()
-    })
-    startMockStream()
-  }, 600)
-})
-
-onUnmounted(() => {
-  if (mockInterval) clearInterval(mockInterval)
-  if (autoScrollInterval) clearInterval(autoScrollInterval)
-  if (newLogDismissTimer) clearTimeout(newLogDismissTimer)
+  nextTick(() => {
+    if (autoScroll.value) scrollToBottom()
+  })
 })
 
 // Watch auto-scroll changes
 watch(autoScroll, (val) => {
   if (val) scrollToBottom()
+})
+
+onUnmounted(() => {
+  if (newLogDismissTimer) clearTimeout(newLogDismissTimer)
+  if (keywordDebounceTimer) clearTimeout(keywordDebounceTimer)
 })
 </script>
 

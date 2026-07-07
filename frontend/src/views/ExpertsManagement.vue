@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Plus,
@@ -12,13 +12,17 @@ import {
 import { ElNotification } from 'element-plus'
 import type { Expert, ExpertCategory, ExpertReviewSummary } from '../types/expert'
 import { categoryColorMap, categoryLabelMap } from '../types/expert'
+import { useExperts } from '../composables/useExperts'
 import ExpertCard from '../components/ExpertsManagement/ExpertCard.vue'
 
 const router = useRouter()
 
+// ========== Composable ==========
+const expertsStore = useExperts()
+
 // ========== State ==========
-const experts = ref<Expert[]>([])
-const loading = ref(false)
+const experts = expertsStore.experts
+const loading = expertsStore.loading
 const isEditing = ref(false)
 const detailModalVisible = ref(false)
 const editModalVisible = ref(false)
@@ -27,224 +31,17 @@ const editingExpert = ref<Expert | null>(null)
 const searchQuery = ref('')
 const filterCategory = ref<ExpertCategory | 'all'>('all')
 
-// ========== Mock Data ==========
-const mockExperts: Expert[] = [
-  {
-    id: 'expert-001',
-    name: 'Security Sentinel',
-    category: 'security',
-    icon: 'Lock',
-    enabled: true,
-    weight: 85,
-    description: 'Reviews security vulnerabilities, injection risks, secret leaks, and insecure dependencies. Ensures compliance with OWASP guidelines and best practices.',
-    promptPreview: `You are a security-focused code review expert. Analyze the provided code for:
-- SQL injection, XSS, and command injection vulnerabilities
-- Hardcoded secrets, API keys, and tokens
-- Insecure dependencies and outdated packages
-- Missing authentication/authorization checks
-- Unsafe deserialization or file operations
-
-Provide severity ratings and actionable remediation steps.`,
-    lastReviews: [
-      { reviewId: 'rev-101', mrTitle: 'Fix authentication middleware', score: 92, date: '2024-01-15' },
-      { reviewId: 'rev-102', mrTitle: 'Update JWT handling', score: 78, date: '2024-01-14' },
-      { reviewId: 'rev-103', mrTitle: 'Add rate limiting', score: 88, date: '2024-01-12' },
-      { reviewId: 'rev-104', mrTitle: 'Secure file upload', score: 95, date: '2024-01-10' },
-      { reviewId: 'rev-105', mrTitle: 'Refactor password hashing', score: 90, date: '2024-01-08' },
-    ],
-  },
-  {
-    id: 'expert-002',
-    name: 'Performance Hawk',
-    category: 'performance',
-    icon: 'Lightning',
-    enabled: true,
-    weight: 75,
-    description: 'Identifies performance bottlenecks, memory leaks, inefficient algorithms, and suboptimal database queries. Recommends caching strategies.',
-    promptPreview: `You are a performance optimization expert. Analyze code for:
-- Algorithmic complexity (O(n²) loops, recursive explosions)
-- Memory leaks and unnecessary allocations
-- N+1 database queries and missing indexes
-- Synchronous blocking operations in async contexts
-- Inefficient caching patterns
-- Large bundle sizes and lazy loading opportunities
-
-Rate impact severity and suggest concrete optimizations.`,
-    lastReviews: [
-      { reviewId: 'rev-201', mrTitle: 'Optimize image loading', score: 82, date: '2024-01-15' },
-      { reviewId: 'rev-202', mrTitle: 'Cache hot paths', score: 91, date: '2024-01-13' },
-      { reviewId: 'rev-203', mrTitle: 'Reduce re-renders', score: 76, date: '2024-01-11' },
-      { reviewId: 'rev-204', mrTitle: 'Database query tuning', score: 85, date: '2024-01-09' },
-      { reviewId: 'rev-205', mrTitle: 'Bundle size reduction', score: 89, date: '2024-01-07' },
-    ],
-  },
-  {
-    id: 'expert-003',
-    name: 'Quality Guardian',
-    category: 'quality',
-    icon: 'CircleCheck',
-    enabled: true,
-    weight: 90,
-    description: 'Enforces code quality standards, consistency, and maintainability. Checks for code smells, duplication, and anti-patterns.',
-    promptPreview: `You are a code quality expert. Review code for:
-- Code duplication (DRY violations)
-- Deep nesting and complex conditionals
-- Magic numbers and string literals
-- Inconsistent naming conventions
-- Missing error handling and edge cases
-- Excessive class/module coupling
-
-Provide a quality score and prioritized refactoring suggestions.`,
-    lastReviews: [
-      { reviewId: 'rev-301', mrTitle: 'Refactor service layer', score: 87, date: '2024-01-14' },
-      { reviewId: 'rev-302', mrTitle: 'Extract shared utilities', score: 93, date: '2024-01-12' },
-      { reviewId: 'rev-303', mrTitle: 'Standardize error types', score: 80, date: '2024-01-10' },
-    ],
-  },
-  {
-    id: 'expert-004',
-    name: 'Maintainability Sage',
-    category: 'maintainability',
-    icon: 'Tools',
-    enabled: false,
-    weight: 60,
-    description: 'Evaluates long-term maintainability. Assesses modularity, documentation quality, and architectural consistency.',
-    promptPreview: `You are a maintainability expert. Evaluate:
-- Module boundaries and single responsibility
-- Comment quality and self-documenting code
-- Dependency direction and stability
-- Configuration vs. hardcoding
-- Testing coverage and testability
-- API design and backward compatibility
-
-Score each dimension and provide maintainability roadmap.`,
-    lastReviews: [
-      { reviewId: 'rev-401', mrTitle: 'Restructure API handlers', score: 72, date: '2024-01-13' },
-      { reviewId: 'rev-402', mrTitle: 'Add module docs', score: 85, date: '2024-01-11' },
-      { reviewId: 'rev-403', mrTitle: 'Refactor config loading', score: 68, date: '2024-01-09' },
-    ],
-  },
-  {
-    id: 'expert-005',
-    name: 'Coverage Analyst',
-    category: 'test-coverage',
-    icon: 'CircleCheck',
-    enabled: true,
-    weight: 70,
-    description: 'Analyzes test coverage gaps, missing edge cases, and ineffective tests. Suggests test strategies and mocking approaches.',
-    promptPreview: `You are a test coverage expert. Analyze:
-- Missing unit tests for critical paths
-- Edge cases not covered (null, empty, boundary values)
-- Fragile tests with hardcoded expectations
-- Integration test gaps
-- Mocking strategy effectiveness
-- Mutation testing opportunities
-
-Report coverage gaps with priority levels and test recommendations.`,
-    lastReviews: [
-      { reviewId: 'rev-501', mrTitle: 'Add unit tests for auth', score: 88, date: '2024-01-15' },
-      { reviewId: 'rev-502', mrTitle: 'Fix flaky integration tests', score: 75, date: '2024-01-13' },
-      { reviewId: 'rev-503', mrTitle: 'Cover edge cases', score: 92, date: '2024-01-11' },
-      { reviewId: 'rev-504', mrTitle: 'Mock external services', score: 81, date: '2024-01-08' },
-    ],
-  },
-  {
-    id: 'expert-006',
-    name: 'Doc Master',
-    category: 'documentation',
-    icon: 'Document',
-    enabled: false,
-    weight: 50,
-    description: 'Reviews API documentation, README accuracy, inline comments, and changelog completeness. Ensures docs stay in sync with code.',
-    promptPreview: `You are a documentation expert. Review for:
-- API documentation completeness and accuracy
-- README clarity and setup instructions
-- Changelog entries for breaking changes
-- Inline comments explaining complex logic
-- Type definitions and JSDoc completeness
-- Examples and usage guides
-
-Flag outdated docs and suggest improvements.`,
-    lastReviews: [
-      { reviewId: 'rev-601', mrTitle: 'Update API docs', score: 70, date: '2024-01-14' },
-      { reviewId: 'rev-602', mrTitle: 'Add migration guide', score: 83, date: '2024-01-12' },
-      { reviewId: 'rev-603', mrTitle: 'Document new endpoints', score: 65, date: '2024-01-10' },
-    ],
-  },
-  {
-    id: 'expert-007',
-    name: 'Dependency Scout',
-    category: 'dependencies',
-    icon: 'Link',
-    enabled: true,
-    weight: 65,
-    description: 'Monitors dependency health, version conflicts, license compliance, and security advisories. Recommends upgrade paths.',
-    promptPreview: `You are a dependency management expert. Check for:
-- Outdated or vulnerable packages
-- License compatibility issues
-- Version conflicts and peer dependency mismatches
-- Unused or redundant dependencies
-- Supply chain security risks
-- Ecosystem health and maintenance status
-
-Provide upgrade priority matrix and risk assessment.`,
-    lastReviews: [
-      { reviewId: 'rev-701', mrTitle: 'Upgrade to React 18', score: 86, date: '2024-01-15' },
-      { reviewId: 'rev-702', mrTitle: 'Fix peer dependency warnings', score: 79, date: '2024-01-13' },
-      { reviewId: 'rev-703', mrTitle: 'Audit dependencies', score: 94, date: '2024-01-11' },
-      { reviewId: 'rev-704', mrTitle: 'Remove unused packages', score: 90, date: '2024-01-09' },
-    ],
-  },
-  {
-    id: 'expert-008',
-    name: 'Accessibility Ally',
-    category: 'accessibility',
-    icon: 'View',
-    enabled: true,
-    weight: 55,
-    description: 'Reviews WCAG compliance, screen reader compatibility, keyboard navigation, and color contrast. Ensures inclusive design.',
-    promptPreview: `You are an accessibility expert. Review for:
-- WCAG 2.1 AA compliance (contrast, focus, labels)
-- Screen reader compatibility (ARIA, alt text)
-- Keyboard navigation and focus management
-- Motion sensitivity and animation concerns
-- Semantic HTML usage
-- Form labeling and error communication
-
-Report accessibility violations with severity levels.`,
-    lastReviews: [
-      { reviewId: 'rev-801', mrTitle: 'Fix focus indicators', score: 84, date: '2024-01-14' },
-      { reviewId: 'rev-802', mrTitle: 'Add ARIA labels', score: 91, date: '2024-01-12' },
-      { reviewId: 'rev-803', mrTitle: 'Improve color contrast', score: 77, date: '2024-01-10' },
-    ],
-  },
-  {
-    id: 'expert-009',
-    name: 'Architecture Oracle',
-    category: 'architecture',
-    icon: 'OfficeBuilding',
-    enabled: true,
-    weight: 80,
-    description: 'Evaluates architectural decisions, design patterns, scalability considerations, and tech stack alignment.',
-    promptPreview: `You are a software architecture expert. Evaluate:
-- Design pattern appropriateness and misuse
-- Layer boundaries and dependency direction
-- Scalability and performance implications
-- Tech stack alignment with requirements
-- Data flow and state management patterns
-- API design and contract stability
-- Microservices vs. monolith fit
-
-Provide architectural review with trade-off analysis.`,
-    lastReviews: [
-      { reviewId: 'rev-901', mrTitle: 'Redesign caching layer', score: 89, date: '2024-01-15' },
-      { reviewId: 'rev-902', mrTitle: 'Evaluate CQRS pattern', score: 82, date: '2024-01-13' },
-      { reviewId: 'rev-903', mrTitle: 'Review database schema', score: 87, date: '2024-01-11' },
-      { reviewId: 'rev-904', mrTitle: 'Assess event sourcing', score: 75, date: '2024-01-09' },
-      { reviewId: 'rev-905', mrTitle: 'Validate service boundaries', score: 93, date: '2024-01-07' },
-    ],
-  },
-]
+/* ─────────────── Error Handling ─────────────── */
+watch(() => expertsStore.error.value, (err) => {
+  if (err) {
+    ElNotification({
+      title: 'Error',
+      message: err,
+      type: 'error',
+      duration: 5000,
+    })
+  }
+})
 
 // ========== Computed ==========
 const categories = computed(() => [
@@ -278,39 +75,29 @@ const avgWeight = computed(() => {
 
 // ========== Methods ==========
 const fetchExperts = async () => {
-  loading.value = true
-  // Simulate API call
-  await new Promise(resolve => setTimeout(resolve, 800))
-  experts.value = mockExperts
-  loading.value = false
+  await expertsStore.fetch()
 }
 
 const handleToggle = async (id: string, enabled: boolean) => {
-  const expert = experts.value.find((e: Expert) => e.id === id)
-  if (!expert) return
-
-  // Optimistic update
-  expert.enabled = enabled
-
-  // Simulate API call
-  await new Promise<void>(resolve => setTimeout(resolve, 300))
-
-  ElNotification({
-    title: enabled ? 'Expert Enabled' : 'Expert Disabled',
-    message: `${expert.name} is now ${enabled ? 'enabled' : 'disabled'}`,
-    type: enabled ? 'success' : 'warning',
-    duration: 2000,
-  })
+  try {
+    await expertsStore.update(id, { enabled })
+    ElNotification({
+      title: enabled ? 'Expert Enabled' : 'Expert Disabled',
+      message: `${experts.value.find((e: Expert) => e.id === id)?.name ?? id} is now ${enabled ? 'enabled' : 'disabled'}`,
+      type: enabled ? 'success' : 'warning',
+      duration: 2000,
+    })
+  } catch {
+    // Error handled by composable
+  }
 }
 
 const handleWeightChange = async (id: string, weight: number) => {
-  const expert = experts.value.find((e: Expert) => e.id === id)
-  if (!expert) return
-
-  expert.weight = weight
-
-  // Simulate debounced API call
-  await new Promise<void>(resolve => setTimeout(resolve, 200))
+  try {
+    await expertsStore.update(id, { weight })
+  } catch {
+    // Error handled by composable
+  }
 }
 
 const handleViewDetails = (expert: Expert) => {
@@ -325,21 +112,29 @@ const handleEditCard = (expert: Expert) => {
 
 const saveEdit = async () => {
   if (!editingExpert.value) return
-
   const idx = experts.value.findIndex((e: Expert) => e.id === editingExpert.value!.id)
   if (idx === -1) return
 
-  experts.value[idx] = { ...editingExpert.value }
-  editModalVisible.value = false
+  try {
+    await expertsStore.update(editingExpert.value.id, {
+      enabled: editingExpert.value.enabled,
+      weight: editingExpert.value.weight,
+    })
+    // Keep local changes for fields not supported by API (name, category, description)
+    experts.value[idx] = { ...experts.value[idx], ...editingExpert.value }
+    editModalVisible.value = false
 
-  ElNotification({
-    title: 'Changes Saved',
-    message: `${editingExpert.value.name} has been updated`,
-    type: 'success',
-    duration: 2000,
-  })
+    ElNotification({
+      title: 'Changes Saved',
+      message: `${editingExpert.value.name} has been updated`,
+      type: 'success',
+      duration: 2000,
+    })
 
-  editingExpert.value = null
+    editingExpert.value = null
+  } catch {
+    // Error handled by composable
+  }
 }
 
 const toggleGlobalEdit = () => {

@@ -1,119 +1,30 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, watch, onMounted } from 'vue'
 import { ElNotification } from 'element-plus'
 import { RefreshRight, Cpu, CircleCheck, Warning, CircleClose, Remove } from '@element-plus/icons-vue'
+import { useLlmStatus } from '../composables/useLlmStatus'
 import ProviderCard from '../components/LlmStatus/ProviderCard.vue'
-import type { LlmProvider, TestResult } from '../types/llm'
+import type { LlmProvider } from '../types/llm'
 
 /* ------------------------------------------------------------------ */
-/*  Mock Data                                                         */
+/*  Composable                                                        */
 /* ------------------------------------------------------------------ */
 
-function generateSparkline(base: number, variance: number): number[] {
-  return Array.from({ length: 24 }, (_, i) => {
-    const trend = Math.sin(i / 3) * variance * 0.5
-    const noise = (Math.random() - 0.5) * variance
-    return Math.max(10, Math.round(base + trend + noise))
-  })
-}
+const llm = useLlmStatus()
 
-function createMockProviders(): LlmProvider[] {
-  const now = new Date().toISOString()
-  return [
-    {
-      id: 'openai',
-      name: 'OpenAI',
-      logo: '🅾️',
-      status: 'healthy',
-      latencyMs: 234,
-      requestCount: 1204,
-      errorRate: 0.002,
-      usagePercent: 74,
-      lastChecked: now,
-      configured: true,
-      sparkline: generateSparkline(230, 60),
-    },
-    {
-      id: 'anthropic',
-      name: 'Anthropic',
-      logo: '🅰️',
-      status: 'healthy',
-      latencyMs: 189,
-      requestCount: 856,
-      errorRate: 0.001,
-      usagePercent: 45,
-      lastChecked: now,
-      configured: true,
-      sparkline: generateSparkline(190, 40),
-    },
-    {
-      id: 'ollama',
-      name: 'Ollama Local',
-      logo: '🦙',
-      status: 'degraded',
-      latencyMs: 1200,
-      requestCount: 320,
-      errorRate: 0.025,
-      usagePercent: 91,
-      lastChecked: now,
-      configured: true,
-      sparkline: generateSparkline(1150, 200),
-    },
-    {
-      id: 'gemini',
-      name: 'Google Gemini',
-      logo: '♊',
-      status: 'offline',
-      latencyMs: 0,
-      requestCount: 0,
-      errorRate: 0,
-      usagePercent: undefined,
-      lastChecked: now,
-      configured: false,
-      sparkline: undefined,
-    },
-    {
-      id: 'azure',
-      name: 'Azure OpenAI',
-      logo: '☁️',
-      status: 'error',
-      latencyMs: 0,
-      requestCount: 0,
-      errorRate: 0,
-      usagePercent: undefined,
-      lastChecked: now,
-      configured: true,
-      sparkline: undefined,
-    },
-    {
-      id: 'groq',
-      name: 'Groq',
-      logo: '⚡',
-      status: 'healthy',
-      latencyMs: 156,
-      requestCount: 2100,
-      errorRate: 0.0005,
-      usagePercent: 38,
-      lastChecked: now,
-      configured: true,
-      sparkline: generateSparkline(150, 30),
-    },
-  ]
-}
-
-/* ------------------------------------------------------------------ */
-/*  State                                                             */
-/* ------------------------------------------------------------------ */
-
-const providers = ref<LlmProvider[]>([])
-const loading = ref(true)
-const testingMap = ref<Record<string, boolean>>({})
+const providers = llm.providers
+const loading = llm.loading
 const cardRefs = ref<InstanceType<typeof ProviderCard>[]>([])
 
-const healthyCount = computed(() => providers.value.filter(p => p.status === 'healthy').length)
-const degradedCount = computed(() => providers.value.filter(p => p.status === 'degraded').length)
-const errorCount = computed(() => providers.value.filter(p => p.status === 'error').length)
-const offlineCount = computed(() => providers.value.filter(p => p.status === 'offline').length)
+const testingMap = computed<Record<string, boolean>>(() => {
+  if (!llm.testingId.value) return {}
+  return { [llm.testingId.value]: true }
+})
+
+const healthyCount = computed(() => llm.healthyCount.value)
+const degradedCount = computed(() => llm.degradedCount.value)
+const errorCount = computed(() => llm.errorCount.value)
+const offlineCount = computed(() => llm.offlineCount.value)
 
 const avgLatency = computed(() => {
   const active = providers.value.filter(p => p.configured && p.status !== 'offline' && p.latencyMs > 0)
@@ -126,38 +37,32 @@ const totalRequests = computed(() =>
 )
 
 /* ------------------------------------------------------------------ */
+/*  Error Handling                                                    */
+/* ------------------------------------------------------------------ */
+
+watch(() => llm.error.value, (err) => {
+  if (err) {
+    ElNotification({
+      title: 'Error',
+      message: err,
+      type: 'error',
+      duration: 5000,
+    })
+  }
+})
+
+/* ------------------------------------------------------------------ */
 /*  Actions                                                           */
 /* ------------------------------------------------------------------ */
 
-function setLoading(val: boolean) {
-  loading.value = val
-}
-
 function fetchProviders() {
-  setLoading(true)
-  // Simulate API delay
-  setTimeout(() => {
-    providers.value = createMockProviders()
-    setLoading(false)
-  }, 800)
+  llm.fetch()
 }
 
 function handleRefreshAll() {
-  setLoading(true)
-  // Simulate bulk test API
-  setTimeout(() => {
-    providers.value = createMockProviders().map(p => ({
-      ...p,
-      lastChecked: new Date().toISOString(),
-      // Slightly jitter values for realism
-      latencyMs: p.configured && p.status !== 'offline'
-        ? Math.max(10, p.latencyMs + Math.round((Math.random() - 0.5) * 40))
-        : p.latencyMs,
-    }))
-    setLoading(false)
-
-    const healthy = providers.value.filter(p => p.status === 'healthy').length
-    const issues = providers.value.filter(p => p.status === 'degraded' || p.status === 'error').length
+  llm.fetch().then(() => {
+    const healthy = healthyCount.value
+    const issues = degradedCount.value + errorCount.value
 
     ElNotification({
       title: 'Providers Refreshed',
@@ -165,30 +70,19 @@ function handleRefreshAll() {
       type: issues === 0 ? 'success' : 'warning',
       duration: issues === 0 ? 3000 : 5000,
     })
-  }, 1200)
+  })
 }
 
-function handleTestSingle(provider: LlmProvider) {
-  testingMap.value[provider.id] = true
-
-  // Simulate per-provider test API
-  setTimeout(() => {
-    testingMap.value[provider.id] = false
-
-    const success = provider.status !== 'error' && provider.status !== 'offline'
-    const result: TestResult = {
-      success,
-      latencyMs: success ? Math.max(10, provider.latencyMs + Math.round((Math.random() - 0.5) * 30)) : undefined,
-      error: success ? undefined : 'Connection timeout after 10s. Check API key and network.',
-      timestamp: new Date().toISOString(),
-    }
-
-    // Find the matching card ref and show result
+async function handleTestSingle(provider: LlmProvider) {
+  try {
+    const result = await llm.test(provider.id)
     const card = cardRefs.value.find(c => c.providerId === provider.id)
     if (card) {
       card.showTestResult(result)
     }
-  }, 800)
+  } catch {
+    // Error already handled by composable
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -197,10 +91,6 @@ function handleTestSingle(provider: LlmProvider) {
 
 onMounted(() => {
   fetchProviders()
-})
-
-onUnmounted(() => {
-  // cleanup if any
 })
 </script>
 

@@ -380,25 +380,31 @@
 import { ref, computed, reactive, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessageBox, ElNotification, type FormInstance, type FormRules } from 'element-plus'
-import {
-  type AppConfig,
-  type TestResult,
-  createMockConfig,
-  providerModels,
-} from '../types/config'
+import { useConfig } from '../composables/useConfig'
+import { type AppConfig, providerModels } from '../types/config'
+
+// --- Composable ---
+const cfg = useConfig()
 
 // --- State ---
-const loading = ref(true)
-const loadError = ref(false)
+const loading = cfg.loading
+const loadError = computed(() => !!cfg.error.value)
 const isEditing = ref(false)
-const saving = ref(false)
-const testingConnection = ref(false)
-const testResult = ref<TestResult | null>(null)
+const saving = cfg.saving
+const testingConnection = cfg.testing
+const testResult = cfg.testResult
 const formValid = ref(true)
 const showAdvanced = ref(false)
 const formRef = ref<FormInstance>()
 
-const config = reactive<AppConfig>(createMockConfig())
+const defaultConfig: AppConfig = {
+  gitlab: { url: '', apiToken: '', webhookSecret: '', defaultProject: '', mrLabel: '', autoReview: false },
+  llm: { primaryProvider: 'openai', openaiApiKey: '', anthropicApiKey: '', ollamaUrl: '', defaultModel: '', maxTokens: 4096, temperature: 0.7, timeoutSeconds: 60, retryAttempts: 3 },
+  rules: { minScore: 75, blockOnCritical: true, autoCommentOnPass: true, commentTemplate: '', excludedPatterns: [], requiredExperts: [], maxReviewDurationSeconds: 300 },
+  advanced: { logLevel: 'info', logRetentionDays: 30, sseHeartbeatInterval: 15, maxConcurrentReviews: 5, requestTimeout: 120, enableMetrics: true, debugMode: false },
+}
+
+const config = reactive<AppConfig>(defaultConfig)
 const originalConfig = ref<AppConfig | null>(null)
 
 // Card refs for flash animation
@@ -544,6 +550,14 @@ function enterEditMode() {
   formValid.value = true
 }
 
+function cancelEdit() {
+  if (originalConfig.value) {
+    Object.assign(config, originalConfig.value)
+  }
+  isEditing.value = false
+  formValid.value = true
+}
+
 async function saveChanges() {
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
@@ -565,63 +579,42 @@ async function saveChanges() {
     return
   }
 
-  saving.value = true
-  // Simulate API call
-  await new Promise(resolve => setTimeout(resolve, 1200))
-
-  // Mock success
-  originalConfig.value = JSON.parse(JSON.stringify(config))
-  isEditing.value = false
-  saving.value = false
-
-  ElNotification({
-    title: 'Success',
-    message: 'Configuration saved successfully',
-    type: 'success',
-    duration: 3000,
-  })
-
-  // Flash border animation on each card individually
-  const cardRefs = [gitlabCardRef, llmCardRef, rulesCardRef, advancedCardRef]
-  cardRefs.forEach((cardRef) => {
-    const el = cardRef.value
-    if (el) {
-      el.classList.add('flash-success')
-      setTimeout(() => el.classList.remove('flash-success'), 600)
-    }
-  })
-}
-
-async function cancelEdit() {
   try {
-    await ElMessageBox.confirm(
-      'Discard unsaved changes?',
-      'Confirm Cancel',
-      {
-        confirmButtonText: 'Discard',
-        cancelButtonText: 'Stay',
-        type: 'warning',
-      }
-    )
-    // Restore original
-    if (originalConfig.value) {
-      const restored = JSON.parse(JSON.stringify(originalConfig.value))
-      Object.keys(restored).forEach((key) => {
-        ;(config as any)[key] = (restored as any)[key]
-      })
-    }
+    await cfg.save(JSON.parse(JSON.stringify(config)))
+    originalConfig.value = JSON.parse(JSON.stringify(config))
     isEditing.value = false
-    originalConfig.value = null
-  } catch {
-    // User stayed
+
+    ElNotification({
+      title: 'Success',
+      message: 'Configuration saved successfully',
+      type: 'success',
+      duration: 3000,
+    })
+
+    // Flash border animation on each card individually
+    const cardRefs = [gitlabCardRef, llmCardRef, rulesCardRef, advancedCardRef]
+    cardRefs.forEach((cardRef) => {
+      const el = cardRef.value
+      if (el) {
+        el.classList.add('flash-success')
+        setTimeout(() => el.classList.remove('flash-success'), 600)
+      }
+    })
+  } catch (e) {
+    ElNotification({
+      title: 'Error',
+      message: 'Failed to save configuration',
+      type: 'error',
+      duration: 5000,
+    })
   }
 }
 
 async function refreshConfig() {
-  loading.value = true
-  await new Promise(resolve => setTimeout(resolve, 600))
-  // Mock reload
-  loading.value = false
+  await cfg.fetch()
+  if (cfg.config.value) {
+    Object.assign(config, cfg.config.value)
+  }
   ElNotification({
     title: 'Refreshed',
     message: 'Configuration refreshed',
@@ -631,18 +624,11 @@ async function refreshConfig() {
 }
 
 async function testConnection() {
-  testingConnection.value = true
-  testResult.value = null
-  await new Promise(resolve => setTimeout(resolve, 1500))
-  // Mock test result
-  const success = Math.random() > 0.2
-  testResult.value = {
-    success,
-    latencyMs: success ? Math.floor(Math.random() * 200 + 50) : undefined,
-    error: success ? undefined : 'Connection refused: check API key',
-    timestamp: new Date().toISOString(),
-  }
-  testingConnection.value = false
+  await cfg.test({
+    provider: config.llm.primaryProvider,
+    model: config.llm.defaultModel,
+    apiKey: config.llm.primaryProvider === 'openai' ? config.llm.openaiApiKey : config.llm.anthropicApiKey,
+  })
 }
 
 function revealField(field: 'apiToken' | 'webhookSecret') {
@@ -719,10 +705,23 @@ function handleResize() {
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('resize', handleResize)
-  // Simulate loading delay
-  setTimeout(() => {
-    loading.value = false
-  }, 800)
+  cfg.fetch().then(() => {
+    if (cfg.config.value) {
+      Object.assign(config, cfg.config.value)
+    }
+  })
+})
+
+// --- Error handling ---
+watch(() => cfg.error.value, (err) => {
+  if (err) {
+    ElNotification({
+      title: 'Error',
+      message: err,
+      type: 'error',
+      duration: 5000,
+    })
+  }
 })
 
 onUnmounted(() => {

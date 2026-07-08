@@ -27,6 +27,7 @@ pub struct TeamReport {
     pub errors: Vec<String>,
     pub metrics: Vec<ExpertMetrics>,
     pub request_id: String,
+    pub consolidated: Option<crate::team::lead_consolidator::ConsolidationResult>,
 }
 
 /// Per-expert metrics collected during review.

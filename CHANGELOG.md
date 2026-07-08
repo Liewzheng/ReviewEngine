@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.3] - 2026-07-08
+
+### Added
+- **False-positive reduction (Phase 1)**: hardened review prompts with scope rules, confidence calibration, and diff-line interpretation to reduce speculative findings.
+- **Configuration**: added `min_confidence` and `drop_low_confidence` to `ReportConfig` for configurable consolidation filtering.
+- **Orchestrator**: wired the existing lead consolidator into the review pipeline; results are exposed in `TeamReport.consolidated`.
+- **Evidence validation**: added `validate_findings()` in `src/output/parser.rs` to drop hallucinated findings whose file or line does not exist in the diff.
+
+### Changed
+- **Prompts**: `REVIEW_SYSTEM_TEMPLATE` now instructs experts to report only issues in added/modified lines and to label low-confidence findings as speculative notes.
+- **Prompts**: `REVIEW_USER_TEMPLATE` now explains `+`/`-`/context lines before the diff block.
+
 ## [0.7.2] - 2026-07-08
 
 ### Security

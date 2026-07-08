@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.7.7] - 2026-07-08
+
+### Fixed
+- **Vite dev server proxy config**: added missing `server.proxy` block to `vite.config.ts` so `/api/*` requests are correctly forwarded to the Rust backend (`http://localhost:18080`). Previously, all API calls from the SPA returned **502 Bad Gateway**, causing **LLM Status** and **Dashboard** pages to crash with `Cannot read properties of undefined (reading 'items')` and other JS errors.
+
 ## [0.7.6] - 2026-07-08
 
 ### Fixed

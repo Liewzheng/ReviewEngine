@@ -15,6 +15,7 @@ backend-*.log
 frontend-test-cases*.xlsx
 ux-review-*.md
 ux-review-*.xlsx
+generate*.py
 plan*.md
 AGENTS.md
 

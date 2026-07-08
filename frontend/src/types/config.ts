@@ -2,6 +2,7 @@ export interface GitLabConfig {
   url: string
   apiToken: string
   webhookSecret: string
+  webhookSigningSecret: string
   defaultProject: string
   mrLabel: string
   autoReview: boolean
@@ -75,6 +76,7 @@ export function createMockConfig(): AppConfig {
       url: 'https://gitlab.example.com',
       apiToken: 'glpat-xxxxxxxxxxxxxxxxxxxx',
       webhookSecret: 'whsec-xxxxxxxxxxxxxxxx',
+      webhookSigningSecret: 'whsec-sign-xxxxxxxxxxxxxxxx',
       defaultProject: 'my-group/my-project',
       mrLabel: 'needs-review',
       autoReview: true,

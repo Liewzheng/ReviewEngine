@@ -105,6 +105,23 @@
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
+              <el-form-item label="Webhook Signing Secret" prop="gitlab.webhookSigningSecret">
+                <div v-if="!isEditing" class="readonly-field">
+                  <template v-if="!revealed.webhookSigningSecret">
+                    <span class="masked-text">••••••••••••</span>
+                    <el-button size="small" aria-label="Reveal Webhook Signing Secret" @click.stop="revealField('webhookSigningSecret')">
+                      <el-icon><View /></el-icon>
+                    </el-button>
+                  </template>
+                  <template v-else>
+                    <span class="revealed-value">{{ config.gitlab.webhookSigningSecret }}</span>
+                    <span class="countdown">Visible for {{ revealCountdown.webhookSigningSecret }}s...</span>
+                  </template>
+                </div>
+                <el-input v-else v-model="config.gitlab.webhookSigningSecret" :disabled="!isEditing" show-password placeholder="GitLab 19.0+ signing token" />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
               <el-form-item label="Default Project" prop="gitlab.defaultProject">
                 <el-select v-model="config.gitlab.defaultProject" :disabled="!isEditing" placeholder="Select a project" clearable style="width: 100%">
                   <el-option label="my-group/my-project" value="my-group/my-project" />
@@ -398,7 +415,7 @@ const showAdvanced = ref(false)
 const formRef = ref<FormInstance>()
 
 const defaultConfig: AppConfig = {
-  gitlab: { url: '', apiToken: '', webhookSecret: '', defaultProject: '', mrLabel: '', autoReview: false },
+  gitlab: { url: '', apiToken: '', webhookSecret: '', webhookSigningSecret: '', defaultProject: '', mrLabel: '', autoReview: false },
   llm: { primaryProvider: 'openai', openaiApiKey: '', anthropicApiKey: '', ollamaUrl: '', defaultModel: '', maxTokens: 4096, temperature: 0.7, timeoutSeconds: 60, retryAttempts: 3 },
   rules: { minScore: 75, blockOnCritical: true, autoCommentOnPass: true, commentTemplate: '', excludedPatterns: [], requiredExperts: [], maxReviewDurationSeconds: 300 },
   advanced: { logLevel: 'info', logRetentionDays: 30, sseHeartbeatInterval: 15, maxConcurrentReviews: 5, requestTimeout: 120, enableMetrics: true, debugMode: false },
@@ -417,10 +434,12 @@ const advancedCardRef = ref<HTMLElement>()
 const revealed = reactive({
   apiToken: false,
   webhookSecret: false,
+  webhookSigningSecret: false,
 })
 const revealCountdown = reactive({
   apiToken: 0,
   webhookSecret: 0,
+  webhookSigningSecret: 0,
 })
 const revealTimers = reactive<Record<string, number>>({})
 
@@ -631,7 +650,7 @@ async function testConnection() {
   })
 }
 
-function revealField(field: 'apiToken' | 'webhookSecret') {
+function revealField(field: 'apiToken' | 'webhookSecret' | 'webhookSigningSecret') {
   revealed[field] = true
   revealCountdown[field] = 5
   if (revealTimers[field]) clearInterval(revealTimers[field])

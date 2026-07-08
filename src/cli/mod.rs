@@ -556,8 +556,13 @@ pub async fn run() -> Result<()> {
             let gitlab_token = gitlab_token
                 .or_else(|| std::env::var("GITLAB_TOKEN").ok())
                 .unwrap_or_default();
-            let signing_secret =
-                gitlab_webhook_signing_secret.or_else(|| std::env::var("GITLAB_WEBHOOK_SIGNING_SECRET").ok());
+            let signing_secret = gitlab_webhook_signing_secret
+                .or_else(|| std::env::var("GITLAB_WEBHOOK_SIGNING_SECRET").ok())
+                .or_else(|| {
+                    #[allow(clippy::unwrap_used)]
+                    let ui = state.ui_config.read().unwrap();
+                    Some(ui.gitlab.webhook_signing_secret.clone()).filter(|s| !s.is_empty())
+                });
             let webhook_secret = gitlab_webhook_secret
                 .or_else(|| std::env::var("GITLAB_WEBHOOK_SECRET").ok())
                 .unwrap_or_default();

@@ -7,6 +7,7 @@
 
 ### Added
 - **CLI**: `--gitlab-webhook-signing-secret` flag and `GITLAB_WEBHOOK_SIGNING_SECRET` environment variable for configuring the GitLab signing token.
+- **UI Config**: added `webhookSigningSecret` to the GitLab config API and the frontend Configuration page, persisted via `PUT /api/v1/config` and used as a fallback when CLI/env signing secret is not set.
 - **Docs**: documented the signing-token option in `docs/integrations/gitlab.md`.
 
 ## [0.7.1] - 2026-07-08

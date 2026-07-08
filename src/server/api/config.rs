@@ -112,6 +112,8 @@ pub struct UiGitLabConfig {
     #[serde(default)]
     pub webhook_secret: String,
     #[serde(default)]
+    pub webhook_signing_secret: String,
+    #[serde(default)]
     pub default_project: String,
     #[serde(default)]
     pub mr_label: String,

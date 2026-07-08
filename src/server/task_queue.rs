@@ -236,10 +236,25 @@ impl TaskStore {
                 let meta = &e.source_meta;
                 meta.mr_title.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
                     || meta.project.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
-                    || meta.repository.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
+                    || meta
+                        .repository
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&q_lower)
                     || meta.branch.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
-                    || meta.author_name.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
-                    || meta.commit_sha.as_deref().unwrap_or("").to_lowercase().contains(&q_lower)
+                    || meta
+                        .author_name
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&q_lower)
+                    || meta
+                        .commit_sha
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(&q_lower)
             });
         }
 
@@ -277,6 +292,32 @@ impl TaskStore {
                     task_id,
                     status: "cancelled",
                     event: "review.cancelled",
+                    mr_title: meta.mr_title,
+                    project: meta.project,
+                    progress: None,
+                    expert_name: None,
+                    elapsed_ms: None,
+                });
+                return true;
+            }
+        }
+        false
+    }
+
+    pub async fn retry(&self, task_id: Uuid) -> bool {
+        let mut map = self.inner.write().await;
+        if let Some(entry) = map.get_mut(&task_id) {
+            if entry.state == TaskState::Failed {
+                entry.state = TaskState::Pending;
+                entry.error = None;
+                entry.progress = None;
+                entry.completed_at = None;
+                entry.started_at = None;
+                let meta = entry.source_meta.clone();
+                let _ = self.tx.send(TaskEvent {
+                    task_id,
+                    status: "pending",
+                    event: "review.retry",
                     mr_title: meta.mr_title,
                     project: meta.project,
                     progress: None,

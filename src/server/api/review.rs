@@ -197,16 +197,18 @@ async fn list_reviews(State(state): State<Arc<AppState>>, Query(params): Query<L
             .map(|dt| dt.with_timezone(&chrono::Utc))
     });
 
-    let (items, total) = store.list(
-        status,
-        page,
-        per_page,
-        params.q.as_deref(),
-        params.project.as_deref(),
-        params.repository.as_deref(),
-        date_from,
-        date_to,
-    ).await;
+    let (items, total) = store
+        .list(
+            status,
+            page,
+            per_page,
+            params.q.as_deref(),
+            params.project.as_deref(),
+            params.repository.as_deref(),
+            date_from,
+            date_to,
+        )
+        .await;
     let items: Vec<TaskStatus> = items.iter().map(task_to_status).collect();
 
     Json(serde_json::json!({

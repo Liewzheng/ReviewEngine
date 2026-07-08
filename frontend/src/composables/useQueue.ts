@@ -1,5 +1,5 @@
 import { ref, computed } from 'vue';
-import { getQueueStats, getQueueTasks, cancelTask, pauseQueue, resumeQueue, setMaxConcurrent } from '../services/queue';
+import { getQueueStats, getQueueTasks, cancelTask, retryTask, pauseQueue, resumeQueue, setMaxConcurrent } from '../services/queue';
 import type { QueueTasksResponse } from '../services/queue';
 import type { QueueStats } from '../types/queue';
 
@@ -41,6 +41,18 @@ export function useQueue() {
     error.value = null;
     try {
       await cancelTask(id);
+    } catch (e) {
+      error.value = e instanceof Error ? e.message : 'Unknown error';
+      throw e;
+    }
+  }
+
+  async function retry(id: string) {
+    error.value = null;
+    try {
+      await retryTask(id);
+      await fetchTasks();
+      await fetchStats();
     } catch (e) {
       error.value = e instanceof Error ? e.message : 'Unknown error';
       throw e;
@@ -94,6 +106,7 @@ export function useQueue() {
     fetchStats,
     fetchTasks,
     cancel,
+    retry,
     pause,
     resume,
     updateMaxConcurrent,

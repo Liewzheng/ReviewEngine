@@ -112,16 +112,12 @@ const handleEditCard = (expert: Expert) => {
 
 const saveEdit = async () => {
   if (!editingExpert.value) return
-  const idx = experts.value.findIndex((e: Expert) => e.id === editingExpert.value!.id)
-  if (idx === -1) return
 
   try {
     await expertsStore.update(editingExpert.value.id, {
       enabled: editingExpert.value.enabled,
       weight: editingExpert.value.weight,
     })
-    // Keep local changes for fields not supported by API (name, category, description)
-    experts.value[idx] = { ...experts.value[idx], ...editingExpert.value }
     editModalVisible.value = false
 
     ElNotification({
@@ -431,10 +427,10 @@ onBeforeUnmount(() => {
     >
       <el-form v-if="editingExpert" label-position="top">
         <el-form-item label="Name">
-          <el-input v-model="editingExpert.name" />
+          <el-input v-model="editingExpert.name" readonly />
         </el-form-item>
         <el-form-item label="Category">
-          <el-select v-model="editingExpert.category" style="width: 100%">
+          <el-select v-model="editingExpert.category" disabled style="width: 100%">
             <el-option
               v-for="(label, value) in categoryLabelMap"
               :key="value"
@@ -464,6 +460,7 @@ onBeforeUnmount(() => {
             v-model="editingExpert.description"
             type="textarea"
             :rows="4"
+            readonly
             resize="none"
           />
         </el-form-item>

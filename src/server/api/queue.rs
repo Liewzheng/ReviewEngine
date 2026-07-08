@@ -22,6 +22,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/stats", get(get_queue_stats))
         .route("/tasks", get(get_queue_tasks))
         .route("/tasks/{task_id}", delete(delete_queue_task))
+        .route("/tasks/{task_id}/retry", post(post_retry_task))
         .route("/pause", post(post_pause))
         .route("/resume", post(post_resume))
         .route("/max-concurrent", post(post_max_concurrent))
@@ -123,6 +124,28 @@ async fn delete_queue_task(State(state): State<Arc<AppState>>, Path(task_id): Pa
         (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": "task not found or cannot be cancelled"})),
+        )
+            .into_response()
+    }
+}
+
+async fn post_retry_task(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
+    let store = match &state.task_store {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "task store not initialized"})),
+            )
+                .into_response()
+        }
+    };
+    if store.retry(task_id).await {
+        (StatusCode::OK, Json(serde_json::json!({"status": "retried"}))).into_response()
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "task not found or not in failed state"})),
         )
             .into_response()
     }

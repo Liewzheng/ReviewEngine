@@ -28,6 +28,10 @@ export async function cancelTask(id: string): Promise<void> {
   await request(`/queue/tasks/${id}`, { method: 'DELETE' });
 }
 
+export async function retryTask(id: string): Promise<void> {
+  await request(`/queue/tasks/${id}/retry`, { method: 'POST' });
+}
+
 export async function pauseQueue(): Promise<{ status: string }> {
   return request('/queue/pause', { method: 'POST' });
 }

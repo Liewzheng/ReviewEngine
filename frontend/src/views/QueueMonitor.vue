@@ -16,6 +16,7 @@ const loading = queue.loading
 // --- Local UI state ---
 const sseConnected = ref(false)
 const recentlyUpdated = ref<string[]>([])
+const isRefreshing = ref(false)
 let refreshInterval: ReturnType<typeof setInterval> | null = null
 
 // --- Computed stats with fallback ---
@@ -46,9 +47,15 @@ const loadQueueData = async () => {
 
 // --- Auto refresh ---
 const startAutoRefresh = () => {
-  refreshInterval = setInterval(() => {
-    queue.fetchStats()
-    queue.fetchTasks()
+  stopAutoRefresh()
+  refreshInterval = setInterval(async () => {
+    if (isRefreshing.value) return
+    isRefreshing.value = true
+    try {
+      await Promise.all([queue.fetchStats(), queue.fetchTasks()])
+    } finally {
+      isRefreshing.value = false
+    }
   }, 3000)
 }
 
@@ -128,13 +135,23 @@ const handleCancelAllFailed = async () => {
         type: 'warning',
       }
     )
-    await Promise.all(failedTasks.value.map(t => queue.cancel(t.id)))
+    const results = await Promise.allSettled(failedTasks.value.map(t => queue.cancel(t.id)))
+    const succeeded: string[] = []
+    const failedIds: string[] = []
+    results.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        succeeded.push(failedTasks.value[index].id)
+      } else {
+        failedIds.push(failedTasks.value[index].id)
+      }
+    })
     await queue.fetchTasks()
     await queue.fetchStats()
+    const type = failedIds.length === 0 ? 'success' : succeeded.length === 0 ? 'error' : 'warning'
     ElNotification({
-      type: 'success',
-      message: 'All failed tasks cancelled',
-      duration: 3000,
+      type,
+      message: `Cancelled ${succeeded.length} tasks, ${failedIds.length} failed`,
+      duration: 5000,
     })
   } catch {
     // User cancelled the dialog
@@ -168,19 +185,21 @@ const handleCancel = async (taskId: string) => {
   }
 }
 
-const handleRetry = (taskId: string) => {
-  const task = queue.items.value.find((t: QueueTask) => t.id === taskId)
-  if (!task) return
-  task.status = 'queued'
-  task.progress = 0
-  task.errorMessage = undefined
-  task.elapsedMs = 0
-  task.startedAt = undefined
-  ElNotification({
-    type: 'success',
-    message: 'Task queued for retry',
-    duration: 3000,
-  })
+const handleRetry = async (taskId: string) => {
+  try {
+    await queue.retry(taskId)
+    ElNotification({
+      type: 'success',
+      message: 'Task queued for retry',
+      duration: 3000,
+    })
+  } catch (e) {
+    ElNotification({
+      type: 'error',
+      message: e instanceof Error ? e.message : 'Failed to retry task',
+      duration: 5000,
+    })
+  }
 }
 
 const handleViewLogs = (taskId: string) => {

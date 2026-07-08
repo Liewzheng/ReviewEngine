@@ -1,4 +1,5 @@
 use axum::{http::StatusCode, Json};
+use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
@@ -15,8 +16,8 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// Supports two verification methods (can be configured independently or together):
 /// 1. **Secret token** (`X-Gitlab-Token` header) — legacy, configured via `webhook_secret`.
-/// 2. **Signing token** (`X-Gitlab-Webhook-Signature` header, HMAC-SHA256 of body) —
-///    GitLab 19.0+, configured via `signing_secret`.
+/// 2. **Signing token** (`webhook-signature` header, Standard Webhooks HMAC-SHA256 of
+///    `{message_id}.{timestamp}.{body}`) — GitLab 19.0+, configured via `signing_secret`.
 ///
 /// See: <https://docs.gitlab.com/19.0/user/project/integrations/webhooks/#signing-tokens>
 #[derive(Clone)]
@@ -31,7 +32,8 @@ impl GitLabWebhookHandler {
     /// Create a new GitLab webhook handler.
     ///
     /// `webhook_secret` — legacy `X-Gitlab-Token` verification (empty string disables).
-    /// `signing_secret` — HMAC-SHA256 body signature verification (`None` disables).
+    /// `signing_secret` — Standard Webhooks HMAC-SHA256 signature verification (`None` disables).
+    /// Expected format: `whsec_<base64-encoded-key>`.
     pub fn new(
         webhook_secret: String,
         signing_secret: Option<String>,
@@ -46,40 +48,100 @@ impl GitLabWebhookHandler {
         }
     }
 
-    /// Verify `X-Gitlab-Webhook-Signature` header (HMAC-SHA256 of body).
+    /// Verify `webhook-signature` header (GitLab 19.0+ signing tokens, Standard Webhooks).
     fn verify_signing(&self, headers: &HeaderMap, body: &str) -> Result<(), (StatusCode, Json<Value>)> {
         let secret = match &self.signing_secret {
             Some(s) if !s.is_empty() => s,
             _ => return Ok(()), // signing not configured — skip this check
         };
 
-        let signature_raw = headers
-            .get("X-Gitlab-Webhook-Signature")
+        let signature_header = headers
+            .get("webhook-signature")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        if signature_raw.is_empty() {
-            tracing::warn!("GitLab webhook signing secret configured but X-Gitlab-Webhook-Signature header missing");
+        if signature_header.is_empty() {
+            tracing::warn!("GitLab webhook signing secret configured but webhook-signature header missing");
             return Err((
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "missing signing signature header"})),
+                Json(serde_json::json!({"error": "missing webhook-signature header"})),
             ));
         }
 
-        let signature = if let Some(s) = signature_raw.strip_prefix("sha256=") {
-            s
-        } else {
-            tracing::warn!("GitLab webhook signing signature does not start with sha256=");
+        let message_id = headers.get("webhook-id").and_then(|v| v.to_str().ok()).unwrap_or("");
+        let timestamp = headers
+            .get("webhook-timestamp")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        if message_id.is_empty() || timestamp.is_empty() {
+            tracing::warn!("GitLab webhook signing missing webhook-id or webhook-timestamp header");
             return Err((
                 StatusCode::FORBIDDEN,
-                Json(serde_json::json!({"error": "invalid signing signature format"})),
+                Json(serde_json::json!({"error": "missing webhook-id or webhook-timestamp header"})),
             ));
-        };
+        }
 
-        if verify_signature(secret, body, signature) {
+        // Replay protection: timestamp must be within 5 minutes.
+        let timestamp_seconds = timestamp.parse::<i64>().map_err(|_| {
+            tracing::warn!("GitLab webhook signing invalid timestamp: {}", timestamp);
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid webhook timestamp"})),
+            )
+        })?;
+        let ts = chrono::DateTime::from_timestamp(timestamp_seconds, 0).ok_or((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "invalid webhook timestamp"})),
+        ))?;
+        let now = chrono::Utc::now();
+        if (now - ts).num_seconds().abs() > 300 {
+            tracing::warn!("GitLab webhook signing timestamp out of tolerance");
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "webhook timestamp out of tolerance"})),
+            ));
+        }
+
+        // Decode the signing key: whsec_<base64>
+        let key_b64 = secret.strip_prefix("whsec_").ok_or_else(|| {
+            tracing::warn!("GitLab webhook signing secret does not start with whsec_");
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid signing secret format"})),
+            )
+        })?;
+        let key = base64::engine::general_purpose::STANDARD.decode(key_b64).map_err(|e| {
+            tracing::warn!("GitLab webhook signing secret is not valid base64: {}", e);
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid signing secret encoding"})),
+            )
+        })?;
+
+        // Build message: "{message_id}.{timestamp}.{body}"
+        let message = format!("{}.{}.{}", message_id, timestamp, body);
+
+        // Compute HMAC-SHA256.
+        let mut mac = HmacSha256::new_from_slice(&key).map_err(|_| {
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"error": "invalid signing key"})),
+            )
+        })?;
+        mac.update(message.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        let computed_sig = format!("v1,{}", base64::engine::general_purpose::STANDARD.encode(&digest));
+
+        // Compare against each signature in the header (constant-time).
+        let valid = signature_header
+            .split_whitespace()
+            .any(|sig| bool::from(subtle::ConstantTimeEq::ct_eq(computed_sig.as_bytes(), sig.as_bytes())));
+
+        if valid {
             Ok(())
         } else {
-            tracing::warn!("GitLab webhook HMAC signing signature mismatch — check GITLAB_WEBHOOK_SIGNING_SECRET");
+            tracing::warn!("GitLab webhook signing signature mismatch — check GITLAB_WEBHOOK_SIGNING_SECRET");
             Err((
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"error": "invalid signing signature"})),
@@ -379,21 +441,6 @@ async fn handle_push_hook(body: &str) -> Result<Json<Value>, StatusCode> {
     })))
 }
 
-/// Verify the HMAC-SHA256 signature (shared with GitHub handler).
-fn verify_signature(secret: &str, body: &str, signature: &str) -> bool {
-    let decoded = match hex::decode(signature) {
-        Ok(d) => d,
-        Err(_) => return false,
-    };
-
-    let mut mac = match HmacSha256::new_from_slice(secret.as_bytes()) {
-        Ok(m) => m,
-        Err(_) => return false,
-    };
-    mac.update(body.as_bytes());
-    mac.verify_slice(&decoded).is_ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -480,38 +527,52 @@ mod tests {
 
     #[tokio::test]
     async fn test_signing_verify_valid_signature() {
-        let secret = "my-signing-secret";
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
         let body = r#"{"object_attributes":{"action":"open","iid":1}}"#;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body.as_bytes());
-        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let message_id = "msg-123";
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let message = format!("{}.{}.{}", message_id, timestamp, body);
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(message.as_bytes());
+        let sig = format!(
+            "v1,{}",
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        );
 
         let handler = GitLabWebhookHandler::new(
             String::new(),
-            Some(secret.to_string()),
+            Some(signing_secret),
             MrDispatcher::new(),
             "test-token".to_string(),
         );
         let mut headers = HeaderMap::new();
-        headers.insert("X-Gitlab-Webhook-Signature", sig.parse().unwrap());
+        headers.insert("webhook-id", message_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.parse().unwrap());
+        headers.insert("webhook-signature", sig.parse().unwrap());
         let result = handler.verify(&headers, body).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_signing_verify_invalid_signature() {
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
         let handler = GitLabWebhookHandler::new(
             String::new(),
-            Some("my-signing-secret".to_string()),
+            Some(signing_secret),
             MrDispatcher::new(),
             "test-token".to_string(),
         );
         let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", "msg-123".parse().unwrap());
         headers.insert(
-            "X-Gitlab-Webhook-Signature",
-            "sha256=0000000000000000000000000000000000000000000000000000000000000000"
-                .parse()
-                .unwrap(),
+            "webhook-timestamp",
+            chrono::Utc::now().timestamp().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "webhook-signature",
+            "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==".parse().unwrap(),
         );
         let result = handler.verify(&headers, "body").await;
         assert!(result.is_err());
@@ -521,9 +582,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_signing_verify_missing_signature() {
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
         let handler = GitLabWebhookHandler::new(
             String::new(),
-            Some("my-signing-secret".to_string()),
+            Some(signing_secret),
             MrDispatcher::new(),
             "test-token".to_string(),
         );
@@ -535,16 +598,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_signing_verify_no_prefix_rejected() {
+    async fn test_signing_verify_missing_headers_rejected() {
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
         let handler = GitLabWebhookHandler::new(
             String::new(),
-            Some("my-signing-secret".to_string()),
+            Some(signing_secret),
             MrDispatcher::new(),
             "test-token".to_string(),
         );
         let mut headers = HeaderMap::new();
-        headers.insert("X-Gitlab-Webhook-Signature", "abcdef123456".parse().unwrap());
+        headers.insert("webhook-signature", "v1,abcdef123456==".parse().unwrap());
         let result = handler.verify(&headers, "body").await;
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn test_signing_verify_old_timestamp_rejected() {
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
+        let body = "body";
+        let message_id = "msg-123";
+        // Timestamp 10 minutes ago
+        let timestamp = (chrono::Utc::now().timestamp() - 600).to_string();
+        let message = format!("{}.{}.{}", message_id, timestamp, body);
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(message.as_bytes());
+        let sig = format!(
+            "v1,{}",
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        );
+
+        let handler = GitLabWebhookHandler::new(
+            String::new(),
+            Some(signing_secret),
+            MrDispatcher::new(),
+            "test-token".to_string(),
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert("webhook-id", message_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.parse().unwrap());
+        headers.insert("webhook-signature", sig.parse().unwrap());
+        let result = handler.verify(&headers, body).await;
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -554,61 +651,84 @@ mod tests {
 
     #[tokio::test]
     async fn test_both_verify_all_pass() {
-        let secret = "my-signing-secret";
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
         let body = r#"{"object_attributes":{"action":"open"}}"#;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body.as_bytes());
-        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let message_id = "msg-123";
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let message = format!("{}.{}.{}", message_id, timestamp, body);
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(message.as_bytes());
+        let sig = format!(
+            "v1,{}",
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        );
 
         let handler = GitLabWebhookHandler::new(
             "my-webhook-secret".to_string(),
-            Some(secret.to_string()),
+            Some(signing_secret),
             MrDispatcher::new(),
             "test-token".to_string(),
         );
         let mut headers = HeaderMap::new();
         headers.insert("X-Gitlab-Token", "my-webhook-secret".parse().unwrap());
-        headers.insert("X-Gitlab-Webhook-Signature", sig.parse().unwrap());
+        headers.insert("webhook-id", message_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.parse().unwrap());
+        headers.insert("webhook-signature", sig.parse().unwrap());
         let result = handler.verify(&headers, body).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn test_both_verify_token_wrong() {
-        let secret = "my-signing-secret";
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
         let body = "body";
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body.as_bytes());
-        let sig = format!("sha256={}", hex::encode(mac.finalize().into_bytes()));
+        let message_id = "msg-123";
+        let timestamp = chrono::Utc::now().timestamp().to_string();
+        let message = format!("{}.{}.{}", message_id, timestamp, body);
+        let mut mac = HmacSha256::new_from_slice(raw_key).unwrap();
+        mac.update(message.as_bytes());
+        let sig = format!(
+            "v1,{}",
+            base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+        );
 
         let handler = GitLabWebhookHandler::new(
             "my-webhook-secret".to_string(),
-            Some(secret.to_string()),
+            Some(signing_secret),
             MrDispatcher::new(),
             "test-token".to_string(),
         );
         let mut headers = HeaderMap::new();
         headers.insert("X-Gitlab-Token", "wrong-secret".parse().unwrap());
-        headers.insert("X-Gitlab-Webhook-Signature", sig.parse().unwrap());
+        headers.insert("webhook-id", message_id.parse().unwrap());
+        headers.insert("webhook-timestamp", timestamp.parse().unwrap());
+        headers.insert("webhook-signature", sig.parse().unwrap());
         let result = handler.verify(&headers, body).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_both_verify_signing_wrong() {
+        let raw_key = b"my-signing-secret";
+        let signing_secret = format!("whsec_{}", base64::engine::general_purpose::STANDARD.encode(raw_key));
         let handler = GitLabWebhookHandler::new(
             "my-webhook-secret".to_string(),
-            Some("my-signing-secret".to_string()),
+            Some(signing_secret),
             MrDispatcher::new(),
             "test-token".to_string(),
         );
         let mut headers = HeaderMap::new();
         headers.insert("X-Gitlab-Token", "my-webhook-secret".parse().unwrap());
+        headers.insert("webhook-id", "msg-123".parse().unwrap());
         headers.insert(
-            "X-Gitlab-Webhook-Signature",
-            "sha256=0000000000000000000000000000000000000000000000000000000000000000"
-                .parse()
-                .unwrap(),
+            "webhook-timestamp",
+            chrono::Utc::now().timestamp().to_string().parse().unwrap(),
+        );
+        headers.insert(
+            "webhook-signature",
+            "v1,AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==".parse().unwrap(),
         );
         let result = handler.verify(&headers, "body").await;
         assert!(result.is_err());
@@ -624,50 +744,8 @@ mod tests {
         );
         let mut headers = HeaderMap::new();
         headers.insert("X-Gitlab-Token", "my-webhook-secret".parse().unwrap());
-        // No X-Gitlab-Webhook-Signature header, but signing not configured → OK
+        // No webhook-signature header, but signing not configured → OK
         let result = handler.verify(&headers, "body").await;
         assert!(result.is_ok());
-    }
-
-    // ── verify_signature helper tests ──────────────────────────────────
-
-    #[test]
-    fn test_verify_signature_valid() {
-        let secret = "my-secret";
-        let body = r#"{"action":"opened"}"#;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body.as_bytes());
-        let expected = hex::encode(mac.finalize().into_bytes());
-        assert!(verify_signature(secret, body, &expected));
-    }
-
-    #[test]
-    fn test_verify_signature_wrong_secret() {
-        let body = r#"{"action":"opened"}"#;
-        let mut mac = HmacSha256::new_from_slice(b"other-secret").unwrap();
-        mac.update(body.as_bytes());
-        let sig = hex::encode(mac.finalize().into_bytes());
-        assert!(!verify_signature("my-secret", body, &sig));
-    }
-
-    #[test]
-    fn test_verify_signature_invalid_hex() {
-        assert!(!verify_signature("secret", "body", "not-hex"));
-    }
-
-    #[test]
-    fn test_verify_signature_empty_secret() {
-        let body = "test";
-        assert!(!verify_signature("", body, "abc123"));
-    }
-
-    #[test]
-    fn test_verify_signature_tampered_body() {
-        let secret = "my-secret";
-        let body = r#"{"action":"opened"}"#;
-        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-        mac.update(body.as_bytes());
-        let sig = hex::encode(mac.finalize().into_bytes());
-        assert!(!verify_signature(secret, r#"{"action":"closed"}"#, &sig));
     }
 }

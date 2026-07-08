@@ -11,11 +11,28 @@ This guide shows how to run review-engine as a webhook server that automatically
 
 ## Start the server
 
-The GitLab webhook handler reads the API token from the `GITLAB_TOKEN` environment variable and the webhook secret from `GITLAB_WEBHOOK_SECRET`.
+The GitLab webhook handler reads the API token from the `GITLAB_TOKEN` environment variable.
+
+For webhook authentication you can use either the legacy **secret token** or the new **signing token** (GitLab 19.0+). You can also configure both during a migration.
+
+### Option A — legacy secret token
+
+The secret token is sent in plain text in the `X-Gitlab-Token` header.
 
 ```bash
 export GITLAB_TOKEN="glpat-xxx"
 export GITLAB_WEBHOOK_SECRET="a-strong-random-secret"
+
+review-engine serve --port 8080
+```
+
+### Option B — signing token (recommended, GitLab 19.0+)
+
+The signing token uses HMAC-SHA256 and follows the Standard Webhooks specification. Copy the entire value shown by GitLab, including the `whsec_` prefix.
+
+```bash
+export GITLAB_TOKEN="glpat-xxx"
+export GITLAB_WEBHOOK_SIGNING_SECRET="whsec_..."
 
 review-engine serve --port 8080
 ```
@@ -30,7 +47,9 @@ ngrok http 8080
 
 1. Go to **Settings → Webhooks** in your GitLab project.
 2. **URL**: `https://your-server.example.com/webhook/gitlab`
-3. **Secret token**: the same value you set as `GITLAB_WEBHOOK_SECRET`.
+3. Authentication:
+   - For the legacy secret token, enter the same value you set as `GITLAB_WEBHOOK_SECRET` in the **Secret token** field.
+   - For GitLab 19.0+, select **Generate signing token**, copy the value, and set it as `GITLAB_WEBHOOK_SIGNING_SECRET`.
 4. **Trigger events**:
    - **Merge request events** — required for automatic review on open/reopen/update.
    - **Comments** — required for `/review`, `/improve`, `/describe` commands.

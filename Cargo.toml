@@ -1,6 +1,6 @@
 [package]
 name = "review-engine"
-version = "0.7.1"
+version = "0.7.2"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -42,6 +42,7 @@ rand = "0.8"
 hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
+base64 = "0.22"
 
 # Constant-time comparison
 subtle = "2"

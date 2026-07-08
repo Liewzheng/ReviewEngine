@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.7.2] - 2026-07-08
+
+### Security
+- **GitLab webhooks**: implemented Standard Webhooks signing-token verification (`webhook-signature`, `webhook-id`, `webhook-timestamp`) for GitLab 19.0+. Supports the `whsec_` key format and includes 5-minute timestamp tolerance for replay protection. Legacy `X-Gitlab-Token` secret-token verification remains supported.
+
+### Added
+- **CLI**: `--gitlab-webhook-signing-secret` flag and `GITLAB_WEBHOOK_SIGNING_SECRET` environment variable for configuring the GitLab signing token.
+- **Docs**: documented the signing-token option in `docs/integrations/gitlab.md`.
+
 ## [0.7.1] - 2026-07-08
 
 ### Added

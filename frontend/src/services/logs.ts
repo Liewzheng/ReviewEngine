@@ -1,4 +1,5 @@
 import type { LogEntry } from '../types/logs';
+import { getApiToken } from './api';
 
 export type { LogEntry };
 
@@ -20,7 +21,13 @@ export function createLogStream(
 }
 
 export async function downloadLogs(): Promise<Blob> {
-  const resp = await fetch('/api/v1/logs/download');
+  const headers: Record<string, string> = {};
+  const token = await getApiToken();
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+
+  const resp = await fetch('/api/v1/logs/download', { headers });
   if (!resp.ok) throw new Error('Download failed');
   return resp.blob();
 }

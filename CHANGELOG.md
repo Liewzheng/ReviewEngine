@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.7.4] - 2026-07-08
+
+### Fixed
+- **Frontend auth in Docker**: frontend API client now reads the API token from `localStorage` or `/config.json` and sends `Authorization: Bearer <token>` on all `/api/v1/*` requests.
+- **Docker deployment**: added `entrypoint.sh` to write `REVIEW_API_TOKEN` into `/app/frontend/dist/config.json` at container startup, so the bundled admin UI can authenticate against the backend when binding to `0.0.0.0`.
+
+### Changed
+- `frontend/src/services/api.ts`: caches API token lookup and exports `setApiToken()` for future UI override.
+- `frontend/src/services/logs.ts`: log download now includes the API token header.
+- `docker-compose.yml`: clarified that `REVIEW_API_TOKEN` is shared between backend auth and frontend runtime config.
+
 ## [0.7.3] - 2026-07-08
 
 ### Added

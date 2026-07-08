@@ -73,6 +73,10 @@ COPY --from=builder /build/target/release/review-engine /usr/local/bin/review-en
 # 复制前端构建产物（从本地预构建的 dist）
 COPY frontend/dist /app/frontend/dist
 
+# 复制启动入口脚本，用于根据环境变量生成前端配置
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
 # 创建配置和报告目录
 RUN mkdir -p /app/config /app/reports /app/.ssh && \
     chown -R review-engine:review-engine /app
@@ -93,5 +97,5 @@ ENV REVIEW_ENGINE_REPORT_DIR=/app/reports
 ENV RUST_LOG=info
 
 # 入口：启动服务
-ENTRYPOINT ["/usr/local/bin/review-engine"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["serve", "--bind", "0.0.0.0", "--port", "8080"]

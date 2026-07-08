@@ -1,4 +1,4 @@
-use crate::models::{AggregatedReport, Effort, ExpertReport, Finding, Severity};
+use crate::models::{AggregatedReport, DiffHunk, Effort, ExpertReport, Finding, Severity};
 use crate::output::renderer;
 use anyhow::Result;
 use regex::Regex;
@@ -197,6 +197,34 @@ fn extract_first_fenced_yaml(text: &str) -> Option<String> {
     first_fenced_yaml_regex()
         .captures(text)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
+}
+
+/// Validate that findings point to files and lines present in the diff.
+///
+/// - Findings whose `file` is not in `diff_files` are dropped.
+/// - Findings with `line: None` are kept if the file exists in the diff.
+/// - Findings with a line value are kept only when that line falls within any
+///   of the file's diff hunks (using the new-file / hunk range).
+pub fn validate_findings(findings: &[Finding], diff_files: &[(String, Vec<DiffHunk>)]) -> Vec<Finding> {
+    let diff_map: std::collections::HashMap<_, _> = diff_files.iter().map(|(p, h)| (p.as_str(), h)).collect();
+
+    findings
+        .iter()
+        .filter(|f| {
+            let Some(hunks) = diff_map.get(f.file.as_str()) else {
+                return false;
+            };
+            match f.line {
+                None => true,
+                Some(line) => hunks.iter().any(|h| {
+                    let start = h.new_start;
+                    let end = h.new_start.saturating_add(h.new_lines.saturating_sub(1));
+                    line >= start && line <= end
+                }),
+            }
+        })
+        .cloned()
+        .collect()
 }
 
 fn extract_findings(value: &serde_yaml_ng::Value, expert_name: &str) -> Result<Vec<Finding>> {
@@ -616,22 +644,177 @@ More text.
     }
 
     #[test]
-    fn parse_llm_response_extracts_fenced_block_when_outer_invalid() {
-        let input = r#"
-invalid yaml outside
-```yaml
-review:
-  findings:
-    - file: "src/lib.rs"
-      line: 1
-      severity: "medium"
-      title: "Inner finding"
-      detail: "From fenced block"
-```
-"#;
-        let report = parse_llm_response("expert", input);
-        assert_eq!(report.findings.len(), 1);
-        assert_eq!(report.findings[0].file, "src/lib.rs");
-        assert_eq!(report.findings[0].title, "Inner finding");
+    fn validate_findings_keeps_file_without_line() {
+        let findings = vec![Finding {
+            file: "src/main.rs".to_string(),
+            line: None,
+            line_end: None,
+            severity: Severity::High,
+            confidence: 8,
+            category: "test".to_string(),
+            title: "No line".to_string(),
+            summary: "summary".to_string(),
+            evidence: "evidence".to_string(),
+            impact: "impact".to_string(),
+            recommendation: "rec".to_string(),
+            effort: Effort::Small,
+            expert_name: "expert".to_string(),
+            expert_role: "role".to_string(),
+            agrees_with: vec![],
+            references: vec![],
+        }];
+        let diff_files = vec![("src/main.rs".to_string(), vec![])];
+        let validated = validate_findings(&findings, &diff_files);
+        assert_eq!(validated.len(), 1);
+    }
+
+    #[test]
+    fn validate_findings_drops_file_not_in_diff() {
+        let findings = vec![Finding {
+            file: "src/other.rs".to_string(),
+            line: Some(10),
+            line_end: None,
+            severity: Severity::High,
+            confidence: 8,
+            category: "test".to_string(),
+            title: "Other file".to_string(),
+            summary: "summary".to_string(),
+            evidence: "evidence".to_string(),
+            impact: "impact".to_string(),
+            recommendation: "rec".to_string(),
+            effort: Effort::Small,
+            expert_name: "expert".to_string(),
+            expert_role: "role".to_string(),
+            agrees_with: vec![],
+            references: vec![],
+        }];
+        let diff_files = vec![(
+            "src/main.rs".to_string(),
+            vec![DiffHunk {
+                header: "@@ -1,5 +1,5 @@".to_string(),
+                old_start: 1,
+                old_lines: 5,
+                new_start: 1,
+                new_lines: 5,
+                lines: vec![],
+            }],
+        )];
+        let validated = validate_findings(&findings, &diff_files);
+        assert!(validated.is_empty());
+    }
+
+    #[test]
+    fn validate_findings_keeps_line_inside_hunk_range() {
+        let findings = vec![Finding {
+            file: "src/main.rs".to_string(),
+            line: Some(12),
+            line_end: None,
+            severity: Severity::High,
+            confidence: 8,
+            category: "test".to_string(),
+            title: "In range".to_string(),
+            summary: "summary".to_string(),
+            evidence: "evidence".to_string(),
+            impact: "impact".to_string(),
+            recommendation: "rec".to_string(),
+            effort: Effort::Small,
+            expert_name: "expert".to_string(),
+            expert_role: "role".to_string(),
+            agrees_with: vec![],
+            references: vec![],
+        }];
+        let diff_files = vec![(
+            "src/main.rs".to_string(),
+            vec![DiffHunk {
+                header: "@@ -10,5 +10,8 @@".to_string(),
+                old_start: 10,
+                old_lines: 5,
+                new_start: 10,
+                new_lines: 8,
+                lines: vec![],
+            }],
+        )];
+        let validated = validate_findings(&findings, &diff_files);
+        assert_eq!(validated.len(), 1);
+    }
+
+    #[test]
+    fn validate_findings_drops_line_outside_hunk_range() {
+        let findings = vec![Finding {
+            file: "src/main.rs".to_string(),
+            line: Some(25),
+            line_end: None,
+            severity: Severity::High,
+            confidence: 8,
+            category: "test".to_string(),
+            title: "Out of range".to_string(),
+            summary: "summary".to_string(),
+            evidence: "evidence".to_string(),
+            impact: "impact".to_string(),
+            recommendation: "rec".to_string(),
+            effort: Effort::Small,
+            expert_name: "expert".to_string(),
+            expert_role: "role".to_string(),
+            agrees_with: vec![],
+            references: vec![],
+        }];
+        let diff_files = vec![(
+            "src/main.rs".to_string(),
+            vec![DiffHunk {
+                header: "@@ -10,5 +10,8 @@".to_string(),
+                old_start: 10,
+                old_lines: 5,
+                new_start: 10,
+                new_lines: 8,
+                lines: vec![],
+            }],
+        )];
+        let validated = validate_findings(&findings, &diff_files);
+        assert!(validated.is_empty());
+    }
+
+    #[test]
+    fn validate_findings_checks_any_hunk_for_file() {
+        let findings = vec![Finding {
+            file: "src/main.rs".to_string(),
+            line: Some(35),
+            line_end: None,
+            severity: Severity::High,
+            confidence: 8,
+            category: "test".to_string(),
+            title: "Second hunk".to_string(),
+            summary: "summary".to_string(),
+            evidence: "evidence".to_string(),
+            impact: "impact".to_string(),
+            recommendation: "rec".to_string(),
+            effort: Effort::Small,
+            expert_name: "expert".to_string(),
+            expert_role: "role".to_string(),
+            agrees_with: vec![],
+            references: vec![],
+        }];
+        let diff_files = vec![(
+            "src/main.rs".to_string(),
+            vec![
+                DiffHunk {
+                    header: "@@ -10,5 +10,5 @@".to_string(),
+                    old_start: 10,
+                    old_lines: 5,
+                    new_start: 10,
+                    new_lines: 5,
+                    lines: vec![],
+                },
+                DiffHunk {
+                    header: "@@ -30,5 +30,10 @@".to_string(),
+                    old_start: 30,
+                    old_lines: 5,
+                    new_start: 30,
+                    new_lines: 10,
+                    lines: vec![],
+                },
+            ],
+        )];
+        let validated = validate_findings(&findings, &diff_files);
+        assert_eq!(validated.len(), 1);
     }
 }

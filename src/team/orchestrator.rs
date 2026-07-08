@@ -22,6 +22,9 @@ use crate::models::*;
 use crate::progress::{ProgressMap, ReviewProgress, StageWeight};
 use crate::prompt::PromptEngine;
 
+use crate::output::parser::validate_findings;
+use crate::team::lead_consolidator::ConsolidatorConfig;
+
 use super::{ExpertMetrics, TeamOrchestrator, TeamReport};
 
 /// Default implementation of [`TeamOrchestrator`].
@@ -159,6 +162,17 @@ impl TeamOrchestrator for DefaultOrchestrator {
         )
         .await?;
 
+        // Lead consolidation: merge and filter validated findings.
+        let consolidated = {
+            let consolidator_config = ConsolidatorConfig {
+                min_confidence: config.report.min_confidence,
+                drop_low_confidence: config.report.drop_low_confidence,
+                scoring: Some(config.scoring.clone()),
+                ..Default::default()
+            };
+            Some(consolidator_config.consolidate(&reports, None))
+        };
+
         // Phase 3-4: Cross-check & Lead Consolidation (placeholder for future)
         let aggregated = if config.report.aggregated && experts.iter().any(|e| e.name == "aggregator") {
             if let Some(aggregator) = experts.iter().find(|e| e.name == "aggregator") {
@@ -202,6 +216,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
             aggregated,
             errors,
             metrics,
+            consolidated,
         })
     }
 }
@@ -559,7 +574,24 @@ pub(crate) async fn run_experts_inner(
     // Mark expert_review complete
     mark_expert_stage_complete(progress_map, review_id);
 
-    let (reports, metrics, total_tokens, errors) = collect_expert_results(results);
+    let (mut reports, metrics, total_tokens, errors) = collect_expert_results(results);
+
+    // Validate each expert's findings against the parsed diff.
+    let diff_files: Vec<(String, Vec<DiffHunk>)> = files.iter().map(|f| (f.path.clone(), f.hunks.clone())).collect();
+    for report in &mut reports {
+        let before = report.findings.len();
+        report.findings = validate_findings(&report.findings, &diff_files);
+        let dropped = before.saturating_sub(report.findings.len());
+        if dropped > 0 {
+            tracing::warn!(
+                "Expert '{}': {} findings dropped after validation",
+                report.expert_name,
+                dropped
+            );
+        } else {
+            tracing::info!("Expert '{}': all findings passed validation", report.expert_name);
+        }
+    }
 
     Ok((reports, metrics, total_tokens, errors, global_context))
 }

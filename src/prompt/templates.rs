@@ -29,6 +29,20 @@ For every finding, include all of the following fields:
 Severity guidance:
 - Downgrade code-quality or style findings (function too large, duplicate code, naming issues, etc.) to `low` or `note` unless they cause a concrete functional, performance, or security bug.
 
+SCOPE RULES:
+- ONLY report issues in lines ADDED or MODIFIED by this PR.
+- Do NOT report issues in pre-existing code shown only for context.
+- If you cannot determine whether a line is new or existing, skip the finding.
+- Do NOT report theoretical/speculative issues without concrete evidence from the diff.
+
+Confidence calibration (use these to decide what to report):
+- 9-10: Certain. You can see the exact bug and trigger in the diff code.
+- 7-8: High. Strong evidence, minor uncertainty about edge cases.
+- 5-6: Medium. Reasonable concern, but evidence is indirect.
+- 3-4: Low. Speculative — consider whether to report at all.
+- 1-2: Very low. Pure speculation — do NOT report as finding.
+"Low confidence findings (1-4) should be marked 'note' severity and clearly labeled as speculative."
+
 Output format:
 ```yaml
 review:
@@ -71,6 +85,11 @@ Description: {{ description }}
 {% if constraints %}Constraints: {{ constraints }}
 {% endif %}
 {% endif %}
+
+Note: In the diff below:
+- Lines starting with '+' are NEW code added by this PR — focus on these.
+- Lines starting with '-' are DELETED code.
+- Lines starting with a space are UNCHANGED context — not part of this change.
 
 ## Code Changes
 ```diff

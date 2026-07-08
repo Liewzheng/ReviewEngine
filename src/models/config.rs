@@ -84,6 +84,12 @@ pub struct ReportConfig {
     /// Maximum number of findings each expert may return.
     #[serde(default = "default_max_findings")]
     pub max_findings_per_expert: usize,
+    /// Minimum confidence score (0-10) for a finding to be included in the report.
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence: u8,
+    /// If `true`, findings below `min_confidence` are dropped instead of included.
+    #[serde(default = "default_drop_low_confidence")]
+    pub drop_low_confidence: bool,
 }
 
 /// Parameters controlling how large diffs are processed and chunked.
@@ -326,6 +332,8 @@ impl Default for ReportConfig {
         Self {
             aggregated: false,
             max_findings_per_expert: 5,
+            min_confidence: 6,
+            drop_low_confidence: false,
         }
     }
 }
@@ -381,6 +389,12 @@ fn default_aggregated() -> bool {
 }
 fn default_max_findings() -> usize {
     5
+}
+fn default_min_confidence() -> u8 {
+    6
+}
+fn default_drop_low_confidence() -> bool {
+    false
 }
 
 fn default_scoring_enabled() -> bool {

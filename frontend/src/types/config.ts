@@ -9,10 +9,8 @@ export interface GitLabConfig {
 }
 
 export interface LLMConfig {
-  primaryProvider: string
+  apiBaseUrl: string
   openaiApiKey: string
-  anthropicApiKey: string
-  ollamaUrl: string
   defaultModel: string
   maxTokens: number
   temperature: number
@@ -64,12 +62,6 @@ export interface TestResult {
   timestamp: string
 }
 
-export const providerModels: Record<string, string[]> = {
-  openai: ['gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-3.5-turbo'],
-  anthropic: ['claude-3-5-sonnet-20241022', 'claude-3-opus-20240229', 'claude-3-haiku-20240307'],
-  ollama: ['llama3.1', 'codellama', 'mistral', 'phi3'],
-}
-
 export function createMockConfig(): AppConfig {
   return {
     gitlab: {
@@ -82,10 +74,8 @@ export function createMockConfig(): AppConfig {
       autoReview: true,
     },
     llm: {
-      primaryProvider: 'openai',
+      apiBaseUrl: 'https://api.openai.com/v1',
       openaiApiKey: 'sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-      anthropicApiKey: '',
-      ollamaUrl: 'http://localhost:11434',
       defaultModel: 'gpt-4o',
       maxTokens: 4096,
       temperature: 0.7,

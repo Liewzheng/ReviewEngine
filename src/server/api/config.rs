@@ -22,6 +22,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/schema", get(get_schema))
         .route("/validate", post(validate_config))
         .route("/test", post(test_config))
+        .route("/models", post(fetch_models))
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -128,10 +129,8 @@ pub struct UiLlmConfig {
     pub primary_provider: String,
     #[serde(default)]
     pub openai_api_key: String,
-    #[serde(default)]
-    pub anthropic_api_key: String,
-    #[serde(default)]
-    pub ollama_url: String,
+    #[serde(default = "default_api_base_url")]
+    pub api_base_url: String,
     #[serde(default)]
     pub default_model: String,
     #[serde(default = "default_max_tokens")]
@@ -185,6 +184,9 @@ pub struct UiAdvancedConfig {
 fn default_max_tokens() -> u32 {
     4096
 }
+fn default_api_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
 fn default_temperature() -> f32 {
     0.7
 }
@@ -237,20 +239,11 @@ impl UiConfig {
                 "openai" => {
                     ui.llm.primary_provider = "openai".to_string();
                     ui.llm.openai_api_key = l.api_key.clone();
-                    ui.llm.default_model = l.model.clone();
-                    ui.llm.max_tokens = l.max_tokens;
-                    ui.llm.temperature = l.temperature;
-                }
-                "anthropic" => {
-                    ui.llm.primary_provider = "anthropic".to_string();
-                    ui.llm.anthropic_api_key = l.api_key.clone();
-                    ui.llm.default_model = l.model.clone();
-                    ui.llm.max_tokens = l.max_tokens;
-                    ui.llm.temperature = l.temperature;
-                }
-                "ollama" => {
-                    ui.llm.primary_provider = "ollama".to_string();
-                    ui.llm.ollama_url = l.api_base.clone();
+                    ui.llm.api_base_url = if l.api_base.is_empty() {
+                        "https://api.openai.com/v1".to_string()
+                    } else {
+                        l.api_base.clone()
+                    };
                     ui.llm.default_model = l.model.clone();
                     ui.llm.max_tokens = l.max_tokens;
                     ui.llm.temperature = l.temperature;
@@ -262,6 +255,12 @@ impl UiConfig {
         if ui.llm.primary_provider.is_empty() {
             if let Some(first) = app.llm.first() {
                 ui.llm.primary_provider = first.provider.clone();
+                ui.llm.openai_api_key = first.api_key.clone();
+                ui.llm.api_base_url = if first.api_base.is_empty() {
+                    "https://api.openai.com/v1".to_string()
+                } else {
+                    first.api_base.clone()
+                };
                 ui.llm.default_model = first.model.clone();
                 ui.llm.max_tokens = first.max_tokens;
                 ui.llm.temperature = first.temperature;
@@ -285,27 +284,7 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
             provider: "openai".to_string(),
             model: body.llm.default_model.clone(),
             api_key: body.llm.openai_api_key.clone(),
-            api_base: String::new(),
-            max_tokens: body.llm.max_tokens,
-            temperature: body.llm.temperature,
-        });
-    }
-    if !body.llm.anthropic_api_key.is_empty() {
-        new_llm_configs.push(crate::models::LLMConfig {
-            provider: "anthropic".to_string(),
-            model: body.llm.default_model.clone(),
-            api_key: body.llm.anthropic_api_key.clone(),
-            api_base: String::new(),
-            max_tokens: body.llm.max_tokens,
-            temperature: body.llm.temperature,
-        });
-    }
-    if !body.llm.ollama_url.is_empty() {
-        new_llm_configs.push(crate::models::LLMConfig {
-            provider: "ollama".to_string(),
-            model: body.llm.default_model.clone(),
-            api_key: String::new(),
-            api_base: body.llm.ollama_url.clone(),
+            api_base: body.llm.api_base_url.clone(),
             max_tokens: body.llm.max_tokens,
             temperature: body.llm.temperature,
         });
@@ -346,6 +325,7 @@ struct TestConfigRequest {
     provider: String,
     model: String,
     api_key: String,
+    api_base: String,
 }
 
 async fn test_config(Json(body): Json<TestConfigRequest>) -> impl IntoResponse {
@@ -353,7 +333,7 @@ async fn test_config(Json(body): Json<TestConfigRequest>) -> impl IntoResponse {
         provider: body.provider,
         model: body.model,
         api_key: body.api_key,
-        api_base: String::new(),
+        api_base: body.api_base,
         max_tokens: 4096,
         temperature: 0.3,
     };
@@ -374,6 +354,71 @@ async fn test_config(Json(body): Json<TestConfigRequest>) -> impl IntoResponse {
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
     .into_response()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ModelsRequest {
+    api_base: String,
+    api_key: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OpenAiModelsResponse {
+    data: Vec<OpenAiModel>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct OpenAiModel {
+    id: String,
+}
+
+async fn fetch_models(Json(body): Json<ModelsRequest>) -> impl IntoResponse {
+    use reqwest::Client;
+    let client = Client::new();
+
+    let base = if body.api_base.is_empty() {
+        "https://api.openai.com/v1".to_string()
+    } else {
+        body.api_base.clone()
+    };
+
+    let url = format!("{}/models", base);
+    let result = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", body.api_key))
+        .timeout(std::time::Duration::from_secs(10))
+        .send()
+        .await;
+
+    match result {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                return Json(serde_json::json!({
+                    "models": [],
+                    "error": format!("HTTP {}", status),
+                }))
+                .into_response();
+            }
+            match resp.json::<OpenAiModelsResponse>().await {
+                Ok(parsed) => {
+                    let mut models: Vec<String> = parsed.data.into_iter().map(|m| m.id).collect();
+                    models.sort();
+                    Json(serde_json::json!({ "models": models })).into_response()
+                }
+                Err(e) => Json(serde_json::json!({
+                    "models": [],
+                    "error": format!("failed to parse response: {}", e),
+                }))
+                .into_response(),
+            }
+        }
+        Err(e) => Json(serde_json::json!({
+            "models": [],
+            "error": e.to_string(),
+        }))
+        .into_response(),
+    }
 }
 
 async fn test_llm_connectivity(cfg: &crate::models::LLMConfig) -> anyhow::Result<()> {

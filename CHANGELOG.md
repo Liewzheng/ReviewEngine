@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.7.5] - 2026-07-08
+
+### Added
+- **LLM model auto-discovery**: the Configuration page now fetches available models from any OpenAI-compatible endpoint (`{api_base}/models`) after the user enters an API base URL and key.
+- **LLM config API**: added `POST /api/v1/config/models` to proxy model-list requests from the UI to the configured LLM provider.
+
+### Changed
+- **LLM Configuration UI**: replaced provider selector (OpenAI/Anthropic/Ollama) with a single OpenAI-compatible flow:
+  - `API Base URL` field (default `https://api.openai.com/v1`)
+  - `API Key` field
+  - `Default Model` dropdown populated from the remote `/models` endpoint
+- **Labels**: renamed `Max Tokens` to `Max Output Tokens` to clarify it controls the LLM response length.
+- **Backend config mapping**: `UiLlmConfig.api_base_url` is now passed to the native `LLMConfig.api_base` field when saving, enabling custom endpoints.
+
+### Removed
+- **Anthropic support from UI**: removed the Anthropic API key field and provider option from the frontend Configuration page. The backend remains capable of using Anthropic via TOML/CLI configuration.
+
 ## [0.7.4] - 2026-07-08
 
 ### Security

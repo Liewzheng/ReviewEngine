@@ -12,11 +12,15 @@
 
 ### Fixed
 - **GitLab webhooks**: `verify()` now chooses the correct authentication method during migration. If a signing secret is configured and the `webhook-signature` header is present, the signature is verified; otherwise it falls back to the legacy `X-Gitlab-Token` when configured. This prevents rejecting webhooks from GitLab versions that have not yet enabled signing.
+- **GitLab webhooks**: `whsec_` signing key is decoded once during handler construction instead of on every request.
+- **GitLab webhooks**: replaced `chrono` timestamp comparison with `std::time` for replay-protection checks.
 - **Frontend**: empty secret fields (`apiToken`, `webhookSecret`, `webhookSigningSecret`) on the Configuration page now display `(not set)` instead of a masked placeholder with a reveal button.
 - **CLI**: replaced the `unwrap()` on `state.ui_config.read()` with graceful poisoned-lock handling.
+- **Tests**: added coverage for multiple signatures in `webhook-signature`, timestamp tolerance boundaries, empty Standard Webhooks headers, and invalid base64 signing keys.
 
 ### Changed
 - `docs/integrations/gitlab.md`: added Standard Webhooks header/replay-protection details and a note about NTP time sync.
+- `frontend/src/views/Configuration.vue`: added `whsec_` prefix hint for the webhook signing secret input.
 
 ## [0.7.1] - 2026-07-08
 

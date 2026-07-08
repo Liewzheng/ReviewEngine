@@ -127,7 +127,8 @@
                     <span class="countdown">Visible for {{ revealCountdown.webhookSigningSecret }}s...</span>
                   </template>
                 </div>
-                <el-input v-else v-model="config.gitlab.webhookSigningSecret" :disabled="!isEditing" show-password placeholder="GitLab 19.0+ signing token" />
+                <el-input v-else v-model="config.gitlab.webhookSigningSecret" :disabled="!isEditing" show-password placeholder="Paste the full GitLab 19.0+ signing token (starts with whsec_...)" />
+                <div v-if="isEditing" class="form-item-help">Include the whsec_ prefix when pasting the token.</div>
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
@@ -912,6 +913,14 @@ onUnmounted(() => {
   color: var(--text-secondary);
   font-style: italic;
   flex: 1;
+}
+
+/* Helper text below form inputs */
+.form-item-help {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  line-height: 1.4;
 }
 
 /* Slider with value */

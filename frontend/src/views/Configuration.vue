@@ -230,6 +230,186 @@
         </div>
       </el-card>
 
+      <!-- Additional LLM Providers Card -->
+      <el-card class="config-card additional-providers-card">
+        <template #header>
+          <div class="card-header">
+            <el-icon><Cpu /></el-icon>
+            <span>Additional LLM Providers</span>
+            <div v-if="isEditing" style="margin-left: auto;">
+              <el-button size="small" type="primary" @click="openAddProviderDialog">
+                <el-icon><Plus /></el-icon>
+                Add Provider
+              </el-button>
+            </div>
+          </div>
+        </template>
+        <div class="card-body">
+          <el-skeleton v-if="providersLoading" :rows="2" animated />
+          <el-empty v-else-if="additionalProviders.length === 0" description="No additional providers configured" :image-size="80" />
+          <div v-else class="providers-list">
+            <div
+              v-for="(provider, index) in additionalProviders"
+              :key="provider._key"
+              class="provider-item"
+              :class="{ 'is-expanded': provider._expanded }"
+            >
+              <div class="provider-item-header" @click="toggleProvider(index)">
+                <div class="provider-item-info">
+                  <el-tag size="small">{{ provider.provider }}</el-tag>
+                  <span class="provider-item-model">{{ provider.defaultModel || '—' }}</span>
+                  <span class="provider-item-base">{{ provider.apiBaseUrl }}</span>
+                </div>
+                <div class="provider-item-actions" @click.stop>
+                  <template v-if="isEditing">
+                    <el-button size="small" text @click.stop="toggleProvider(index)">
+                      {{ provider._expanded ? 'Collapse' : 'Edit' }}
+                    </el-button>
+                    <el-button size="small" text type="danger" @click.stop="confirmDeleteProvider(index)">
+                      <el-icon><Delete /></el-icon>
+                    </el-button>
+                  </template>
+                  <el-icon :class="{ 'rotated-open': provider._expanded }">
+                    <ArrowDown />
+                  </el-icon>
+                </div>
+              </div>
+              <template v-if="provider._expanded">
+                <div v-if="isEditing" class="provider-item-body">
+                  <el-form :model="provider" label-position="top" size="small">
+                    <el-row :gutter="16">
+                      <el-col :xs="24" :sm="12">
+                        <el-form-item label="Provider Type">
+                          <el-select v-model="provider.provider" style="width: 100%">
+                            <el-option
+                              v-for="pt in PROVIDER_TYPES"
+                              :key="pt.value"
+                              :label="pt.label"
+                              :value="pt.value"
+                            />
+                          </el-select>
+                        </el-form-item>
+                      </el-col>
+                      <el-col :xs="24" :sm="12">
+                        <el-form-item label="Default Model">
+                          <el-input v-model="provider.defaultModel" placeholder="gpt-4o, claude-3, ..." />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :span="24">
+                        <el-form-item label="API Base URL">
+                          <el-input v-model="provider.apiBaseUrl" placeholder="https://api.openai.com/v1" />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :span="24">
+                        <el-form-item label="API Key">
+                          <el-input v-model="provider.apiKey" show-password placeholder="sk-..." />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :xs="12" :sm="6">
+                        <el-form-item label="Max Tokens">
+                          <el-input-number v-model="provider.maxTokens" :min="128" :max="8192" :step="128" style="width: 100%" />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :xs="12" :sm="6">
+                        <el-form-item label="Temperature">
+                          <el-slider v-model="provider.temperature" :min="0" :max="2" :step="0.1" />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :xs="12" :sm="6">
+                        <el-form-item label="Timeout (s)">
+                          <el-input-number v-model="provider.timeout" :min="5" :max="300" :step="5" style="width: 100%" />
+                        </el-form-item>
+                      </el-col>
+                      <el-col :xs="12" :sm="6">
+                        <el-form-item label="Retry">
+                          <el-input-number v-model="provider.retry" :min="0" :max="5" style="width: 100%" />
+                        </el-form-item>
+                      </el-col>
+                    </el-row>
+                  </el-form>
+                </div>
+                <div v-else class="provider-item-body readonly-body">
+                  <el-descriptions :column="2" size="small" border>
+                    <el-descriptions-item label="Provider">{{ provider.provider }}</el-descriptions-item>
+                    <el-descriptions-item label="Model">{{ provider.defaultModel || '—' }}</el-descriptions-item>
+                    <el-descriptions-item label="API Base URL" :span="2">{{ provider.apiBaseUrl }}</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.maxTokens != null" label="Max Tokens">{{ provider.maxTokens }}</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.temperature != null" label="Temperature">{{ provider.temperature }}</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.timeout != null" label="Timeout">{{ provider.timeout }}s</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.retry != null" label="Retry">{{ provider.retry }}</el-descriptions-item>
+                  </el-descriptions>
+                </div>
+              </template>
+              <div v-if="provider._isNew && isEditing" class="provider-item-badge">
+                <el-tag size="small" type="warning">Not saved yet</el-tag>
+              </div>
+            </div>
+          </div>
+        </div>
+      </el-card>
+
+      <!-- Add Provider Dialog -->
+      <el-dialog v-model="showAddProviderDialog" title="Add LLM Provider" width="640px" append-to-body>
+        <el-form ref="addProviderFormRef" :model="newProvider" label-position="top" size="default">
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <el-form-item label="Provider Type" prop="provider">
+                <el-select v-model="newProvider.provider" style="width: 100%">
+                  <el-option
+                    v-for="pt in PROVIDER_TYPES"
+                    :key="pt.value"
+                    :label="pt.label"
+                    :value="pt.value"
+                  />
+                </el-select>
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Default Model">
+                <el-input v-model="newProvider.defaultModel" placeholder="gpt-4o, claude-3, ..." />
+              </el-form-item>
+            </el-col>
+            <el-col :span="24">
+              <el-form-item label="API Base URL" prop="apiBaseUrl">
+                <el-input v-model="newProvider.apiBaseUrl" placeholder="https://api.openai.com/v1" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="24">
+              <el-form-item label="API Key" prop="apiKey">
+                <el-input v-model="newProvider.apiKey" show-password placeholder="sk-..." />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Max Tokens">
+                <el-input-number v-model="newProvider.maxTokens" :min="128" :max="8192" :step="128" style="width: 100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Temperature">
+                <el-slider v-model="newProvider.temperature" :min="0" :max="2" :step="0.1" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Timeout (s)">
+                <el-input-number v-model="newProvider.timeout" :min="5" :max="300" :step="5" style="width: 100%" />
+              </el-form-item>
+            </el-col>
+            <el-col :span="12">
+              <el-form-item label="Retry Attempts">
+                <el-input-number v-model="newProvider.retry" :min="0" :max="5" style="width: 100%" />
+              </el-form-item>
+            </el-col>
+          </el-row>
+        </el-form>
+        <template #footer>
+          <el-button @click="showAddProviderDialog = false">Cancel</el-button>
+          <el-button type="primary" :loading="addingProvider" @click="confirmAddProvider">
+            <el-icon><Plus /></el-icon>
+            Add Provider
+          </el-button>
+        </template>
+      </el-dialog>
+
       <!-- Review Rules Card -->
       <el-card ref="rulesCardRef" class="config-card">
         <template #header>
@@ -402,6 +582,9 @@ import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessageBox, ElNotification, type FormInstance, type FormRules } from 'element-plus'
 import { useConfig } from '../composables/useConfig'
 import { type AppConfig } from '../types/config'
+import { addProvider as addProviderApi, deleteProvider as deleteProviderApi, updateProvider as updateProviderApi, getProviders as getProvidersApi } from '../services/llm'
+import { PROVIDER_TYPES } from '../types/llm'
+import type { ProviderEntry, ProviderConfig } from '../types/llm'
 
 // --- Composable ---
 const cfg = useConfig()
@@ -459,6 +642,29 @@ const modelOptions = ref<string[]>([])
 const modelFetchLoading = ref(false)
 const modelFetchError = ref<string | null>(null)
 const modelFetchTimer = ref<number | null>(null)
+
+// --- Provider Management State ---
+const additionalProviders = ref<ProviderEntry[]>([])
+const showAddProviderDialog = ref(false)
+const addingProvider = ref(false)
+const providersLoading = ref(false)
+const addProviderFormRef = ref<FormInstance>()
+const deletedProviderIds = ref<string[]>([])
+
+function createNewProvider(): ProviderConfig {
+  return {
+    provider: 'openai',
+    apiKey: '',
+    apiBaseUrl: 'https://api.openai.com/v1',
+    defaultModel: '',
+    maxTokens: 4096,
+    temperature: 0.7,
+    timeout: 60,
+    retry: 3,
+  }
+}
+
+const newProvider = reactive<ProviderConfig>(createNewProvider())
 
 // --- Computed ---
 const availableModels = computed(() => modelOptions.value)
@@ -599,6 +805,7 @@ async function saveChanges() {
 
   try {
     await cfg.save(JSON.parse(JSON.stringify(config)))
+    await saveAdditionalProviders()
     originalConfig.value = JSON.parse(JSON.stringify(config))
     isEditing.value = false
 
@@ -685,6 +892,122 @@ function removePattern(index: number) {
   config.rules.excludedPatterns.splice(index, 1)
 }
 
+// --- Provider Management Methods ---
+async function loadProviders() {
+  providersLoading.value = true
+  try {
+    const resp = await getProvidersApi()
+    additionalProviders.value = (resp.items || []).map((p) => ({
+      provider: p.name || p.id,
+      apiKey: '',
+      apiBaseUrl: '',
+      defaultModel: '',
+      maxTokens: 4096,
+      temperature: 0.7,
+      timeout: 60,
+      retry: 3,
+      _key: `provider-${p.id}`,
+      _expanded: false,
+      _isNew: false,
+    }))
+  } catch {
+    additionalProviders.value = []
+  } finally {
+    providersLoading.value = false
+  }
+}
+
+function openAddProviderDialog() {
+  Object.assign(newProvider, createNewProvider())
+  showAddProviderDialog.value = true
+}
+
+async function confirmAddProvider() {
+  if (!addProviderFormRef.value) return
+  const valid = await addProviderFormRef.value.validate().catch(() => false)
+  if (!valid) return
+
+  addingProvider.value = true
+  try {
+    const entry: ProviderEntry = {
+      ...(newProvider as ProviderConfig),
+      _key: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      _expanded: true,
+      _isNew: true,
+    }
+    additionalProviders.value.push(entry)
+    showAddProviderDialog.value = false
+    ElNotification({
+      title: 'Provider Added',
+      message: 'Save changes to persist the new provider.',
+      type: 'info',
+      duration: 3000,
+    })
+  } finally {
+    addingProvider.value = false
+  }
+}
+
+function toggleProvider(index: number) {
+  additionalProviders.value[index]._expanded = !additionalProviders.value[index]._expanded
+}
+
+function confirmDeleteProvider(index: number) {
+  const provider = additionalProviders.value[index]
+  ElMessageBox.confirm(
+    `Remove "${provider.provider}" provider?`,
+    'Remove Provider',
+    {
+      confirmButtonText: 'Remove',
+      cancelButtonText: 'Cancel',
+      type: 'warning',
+    }
+  ).then(() => {
+    if (provider.id) {
+      deletedProviderIds.value.push(provider.id)
+    }
+    additionalProviders.value.splice(index, 1)
+  }).catch(() => { /* cancelled */ })
+}
+
+async function saveAdditionalProviders() {
+  // Delete removed providers
+  for (const id of deletedProviderIds.value) {
+    try {
+      await deleteProviderApi(id)
+    } catch (e) {
+      console.error(`Failed to delete provider ${id}`, e)
+    }
+  }
+  deletedProviderIds.value = []
+
+  // Save (add or update) providers
+  for (const provider of additionalProviders.value) {
+    const payload: ProviderConfig = {
+      provider: provider.provider,
+      apiKey: provider.apiKey,
+      apiBaseUrl: provider.apiBaseUrl,
+      defaultModel: provider.defaultModel || undefined,
+      maxTokens: provider.maxTokens,
+      temperature: provider.temperature,
+      timeout: provider.timeout,
+      retry: provider.retry,
+    }
+    try {
+      if (provider.id && !provider._isNew) {
+        await updateProviderApi(provider.id, payload)
+      } else {
+        const result = await addProviderApi(payload)
+        provider.id = result.id
+        provider._isNew = false
+      }
+    } catch (e) {
+      console.error(`Failed to save provider ${provider.provider}`, e)
+      throw e
+    }
+  }
+}
+
 // --- Navigation Guard ---
 onBeforeRouteLeave(async (_to, _from, next) => {
   if (isEditing.value && dirty.value) {
@@ -729,6 +1052,7 @@ onMounted(() => {
       Object.assign(config, cfg.config.value)
     }
   })
+  loadProviders()
 })
 
 // --- Error handling ---
@@ -1088,5 +1412,142 @@ onUnmounted(() => {
 .config-card :deep(.el-card__body) {
   max-height: none;
   overflow: visible;
+}
+
+/* --- Additional Providers Card --- */
+.additional-providers-card :deep(.el-card__body) {
+  padding: 16px 20px;
+}
+
+.providers-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.provider-item {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+  overflow: hidden;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.provider-item:hover {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand);
+}
+
+.provider-item.is-expanded {
+  border-color: var(--brand);
+  box-shadow: 0 0 0 1px var(--brand);
+}
+
+.provider-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  cursor: pointer;
+  gap: 12px;
+  user-select: none;
+}
+
+.provider-item-header:hover {
+  background: rgba(var(--brand-rgb, 64, 158, 255), 0.04);
+}
+
+.provider-item-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.provider-item-model {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  white-space: nowrap;
+}
+
+.provider-item-base {
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.provider-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.provider-item-actions .el-icon {
+  transition: transform 0.2s ease;
+  color: var(--text-secondary);
+}
+
+.provider-item-actions .el-icon.rotated-open {
+  transform: rotate(180deg);
+}
+
+.provider-item-body {
+  padding: 16px;
+  border-top: 1px solid var(--border-color);
+  animation: slideDown 0.2s ease;
+}
+
+.provider-item-body.readonly-body {
+  padding: 12px 16px;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    max-height: 0;
+  }
+  to {
+    opacity: 1;
+    max-height: 600px;
+  }
+}
+
+.provider-item-body :deep(.el-form-item) {
+  margin-bottom: 12px;
+}
+
+.provider-item-body :deep(.el-form-item__label) {
+  font-size: 12px;
+  padding-bottom: 4px;
+}
+
+.provider-item-body :deep(.el-slider) {
+  margin-top: 8px;
+}
+
+.provider-item-body :deep(.el-descriptions__label) {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.provider-item-body :deep(.el-descriptions__content) {
+  font-size: 13px;
+}
+
+.provider-item-badge {
+  padding: 6px 16px 10px;
+  display: flex;
+  align-items: center;
+}
+
+/* Add provider dialog */
+:deep(.el-dialog__body) {
+  padding-top: 12px;
 }
 </style>

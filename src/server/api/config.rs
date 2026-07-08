@@ -124,6 +124,26 @@ pub struct UiGitLabConfig {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UiLlmProviderConfig {
+    pub provider: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_base_url: String,
+    #[serde(default)]
+    pub default_model: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: u32,
+    #[serde(default = "default_retry_attempts")]
+    pub retry_attempts: u32,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UiLlmConfig {
     #[serde(default)]
     pub primary_provider: String,
@@ -141,6 +161,9 @@ pub struct UiLlmConfig {
     pub timeout_seconds: u32,
     #[serde(default = "default_retry_attempts")]
     pub retry_attempts: u32,
+    /// Multi-provider support — additive to the legacy single fields.
+    #[serde(default)]
+    pub providers: Vec<UiLlmProviderConfig>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -233,7 +256,7 @@ impl UiConfig {
     pub fn from_app_config(app: &crate::models::AppConfig) -> Self {
         let mut ui = UiConfig::default();
 
-        // Map LLM configs
+        // Map LLM configs — legacy single fields
         for l in &app.llm {
             match l.provider.as_str() {
                 "openai" => {
@@ -267,6 +290,20 @@ impl UiConfig {
             }
         }
 
+        // Map all LLM configs as providers (multi-provider support)
+        for l in &app.llm {
+            ui.llm.providers.push(UiLlmProviderConfig {
+                provider: l.provider.clone(),
+                api_key: l.api_key.clone(),
+                api_base_url: l.api_base.clone(),
+                default_model: l.model.clone(),
+                max_tokens: l.max_tokens,
+                temperature: l.temperature,
+                timeout_seconds: 60,
+                retry_attempts: 3,
+            });
+        }
+
         // Map advanced settings
         ui.advanced.max_concurrent_reviews = app.max_concurrent_llm_calls.unwrap_or(5) as u32;
         ui.advanced.enable_metrics = true; // Default, overridden at runtime if needed
@@ -288,6 +325,20 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
             max_tokens: body.llm.max_tokens,
             temperature: body.llm.temperature,
         });
+    }
+
+    // Build LLM configs from multi-provider providers Vec
+    for p in &body.llm.providers {
+        if !p.provider.is_empty() && !p.api_key.is_empty() {
+            new_llm_configs.push(crate::models::LLMConfig {
+                provider: p.provider.clone(),
+                model: p.default_model.clone(),
+                api_key: p.api_key.clone(),
+                api_base: p.api_base_url.clone(),
+                max_tokens: p.max_tokens,
+                temperature: p.temperature,
+            });
+        }
     }
 
     let mut cfg_opt = state.app_config.write().unwrap();

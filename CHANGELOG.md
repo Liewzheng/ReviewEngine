@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.7.1] - 2026-07-08
+
+### Added
+- **Backend-Frontend Integration**: full-stack API integration between the Rust Axum backend and the Vue 3 + Element Plus frontend, including endpoints for config, experts, system health, LLM providers, logs, dashboard, queue control, and server-sent events.
+- **Queue**: new `POST /queue/tasks/{id}/retry` endpoint to re-queue failed tasks from the Queue Monitor UI.
+
+### Fixed
+- **Queue Monitor**: real retry wired to the backend; cancel-all-failed now uses `Promise.allSettled` to handle partial failures; auto-refresh guarded against overlapping requests.
+- **Experts Management**: edit modal restricted to API-supported fields (`enabled`, `weight`); `name`, `category`, and `description` are now read-only.
+
+### Changed
+- Moved generated agent/subagent artifacts (test reports, plans, UX reviews, screenshots, logs, test case files) to `reports/` and ignored them in `.gitignore`.
+
 ## [0.7.0] - 2026-07-06
 
 ### Added

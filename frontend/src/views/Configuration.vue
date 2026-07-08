@@ -166,17 +166,24 @@
         <div class="card-body">
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Primary Provider" prop="llm.primaryProvider">
-                <el-select v-model="config.llm.primaryProvider" :disabled="!isEditing" placeholder="Select provider" style="width: 100%">
-                  <el-option label="OpenAI" value="openai" />
-                  <el-option label="Anthropic" value="anthropic" />
-                  <el-option label="Ollama (Local)" value="ollama" />
-                </el-select>
+              <el-form-item label="API Base URL" prop="llm.apiBaseUrl">
+                <el-input v-model="config.llm.apiBaseUrl" :disabled="!isEditing" placeholder="https://api.openai.com/v1" />
+              </el-form-item>
+            </el-col>
+            <el-col :xs="24" :sm="12">
+              <el-form-item label="API Key" prop="llm.openaiApiKey">
+                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password placeholder="sk-..." />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item label="Default Model" prop="llm.defaultModel">
-                <el-select v-model="config.llm.defaultModel" :disabled="!isEditing" placeholder="Select model" style="width: 100%">
+                <el-select
+                  v-model="config.llm.defaultModel"
+                  :disabled="!isEditing"
+                  :loading="modelFetchLoading"
+                  placeholder="Select model"
+                  style="width: 100%"
+                >
                   <el-option
                     v-for="model in availableModels"
                     :key="model"
@@ -184,25 +191,11 @@
                     :value="model"
                   />
                 </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12" v-show="config.llm.primaryProvider === 'openai'">
-              <el-form-item label="OpenAI API Key" prop="llm.openaiApiKey">
-                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password placeholder="sk-..." />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12" v-show="config.llm.primaryProvider === 'anthropic'">
-              <el-form-item label="Anthropic API Key" prop="llm.anthropicApiKey">
-                <el-input v-model="config.llm.anthropicApiKey" :disabled="!isEditing" show-password placeholder="sk-ant-..." />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12" v-show="config.llm.primaryProvider === 'ollama'">
-              <el-form-item label="Local Ollama URL" prop="llm.ollamaUrl">
-                <el-input v-model="config.llm.ollamaUrl" :disabled="!isEditing" placeholder="http://localhost:11434" />
+                <div v-if="modelFetchError" class="form-item-help error-text">{{ modelFetchError }}</div>
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Max Tokens" prop="llm.maxTokens">
+              <el-form-item label="Max Output Tokens" prop="llm.maxTokens">
                 <el-input-number v-model="config.llm.maxTokens" :disabled="!isEditing" :min="128" :max="8192" :step="128" style="width: 100%" />
               </el-form-item>
             </el-col>
@@ -408,7 +401,7 @@ import { ref, computed, reactive, watch, onMounted, onUnmounted, nextTick } from
 import { onBeforeRouteLeave } from 'vue-router'
 import { ElMessageBox, ElNotification, type FormInstance, type FormRules } from 'element-plus'
 import { useConfig } from '../composables/useConfig'
-import { type AppConfig, providerModels } from '../types/config'
+import { type AppConfig } from '../types/config'
 
 // --- Composable ---
 const cfg = useConfig()
@@ -426,7 +419,7 @@ const formRef = ref<FormInstance>()
 
 const defaultConfig: AppConfig = {
   gitlab: { url: '', apiToken: '', webhookSecret: '', webhookSigningSecret: '', defaultProject: '', mrLabel: '', autoReview: false },
-  llm: { primaryProvider: 'openai', openaiApiKey: '', anthropicApiKey: '', ollamaUrl: '', defaultModel: '', maxTokens: 4096, temperature: 0.7, timeoutSeconds: 60, retryAttempts: 3 },
+  llm: { apiBaseUrl: 'https://api.openai.com/v1', openaiApiKey: '', defaultModel: '', maxTokens: 4096, temperature: 0.7, timeoutSeconds: 60, retryAttempts: 3 },
   rules: { minScore: 75, blockOnCritical: true, autoCommentOnPass: true, commentTemplate: '', excludedPatterns: [], requiredExperts: [], maxReviewDurationSeconds: 300 },
   advanced: { logLevel: 'info', logRetentionDays: 30, sseHeartbeatInterval: 15, maxConcurrentReviews: 5, requestTimeout: 120, enableMetrics: true, debugMode: false },
 }
@@ -462,10 +455,13 @@ const patternInputRef = ref<any>()
 const windowWidth = ref(window.innerWidth)
 const labelPosition = computed(() => (windowWidth.value >= 1024 ? 'left' : 'top'))
 
+const modelOptions = ref<string[]>([])
+const modelFetchLoading = ref(false)
+const modelFetchError = ref<string | null>(null)
+const modelFetchTimer = ref<number | null>(null)
+
 // --- Computed ---
-const availableModels = computed(() => {
-  return providerModels[config.llm.primaryProvider] || []
-})
+const availableModels = computed(() => modelOptions.value)
 
 const dirty = computed(() => {
   if (!isEditing.value || !originalConfig.value) return false
@@ -491,53 +487,12 @@ const rules = computed<FormRules>(() => ({
     { required: true, message: 'API Token is required', trigger: 'blur' },
     { min: 10, message: 'API Token must be at least 10 characters', trigger: 'blur' },
   ],
-  'llm.primaryProvider': [
-    { required: true, message: 'Primary Provider is required', trigger: 'change' },
+  'llm.apiBaseUrl': [
+    { required: true, message: 'API Base URL is required', trigger: 'blur' },
+    { validator: validateUrl, trigger: 'blur' },
   ],
   'llm.openaiApiKey': [
-    {
-      validator: (_rule: any, value: any, callback: any) => {
-        if (config.llm.primaryProvider === 'openai' && !value) {
-          callback(new Error('OpenAI API Key is required'))
-        } else {
-          callback()
-        }
-      },
-      trigger: 'blur',
-    },
-  ],
-  'llm.anthropicApiKey': [
-    {
-      validator: (_rule: any, value: any, callback: any) => {
-        if (config.llm.primaryProvider === 'anthropic' && !value) {
-          callback(new Error('Anthropic API Key is required'))
-        } else {
-          callback()
-        }
-      },
-      trigger: 'blur',
-    },
-  ],
-  'llm.ollamaUrl': [
-    {
-      validator: (_rule: any, value: any, callback: any) => {
-        if (config.llm.primaryProvider === 'ollama') {
-          if (!value) {
-            callback(new Error('Ollama URL is required'))
-          } else {
-            try {
-              new URL(value)
-              callback()
-            } catch {
-              callback(new Error('Please enter a valid URL'))
-            }
-          }
-        } else {
-          callback()
-        }
-      },
-      trigger: 'blur',
-    },
+    { required: true, message: 'API Key is required', trigger: 'blur' },
   ],
   'llm.defaultModel': [
     { required: true, message: 'Default Model is required', trigger: 'change' },
@@ -565,14 +520,48 @@ watch(config, () => {
   }
 }, { deep: true })
 
-watch(() => config.llm.primaryProvider, (newProvider) => {
-  const models = providerModels[newProvider] || []
-  if (!models.includes(config.llm.defaultModel)) {
-    config.llm.defaultModel = models[0] || ''
+watch(() => [config.llm.apiBaseUrl, config.llm.openaiApiKey], () => {
+  if (modelFetchTimer.value) {
+    clearTimeout(modelFetchTimer.value)
   }
+  modelFetchTimer.value = window.setTimeout(() => {
+    loadModels()
+  }, 500)
 })
 
 // --- Methods ---
+async function loadModels() {
+  const apiBase = config.llm.apiBaseUrl.trim()
+  const apiKey = config.llm.openaiApiKey.trim()
+  if (!apiBase || !apiKey) {
+    modelOptions.value = []
+    modelFetchError.value = null
+    return
+  }
+  try {
+    new URL(apiBase)
+  } catch {
+    modelOptions.value = []
+    return
+  }
+  modelFetchLoading.value = true
+  modelFetchError.value = null
+  try {
+    const models = await cfg.fetchModels(apiBase, apiKey)
+    if (cfg.modelsError.value) {
+      modelFetchError.value = cfg.modelsError.value
+      modelOptions.value = []
+    } else {
+      modelOptions.value = models
+      if (!models.includes(config.llm.defaultModel)) {
+        config.llm.defaultModel = models[0] || ''
+      }
+    }
+  } finally {
+    modelFetchLoading.value = false
+  }
+}
+
 function enterEditMode() {
   originalConfig.value = JSON.parse(JSON.stringify(config))
   isEditing.value = true
@@ -654,9 +643,10 @@ async function refreshConfig() {
 
 async function testConnection() {
   await cfg.test({
-    provider: config.llm.primaryProvider,
+    provider: 'openai',
     model: config.llm.defaultModel,
-    apiKey: config.llm.primaryProvider === 'openai' ? config.llm.openaiApiKey : config.llm.anthropicApiKey,
+    apiKey: config.llm.openaiApiKey,
+    apiBase: config.llm.apiBaseUrl,
   })
 }
 
@@ -921,6 +911,10 @@ onUnmounted(() => {
   color: var(--text-secondary);
   margin-top: 6px;
   line-height: 1.4;
+}
+
+.form-item-help.error-text {
+  color: var(--danger);
 }
 
 /* Slider with value */

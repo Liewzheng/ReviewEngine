@@ -1,5 +1,5 @@
 import { ref } from 'vue';
-import { getConfig, updateConfig, testConnection } from '../services/config';
+import { getConfig, updateConfig, testConnection, fetchModels as fetchModelsApi } from '../services/config';
 import type { AppConfig } from '../types/config';
 import type { TestResult } from '../types/llm';
 
@@ -10,6 +10,8 @@ export function useConfig() {
   const error = ref<string | null>(null);
   const testResult = ref<TestResult | null>(null);
   const testing = ref(false);
+  const modelsLoading = ref(false);
+  const modelsError = ref<string | null>(null);
 
   async function fetch() {
     loading.value = true;
@@ -39,7 +41,7 @@ export function useConfig() {
     }
   }
 
-  async function test(data: { provider: string; model: string; apiKey: string }) {
+  async function test(data: { provider: string; model: string; apiKey: string; apiBase?: string }) {
     testing.value = true;
     error.value = null;
     testResult.value = null;
@@ -53,6 +55,24 @@ export function useConfig() {
     }
   }
 
+  async function fetchModels(apiBase: string, apiKey: string): Promise<string[]> {
+    modelsLoading.value = true;
+    modelsError.value = null;
+    try {
+      const response = await fetchModelsApi(apiBase, apiKey);
+      if (response.error) {
+        modelsError.value = response.error;
+        return [];
+      }
+      return response.models || [];
+    } catch (e) {
+      modelsError.value = e instanceof Error ? e.message : 'Failed to fetch models';
+      return [];
+    } finally {
+      modelsLoading.value = false;
+    }
+  }
+
   return {
     config,
     loading,
@@ -60,8 +80,11 @@ export function useConfig() {
     error,
     testResult,
     testing,
+    modelsLoading,
+    modelsError,
     fetch,
     save,
     test,
+    fetchModels,
   };
 }

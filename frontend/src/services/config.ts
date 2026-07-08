@@ -18,9 +18,25 @@ export async function testConnection(data: {
   provider: string;
   model: string;
   apiKey: string;
+  apiBase?: string;
 }): Promise<TestResult> {
   return request('/config/test', {
     method: 'POST',
-    body: JSON.stringify(data),
+    body: JSON.stringify({
+      provider: data.provider,
+      model: data.model,
+      api_key: data.apiKey,
+      api_base: data.apiBase,
+    }),
+  });
+}
+
+export async function fetchModels(
+  apiBase: string,
+  apiKey: string
+): Promise<{ models: string[]; error?: string }> {
+  return request('/config/models', {
+    method: 'POST',
+    body: JSON.stringify({ api_base: apiBase, api_key: apiKey }),
   });
 }

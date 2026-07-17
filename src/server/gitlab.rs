@@ -11,8 +11,49 @@ use super::webhook::WebhookHandler;
 
 use async_trait::async_trait;
 use axum::http::HeaderMap;
+use std::sync::{OnceLock, RwLock};
 
 type HmacSha256 = Hmac<Sha256>;
+
+/// Runtime-mutable GitLab configuration shared between the webhook handler
+/// and the UI config API. Updated by `PUT /api/v1/config` without restart.
+#[derive(Clone)]
+pub struct GitLabRuntimeConfig {
+    pub webhook_secret: String,
+    pub signing_secret: Option<String>,
+    pub signing_key: Option<Vec<u8>>,
+    pub token: String,
+}
+
+impl GitLabRuntimeConfig {
+    pub fn from_handler(handler: &GitLabWebhookHandler) -> Self {
+        Self {
+            webhook_secret: handler.webhook_secret.clone(),
+            signing_secret: handler.signing_secret.clone(),
+            signing_key: handler.signing_key.clone(),
+            token: handler.token.clone(),
+        }
+    }
+}
+
+/// Accessor for the global GitLab runtime config.
+pub(crate) fn gitlab_runtime() -> &'static RwLock<GitLabRuntimeConfig> {
+    static INSTANCE: OnceLock<RwLock<GitLabRuntimeConfig>> = OnceLock::new();
+    INSTANCE.get_or_init(|| {
+        RwLock::new(GitLabRuntimeConfig {
+            webhook_secret: String::new(),
+            signing_secret: None,
+            signing_key: None,
+            token: String::new(),
+        })
+    })
+}
+
+/// Initialise the global GitLab runtime config from a handler (called at startup).
+pub fn init_gitlab_runtime(handler: &GitLabWebhookHandler) {
+    let mut rt = gitlab_runtime().write().unwrap();
+    *rt = GitLabRuntimeConfig::from_handler(handler);
+}
 
 /// GitLab webhook handler.
 ///
@@ -32,6 +73,21 @@ pub struct GitLabWebhookHandler {
 }
 
 impl GitLabWebhookHandler {
+    /// Return the effective runtime config: if the global was initialised
+    /// (e.g. from the UI) use that, otherwise fall back to `self.*` so
+    /// tests and legacy startup paths continue to work.
+    fn effective_config(&self) -> GitLabRuntimeConfig {
+        gitlab_runtime()
+            .try_read()
+            .ok()
+            .filter(|rt| {
+                // Only use runtime if it was explicitly initialised
+                !rt.webhook_secret.is_empty() || rt.signing_secret.is_some() || !rt.token.is_empty()
+            })
+            .map(|rt| rt.clone())
+            .unwrap_or_else(|| GitLabRuntimeConfig::from_handler(self))
+    }
+
     /// Create a new GitLab webhook handler.
     ///
     /// `webhook_secret` — legacy `X-Gitlab-Token` verification (empty string disables).
@@ -58,7 +114,8 @@ impl GitLabWebhookHandler {
 
     /// Verify `webhook-signature` header (GitLab 19.0+ signing tokens, Standard Webhooks).
     fn verify_signing(&self, headers: &HeaderMap, body: &str) -> Result<(), (StatusCode, Json<Value>)> {
-        let key = match &self.signing_key {
+        let cfg = self.effective_config();
+        let key = match &cfg.signing_key {
             Some(k) => k,
             None => {
                 tracing::warn!("GitLab webhook signing secret is invalid");
@@ -153,7 +210,8 @@ impl GitLabWebhookHandler {
 
     /// Verify legacy `X-Gitlab-Token` header.
     fn verify_secret_token(&self, headers: &HeaderMap) -> Result<(), (StatusCode, Json<Value>)> {
-        if self.webhook_secret.is_empty() {
+        let cfg = self.effective_config();
+        if cfg.webhook_secret.is_empty() {
             return Ok(()); // legacy secret not configured — skip this check
         }
 
@@ -163,7 +221,7 @@ impl GitLabWebhookHandler {
             .unwrap_or("");
 
         let token_bytes = token.as_bytes();
-        let secret_bytes = self.webhook_secret.as_bytes();
+        let secret_bytes = cfg.webhook_secret.as_bytes();
         if token_bytes.len() != secret_bytes.len() {
             tracing::warn!("GitLab webhook received with invalid token");
             return Err((
@@ -194,8 +252,9 @@ impl WebhookHandler for GitLabWebhookHandler {
     }
 
     async fn verify(&self, headers: &HeaderMap, body: &str) -> Result<(), (StatusCode, Json<Value>)> {
-        let signing_configured = self.signing_secret.as_ref().map_or(false, |s| !s.is_empty());
-        let legacy_configured = !self.webhook_secret.is_empty();
+        let cfg = self.effective_config();
+        let signing_configured = cfg.signing_secret.as_ref().map_or(false, |s| !s.is_empty());
+        let legacy_configured = !cfg.webhook_secret.is_empty();
         let signature_header_present = headers.get("webhook-signature").is_some();
 
         // Security policy: when the `webhook-signature` header is present, the
@@ -235,11 +294,15 @@ impl WebhookHandler for GitLabWebhookHandler {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
+        // Clone the token before the match so the RwLock guard is dropped
+        // before any .await call (RwLockReadGuard is not Send).
+        let token = self.effective_config().token.clone();
+
         match event {
-            "Merge Request Hook" => handle_mr_hook(&body, &self.dispatcher, &self.token)
+            "Merge Request Hook" => handle_mr_hook(&body, &self.dispatcher, &token)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "Note Hook" => handle_note_hook(&body, &self.dispatcher, &self.token)
+            "Note Hook" => handle_note_hook(&body, &self.dispatcher, &token)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
             "Push Hook" => handle_push_hook(&body)

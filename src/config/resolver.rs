@@ -7,7 +7,10 @@
 use crate::config::defaults::{default_config, merge_default, parse_toml};
 use crate::models::*;
 use anyhow::Result;
+use serde::Deserialize;
 use std::collections::HashMap;
+#[cfg(test)]
+use std::sync::Mutex;
 
 /// Parse, merge, apply environment overrides, and validate a TOML config string.
 pub fn load_and_apply(toml_content: &str) -> Result<AppConfig> {
@@ -72,10 +75,8 @@ pub(crate) fn validate_experts(config: &AppConfig) -> Result<()> {
 
 /// Extract LLM config array from a parsed TOML value.
 fn take_llm(val: &toml::Value) -> Vec<crate::models::LLMConfig> {
-    let mut wrapper = toml::map::Map::new();
-    wrapper.insert("llm".to_string(), val.clone());
-    match toml::from_str::<crate::models::AppConfig>(&toml::Value::Table(wrapper).to_string()) {
-        Ok(cfg) => cfg.llm,
+    match Vec::<crate::models::LLMConfig>::deserialize(val.clone()) {
+        Ok(llm) => llm,
         Err(e) => {
             tracing::warn!(error = %e, "Failed to parse [[llm]] array from TOML; using empty LLM config");
             Vec::new()
@@ -97,15 +98,155 @@ fn take_commands(val: &toml::Value) -> HashMap<String, bool> {
     }
 }
 
+/// Load a valid `[[llm]]` array from the user-level config file at
+/// `~/.config/review-engine/.code-audit-config.toml`.
+///
+/// Returns an empty vector if the file is missing, cannot be parsed, or does not
+/// contain a valid non-empty `[[llm]]` array.
+fn load_user_llm_fallback() -> Vec<LLMConfig> {
+    let Some(user_path) =
+        home::home_dir().map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml"))
+    else {
+        return Vec::new();
+    };
+
+    if !user_path.exists() {
+        return Vec::new();
+    }
+
+    match std::fs::read_to_string(&user_path) {
+        Ok(content) => match toml::from_str::<toml::Value>(&content) {
+            Ok(val) => {
+                if let Some(obj) = val.as_table() {
+                    if let Some(llm) = obj.get("llm") {
+                        let parsed = take_llm(llm);
+                        if !parsed.is_empty() {
+                            return parsed;
+                        }
+                    }
+                }
+                Vec::new()
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %user_path.display(),
+                    error = %e,
+                    "Failed to parse user-level config file as TOML; ignoring LLM fallback"
+                );
+                Vec::new()
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                path = %user_path.display(),
+                error = %e,
+                "Failed to read user-level config file; ignoring LLM fallback"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Load the `[report]` section from the user-level config file at
+/// `~/.config/review-engine/.code-audit-config.toml`.
+///
+/// Returns `None` — keeping the built-in defaults — if the file is missing,
+/// cannot be read or parsed, or does not contain a valid `[report]` section.
+fn load_user_report_fallback() -> Option<ReportConfig> {
+    let user_path = home::home_dir()?
+        .join(".config")
+        .join("review-engine")
+        .join(".code-audit-config.toml");
+
+    if !user_path.exists() {
+        return None;
+    }
+
+    match std::fs::read_to_string(&user_path) {
+        Ok(content) => match toml::from_str::<toml::Value>(&content) {
+            Ok(val) => {
+                let report = val.as_table().and_then(|obj| obj.get("report"))?;
+                match ReportConfig::deserialize(report.clone()) {
+                    Ok(parsed) => Some(parsed),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %user_path.display(),
+                            error = %e,
+                            "Failed to parse user-level [report] section; ignoring"
+                        );
+                        None
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    path = %user_path.display(),
+                    error = %e,
+                    "Failed to parse user-level config file as TOML; ignoring [report] fallback"
+                );
+                None
+            }
+        },
+        Err(e) => {
+            tracing::warn!(
+                path = %user_path.display(),
+                error = %e,
+                "Failed to read user-level config file; ignoring [report] fallback"
+            );
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+static FALLBACK_WARNINGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Print a warning to stderr when falling back to the user-level `[[llm]]`
+/// configuration because the project-level `[[llm]]` is missing or invalid.
+fn print_llm_fallback_warning(path: &std::path::Path, reason: &str) {
+    let msg = format!(
+        "Warning: project-level [[llm]] in '{}' is {}; using [[llm]] from ~/.config/review-engine/.code-audit-config.toml as fallback.",
+        path.display(),
+        reason
+    );
+    eprintln!("{}", msg);
+    #[cfg(test)]
+    {
+        let mut guard = FALLBACK_WARNINGS.lock().unwrap_or_else(|e| e.into_inner());
+        guard.push(msg);
+    }
+}
+
+/// Parse a config file, separating the `llm` section from everything else.
+///
+/// This lets us treat an invalid project-level `llm` (e.g. `[llm]` instead of
+/// `[[llm]]`) as missing, falling back to the user-level config without failing
+/// the whole project config.
+fn load_config_without_llm(content: &str) -> Result<(AppConfig, Option<toml::Value>)> {
+    let val = toml::from_str::<toml::Value>(content)?;
+    let mut cleaned = val.clone();
+    let raw_project_llm = if let Some(obj) = cleaned.as_table_mut() {
+        obj.remove("llm")
+    } else {
+        None
+    };
+    let toml_without_llm = toml::to_string(&cleaned)?;
+    let config = load_and_apply(&toml_without_llm)?;
+    Ok((config, raw_project_llm))
+}
+
 /// Resolve the application configuration from the given source (or auto-detect).
 ///
-/// Resolution order (three-level merge):
+/// Resolution order:
 /// 1. Built-in defaults + environment-variable overrides (base).
-/// 2. `~/.config/review-engine/.code-audit-config.toml` — fills `[[llm]]` and
-///    other fields that the project config doesn't set.
-/// 3. `.code-audit-config.toml` in the current directory — overrides everything
-///    above, except `[[llm]]` which is only overridden if the project config
-///    explicitly provides it.
+/// 2. `~/.config/review-engine/.code-audit-config.toml` — provides a global
+///    `[[llm]]` fallback and global `[report]` defaults.
+/// 3. `.code-audit-config.toml` in the current directory (or the file specified
+///    by `--config`) — overrides the base. Its `[[llm]]` is only used if it
+///    parses successfully and is non-empty; otherwise the user-level `[[llm]]`
+///    fallback is used. Its `[report]`, if present, replaces the resolved
+///    report config wholesale (omitted fields use serde defaults, not the
+///    user-level values).
 pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
     match source {
         Some(ConfigSource::Inline(toml_str)) => load_and_apply(&toml_str),
@@ -114,90 +255,65 @@ pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
                 anyhow::bail!("config file not found: {}", path);
             }
             let content = tokio::fs::read_to_string(&path).await?;
-            load_and_apply(&content)
+            let (mut config, raw_project_llm) = load_config_without_llm(&content)?;
+            let project_path = std::path::Path::new(&path);
+            let project_llm = raw_project_llm.as_ref().map(take_llm).unwrap_or_default();
+            config.llm = if !project_llm.is_empty() {
+                project_llm
+            } else {
+                let user_llm = load_user_llm_fallback();
+                if !user_llm.is_empty() {
+                    let reason = if raw_project_llm.is_none() {
+                        "missing"
+                    } else {
+                        "invalid"
+                    };
+                    print_llm_fallback_warning(project_path, reason);
+                }
+                user_llm
+            };
+            Ok(config)
         }
         None => {
             let default_path = ".code-audit-config.toml";
-            let user_config_path =
-                home::home_dir().map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml"));
-
-            // 1. Built-in defaults + env overrides
             let mut config = apply_env_overrides(default_config()?);
 
-            // 2. User-level config (~/.config/review-engine/) — fills gaps
-            if let Some(ref user_path) = user_config_path {
-                if user_path.exists() {
-                    match std::fs::read_to_string(user_path) {
-                        Ok(content) => {
-                            match toml::from_str::<toml::Value>(&content) {
-                                Ok(val) => {
-                                    if let Some(obj) = val.as_table() {
-                                        // LLM: fill only if base has none
-                                        if config.llm.is_empty() {
-                                            if let Some(llm) = obj.get("llm") {
-                                                let parsed = take_llm(llm);
-                                                if !parsed.is_empty() {
-                                                    config.llm = parsed;
-                                                }
-                                            }
-                                        }
-                                        // Commands: merge
-                                        if let Some(cmds) = obj.get("commands") {
-                                            config.commands.extend(take_commands(cmds));
-                                        }
-                                        // Experts: fill (don't override project)
-                                        if let Some(review_experts) = obj.get("review_experts") {
-                                            match toml::from_str::<HashMap<String, crate::models::ExpertTomlDef>>(
-                                                &review_experts.to_string(),
-                                            ) {
-                                                Ok(parsed) => {
-                                                    for (k, v) in parsed {
-                                                        config.review_experts.entry(k).or_insert(v);
-                                                    }
-                                                }
-                                                Err(e) => {
-                                                    tracing::warn!(
-                                                        path = %user_path.display(),
-                                                        error = %e,
-                                                        "Failed to parse user-level review_experts section; ignoring"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        path = %user_path.display(),
-                                        error = %e,
-                                        "Failed to parse user-level config file as TOML; ignoring"
-                                    );
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                path = %user_path.display(),
-                                error = %e,
-                                "Failed to read user-level config file; ignoring"
-                            );
-                        }
-                    }
-                }
+            // User-level config provides a global LLM fallback.
+            config.llm = load_user_llm_fallback();
+
+            // User-level [report] provides global report defaults; a
+            // project-level [report] (handled below) replaces it wholesale.
+            if let Some(report) = load_user_report_fallback() {
+                config.report = report;
             }
 
-            // 3. Project-level config (.code-audit-config.toml) — overrides
+            // Project-level config overrides
             if std::path::Path::new(default_path).exists() {
                 match tokio::fs::read_to_string(default_path).await {
                     Ok(content) => {
                         match toml::from_str::<toml::Value>(&content) {
                             Ok(val) => {
                                 if let Some(obj) = val.as_table() {
-                                    // LLM: override only if project explicitly provides [[llm]]
-                                    if let Some(llm) = obj.get("llm") {
-                                        let parsed = take_llm(llm);
-                                        if !parsed.is_empty() {
-                                            config.llm = parsed;
+                                    // LLM: override only if project provides valid [[llm]]
+                                    match obj.get("llm") {
+                                        None => {
+                                            if !config.llm.is_empty() {
+                                                print_llm_fallback_warning(
+                                                    std::path::Path::new(default_path),
+                                                    "missing",
+                                                );
+                                            }
+                                        }
+                                        Some(llm) => {
+                                            let parsed = take_llm(llm);
+                                            if !parsed.is_empty() {
+                                                config.llm = parsed;
+                                            } else if !config.llm.is_empty() {
+                                                print_llm_fallback_warning(
+                                                    std::path::Path::new(default_path),
+                                                    "invalid",
+                                                );
+                                            }
                                         }
                                     }
                                     // Commands: override
@@ -217,6 +333,25 @@ pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
                                                     path = default_path,
                                                     error = %e,
                                                     "Failed to parse project-level review_experts section; ignoring"
+                                                );
+                                            }
+                                        }
+                                    }
+                                    // Report: wholesale replacement (project wins over user).
+                                    // NOTE: unlike `commands`/`review_experts`, which extend the
+                                    // existing map, a present `[report]` replaces `config.report`
+                                    // entirely — fields omitted here fall back to the serde
+                                    // defaults of `ReportConfig`, NOT to user-level values.
+                                    if let Some(report) = obj.get("report") {
+                                        match ReportConfig::deserialize(report.clone()) {
+                                            Ok(parsed) => {
+                                                config.report = parsed;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    path = default_path,
+                                                    error = %e,
+                                                    "Failed to parse project-level [report] section; ignoring"
                                                 );
                                             }
                                         }
@@ -920,5 +1055,430 @@ display_individual_scores = false
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("sum to"), "Error should mention weight sum: {}", err);
+    }
+
+    // ── LLM fallback tests ──────────────────────────────────────────────────
+
+    fn user_llm_toml() -> &'static str {
+        r#"
+[[llm]]
+provider = "openai"
+model = "gpt-4"
+api_key = "user-key"
+"#
+    }
+
+    /// Guard that temporarily sets `$HOME` and restores it on drop.
+    struct HomeGuard {
+        original: Option<String>,
+    }
+
+    impl HomeGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original = std::env::var("HOME").ok();
+            std::env::set_var("HOME", path.as_os_str());
+            Self { original }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+        }
+    }
+
+    /// Guard that temporarily changes the current directory and restores it on drop.
+    struct CwdGuard {
+        original: std::path::PathBuf,
+    }
+
+    impl CwdGuard {
+        fn set(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self { original }
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            std::env::set_current_dir(&self.original).unwrap();
+        }
+    }
+
+    static FS_LOCK: Mutex<()> = Mutex::new(());
+
+    fn clear_fallback_warnings() {
+        let mut guard = super::FALLBACK_WARNINGS.lock().unwrap_or_else(|e| e.into_inner());
+        guard.clear();
+    }
+
+    fn take_fallback_warnings() -> Vec<String> {
+        let mut guard = super::FALLBACK_WARNINGS.lock().unwrap_or_else(|e| e.into_inner());
+        guard.drain(..).collect()
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_path_uses_user_llm_fallback() {
+        let _guard = FS_LOCK.lock().unwrap();
+        clear_fallback_warnings();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(user_path.join(".code-audit-config.toml"), user_llm_toml()).unwrap();
+
+        let project_path = tmp.path().join("project.toml");
+        std::fs::write(&project_path, "[commands]\nreview = true\n").unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let cfg = resolve_config(Some(ConfigSource::Path(project_path.to_string_lossy().to_string())))
+            .await
+            .unwrap();
+
+        assert_eq!(cfg.llm.len(), 1);
+        assert_eq!(cfg.llm[0].provider, "openai");
+        assert_eq!(cfg.llm[0].model, "gpt-4");
+        assert_eq!(cfg.llm[0].api_key, "user-key");
+
+        let warnings = take_fallback_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("is missing"));
+        assert!(warnings[0].contains(&*project_path.to_string_lossy()));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_path_invalid_project_llm_fallback() {
+        let _guard = FS_LOCK.lock().unwrap();
+        clear_fallback_warnings();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(user_path.join(".code-audit-config.toml"), user_llm_toml()).unwrap();
+
+        let project_path = tmp.path().join("project.toml");
+        let project_toml = r#"
+[llm]
+provider = "openai"
+model = "gpt-4"
+"#;
+        std::fs::write(&project_path, project_toml).unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let cfg = resolve_config(Some(ConfigSource::Path(project_path.to_string_lossy().to_string())))
+            .await
+            .unwrap();
+
+        assert_eq!(cfg.llm.len(), 1);
+        assert_eq!(cfg.llm[0].api_key, "user-key");
+
+        let warnings = take_fallback_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("is invalid"));
+        assert!(warnings[0].contains(&*project_path.to_string_lossy()));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_path_project_llm_wins() {
+        let _guard = FS_LOCK.lock().unwrap();
+        clear_fallback_warnings();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(user_path.join(".code-audit-config.toml"), user_llm_toml()).unwrap();
+
+        let project_path = tmp.path().join("project.toml");
+        let project_toml = r#"
+[[llm]]
+provider = "anthropic"
+model = "claude-3"
+api_key = "project-key"
+"#;
+        std::fs::write(&project_path, project_toml).unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let cfg = resolve_config(Some(ConfigSource::Path(project_path.to_string_lossy().to_string())))
+            .await
+            .unwrap();
+
+        assert_eq!(cfg.llm.len(), 1);
+        assert_eq!(cfg.llm[0].provider, "anthropic");
+        assert_eq!(cfg.llm[0].api_key, "project-key");
+
+        let warnings = take_fallback_warnings();
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_project_missing_uses_user_llm() {
+        let _guard = FS_LOCK.lock().unwrap();
+        clear_fallback_warnings();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(user_path.join(".code-audit-config.toml"), user_llm_toml()).unwrap();
+
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(".code-audit-config.toml"),
+            "[commands]\nreview = true\n",
+        )
+        .unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        assert_eq!(cfg.llm.len(), 1);
+        assert_eq!(cfg.llm[0].api_key, "user-key");
+
+        let warnings = take_fallback_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("is missing"));
+        assert!(warnings[0].contains(".code-audit-config.toml"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_invalid_project_llm_fallback() {
+        let _guard = FS_LOCK.lock().unwrap();
+        clear_fallback_warnings();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(user_path.join(".code-audit-config.toml"), user_llm_toml()).unwrap();
+
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(".code-audit-config.toml"),
+            "[llm]\nprovider = \"openai\"\nmodel = \"gpt-4\"\n",
+        )
+        .unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        assert_eq!(cfg.llm.len(), 1);
+        assert_eq!(cfg.llm[0].api_key, "user-key");
+
+        let warnings = take_fallback_warnings();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("is invalid"));
+        assert!(warnings[0].contains(".code-audit-config.toml"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_project_llm_wins() {
+        let _guard = FS_LOCK.lock().unwrap();
+        clear_fallback_warnings();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(user_path.join(".code-audit-config.toml"), user_llm_toml()).unwrap();
+
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(".code-audit-config.toml"),
+            "[[llm]]\nprovider = \"anthropic\"\nmodel = \"claude-3\"\napi_key = \"project-key\"\n",
+        )
+        .unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        assert_eq!(cfg.llm.len(), 1);
+        assert_eq!(cfg.llm[0].provider, "anthropic");
+        assert_eq!(cfg.llm[0].api_key, "project-key");
+
+        let warnings = take_fallback_warnings();
+        assert!(warnings.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_path_same_as_user_config_no_duplicate() {
+        let _guard = FS_LOCK.lock().unwrap();
+        clear_fallback_warnings();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        let user_config = user_path.join(".code-audit-config.toml");
+        std::fs::write(&user_config, user_llm_toml()).unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let cfg = resolve_config(Some(ConfigSource::Path(user_config.to_string_lossy().to_string())))
+            .await
+            .unwrap();
+
+        assert_eq!(cfg.llm.len(), 1);
+        assert_eq!(cfg.llm[0].api_key, "user-key");
+
+        let warnings = take_fallback_warnings();
+        assert!(warnings.is_empty());
+    }
+
+    // ── [report] section tests (None path) ──────────────────────────────────
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_user_report_applied() {
+        let _guard = FS_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(
+            user_path.join(".code-audit-config.toml"),
+            "[report]\nverification_pass = true\naggregated = true\n",
+        )
+        .unwrap();
+
+        // No project-level config file at all.
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        assert!(cfg.report.verification_pass);
+        assert!(cfg.report.aggregated);
+        // Fields omitted from the user-level [report] keep serde defaults.
+        assert_eq!(cfg.report.max_findings_per_expert, 5);
+        assert_eq!(cfg.report.verification_max_file_bytes, 20000);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_project_report_overrides_user() {
+        let _guard = FS_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(
+            user_path.join(".code-audit-config.toml"),
+            "[report]\nverification_pass = false\naggregated = true\n",
+        )
+        .unwrap();
+
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(".code-audit-config.toml"),
+            "[report]\nverification_pass = true\n",
+        )
+        .unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        // Project-level [report] wins over the user-level one.
+        assert!(cfg.report.verification_pass);
+        // Wholesale-replacement semantics: `aggregated` is NOT inherited from
+        // the user-level config; it falls back to the serde default (false).
+        assert!(!cfg.report.aggregated);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_project_report_disables_user_setting() {
+        let _guard = FS_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        std::fs::write(
+            user_path.join(".code-audit-config.toml"),
+            "[report]\nverification_pass = true\n",
+        )
+        .unwrap();
+
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join(".code-audit-config.toml"),
+            "[report]\nverification_pass = false\n",
+        )
+        .unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        // An explicit project-level `false` overrides the user-level `true`.
+        assert!(!cfg.report.verification_pass);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_no_report_keeps_builtin_default() {
+        let _guard = FS_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        // User-level config without a [report] section.
+        std::fs::write(user_path.join(".code-audit-config.toml"), user_llm_toml()).unwrap();
+
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        // Project-level config without a [report] section.
+        std::fs::write(
+            project_dir.join(".code-audit-config.toml"),
+            "[commands]\nreview = true\n",
+        )
+        .unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        assert!(!cfg.report.verification_pass);
+        assert!(!cfg.report.aggregated);
+        assert_eq!(cfg.report.max_findings_per_expert, 5);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn test_resolve_config_none_invalid_user_toml_keeps_default_report() {
+        let _guard = FS_LOCK.lock().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let user_path = home.join(".config").join("review-engine");
+        std::fs::create_dir_all(&user_path).unwrap();
+        // Malformed user-level TOML: must not panic, falls back to defaults.
+        std::fs::write(user_path.join(".code-audit-config.toml"), "this is = not [ valid toml").unwrap();
+
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
+        let cfg = resolve_config(None).await.unwrap();
+
+        assert!(!cfg.report.verification_pass);
+        assert!(!cfg.report.aggregated);
+        assert!(cfg.llm.is_empty());
     }
 }

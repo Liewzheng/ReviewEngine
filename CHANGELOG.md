@@ -1,5 +1,42 @@
 # Changelog
 
+## [0.7.8] - 2026-07-17
+
+### Added
+- **Context-boundary rules in review prompt**: `REVIEW_SYSTEM_TEMPLATE` gains a `CONTEXT BOUNDARY` section telling experts they can only see diff fragments — not imported helper files, wrapper/helper implementations, backend route definitions, or middleware. "Missing X" claims (header, base path, validation, error handling) must be provable directly from the diff; otherwise they must be downgraded to `note` severity with confidence ≤ 4 and an explicit `Assumption:` statement in the summary, reducing false positives about code outside the diff.
+- **Finding-verification pass** (opt-in): new `[report]` options `verification_pass` (default `false`) and `verification_max_file_bytes` (default `20000`). When enabled, an extra LLM pass runs after line-range validation: findings are grouped by referenced file (≤ 10 per call) and re-checked against the file's diff hunks, its current full content read from the local checkout, and the complete changed-file list. The verifier acts as a skeptical judge — it only drops findings the context directly disproves (e.g. "change not in this MR" claims refuted by the changed-file list) and keeps everything else, failing open on any LLM or parse error. Dropped findings are removed from the reports, exposed as `dropped_findings` in the JSON output, and listed in a "Dropped by verification" appendix in the Markdown report.
+- **Verification-pass run summary**: the pass now always logs `Verification pass: checked N findings, dropped M` (previously silent when nothing was dropped), and the CLI Markdown "Dropped by verification" appendix renders a `_Verification pass ran: no findings were dropped (N checked)._` note when the pass is enabled but kept every finding; a non-empty appendix now ends with the checked/dropped counts, so users can tell "verification ran, all kept" apart from "verification not enabled".
+
+### Changed
+- **Diff context widened to 10 lines**: `LocalGitBrowser::get_diff` now runs `git diff -U10` (was git's default 3-line context) so experts see more surrounding code around each hunk.
+- **Expert personas**: the `api` and `security` experts in the default config each gain a verifiability principle — only assert what the diff proves; when a judgment depends on code outside the diff (wrappers, route definitions, middleware), state the assumption explicitly and report it as a note with low confidence.
+
+### Fixed
+- **Stray quoted sentence in review prompt**: removed the stray double quotes around the low-confidence guidance line in `REVIEW_SYSTEM_TEMPLATE` that caused it to render verbatim (including the quotes) into the prompt.
+- **`[report]` section ignored without `--config`**: when no `--config` is given, `resolve_config` now honors the `[report]` section from both the user-level (`~/.config/review-engine/.code-audit-config.toml`) and project-level (`.code-audit-config.toml`) configs. User-level `[report]` acts as global defaults; a project-level `[report]` replaces it wholesale (fields omitted there fall back to serde defaults, not user-level values). Previously `[report]` (e.g. `verification_pass = true`) only took effect via an explicit `--config <path>`.
+- **Provider list lost backend `id` on load**: `loadProviders()` in the Configuration page now preserves the server-returned `id` when mapping `GET /api/v1/llm/providers` items into local entries. Previously the `id` was dropped, so deleting an existing provider never issued the backend `DELETE` request, and saving re-added every existing provider via `POST` (with an empty API key) instead of updating it via `PUT`.
+- **Provider add/update endpoints dropped frontend field names**: `POST /api/v1/llm/providers` and `PUT /api/v1/llm/providers/{id}` now accept the frontend's `apiBaseUrl` and `defaultModel` field names as serde aliases for `apiBase` and `model` (the primary camelCase names are unchanged). Previously those fields were silently discarded, so `api_base`/`model` always fell back to defaults (e.g. connectivity tests hit `https://api.openai.com/v1` instead of the configured base URL).
+- **Malformed provider JSON rejected with 422 plain text**: `add_provider` and `update_provider` now handle axum `Json` extractor rejections themselves and return `400 Bad Request` with the usual `{"error": ...}` JSON body, consistent with the handlers' business-logic errors.
+- **Save Changes stayed disabled for provider-only changes**: the Configuration page `dirty` check now also tracks the Additional LLM Providers list (snapshot compared on load/save, pure-UI expand state excluded) and pending provider deletions. Previously it only diffed the main config JSON, so adding or removing a provider never enabled Save Changes and `saveAdditionalProviders()` was unreachable.
+- **`GET /llm/providers` now returns the provider config**: each item includes `apiBaseUrl`, `defaultModel`, `maxTokens`, and `temperature` (never the API key), and `loadProviders()` prefills the edit form with these real values. Previously the form fell back to fake defaults (empty URLs, 4096/0.7) that `update_provider` would write back over the user's original configuration on save.
+- **`PUT /config` no longer duplicates the primary provider on every save**: `GET /config` maps the primary provider into both the legacy `llm.*` fields and `llm.providers`, so rebuilding `llm_configs` from both sources appended one more copy of the primary per save (`openai-0` + `openai-1` duplicates). The rebuild now skips `llm.providers` entries whose provider name matches the primary, which is authoritatively expressed by the legacy fields; repeated saves are idempotent.
+- **Spurious `console.error` when deleting a provider**: `saveAdditionalProviders()` runs after `PUT /config`, which may already have rebuilt the provider list without the deleted entry, so the subsequent `DELETE` returns 404. A 404 on delete is now treated as success (idempotent deletion); other errors still log.
+- **Success + Error double notification on save**: the post-save flash animation called `classList.add` on `el-card` *component instances* (template refs don't resolve to DOM elements), throwing a `TypeError` that fell into the save `catch` and showed an error notification despite both write requests succeeding. The animation now reaches the DOM node via the instance's `$el` and skips cards whose element is unavailable.
+
+## [0.7.7] - 2026-07-08
+
+### Fixed
+- **Vite dev server proxy config**: added missing `server.proxy` block to `vite.config.ts` so `/api/*` requests are correctly forwarded to the Rust backend (`http://localhost:18080`). Previously, all API calls from the SPA returned **502 Bad Gateway**, causing **LLM Status** and **Dashboard** pages to crash with `Cannot read properties of undefined (reading 'items')` and other JS errors.
+
+### Added
+- **Multi-provider CRUD API**: added `POST /api/v1/llm/providers`, `DELETE /api/v1/llm/providers/{id}`, and `PUT /api/v1/llm/providers/{id}` endpoints so users can dynamically add, remove, and update LLM providers without editing static config files.
+- **Multi-provider UI in Configuration page**: new "Additional LLM Providers" card with provider type dropdown (OpenAI, Anthropic, Ollama, Google, Azure, xAI, DeepSeek, Mistral, Together AI, OpenRouter, Custom), inline expandable edit forms, and Add/Delete/Save operations.
+- **Frontend provider types**: added `ProviderConfig`, `ProviderResponse`, `ProviderEntry` interfaces and `PROVIDER_TYPES` constant.
+
+### Changed
+- **UiLlmConfig**: added `providers: Vec<UiLlmProviderConfig>` field (backward-compatible with legacy single-provider fields).
+- **put_config()**: now saves both the legacy single provider AND all entries from the `providers` array to `state.llm_configs`.
+
 ## [0.7.6] - 2026-07-08
 
 ### Fixed

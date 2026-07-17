@@ -193,7 +193,7 @@ fn first_fenced_yaml_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"```(?:yaml|YAML)?\r?\n([\s\S]*?)\r?\n```").unwrap())
 }
 
-fn extract_first_fenced_yaml(text: &str) -> Option<String> {
+pub(crate) fn extract_first_fenced_yaml(text: &str) -> Option<String> {
     first_fenced_yaml_regex()
         .captures(text)
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))

@@ -35,13 +35,20 @@ SCOPE RULES:
 - If you cannot determine whether a line is new or existing, skip the finding.
 - Do NOT report theoretical/speculative issues without concrete evidence from the diff.
 
+CONTEXT BOUNDARY:
+- You can ONLY see the diff below. You can NOT see imported helper files, the implementation of wrapper/helper functions, backend route definitions, or middleware.
+- Claims of the form "X is missing" (missing header, missing base path, missing validation, missing error handling) MUST be provable directly from the diff. If you cannot prove a claim from the diff, either do NOT report it, or report it with severity `note` and confidence 4 or lower, and state the assumption it relies on explicitly in the summary, starting with "Assumption:".
+- When the reviewed code calls a wrapper or helper function (e.g. request(), apiClient, a wrapper, middleware), assume cross-cutting behavior (headers, base URL, serialization, error conversion) may already be handled by that layer unless the diff contains evidence to the contrary.
+- Do NOT make factual assertions about files, routes, or function implementations that do not appear in the diff.
+
 Confidence calibration (use these to decide what to report):
 - 9-10: Certain. You can see the exact bug and trigger in the diff code.
 - 7-8: High. Strong evidence, minor uncertainty about edge cases.
 - 5-6: Medium. Reasonable concern, but evidence is indirect.
 - 3-4: Low. Speculative — consider whether to report at all.
 - 1-2: Very low. Pure speculation — do NOT report as finding.
-"Low confidence findings (1-4) should be marked 'note' severity and clearly labeled as speculative."
+
+Low confidence findings (1-4) should be marked 'note' severity and clearly labeled as speculative.
 
 Output format:
 ```yaml
@@ -445,5 +452,48 @@ Branch: {{ branch }}
 ## Code Changes
 ```diff
 {{ diff }}
+```
+"###;
+
+/// System prompt for the finding-verification pass.
+///
+/// The verifier acts as a skeptical judge: it receives findings together with
+/// ground-truth context (diff hunks, full file content, changed-file list) and
+/// may only DROP a finding when the context directly disproves it. Anything
+/// inconclusive is kept (fail-open).
+pub(crate) const VERIFIER_SYSTEM_TEMPLATE: &str = r###"
+You are a skeptical verification judge for automated code-review findings.
+
+Expert reviewers produced the findings below while seeing only fragments of a
+diff. You are given ground-truth context they did not have: the diff hunks of
+the referenced file, the file's current full content, and the complete list of
+files changed in this merge request.
+
+For each finding, decide KEEP or DROP.
+
+DROP a finding ONLY when:
+- The provided context directly disproves the finding's central claim. Example:
+  the finding asserts "X is missing" but X is visible in the file content or in
+  the diff hunks; or the finding asserts a change is not part of this MR but the
+  changed-file list or hunks show it is.
+- The finding makes a factual assertion about code that is not provided to you
+  and offers no evidence for it.
+
+KEEP a finding whenever:
+- The evidence is inconclusive, incomplete, truncated, or unavailable.
+- The finding is a judgment call, style suggestion, or risk warning that cannot
+  be strictly disproven from the context.
+- You are uncertain. When in doubt, KEEP — false keeps are far cheaper than
+  false drops.
+
+Respond with ONLY a YAML code block, one entry per finding index:
+```yaml
+verdicts:
+  - index: 0
+    verdict: keep
+    reason: ""
+  - index: 1
+    verdict: drop
+    reason: "One sentence stating the concrete evidence that disproves the finding."
 ```
 "###;

@@ -8,6 +8,7 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use base64::Engine;
 use schemars::schema_for;
 use std::sync::Arc;
 
@@ -124,6 +125,26 @@ pub struct UiGitLabConfig {
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UiLlmProviderConfig {
+    pub provider: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub api_base_url: String,
+    #[serde(default)]
+    pub default_model: String,
+    #[serde(default = "default_max_tokens")]
+    pub max_tokens: u32,
+    #[serde(default = "default_temperature")]
+    pub temperature: f32,
+    #[serde(default = "default_timeout_seconds")]
+    pub timeout_seconds: u32,
+    #[serde(default = "default_retry_attempts")]
+    pub retry_attempts: u32,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UiLlmConfig {
     #[serde(default)]
     pub primary_provider: String,
@@ -141,6 +162,9 @@ pub struct UiLlmConfig {
     pub timeout_seconds: u32,
     #[serde(default = "default_retry_attempts")]
     pub retry_attempts: u32,
+    /// Multi-provider support — additive to the legacy single fields.
+    #[serde(default)]
+    pub providers: Vec<UiLlmProviderConfig>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -233,7 +257,7 @@ impl UiConfig {
     pub fn from_app_config(app: &crate::models::AppConfig) -> Self {
         let mut ui = UiConfig::default();
 
-        // Map LLM configs
+        // Map LLM configs — legacy single fields
         for l in &app.llm {
             match l.provider.as_str() {
                 "openai" => {
@@ -267,9 +291,31 @@ impl UiConfig {
             }
         }
 
+        // Map all LLM configs as providers (multi-provider support)
+        for l in &app.llm {
+            ui.llm.providers.push(UiLlmProviderConfig {
+                provider: l.provider.clone(),
+                api_key: l.api_key.clone(),
+                api_base_url: l.api_base.clone(),
+                default_model: l.model.clone(),
+                max_tokens: l.max_tokens,
+                temperature: l.temperature,
+                timeout_seconds: 60,
+                retry_attempts: 3,
+            });
+        }
+
         // Map advanced settings
         ui.advanced.max_concurrent_reviews = app.max_concurrent_llm_calls.unwrap_or(5) as u32;
         ui.advanced.enable_metrics = true; // Default, overridden at runtime if needed
+
+        // Apply defaults for fields not mapped from AppConfig
+        if ui.llm.temperature == 0.0 {
+            ui.llm.temperature = default_temperature();
+        }
+        if ui.rules.min_score == 0 {
+            ui.rules.min_score = default_min_score();
+        }
 
         ui
     }
@@ -279,7 +325,9 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
     let mut new_llm_configs = Vec::new();
 
     // Build LLM configs from UI fields (all non-empty keys are kept)
+    let mut primary_provider: Option<&str> = None;
     if !body.llm.openai_api_key.is_empty() {
+        primary_provider = Some("openai");
         new_llm_configs.push(crate::models::LLMConfig {
             provider: "openai".to_string(),
             model: body.llm.default_model.clone(),
@@ -288,6 +336,28 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
             max_tokens: body.llm.max_tokens,
             temperature: body.llm.temperature,
         });
+    }
+
+    // Build LLM configs from multi-provider providers Vec. GET /config maps
+    // every backend LLM config — including the primary — into `llm.providers`,
+    // so a UI round-trip echoes the primary back inside this array. The primary
+    // is authoritatively expressed by the legacy fields above; skip providers
+    // entries with the same provider name or every save would add one more
+    // duplicate (the `{provider}-{i}` id scheme cannot tell them apart anyway).
+    for p in &body.llm.providers {
+        if !p.provider.is_empty() && !p.api_key.is_empty() {
+            if primary_provider == Some(p.provider.as_str()) {
+                continue;
+            }
+            new_llm_configs.push(crate::models::LLMConfig {
+                provider: p.provider.clone(),
+                model: p.default_model.clone(),
+                api_key: p.api_key.clone(),
+                api_base: p.api_base_url.clone(),
+                max_tokens: p.max_tokens,
+                temperature: p.temperature,
+            });
+        }
     }
 
     let mut cfg_opt = state.app_config.write().unwrap();
@@ -316,6 +386,28 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
     // Persist full UI config so GET /config returns exactly what was saved
     let mut ui = state.ui_config.write().unwrap();
     *ui = body;
+
+    // Sync GitLab config to the global runtime so webhook handler picks up changes
+    // without requiring a restart.
+    {
+        let rt = crate::server::gitlab::gitlab_runtime();
+        let mut gl_rt = rt.write().unwrap();
+        let ui_gl = &ui.gitlab;
+        if !ui_gl.api_token.is_empty() {
+            gl_rt.token = ui_gl.api_token.clone();
+        }
+        if !ui_gl.webhook_secret.is_empty() {
+            gl_rt.webhook_secret = ui_gl.webhook_secret.clone();
+        }
+        if !ui_gl.webhook_signing_secret.is_empty() {
+            let s = ui_gl.webhook_signing_secret.clone();
+            let signing_key = s
+                .strip_prefix("whsec_")
+                .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok());
+            gl_rt.signing_secret = Some(s);
+            gl_rt.signing_key = signing_key;
+        }
+    }
 
     Json(serde_json::json!({"status": "saved"})).into_response()
 }

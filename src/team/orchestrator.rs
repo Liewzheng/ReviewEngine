@@ -24,6 +24,7 @@ use crate::prompt::PromptEngine;
 
 use crate::output::parser::validate_findings;
 use crate::team::lead_consolidator::ConsolidatorConfig;
+use crate::team::verifier::{self, DroppedFinding};
 
 use super::{ExpertMetrics, TeamOrchestrator, TeamReport};
 
@@ -149,7 +150,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
             _ => (None, None),
         };
 
-        let (reports, metrics, total_tokens, errors, _global_context) = run_experts_inner(
+        let (reports, metrics, total_tokens, errors, _global_context, dropped_findings) = run_experts_inner(
             &selected_defs,
             &mr_info,
             &diff_raw,
@@ -217,6 +218,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
             errors,
             metrics,
             consolidated,
+            dropped_findings,
         })
     }
 }
@@ -445,7 +447,8 @@ fn collect_expert_results(
 
 /// Run the core expert pipeline: diff parsing → large PR handling → parallel LLM execution.
 ///
-/// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context).
+/// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context, dropped_findings).
+#[allow(clippy::type_complexity)]
 pub(crate) async fn run_experts_inner(
     experts: &[ExpertDef],
     mr_info: &MRInfo,
@@ -462,6 +465,7 @@ pub(crate) async fn run_experts_inner(
     u64,
     Vec<String>,
     Option<GlobalReviewContext>,
+    Vec<DroppedFinding>,
 )> {
     let mut files = parse_and_filter_diff(diff_raw);
 
@@ -593,7 +597,31 @@ pub(crate) async fn run_experts_inner(
         }
     }
 
-    Ok((reports, metrics, total_tokens, errors, global_context))
+    // Optional LLM verification pass: re-check findings against the diff
+    // hunks, the referenced files' full content, and the changed-file list.
+    // Fail-open by construction — `verify_findings` never returns an error.
+    let dropped_findings = if config.report.verification_pass {
+        let dropped = verifier::verify_findings(
+            &mut reports,
+            &files,
+            &mr_info.project_path,
+            llm_configs,
+            config.report.verification_max_file_bytes,
+        )
+        .await;
+        // Log unconditionally so a run that dropped nothing is still visible.
+        let checked = reports.iter().map(|r| r.findings.len()).sum::<usize>() + dropped.len();
+        info!(
+            "Verification pass: checked {} findings, dropped {}",
+            checked,
+            dropped.len()
+        );
+        dropped
+    } else {
+        Vec::new()
+    };
+
+    Ok((reports, metrics, total_tokens, errors, global_context, dropped_findings))
 }
 
 /// Run all applicable experts against the given MR diff.
@@ -603,7 +631,8 @@ pub(crate) async fn run_experts_inner(
 /// chunking, lead overview (Pass 1), rate-limited parallel expert
 /// dispatch, and consolidation.
 ///
-/// Returns per-expert reports and an optional global review context.
+/// Returns per-expert reports, an optional global review context, and any
+/// findings dropped by the optional verification pass.
 pub async fn run_experts(
     experts: &[ExpertDef],
     mr_info: &MRInfo,
@@ -612,7 +641,7 @@ pub async fn run_experts(
     config: &AppConfig,
     progress_map: Option<ProgressMap>,
     review_id: &str,
-) -> anyhow::Result<(Vec<ExpertReport>, Option<GlobalReviewContext>)> {
+) -> anyhow::Result<(Vec<ExpertReport>, Option<GlobalReviewContext>, Vec<DroppedFinding>)> {
     // Initialize progress (skip if already initialized by caller)
     if let Some(ref map) = progress_map {
         let exists = map.read().ok().map(|g| g.contains_key(review_id)).unwrap_or(false);
@@ -629,7 +658,7 @@ pub async fn run_experts(
         }
     }
 
-    let (reports, _, _, _, global_context) = run_experts_inner(
+    let (reports, _, _, _, global_context, dropped_findings) = run_experts_inner(
         experts,
         mr_info,
         diff_raw,
@@ -642,7 +671,7 @@ pub async fn run_experts(
     )
     .await?;
 
-    Ok((reports, global_context))
+    Ok((reports, global_context, dropped_findings))
 }
 
 /// Run the aggregator expert to merge individual expert reports.

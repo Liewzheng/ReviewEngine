@@ -573,11 +573,21 @@ pub async fn run() -> Result<()> {
                 .unwrap_or_default();
             if !webhook_secret.is_empty() || signing_secret.is_some() {
                 handlers.push(Arc::new(review_engine::server::gitlab::GitLabWebhookHandler::new(
-                    webhook_secret,
-                    signing_secret,
+                    webhook_secret.clone(),
+                    signing_secret.clone(),
                     dispatcher.clone(),
-                    gitlab_token,
+                    gitlab_token.clone(),
                 )));
+                // Initialise the global GitLab runtime config so UI changes
+                // propagate to the running handler without restart.
+                review_engine::server::gitlab::init_gitlab_runtime(
+                    &review_engine::server::gitlab::GitLabWebhookHandler::new(
+                        webhook_secret,
+                        signing_secret,
+                        dispatcher.clone(),
+                        gitlab_token,
+                    ),
+                );
             }
             if let Some((tok, secret)) = github_token
                 .or_else(|| std::env::var("GITHUB_TOKEN").ok())

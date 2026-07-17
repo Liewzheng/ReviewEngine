@@ -122,6 +122,9 @@ pub struct ReviewOutput {
     pub reports: Vec<ExpertReport>,
     /// Optional consolidated report from the aggregator expert.
     pub aggregated: Option<AggregatedReport>,
+    /// Findings dropped by the optional verification pass, with reasons.
+    #[serde(default)]
+    pub dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
 }
 
 /// A consolidated report produced by the aggregator expert.
@@ -144,6 +147,7 @@ impl ReviewOutput {
         Self {
             reports,
             aggregated: None,
+            dropped_findings: Vec::new(),
         }
     }
 
@@ -152,6 +156,13 @@ impl ReviewOutput {
         Self {
             reports,
             aggregated: Some(aggregated),
+            dropped_findings: Vec::new(),
         }
+    }
+
+    /// Attach findings dropped by the verification pass.
+    pub fn with_dropped_findings(mut self, dropped_findings: Vec<crate::team::verifier::DroppedFinding>) -> Self {
+        self.dropped_findings = dropped_findings;
+        self
     }
 }

@@ -47,7 +47,9 @@ pub async fn run_stdin(format: &str, output: &Option<String>) -> Result<()> {
 
     let result =
         review_engine::run_review(mr_url, token, llm_configs, config_toml.map(ConfigSource::Inline), None).await?;
-    write_output(&result, format, output, None, None)?;
+    // The verification-enabled flag is resolved inside `run_review` and not
+    // available here; `false` keeps the historical list-only appendix.
+    write_output(&result, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -75,7 +77,14 @@ pub async fn run_mr(
 
     let progress_override = progress_map.map(|map| (map, review_id.to_string()));
     let result = review_engine::run_review(mr_url, &token, configs, config_source, progress_override).await?;
-    write_output(&result, format, output, None, Some(&config.output_dir))?;
+    write_output(
+        &result,
+        format,
+        output,
+        None,
+        Some(&config.output_dir),
+        config.report.verification_pass,
+    )?;
 
     if publish {
         if let Err(e) = review_engine::publish_review(&token, mr_url, &result).await {
@@ -140,8 +149,9 @@ pub async fn run_improve(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     if publish {
         if let Err(e) = review_engine::publish_review(&token, mr_url, &review_out).await {
@@ -194,8 +204,9 @@ pub async fn run_improve_local_diff(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -251,8 +262,9 @@ pub async fn run_improve_local_repo(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -307,8 +319,9 @@ pub async fn run_describe(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     if publish {
         if let Err(e) = review_engine::publish_review(&token, mr_url, &review_out).await {
@@ -363,8 +376,9 @@ pub async fn run_describe_local_diff(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -422,8 +436,9 @@ pub async fn run_describe_local_repo(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -475,8 +490,9 @@ pub async fn run_ask(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -517,8 +533,9 @@ pub async fn run_ask_local_diff(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -574,8 +591,9 @@ pub async fn run_ask_local_repo(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -635,8 +653,9 @@ pub async fn run_update_changelog(
             raw_llm_response: String::new(),
         }],
         aggregated: None,
+        dropped_findings: vec![],
     };
-    write_output(&review_out, format, output, None, None)?;
+    write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
 }
@@ -676,7 +695,7 @@ pub async fn run_local(
 
     let (experts, mr_info) = prepare_review(&config, "local", "local", "main");
 
-    let (reports, _) = review_engine::team::orchestrator::run_experts(
+    let (reports, _, dropped_findings) = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -687,8 +706,15 @@ pub async fn run_local(
     )
     .await?;
 
-    let out = ReviewOutput::new(reports);
-    write_output(&out, format, output, None, Some(&config.output_dir))?;
+    let out = ReviewOutput::new(reports).with_dropped_findings(dropped_findings);
+    write_output(
+        &out,
+        format,
+        output,
+        None,
+        Some(&config.output_dir),
+        config.report.verification_pass,
+    )?;
     review_engine::progress::complete_progress(progress_map.as_ref(), review_id);
     Ok(())
 }
@@ -739,9 +765,17 @@ pub async fn run_local_repo(
 
     let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
+    if llm_configs.is_empty() {
+        anyhow::bail!(
+            "No LLM configuration found. \
+             Provide [[llm]] in ~/.config/review-engine/.code-audit-config.toml, \
+             the project .code-audit-config.toml, --llm-config, or LLM_CONFIG env var."
+        );
+    }
+
     let (experts, mr_info) = prepare_review(&config, local_path, "local", base_ref);
 
-    let (reports, _) = review_engine::team::orchestrator::run_experts(
+    let (reports, _, dropped_findings) = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -752,7 +786,7 @@ pub async fn run_local_repo(
     )
     .await?;
 
-    let out = ReviewOutput::new(reports);
+    let out = ReviewOutput::new(reports).with_dropped_findings(dropped_findings);
 
     let repo_root = match std::fs::canonicalize(local_path) {
         Ok(p) => Some(p),
@@ -765,7 +799,14 @@ pub async fn run_local_repo(
             None
         }
     };
-    write_output(&out, format, output, repo_root.as_deref(), Some(&config.output_dir))?;
+    write_output(
+        &out,
+        format,
+        output,
+        repo_root.as_deref(),
+        Some(&config.output_dir),
+        config.report.verification_pass,
+    )?;
     review_engine::progress::complete_progress(progress_map.as_ref(), review_id);
     Ok(())
 }
@@ -826,19 +867,56 @@ fn normalize_all_findings(output: &mut ReviewOutput, repo_root: &Path) {
 }
 
 /// Format a ReviewOutput according to the requested format string.
-fn format_output(result: &ReviewOutput, format: &str) -> Result<String> {
+///
+/// `verification_enabled` tells the Markdown renderer whether the finding
+/// verification pass ran, so the "Dropped by verification" appendix can show
+/// a run summary even when nothing was dropped.
+fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool) -> Result<String> {
     Ok(match format {
-        "markdown" => result
-            .reports
-            .iter()
-            .map(|r| r.markdown.clone())
-            .collect::<Vec<_>>()
-            .join("\n\n---\n\n"),
-        "aggregated-markdown" => result
-            .aggregated
-            .as_ref()
-            .map(|a| a.markdown.clone())
-            .unwrap_or_else(|| String::from("No aggregated report")),
+        "markdown" => {
+            let text = result
+                .reports
+                .iter()
+                .map(|r| r.markdown.clone())
+                .collect::<Vec<_>>()
+                .join("\n\n---\n\n");
+            let mut text = if text.trim().is_empty() {
+                "# PR Review Report\n\nNo review content was generated. \
+                 Check that LLM configuration is correct and that the diff contains changes.\n"
+                    .to_string()
+            } else {
+                text
+            };
+            let checked =
+                result.reports.iter().map(|r| r.findings.len()).sum::<usize>() + result.dropped_findings.len();
+            let appendix = review_engine::output::renderer::render_dropped_findings_appendix(
+                &result.dropped_findings,
+                verification_enabled,
+                checked,
+            );
+            if !appendix.is_empty() {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str("\n---\n\n");
+                text.push_str(&appendix);
+            }
+            text
+        }
+        "aggregated-markdown" => {
+            let text = result
+                .aggregated
+                .as_ref()
+                .map(|a| a.markdown.clone())
+                .unwrap_or_else(|| String::from("No aggregated report"));
+            if text.trim().is_empty() {
+                "# Aggregated PR Review Report\n\nNo aggregated review content was generated. \
+                 Check that LLM configuration is correct and that the diff contains changes.\n"
+                    .to_string()
+            } else {
+                text
+            }
+        }
         _ => serde_json::to_string_pretty(result)?,
     })
 }
@@ -849,13 +927,14 @@ fn write_output(
     output: &Option<String>,
     repo_root: Option<&Path>,
     output_dir: Option<&str>,
+    verification_enabled: bool,
 ) -> Result<()> {
     let text = if let Some(root) = repo_root {
         let mut normalized = result.clone();
         normalize_all_findings(&mut normalized, root);
-        format_output(&normalized, format)?
+        format_output(&normalized, format, verification_enabled)?
     } else {
-        format_output(result, format)?
+        format_output(result, format, verification_enabled)?
     };
 
     match output {
@@ -867,6 +946,7 @@ fn write_output(
                     anyhow::bail!("--output path must not contain '..'");
                 }
             }
+            std::fs::create_dir_all(path.parent().unwrap_or(path))?;
             std::fs::write(path, &text)?;
         }
         None => {

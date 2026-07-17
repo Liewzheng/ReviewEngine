@@ -101,7 +101,7 @@ pub async fn run_review(
         None => (crate::progress::new_progress_map(), uuid::Uuid::new_v4().to_string()),
     };
 
-    let (findings, global_context) = crate::team::orchestrator::run_experts(
+    let (findings, global_context, dropped_findings) = crate::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -132,6 +132,7 @@ pub async fn run_review(
     } else {
         ReviewOutput::new(findings)
     };
+    let output = output.with_dropped_findings(dropped_findings);
 
     // Mark progress complete
     crate::progress::complete_progress(Some(&progress_map), &review_id);
@@ -164,6 +165,13 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
         md.push_str(&report.markdown);
         md.push_str("\n\n---\n\n");
     }
+    // `false` keeps the historical list-only rendering here; the run-summary
+    // lines are only added to the CLI Markdown report.
+    md.push_str(&crate::output::renderer::render_dropped_findings_appendix(
+        &output.dropped_findings,
+        false,
+        0,
+    ));
 
     let mut errors: Vec<anyhow::Error> = Vec::new();
 

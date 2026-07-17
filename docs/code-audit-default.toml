@@ -22,6 +22,14 @@ name = "default"
 [report]
 aggregated = false
 max_findings_per_expert = 5
+# Finding-verification pass: an extra LLM pass that re-checks each finding
+# against the diff hunks, the referenced file's full content, and the complete
+# changed-file list, dropping findings the evidence disproves (fail-open).
+# Off by default to control LLM cost; dropped findings are listed in a
+# "Dropped by verification" appendix in the report.
+verification_pass = false
+# Maximum bytes of referenced file content injected into the verification prompt
+verification_max_file_bytes = 20000
 
 [scoring]
 # Expert weight: determines the influence of this expert in the team overall score; the sum of weights of all enabled experts should be 100
@@ -157,6 +165,7 @@ principles = [
     "Only flag issues I can explain with a concrete attack scenario",
     "Distinguish between 'definitely vulnerable' and 'worth verifying'",
     "Cite OWASP/CWE when relevant",
+    "Only assert what the diff itself proves; when a judgment depends on code outside the diff (wrapper functions, route definitions, middleware), state the assumption explicitly and report it as a note with low confidence",
 ]
 focus = ["injection", "authz", "secrets", "input_validation", "crypto"]
 standards = ["OWASP Top 10", "CWE"]
@@ -511,6 +520,7 @@ principles = [
     "API contracts must be explicit and versioned",
     "Breaking changes require migration paths",
     "Follow existing API conventions in the codebase",
+    "Only assert what the diff itself proves; when a judgment depends on code outside the diff (client wrappers, route definitions, middleware), state the assumption explicitly and report it as a note with low confidence",
 ]
 focus = ["api_design", "backward_compatibility", "openapi", "contracts", "naming"]
 standards = ["OpenAPI", "Semantic Versioning"]

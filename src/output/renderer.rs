@@ -84,6 +84,54 @@ fn capitalize(s: &str) -> String {
     }
 }
 
+/// Render the "Dropped by verification" appendix for the verification pass.
+///
+/// `checked` is the total number of findings the pass examined (kept plus
+/// dropped). When `verification_enabled` is false the run-summary lines are
+/// omitted, so an empty `dropped` list yields an empty string (no appendix);
+/// callers that don't know whether the pass ran (e.g. publish) pass `false`
+/// to keep the historical list-only rendering. When the pass ran but dropped
+/// nothing, a one-line note is rendered so users can tell the pass ran;
+/// otherwise each dropped finding is listed with file, title, expert, and the
+/// verifier's reason, followed by the run summary.
+pub fn render_dropped_findings_appendix(
+    dropped: &[crate::team::verifier::DroppedFinding],
+    verification_enabled: bool,
+    checked: usize,
+) -> String {
+    if dropped.is_empty() {
+        if !verification_enabled {
+            return String::new();
+        }
+        return format!(
+            "## Dropped by verification\n\n_Verification pass ran: no findings were dropped ({} checked)._\n",
+            checked
+        );
+    }
+
+    let mut out = String::from("## Dropped by verification\n\n");
+    for d in dropped {
+        let f = &d.finding;
+        let line = f.line.map_or(String::new(), |l| format!(":{}", l));
+        out.push_str(&format!(
+            "- `{file}{line}` — **{title}** ({expert}): {reason}\n",
+            file = f.file,
+            line = line,
+            title = f.title,
+            expert = f.expert_name,
+            reason = d.reason,
+        ));
+    }
+    if verification_enabled {
+        out.push_str(&format!(
+            "\n_Verification pass ran: {} findings checked, {} dropped._\n",
+            checked,
+            dropped.len()
+        ));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -188,5 +236,48 @@ mod tests {
         assert!(md.contains("[HIGH]"));
         assert!(md.contains("src/main.rs"));
         assert!(md.contains("Bug"));
+    }
+
+    // ── render_dropped_findings_appendix ──
+
+    #[test]
+    fn test_render_dropped_findings_appendix_disabled_is_empty() {
+        // Pass not enabled (or caller doesn't know): no appendix at all.
+        assert!(render_dropped_findings_appendix(&[], false, 0).is_empty());
+    }
+
+    #[test]
+    fn test_render_dropped_findings_appendix_enabled_no_drops() {
+        let md = render_dropped_findings_appendix(&[], true, 7);
+        assert!(md.contains("## Dropped by verification"));
+        assert!(md.contains("no findings were dropped (7 checked)"));
+    }
+
+    #[test]
+    fn test_render_dropped_findings_appendix_lists_drops_with_count() {
+        let dropped = vec![crate::team::verifier::DroppedFinding {
+            finding: make_test_finding(Severity::High, "False alarm", "src/lib.rs"),
+            reason: "Claim disproven by file content".to_string(),
+        }];
+        let md = render_dropped_findings_appendix(&dropped, true, 5);
+        assert!(md.contains("## Dropped by verification"));
+        assert!(md.contains("src/lib.rs:42"));
+        assert!(md.contains("False alarm"));
+        assert!(md.contains("test")); // expert name
+        assert!(md.contains("Claim disproven by file content"));
+        assert!(md.contains("5 findings checked, 1 dropped"));
+    }
+
+    #[test]
+    fn test_render_dropped_findings_appendix_disabled_lists_drops_without_summary() {
+        // Legacy rendering (publish path): list only, no run-summary lines.
+        let dropped = vec![crate::team::verifier::DroppedFinding {
+            finding: make_test_finding(Severity::High, "False alarm", "src/lib.rs"),
+            reason: "Claim disproven by file content".to_string(),
+        }];
+        let md = render_dropped_findings_appendix(&dropped, false, 0);
+        assert!(md.contains("## Dropped by verification"));
+        assert!(md.contains("False alarm"));
+        assert!(!md.contains("Verification pass ran"));
     }
 }

@@ -90,6 +90,14 @@ pub struct ReportConfig {
     /// If `true`, findings below `min_confidence` are dropped instead of included.
     #[serde(default = "default_drop_low_confidence")]
     pub drop_low_confidence: bool,
+    /// If `true`, an extra LLM verification pass re-checks each finding against
+    /// the diff hunks, the referenced file's full content, and the changed-file
+    /// list, dropping findings the evidence disproves. Off by default (extra cost).
+    #[serde(default = "default_verification_pass")]
+    pub verification_pass: bool,
+    /// Maximum bytes of referenced file content injected into the verification prompt.
+    #[serde(default = "default_verification_max_file_bytes")]
+    pub verification_max_file_bytes: usize,
 }
 
 /// Parameters controlling how large diffs are processed and chunked.
@@ -334,6 +342,8 @@ impl Default for ReportConfig {
             max_findings_per_expert: 5,
             min_confidence: 6,
             drop_low_confidence: false,
+            verification_pass: false,
+            verification_max_file_bytes: 20000,
         }
     }
 }
@@ -395,6 +405,12 @@ fn default_min_confidence() -> u8 {
 }
 fn default_drop_low_confidence() -> bool {
     false
+}
+fn default_verification_pass() -> bool {
+    false
+}
+fn default_verification_max_file_bytes() -> usize {
+    20000
 }
 
 fn default_scoring_enabled() -> bool {
@@ -633,6 +649,8 @@ low_max = 85
         assert_eq!(config.report.max_findings_per_expert, 5);
         assert_eq!(config.report.min_confidence, 6);
         assert!(!config.report.drop_low_confidence);
+        assert!(!config.report.verification_pass);
+        assert_eq!(config.report.verification_max_file_bytes, 20000);
     }
 
     #[test]
@@ -644,6 +662,8 @@ aggregated = true
 max_findings_per_expert = 10
 min_confidence = 7
 drop_low_confidence = true
+verification_pass = true
+verification_max_file_bytes = 50000
 "#,
         )
         .unwrap();
@@ -652,5 +672,7 @@ drop_low_confidence = true
         assert_eq!(config.report.max_findings_per_expert, 10);
         assert_eq!(config.report.min_confidence, 7);
         assert!(config.report.drop_low_confidence);
+        assert!(config.report.verification_pass);
+        assert_eq!(config.report.verification_max_file_bytes, 50000);
     }
 }

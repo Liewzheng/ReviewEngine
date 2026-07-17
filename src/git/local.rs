@@ -67,6 +67,10 @@ impl LocalGitBrowser {
 
     /// Get the diff between two refs (or a commit range).
     ///
+    /// The diff is produced with `-U10` (10 lines of context around each
+    /// change instead of git's default 3) so reviewers see more of the
+    /// surrounding code and speculate less about code outside the hunks.
+    ///
     /// If `staged` is true, returns the staged diff (`--cached`).
     /// If `since` is provided, returns the diff from `since..HEAD`
     /// (or `since..until` if `until` is also given).
@@ -80,7 +84,7 @@ impl LocalGitBrowser {
         until: Option<&str>,
     ) -> Result<String> {
         let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(&self.repo_path).arg("diff");
+        cmd.arg("-C").arg(&self.repo_path).arg("diff").arg("-U10");
 
         if staged {
             cmd.arg("--cached");

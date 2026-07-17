@@ -31,6 +31,8 @@ The config file uses TOML format. Below is the complete schema with all availabl
 |-------|------|---------|-------------|
 | `aggregated` | boolean | `false` | Whether to produce an aggregated report |
 | `max_findings_per_expert` | integer | `5` | Max findings per expert in the prompt |
+| `verification_pass` | boolean | `false` | Extra LLM pass that re-checks each finding against the diff hunks, the referenced file's full content, and the changed-file list; drops findings the evidence disproves (fail-open, adds LLM cost) |
+| `verification_max_file_bytes` | integer | `20000` | Max bytes of referenced file content injected into the verification prompt |
 
 ## `[scoring]`
 
@@ -210,3 +212,5 @@ window_seconds = 60
 3. Project-level config (`.code-audit-config.toml` in the project root)
 4. Environment variables (`LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.)
 5. CLI arguments (`--llm-config`, `--config`)
+
+When no `--config` is given, the user-level file contributes `[[llm]]` (as a fallback) and `[report]` (as global defaults); the project-level file then overrides `commands`/`review_experts` (extended) and `[report]` (replaced wholesale — fields omitted in the project file fall back to serde defaults, not user-level values).

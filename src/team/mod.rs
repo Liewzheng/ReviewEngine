@@ -10,6 +10,7 @@
 
 pub mod lead_consolidator;
 pub mod orchestrator;
+pub mod verifier;
 
 pub use crate::models::ExpertReport;
 
@@ -30,6 +31,8 @@ pub struct TeamReport {
     /// Result of the lead consolidator, including confidence filtering,
     /// deduplication, conflict detection, and scoring.
     pub consolidated: Option<crate::team::lead_consolidator::ConsolidationResult>,
+    /// Findings dropped by the optional verification pass, with reasons.
+    pub dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
 }
 
 /// Per-expert metrics collected during review.

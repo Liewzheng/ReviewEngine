@@ -906,6 +906,7 @@ async function loadProviders() {
       temperature: 0.7,
       timeout: 60,
       retry: 3,
+      id: p.id,
       _key: `provider-${p.id}`,
       _expanded: false,
       _isNew: false,

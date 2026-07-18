@@ -139,6 +139,12 @@ pub struct ExpertTomlDef {
     pub commands: Vec<String>,
     /// Condition under which this expert is activated.
     pub trigger: Option<ExpertTrigger>,
+    /// Substrings matched against chunk diff content during large-PR routing.
+    /// Files whose rendered diff text contains any of these strings are routed
+    /// to this expert with priority; unmatched files fall back to the regular
+    /// file-pattern / route-to-all logic.
+    #[serde(default)]
+    pub content_patterns: Vec<String>,
     /// Expert's persona/prompt text injected into the LLM system prompt.
     /// If not set, a default perspective is generated from the trigger configuration.
     #[serde(alias = "trigger_prompt", alias = "perspective")]

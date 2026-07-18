@@ -170,7 +170,7 @@ describe = true
         assert_eq!(cfg.diff.max_tokens_per_chunk, 30000);
         assert_eq!(cfg.diff.large_pr_file_threshold, 21);
         assert_eq!(cfg.diff.large_pr_line_threshold, 1000);
-        assert_eq!(cfg.diff.compression_level, "aggressive");
+        assert_eq!(cfg.diff.compression_level, "auto");
         assert_eq!(cfg.diff.chunking_strategy, "adaptive");
         assert_eq!(cfg.diff.max_chunks_per_expert, 3);
     }

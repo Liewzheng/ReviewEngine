@@ -251,16 +251,23 @@ fn assess_and_chunk_diff(
     let assessment = large_pr::assess_large_pr(files, &thresholds);
 
     let chunked_mode = if assessment.is_large && !non_aggregators.is_empty() {
-        info!(
-            "Large PR detected: {} files, {} changes, compressing at {:?} level",
-            assessment.file_count, assessment.total_changes, assessment.compression_level
+        let (effective_level, compression_actions) = large_pr::apply_configured_compression(
+            files,
+            &config.diff.compression_level,
+            &assessment.compression_level,
         );
-
-        large_pr::apply_compression(files, &assessment.compression_level);
+        info!(
+            "Large PR detected: {} files, {} changes, compressing at {:?} level ({} actions)",
+            assessment.file_count,
+            assessment.total_changes,
+            effective_level,
+            compression_actions.len()
+        );
 
         let chunks = match config.diff.chunking_strategy.as_str() {
             "files" => chunker::chunk_by_files(files, config.diff.max_tokens_per_chunk),
             "hunks" => chunker::chunk_by_hunks(files, config.diff.max_tokens_per_chunk),
+            "semantic" => chunker::semantic_chunk(files, config.diff.max_tokens_per_chunk),
             _ => chunker::adaptive_chunk(files, config.diff.max_tokens_per_chunk),
         };
 

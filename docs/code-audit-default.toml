@@ -61,9 +61,16 @@ max_tokens_per_chunk = 30000
 large_pr_file_threshold = 21
 # PRs exceeding this changed-line count are treated as large PRs
 large_pr_line_threshold = 1000
-# Compression level: one of "none", "light", "medium", "aggressive"
-compression_level = "aggressive"
-# Chunking strategy: one of "files", "hunks", "adaptive"
+# Compression level for large PRs:
+#   "auto"       — derive the level from PR size (recommended; previous default behaviour)
+#   "none"       — skip compression entirely
+#   "light"      — compress deletion-only files only
+#   "medium"     — light + generated/vendor filtering, priority sort, line truncation
+#   "aggressive" — medium + tighter truncation and a 40K token budget
+compression_level = "auto"
+# Chunking strategy: one of "files", "hunks", "adaptive", "semantic"
+# ("semantic" groups files by directory + extension before chunking, so files
+# from the same module stay in the same chunk where possible)
 chunking_strategy = "adaptive"
 # Maximum number of chunks each expert processes
 max_chunks_per_expert = 3
@@ -169,6 +176,9 @@ principles = [
 ]
 focus = ["injection", "authz", "secrets", "input_validation", "crypto"]
 standards = ["OWASP Top 10", "CWE"]
+# Large-PR routing: files whose diff content contains any of these substrings
+# are routed to this expert with priority
+content_patterns = ["auth", "token", "crypto", "password", "secret"]
 prompt = """
 ## 身份
 你是 CodeReview Board 的 Security Lead，一名 Staff Security Engineer。
@@ -214,6 +224,9 @@ principles = [
 ]
 focus = ["algorithm", "memory", "concurrency", "io", "caching"]
 standards = ["Latency SLO best practices"]
+# Large-PR routing: files whose diff content contains any of these substrings
+# are routed to this expert with priority
+content_patterns = ["for ", "while ", "loop", "mutex", "lock", "await", "query"]
 prompt = """
 ## 身份
 你是 CodeReview Board 的 Performance Lead，一名 Performance Engineer。

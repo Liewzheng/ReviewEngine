@@ -538,7 +538,11 @@ pub async fn run() -> Result<()> {
                 }
             }
 
-            let config = review_engine::config::resolve_config(None).await?;
+            let mut config = review_engine::config::resolve_config(None).await?;
+            // LLM_CONFIG env is a fallback for the provider list only: a
+            // non-empty [[llm]] from config files always wins (same
+            // precedence as webhook-triggered reviews).
+            review_engine::config::apply_llm_env_fallback(&mut config);
             let mut app_state = review_engine::server::AppState::new(config.llm.clone());
             app_state.task_store = Some(Arc::new(review_engine::server::task_queue::TaskStore::new()));
             app_state.app_config = std::sync::RwLock::new(Some(Arc::new(config.clone())));

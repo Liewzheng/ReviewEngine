@@ -16,10 +16,9 @@ pub fn resolve_llm_configs(argv_llm_configs: &[String], config: &AppConfig) -> a
         }
         return Ok(configs);
     }
-    if let Ok(json) = std::env::var("LLM_CONFIG") {
-        if !json.is_empty() && json != "[]" {
-            return Ok(serde_json::from_str(&json)?);
-        }
+    let env_configs = review_engine::config::llm_configs_from_env();
+    if !env_configs.is_empty() {
+        return Ok(env_configs);
     }
     if !config.llm.is_empty() {
         return Ok(config.llm.clone());

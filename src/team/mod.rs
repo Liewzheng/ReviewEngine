@@ -30,7 +30,7 @@ pub struct TeamReport {
     pub request_id: String,
     /// Result of the lead consolidator, including confidence filtering,
     /// deduplication, conflict detection, and scoring.
-    pub consolidated: Option<crate::team::lead_consolidator::ConsolidationResult>,
+    pub consolidated: Option<crate::team::lead_consolidator::ConsolidatedReport>,
     /// Findings dropped by the optional verification pass, with reasons.
     pub dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
 }

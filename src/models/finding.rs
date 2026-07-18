@@ -114,8 +114,9 @@ impl std::fmt::Display for Effort {
 
 /// The top-level output of a complete review pipeline.
 ///
-/// Contains individual per-expert reports and an optional aggregated
-/// report produced by the aggregator expert.
+/// Contains individual per-expert reports, an optional aggregated
+/// report produced by the aggregator expert, and an optional lead
+/// consolidation summary computed from all expert findings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewOutput {
     /// Per-expert review reports.
@@ -125,6 +126,11 @@ pub struct ReviewOutput {
     /// Findings dropped by the optional verification pass, with reasons.
     #[serde(default)]
     pub dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
+    /// Lead consolidation summary (confidence filtering, deduplication,
+    /// conflicts, overall score). Always computed for expert-team reviews;
+    /// `None` for non-review commands (describe/ask/improve/changelog).
+    #[serde(default)]
+    pub consolidated: Option<crate::team::lead_consolidator::ConsolidatedReport>,
 }
 
 /// A consolidated report produced by the aggregator expert.
@@ -148,6 +154,7 @@ impl ReviewOutput {
             reports,
             aggregated: None,
             dropped_findings: Vec::new(),
+            consolidated: None,
         }
     }
 
@@ -157,12 +164,19 @@ impl ReviewOutput {
             reports,
             aggregated: Some(aggregated),
             dropped_findings: Vec::new(),
+            consolidated: None,
         }
     }
 
     /// Attach findings dropped by the verification pass.
     pub fn with_dropped_findings(mut self, dropped_findings: Vec<crate::team::verifier::DroppedFinding>) -> Self {
         self.dropped_findings = dropped_findings;
+        self
+    }
+
+    /// Attach the lead consolidation summary.
+    pub fn with_consolidated(mut self, consolidated: crate::team::lead_consolidator::ConsolidatedReport) -> Self {
+        self.consolidated = Some(consolidated);
         self
     }
 }

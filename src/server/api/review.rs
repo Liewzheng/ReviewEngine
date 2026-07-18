@@ -282,12 +282,14 @@ async fn run_review(
     )
     .await;
 
-    let (reports, _, dropped_findings) = match review_result {
+    let (reports, _, dropped_findings, consolidated) = match review_result {
         Ok(result) => result?,
         Err(_) => anyhow::bail!("Task timed out after 600 seconds"),
     };
 
-    let output = crate::models::ReviewOutput::new(reports).with_dropped_findings(dropped_findings);
+    let output = crate::models::ReviewOutput::new(reports)
+        .with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated);
     let findings: usize = output.reports.iter().map(|r| r.findings.len()).sum();
     let summary = format!("{} expert report(s), {} finding(s)", output.reports.len(), findings);
     let value = serde_json::to_value(&output).unwrap_or_default();

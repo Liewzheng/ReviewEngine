@@ -3,6 +3,7 @@
 //! @module review-engine: CodeReview Board platform
 use crate::models::*;
 use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
+use crate::team::lead_consolidator::ConsolidatedReport;
 
 /// Render a full team report as markdown.
 ///
@@ -188,6 +189,46 @@ pub fn render_team_report(
     render_team_report_with_scoring(team_name, reports, metrics, errors, None)
 }
 
+/// Render the lead consolidation summary as a Markdown section.
+///
+/// Uses the same Overall Assessment / TL;DR formats as the team report,
+/// and appends the expert-conflict list when conflicts were detected.
+/// Rendered after the per-expert reports and before the "Dropped by
+/// verification" appendix in both CLI Markdown output and MR comments.
+pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
+    let assessment = &consolidated.assessment;
+    let mut out = String::from("## Lead Summary\n\n");
+
+    out.push_str(&format!(
+        "**Overall Assessment**: Overall Score: **{}/100** (Risk Level: {})\n\n",
+        assessment.score, assessment.risk_level,
+    ));
+    out.push_str(&format!(
+        "### TL;DR\n{}\n\n",
+        close_unclosed_code_fences(&assessment.tl_dr)
+    ));
+
+    if !consolidated.conflicts.is_empty() {
+        out.push_str("### Expert Conflicts\n\n");
+        for conflict in &consolidated.conflicts {
+            let line = conflict.line.map_or(String::new(), |l| format!(":{}", l));
+            out.push_str(&format!(
+                "- `{file}{line}` — **{issue}** ({experts})\n",
+                file = conflict.file,
+                line = line,
+                issue = conflict.issue,
+                experts = conflict.experts.join(", "),
+            ));
+            for (expert, resolution) in conflict.experts.iter().zip(conflict.resolutions.iter()) {
+                out.push_str(&format!("  - {}: {}\n", expert, close_unclosed_code_fences(resolution)));
+            }
+        }
+        out.push('\n');
+    }
+
+    out
+}
+
 /// Generate a concise TL;DR summary from expert reports.
 fn generate_tldr(reports: &[crate::team::ExpertReport], risk: &RiskLevel) -> String {
     let total_critical: usize = reports
@@ -361,5 +402,58 @@ mod tests {
         let report1 = render_team_report("Test", &reports, &metrics, &[]);
         let report2 = render_team_report_with_scoring("Test", &reports, &metrics, &[], None);
         assert_eq!(report1, report2);
+    }
+
+    // ── render_lead_summary ──
+
+    fn make_consolidated(score: u8, risk_level: RiskLevel, tl_dr: &str) -> ConsolidatedReport {
+        ConsolidatedReport {
+            findings: vec![],
+            low_confidence_removed: 0,
+            duplicates_merged: 0,
+            conflicts: vec![],
+            assessment: OverallAssessment {
+                score,
+                risk_level,
+                lead_override: None,
+                tl_dr: tl_dr.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn test_render_lead_summary_without_conflicts() {
+        let consolidated = make_consolidated(85, RiskLevel::LowMedium, "1 high found by 3 reviewers.");
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("## Lead Summary"));
+        assert!(md.contains("Overall Score: **85/100**"));
+        assert!(md.contains("Risk Level: low-medium"));
+        assert!(md.contains("### TL;DR"));
+        assert!(md.contains("1 high found by 3 reviewers."));
+        assert!(!md.contains("Expert Conflicts"));
+    }
+
+    #[test]
+    fn test_render_lead_summary_with_conflicts() {
+        let mut consolidated = make_consolidated(70, RiskLevel::Medium, "2 reviewers disagree.");
+        consolidated
+            .conflicts
+            .push(crate::team::lead_consolidator::ExpertConflict {
+                file: "src/auth.rs".to_string(),
+                line: Some(42),
+                issue: "Token comparison".to_string(),
+                experts: vec!["security".to_string(), "performance".to_string()],
+                resolutions: vec![
+                    "Use constant-time comparison".to_string(),
+                    "Cache the token hash".to_string(),
+                ],
+            });
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("### Expert Conflicts"));
+        assert!(md.contains("`src/auth.rs:42`"));
+        assert!(md.contains("Token comparison"));
+        assert!(md.contains("security, performance"));
+        assert!(md.contains("security: Use constant-time comparison"));
+        assert!(md.contains("performance: Cache the token hash"));
     }
 }

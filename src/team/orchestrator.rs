@@ -23,7 +23,7 @@ use crate::progress::{ProgressMap, ReviewProgress, StageWeight};
 use crate::prompt::PromptEngine;
 
 use crate::output::parser::validate_findings;
-use crate::team::lead_consolidator::ConsolidatorConfig;
+use crate::team::lead_consolidator::{ConsolidatedReport, ConsolidatorConfig};
 use crate::team::verifier::{self, DroppedFinding};
 
 use super::{ExpertMetrics, TeamOrchestrator, TeamReport};
@@ -150,31 +150,22 @@ impl TeamOrchestrator for DefaultOrchestrator {
             _ => (None, None),
         };
 
-        let (reports, metrics, total_tokens, errors, _global_context, dropped_findings) = run_experts_inner(
-            &selected_defs,
-            &mr_info,
-            &diff_raw,
-            llm_configs,
-            config,
-            self.progress_map.as_ref(),
-            &self.review_id,
-            base_ref.as_deref(),
-            head_ref.as_deref(),
-        )
-        .await?;
+        let (reports, metrics, total_tokens, errors, _global_context, dropped_findings, consolidated) =
+            run_experts_inner(
+                &selected_defs,
+                &mr_info,
+                &diff_raw,
+                llm_configs,
+                config,
+                self.progress_map.as_ref(),
+                &self.review_id,
+                base_ref.as_deref(),
+                head_ref.as_deref(),
+            )
+            .await?;
 
-        // Lead consolidation: merge and filter validated findings.
-        let consolidated = {
-            let consolidator_config = ConsolidatorConfig {
-                min_confidence: config.report.min_confidence,
-                drop_low_confidence: config.report.drop_low_confidence,
-                scoring: Some(config.scoring.clone()),
-                ..Default::default()
-            };
-            Some(consolidator_config.consolidate(&reports, None))
-        };
-
-        // Phase 3-4: Cross-check & Lead Consolidation (placeholder for future)
+        // Optional aggregator expert (LLM consolidation) on top of the
+        // deterministic lead consolidation already computed in `run_experts_inner`.
         let aggregated = if config.report.aggregated && experts.iter().any(|e| e.name == "aggregator") {
             if let Some(aggregator) = experts.iter().find(|e| e.name == "aggregator") {
                 let prompt_engine = PromptEngine::new();
@@ -217,7 +208,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
             aggregated,
             errors,
             metrics,
-            consolidated,
+            consolidated: Some(consolidated),
             dropped_findings,
         })
     }
@@ -445,9 +436,25 @@ fn collect_expert_results(
     (reports, metrics, total_tokens, errors)
 }
 
+/// Run lead consolidation over the validated expert findings.
+///
+/// Pure computation (no LLM calls): confidence filtering, deduplication,
+/// conflict detection, and overall scoring, driven by `config.report`
+/// (`min_confidence`, `drop_low_confidence`) and `config.scoring`.
+fn build_consolidated_report(reports: &[ExpertReport], config: &AppConfig) -> ConsolidatedReport {
+    ConsolidatorConfig {
+        min_confidence: config.report.min_confidence,
+        drop_low_confidence: config.report.drop_low_confidence,
+        scoring: Some(config.scoring.clone()),
+        ..Default::default()
+    }
+    .consolidate(reports, None)
+}
+
 /// Run the core expert pipeline: diff parsing → large PR handling → parallel LLM execution.
 ///
-/// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context, dropped_findings).
+/// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context,
+/// dropped_findings, consolidated).
 #[allow(clippy::type_complexity)]
 pub(crate) async fn run_experts_inner(
     experts: &[ExpertDef],
@@ -466,6 +473,7 @@ pub(crate) async fn run_experts_inner(
     Vec<String>,
     Option<GlobalReviewContext>,
     Vec<DroppedFinding>,
+    ConsolidatedReport,
 )> {
     let mut files = parse_and_filter_diff(diff_raw);
 
@@ -621,7 +629,20 @@ pub(crate) async fn run_experts_inner(
         Vec::new()
     };
 
-    Ok((reports, metrics, total_tokens, errors, global_context, dropped_findings))
+    // Lead consolidation over the validated findings: confidence filtering,
+    // deduplication, conflict detection, and overall scoring. Pure
+    // computation, so it always runs.
+    let consolidated = build_consolidated_report(&reports, config);
+
+    Ok((
+        reports,
+        metrics,
+        total_tokens,
+        errors,
+        global_context,
+        dropped_findings,
+        consolidated,
+    ))
 }
 
 /// Run all applicable experts against the given MR diff.
@@ -631,8 +652,9 @@ pub(crate) async fn run_experts_inner(
 /// chunking, lead overview (Pass 1), rate-limited parallel expert
 /// dispatch, and consolidation.
 ///
-/// Returns per-expert reports, an optional global review context, and any
-/// findings dropped by the optional verification pass.
+/// Returns per-expert reports, an optional global review context, any
+/// findings dropped by the optional verification pass, and the lead
+/// consolidation summary (always computed — pure post-processing).
 pub async fn run_experts(
     experts: &[ExpertDef],
     mr_info: &MRInfo,
@@ -641,7 +663,12 @@ pub async fn run_experts(
     config: &AppConfig,
     progress_map: Option<ProgressMap>,
     review_id: &str,
-) -> anyhow::Result<(Vec<ExpertReport>, Option<GlobalReviewContext>, Vec<DroppedFinding>)> {
+) -> anyhow::Result<(
+    Vec<ExpertReport>,
+    Option<GlobalReviewContext>,
+    Vec<DroppedFinding>,
+    ConsolidatedReport,
+)> {
     // Initialize progress (skip if already initialized by caller)
     if let Some(ref map) = progress_map {
         let exists = map.read().ok().map(|g| g.contains_key(review_id)).unwrap_or(false);
@@ -658,7 +685,7 @@ pub async fn run_experts(
         }
     }
 
-    let (reports, _, _, _, global_context, dropped_findings) = run_experts_inner(
+    let (reports, _, _, _, global_context, dropped_findings, consolidated) = run_experts_inner(
         experts,
         mr_info,
         diff_raw,
@@ -671,7 +698,7 @@ pub async fn run_experts(
     )
     .await?;
 
-    Ok((reports, global_context, dropped_findings))
+    Ok((reports, global_context, dropped_findings, consolidated))
 }
 
 /// Run the aggregator expert to merge individual expert reports.
@@ -744,5 +771,131 @@ async fn resolve_input(_command: &Command, input: &ReviewInput) -> anyhow::Resul
             );
             Ok((diff, mr_info))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_finding(severity: Severity, confidence: u8, file: &str, line: Option<u32>, title: &str) -> Finding {
+        Finding {
+            file: file.to_string(),
+            line,
+            line_end: None,
+            severity,
+            confidence,
+            category: String::new(),
+            title: title.to_string(),
+            summary: String::new(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: String::new(),
+            effort: Effort::Small,
+            expert_name: "test".to_string(),
+            expert_role: String::new(),
+            agrees_with: vec![],
+            references: vec![],
+        }
+    }
+
+    fn make_report(expert_name: &str, findings: Vec<Finding>) -> ExpertReport {
+        ExpertReport {
+            expert_name: expert_name.to_string(),
+            findings,
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+        }
+    }
+
+    fn test_config() -> AppConfig {
+        AppConfig {
+            project: None,
+            report: ReportConfig::default(),
+            review_experts: HashMap::new(),
+            commands: HashMap::new(),
+            scoring: ScoringConfig::default(),
+            llm: Vec::new(),
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            output_dir: String::new(),
+            diff: DiffConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            languages: LanguagesConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_build_consolidated_report_respects_min_confidence_drop() {
+        let mut config = test_config();
+        config.report.min_confidence = 9;
+        config.report.drop_low_confidence = true;
+        let reports = vec![make_report(
+            "security",
+            vec![
+                make_finding(Severity::High, 5, "a.rs", Some(1), "low confidence finding"),
+                make_finding(Severity::Medium, 10, "b.rs", Some(2), "confident finding"),
+            ],
+        )];
+        let consolidated = build_consolidated_report(&reports, &config);
+        assert_eq!(consolidated.low_confidence_removed, 1);
+        assert_eq!(consolidated.findings.len(), 1);
+        assert_eq!(consolidated.findings[0].title, "confident finding");
+    }
+
+    #[test]
+    fn test_build_consolidated_report_downgrades_by_default() {
+        // Default config: min_confidence = 6, drop_low_confidence = false
+        let config = test_config();
+        let reports = vec![make_report(
+            "security",
+            vec![make_finding(Severity::High, 4, "a.rs", Some(1), "shaky finding")],
+        )];
+        let consolidated = build_consolidated_report(&reports, &config);
+        assert_eq!(consolidated.low_confidence_removed, 0);
+        assert_eq!(consolidated.findings.len(), 1);
+        // Downgraded one severity step: High → Medium
+        assert_eq!(consolidated.findings[0].severity, Severity::Medium);
+    }
+
+    #[test]
+    fn test_build_consolidated_report_detects_conflicts_and_scores() {
+        let config = test_config();
+        let mut f1 = make_finding(Severity::Medium, 8, "a.rs", Some(1), "Style");
+        f1.recommendation = "Use tabs".to_string();
+        f1.expert_name = "alice".to_string();
+        let mut f2 = make_finding(Severity::Medium, 8, "a.rs", Some(1), "Style");
+        f2.title = "Other take".to_string();
+        f2.recommendation = "Use spaces".to_string();
+        f2.expert_name = "bob".to_string();
+        let reports = vec![make_report("alice", vec![f1]), make_report("bob", vec![f2])];
+        let consolidated = build_consolidated_report(&reports, &config);
+        assert!(!consolidated.conflicts.is_empty());
+        assert!(consolidated.assessment.score <= 100);
+        assert!(!consolidated.assessment.tl_dr.is_empty());
+    }
+
+    /// End-to-end wiring check: `run_experts` always returns a lead
+    /// consolidation summary, even with an empty expert team (no LLM calls).
+    #[tokio::test]
+    async fn test_run_experts_returns_consolidated_report() {
+        let config = test_config();
+        let mr_info = MRInfo::new(
+            "test/project".to_string(),
+            "Test review".to_string(),
+            "feat/test".to_string(),
+            "main".to_string(),
+        );
+        let (reports, _global_context, dropped_findings, consolidated) =
+            run_experts(&[], &mr_info, "", &[], &config, None, "test-review-id")
+                .await
+                .expect("run_experts with empty team should succeed");
+        assert!(reports.is_empty());
+        assert!(dropped_findings.is_empty());
+        // Empty team → perfect score, no conflicts, non-empty TL;DR.
+        assert_eq!(consolidated.assessment.score, 100);
+        assert!(consolidated.conflicts.is_empty());
+        assert!(consolidated.findings.is_empty());
+        assert!(!consolidated.assessment.tl_dr.is_empty());
     }
 }

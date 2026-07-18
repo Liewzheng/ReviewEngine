@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::models::*;
 use crate::scoring::review;
 
@@ -28,8 +30,8 @@ impl Default for ConsolidatorConfig {
 }
 
 /// Result of the consolidation process.
-#[derive(Debug, Clone)]
-pub struct ConsolidationResult {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidatedReport {
     /// Consolidated findings (deduplicated, filtered).
     pub findings: Vec<Finding>,
     /// Number of findings removed for low confidence.
@@ -43,7 +45,7 @@ pub struct ConsolidationResult {
 }
 
 /// A conflict between two or more experts on the same issue.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpertConflict {
     pub file: String,
     pub line: Option<u32>,
@@ -54,7 +56,7 @@ pub struct ExpertConflict {
 
 impl ConsolidatorConfig {
     /// Run the full consolidation pipeline.
-    pub fn consolidate(&self, reports: &[ExpertReport], total_score: Option<u8>) -> ConsolidationResult {
+    pub fn consolidate(&self, reports: &[ExpertReport], total_score: Option<u8>) -> ConsolidatedReport {
         let mut all_findings: Vec<Finding> = reports.iter().flat_map(|r| r.findings.clone()).collect();
 
         // Step 1: Filter by confidence
@@ -90,7 +92,7 @@ impl ConsolidatorConfig {
             tl_dr,
         };
 
-        ConsolidationResult {
+        ConsolidatedReport {
             findings: all_findings,
             low_confidence_removed,
             duplicates_merged,

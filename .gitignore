@@ -20,6 +20,6 @@ plan*.md
 AGENTS.md
 
 # Directories
-config/
+/config/
 screenshots/
 reports/

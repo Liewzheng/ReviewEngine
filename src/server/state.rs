@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use crate::models::LLMConfig;
 use crate::server::api::config::UiConfig;
+use crate::server::feedback::FeedbackStore;
 use crate::server::log_collector::LogCollector;
 use crate::server::task_queue::TaskStore;
 
@@ -29,6 +30,8 @@ pub struct AppState {
     pub log_collector: Option<Arc<Mutex<LogCollector>>>,
     /// UI-facing configuration (frontend-compatible shape, persisted in-memory).
     pub ui_config: RwLock<UiConfig>,
+    /// Finding feedback store for user verdicts (optional).
+    pub feedback_store: Option<Arc<FeedbackStore>>,
 }
 
 impl AppState {
@@ -45,6 +48,7 @@ impl AppState {
             app_config: RwLock::new(None),
             log_collector: None,
             ui_config: RwLock::new(UiConfig::default()),
+            feedback_store: None,
         }
     }
 }
@@ -62,6 +66,7 @@ mod tests {
         assert!(state.task_store.is_none());
         assert!(state.app_config.read().unwrap().is_none());
         assert!(state.log_collector.is_none());
+        assert!(state.feedback_store.is_none());
     }
 
     #[test]

@@ -656,6 +656,71 @@ Response 200:
 
 ---
 
+### 9. Finding 反馈闭环
+
+用户对单条 finding 打「有用 / 误报」标记，服务端按稳定 fingerprint 归并统计命中率与误报率，为后续 prompt 校准和降误报提供数据基础（设计见 `docs/professional_team_design.md` §6.3 / §8.9）。
+
+**fingerprint**：对 `(file, line, title, category)` 做 SHA-256（字段间以 `0x1f` 分隔），取前 16 个 hex 字符。同一 finding 在多次评审中 fingerprint 不变。
+
+**存储**：JSON 数组，默认 `~/.config/review-engine/feedback.json`，可用环境变量 `REVIEW_FEEDBACK_PATH` 覆盖；写入为原子写（tmp + rename）。
+
+#### `POST /api/v1/feedback`
+
+记录一条反馈。`verdict` 必填，取值 `"useful"` | `"false_positive"`。finding 有两种定位方式，二选一：
+
+- 直接给 `finding_fingerprint`（非空字符串）；
+- 或给 `file` + `title` + `category`（`line` 可选），由服务端计算 fingerprint（此时 `category` 会随记录保存，用于分类统计）。
+
+```
+Request（便捷形式）:
+{
+  "file": "src/main.rs",
+  "line": 42,
+  "title": "SQL injection risk",
+  "category": "security",
+  "verdict": "false_positive",
+  "comment": "input is sanitised upstream"   // 可选
+}
+
+Request（fingerprint 形式）:
+{
+  "finding_fingerprint": "9f2c1ab7e04d3a55",
+  "verdict": "useful"
+}
+
+Response 200:
+{
+  "finding_fingerprint": "9f2c1ab7e04d3a55",
+  "verdict": "false_positive",
+  "comment": "input is sanitised upstream",
+  "category": "security",
+  "created_at": "2026-07-18T03:30:00Z"
+}
+```
+
+错误：`400` body 非法 / 缺 `verdict` / 两种定位方式都不完整；`503` feedback store 未初始化。
+
+#### `GET /api/v1/feedback/stats`
+
+聚合统计。`false_positive_rate = false_positive / total`（无数据时为 `0.0`）。按 fingerprint 形式提交、未带 `category` 的记录归入 `"unknown"` 桶。
+
+```
+Response 200:
+{
+  "total": 4,
+  "useful": 2,
+  "false_positive": 2,
+  "false_positive_rate": 0.5,
+  "by_category": {
+    "security": { "total": 2, "useful": 1, "false_positive": 1, "false_positive_rate": 0.5 },
+    "quality":  { "total": 1, "useful": 1, "false_positive": 0, "false_positive_rate": 0.0 },
+    "unknown":  { "total": 1, "useful": 0, "false_positive": 1, "false_positive_rate": 1.0 }
+  }
+}
+```
+
+---
+
 ## 数据流
 
 ```

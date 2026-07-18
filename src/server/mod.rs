@@ -4,8 +4,9 @@
 //! review-engine REST API (routes under `api/`), handles incoming
 //! webhooks from GitLab and GitHub (via the `gitlab`, `github`, and
 //! provider-agnostic `webhook` submodules), manages review
-//! authentication via `auth`, and provides a background task queue
-//! (`task_queue`) for asynchronous review processing. Application state
+//! authentication via `auth`, provides a background task queue
+//! (`task_queue`) for asynchronous review processing, and persists
+//! finding feedback via `feedback`. Application state
 //! is defined in [`state`], and the Axum [`Router`] is constructed by the
 //! [`router`] submodule.
 #![allow(clippy::unwrap_used)]
@@ -15,6 +16,7 @@ use std::sync::Arc;
 pub mod api;
 pub mod auth;
 pub mod dispatcher;
+pub mod feedback;
 pub mod github;
 pub mod gitlab;
 pub mod log_collector;

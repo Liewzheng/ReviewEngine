@@ -171,6 +171,7 @@ Large PR detection and chunking configuration. Controls when compression, chunki
 | `compression_level` | string | `"aggressive"` | Compression level: `"none"` / `"moderate"` / `"aggressive"`. Note: compression level is currently auto-determined by `assess_large_pr()` (severity-driven); this config field is not yet honored |
 | `chunking_strategy` | string | `"adaptive"` | Chunking strategy: `"files"` / `"hunks"` / `"adaptive"` (see `src/team/orchestrator.rs`) |
 | `max_chunks_per_expert` | integer | `3` | Maximum number of chunks each expert receives |
+| `max_context_file_bytes` | integer | `60000` | Total byte budget for full changed-file contents injected into expert prompts (local reviews only, per-file cap 20000 bytes; `0` disables) |
 
 **Detection logic:**
 
@@ -188,6 +189,7 @@ large_pr_line_threshold = 1000
 compression_level = "aggressive"
 chunking_strategy = "adaptive"
 max_chunks_per_expert = 3
+max_context_file_bytes = 60000
 ```
 
 ## `[languages]`

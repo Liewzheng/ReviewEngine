@@ -56,7 +56,8 @@ impl PromptEngine {
     /// The system prompt includes the expert's perspective/role, the
     /// detected language, and max-findings limit. The user prompt
     /// contains the MR title, branch, description, optional lead context,
-    /// and the full diff.
+    /// the full diff, and — for local reviews — an optional "Full File
+    /// Contents" section with the current contents of the changed files.
     ///
     /// Returns `(system_prompt, user_prompt)`.
     pub fn build_review_prompt(
@@ -67,6 +68,7 @@ impl PromptEngine {
         lang: &str,
         settings: &AppConfig,
         lead_context: Option<&GlobalReviewContext>,
+        file_contents: Option<&str>,
     ) -> Result<(String, String)> {
         let ctx_system = serde_json::json!({
             "perspective": expert.prompt,
@@ -96,6 +98,7 @@ impl PromptEngine {
             "domain": domain,
             "constraints": constraints,
             "lead_context": lead_section,
+            "file_contents": file_contents,
         });
 
         let user = self.env.get_template("review_user")?.render(&ctx_user)?;
@@ -350,7 +353,7 @@ mod tests {
         let settings = make_test_app_config(Some(project));
         let mr = make_test_mr();
         let (system, user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None)
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
             .unwrap();
 
         assert!(!system.is_empty());
@@ -370,7 +373,7 @@ mod tests {
         let settings = make_test_app_config(None);
         let mr = make_test_mr();
         let (system, _user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None)
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
             .unwrap();
 
         assert!(system.contains("evidence"));
@@ -388,7 +391,7 @@ mod tests {
         let settings = make_test_app_config(None);
         let mr = make_test_mr();
         let (_system, user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None)
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
             .unwrap();
 
         assert!(!user.contains("## Project Context"));
@@ -408,7 +411,7 @@ mod tests {
             project_overview: "Rust web service".to_string(),
         };
         let (_system, user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, Some(&lead))
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, Some(&lead), None)
             .unwrap();
 
         assert!(user.contains("## Lead Context"));
@@ -439,7 +442,7 @@ mod tests {
             project_overview: "Rust web service".to_string(),
         };
         let (_system, user) = engine
-            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, Some(&lead))
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, Some(&lead), None)
             .unwrap();
 
         assert!(user.contains("## Lead Context"));
@@ -449,6 +452,37 @@ mod tests {
         assert!(user.contains("Architecture: ARM"));
         assert!(user.contains("Domain: IoT"));
         assert!(user.contains("Constraints: 64 KiB RAM"));
+    }
+
+    #[test]
+    fn test_review_prompt_with_file_contents() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let settings = make_test_app_config(None);
+        let mr = make_test_mr();
+        let contents = "### `src/main.rs`\n```rust\nfn main() {}\n```";
+        let (_system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, Some(contents))
+            .unwrap();
+
+        assert!(user.contains("## Full File Contents"));
+        assert!(user.contains("### `src/main.rs`"));
+        assert!(user.contains("fn main() {}"));
+        // The section must come after the diff.
+        assert!(user.find("## Code Changes").unwrap() < user.find("## Full File Contents").unwrap());
+    }
+
+    #[test]
+    fn test_review_prompt_without_file_contents_omits_section() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let settings = make_test_app_config(None);
+        let mr = make_test_mr();
+        let (_system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
+            .unwrap();
+
+        assert!(!user.contains("## Full File Contents"));
     }
 
     #[test]

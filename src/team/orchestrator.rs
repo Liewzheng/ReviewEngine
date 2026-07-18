@@ -346,10 +346,14 @@ type Task = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<(E
 
 /// Create a boxed future for a single expert review task, shared by both
 /// the chunked and non-chunked execution paths.
+///
+/// `file_contents` is the rendered "Full File Contents" section for the
+/// files this task reviews (empty when unavailable, e.g. remote reviews).
 fn create_expert_task(
     expert: ExpertDef,
     mr_info: MRInfo,
     diff_text: String,
+    file_contents: String,
     lang: String,
     llm_configs: Vec<LLMConfig>,
     config: AppConfig,
@@ -382,6 +386,11 @@ fn create_expert_task(
             &lang,
             &config,
             global_context.as_ref(),
+            if file_contents.is_empty() {
+                None
+            } else {
+                Some(file_contents.as_str())
+            },
         )?;
         let llm_config = select_llm_config(&expert, &llm_configs);
         let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
@@ -521,6 +530,12 @@ pub(crate) async fn run_experts_inner(
     let diff_text = processor::render_diff_text(&files);
     let lang = filter::detect_language(&files);
 
+    // A2: inject the current full contents of changed files into expert
+    // prompts (local reviews only, budget-capped). Files unreadable from
+    // `mr_info.project_path` — e.g. remote GitLab/GitHub reviews — are
+    // skipped silently, leaving the prompt section absent as before.
+    let max_context_file_bytes = config.diff.max_context_file_bytes;
+
     info!(
         "Team review: {} experts on {} files",
         non_aggregators.len(),
@@ -547,11 +562,19 @@ pub(crate) async fn run_experts_inner(
 
                 let task_diff_text = processor::render_diff_text(&files_for_task);
                 let task_lang = filter::detect_language(&files_for_task);
+                // Chunked mode: each task injects only the contents of the
+                // files in its own chunk assignment.
+                let task_file_contents = crate::context::file_contents::build_file_contents_section(
+                    &files_for_task,
+                    &mr_info.project_path,
+                    max_context_file_bytes,
+                );
 
                 create_expert_task(
                     expert,
                     mr_info.clone(),
                     task_diff_text,
+                    task_file_contents,
                     task_lang,
                     llm_configs.to_vec(),
                     config.clone(),
@@ -566,6 +589,13 @@ pub(crate) async fn run_experts_inner(
             })
             .collect()
     } else {
+        // Non-chunked mode: all experts share one injection built from the
+        // full changed-file list.
+        let file_contents = crate::context::file_contents::build_file_contents_section(
+            &files,
+            &mr_info.project_path,
+            max_context_file_bytes,
+        );
         non_aggregators
             .into_iter()
             .map(|expert| {
@@ -573,6 +603,7 @@ pub(crate) async fn run_experts_inner(
                     expert,
                     mr_info.clone(),
                     diff_text.clone(),
+                    file_contents.clone(),
                     lang.clone(),
                     llm_configs.to_vec(),
                     config.clone(),

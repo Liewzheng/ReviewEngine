@@ -127,6 +127,10 @@ pub struct DiffConfig {
     /// Maximum number of chunks sent to a single expert.
     #[serde(default = "default_diff_max_chunks_per_expert")]
     pub max_chunks_per_expert: usize,
+    /// Total byte budget for full changed-file contents injected into expert
+    /// prompts (local reviews only). `0` disables the injection.
+    #[serde(default = "default_diff_max_context_file_bytes")]
+    pub max_context_file_bytes: usize,
 }
 
 /// Rate-limiting parameters for LLM API requests.
@@ -311,6 +315,7 @@ impl Default for DiffConfig {
             compression_level: default_diff_compression_level(),
             chunking_strategy: default_diff_chunking_strategy(),
             max_chunks_per_expert: default_diff_max_chunks_per_expert(),
+            max_context_file_bytes: default_diff_max_context_file_bytes(),
         }
     }
 }
@@ -385,6 +390,9 @@ fn default_diff_chunking_strategy() -> String {
 }
 fn default_diff_max_chunks_per_expert() -> usize {
     3
+}
+fn default_diff_max_context_file_bytes() -> usize {
+    60000
 }
 
 fn default_rate_limit_max_rpm() -> usize {

@@ -74,6 +74,8 @@ compression_level = "auto"
 chunking_strategy = "adaptive"
 # Maximum number of chunks each expert processes
 max_chunks_per_expert = 3
+# Total byte budget for full changed-file contents injected into expert prompts (0 disables)
+max_context_file_bytes = 60000
 
 [rate_limit]
 # max_rpm: maximum requests per minute

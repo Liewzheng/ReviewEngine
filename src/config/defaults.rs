@@ -173,6 +173,7 @@ describe = true
         assert_eq!(cfg.diff.compression_level, "auto");
         assert_eq!(cfg.diff.chunking_strategy, "adaptive");
         assert_eq!(cfg.diff.max_chunks_per_expert, 3);
+        assert_eq!(cfg.diff.max_context_file_bytes, 60000);
     }
 
     #[test]
@@ -194,6 +195,7 @@ large_pr_line_threshold = 500
 compression_level = "moderate"
 chunking_strategy = "files"
 max_chunks_per_expert = 5
+max_context_file_bytes = 40000
 "#;
         let cfg = parse_toml(toml_str).unwrap();
         assert_eq!(cfg.diff.max_input_tokens, 50000);
@@ -203,6 +205,7 @@ max_chunks_per_expert = 5
         assert_eq!(cfg.diff.compression_level, "moderate");
         assert_eq!(cfg.diff.chunking_strategy, "files");
         assert_eq!(cfg.diff.max_chunks_per_expert, 5);
+        assert_eq!(cfg.diff.max_context_file_bytes, 40000);
     }
 
     #[test]

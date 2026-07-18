@@ -139,6 +139,16 @@ Note: In the diff below:
 ```diff
 {{ diff }}
 ```
+
+{% if file_contents %}
+## Full File Contents
+The current full contents of files changed by this MR are provided below, one
+section per file (long files are truncated and noted; files over the context
+budget are listed as omitted). Use them to verify assumptions the diff alone
+cannot prove — but report findings ONLY for lines added or modified by this MR.
+
+{{ file_contents }}
+{% endif %}
 "###;
 
 pub(crate) const AGGREGATOR_SYSTEM_TEMPLATE: &str = r###"

@@ -317,6 +317,73 @@ impl Client {
         Ok(Some(content))
     }
 
+    /// Fetch the raw content of a repository file at the given git ref.
+    ///
+    /// Uses `GET /projects/:id/repository/files/:path/raw?ref=:ref` (the same
+    /// endpoint family as [`fetch_config_toml`](Self::fetch_config_toml)).
+    pub async fn fetch_file_raw(&self, path: &str, git_ref: &str) -> Result<String> {
+        validate_repo_file_path(path)?;
+        let project = self.encoded_project_path();
+        let url = format!(
+            "{}/projects/{}/repository/files/{}/raw",
+            self.base_url,
+            project,
+            encode_file_path(path),
+        );
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .query(&[("ref", git_ref)])
+            .send()
+            .await
+            .with_context(|| format!("Failed to send GET {url}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!(status = %status, path = %path, "Failed to fetch file content");
+            anyhow::bail!("GitLab API returned {status} for file '{path}': {body}");
+        }
+
+        resp.text()
+            .await
+            .with_context(|| format!("Failed to read file content response for '{path}'"))
+    }
+
+    /// Search the project's blobs for `query`, returning up to `limit`
+    /// distinct matching file paths.
+    ///
+    /// Uses `GET /projects/:id/search?scope=blobs`.
+    pub async fn search_code_paths(&self, query: &str, limit: usize) -> Result<Vec<String>> {
+        let project = self.encoded_project_path();
+        let url = format!("{}/projects/{}/search", self.base_url, project);
+        let per_page = limit.to_string();
+
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .query(&[("scope", "blobs"), ("search", query), ("per_page", per_page.as_str())])
+            .send()
+            .await
+            .with_context(|| format!("Failed to send GET {url}"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!(status = %status, "Failed to search blobs");
+            anyhow::bail!("GitLab API returned {status} for blob search: {body}");
+        }
+
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .with_context(|| "Failed to parse blob search response")?;
+        Ok(parse_blob_search_paths(&value, limit))
+    }
+
     pub async fn post_comment(&self, body: &str) -> Result<()> {
         let project = self.encoded_project_path();
         let url = format!(
@@ -541,4 +608,182 @@ pub struct NoteAuthor {
 
 fn encode_project_path(path: &str) -> String {
     path.replace('/', "%2F")
+}
+
+/// Defensive validation of a repository-relative file path before it is
+/// embedded in an API URL, consistent with `post_inline_note`.
+fn validate_repo_file_path(path: &str) -> Result<()> {
+    if path.is_empty() || path.contains("..") || path.starts_with('/') || path.starts_with('~') {
+        anyhow::bail!("Invalid repository file path: {path}");
+    }
+    Ok(())
+}
+
+/// Percent-encode a repository file path for use as a single URL path segment
+/// (GitLab requires the full path, including slashes, to be URL-encoded).
+fn encode_file_path(path: &str) -> String {
+    path.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Extract distinct file paths from a GitLab `scope=blobs` search response,
+/// capped at `limit` entries.
+fn parse_blob_search_paths(value: &serde_json::Value, limit: usize) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Some(items) = value.as_array() else {
+        return paths;
+    };
+    for item in items {
+        if let Some(path) = item.get("path").and_then(|p| p.as_str()) {
+            if !paths.iter().any(|p| p == path) {
+                paths.push(path.to_string());
+            }
+        }
+        if paths.len() >= limit {
+            break;
+        }
+    }
+    paths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Build a client pointed at a wiremock server. Tests live in the same
+    /// module, so private fields are accessible; `Client::new` cannot be
+    /// used because it derives `base_url` from the MR URL host and rejects
+    /// `host:port` forms.
+    fn make_test_client(server: &MockServer) -> Client {
+        Client {
+            http: HttpClient::new(),
+            base_url: server.uri(),
+            project_path: "group/project".to_string(),
+            mr_iid: 1,
+            gitlab_token: "test_token".to_string(),
+        }
+    }
+
+    // ─── helpers ──────────────────────────────────
+
+    #[test]
+    fn test_encode_file_path() {
+        assert_eq!(encode_file_path("src/main.rs"), "src%2Fmain.rs");
+        assert_eq!(encode_file_path("a b/c#.rs"), "a%20b%2Fc%23.rs");
+        assert_eq!(encode_file_path("plain.rs"), "plain.rs");
+    }
+
+    #[test]
+    fn test_validate_repo_file_path() {
+        assert!(validate_repo_file_path("src/main.rs").is_ok());
+        assert!(validate_repo_file_path("../secret").is_err());
+        assert!(validate_repo_file_path("/etc/passwd").is_err());
+        assert!(validate_repo_file_path("~/key").is_err());
+        assert!(validate_repo_file_path("").is_err());
+    }
+
+    #[test]
+    fn test_parse_blob_search_paths_dedups_and_caps() {
+        let value = json!([
+            {"path": "src/a.rs", "data": "..."},
+            {"path": "src/b.rs", "data": "..."},
+            {"path": "src/a.rs", "data": "..."},
+            {"path": "src/c.rs", "data": "..."}
+        ]);
+        assert_eq!(
+            parse_blob_search_paths(&value, 20),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string(), "src/c.rs".to_string()]
+        );
+        assert_eq!(
+            parse_blob_search_paths(&value, 2),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_blob_search_paths_tolerates_garbage() {
+        assert!(parse_blob_search_paths(&json!({"unexpected": true}), 20).is_empty());
+        assert!(parse_blob_search_paths(&json!([{"no_path": 1}]), 20).is_empty());
+    }
+
+    // ─── fetch_file_raw ───────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_file_raw_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/repository/files/src%2Fmain.rs/raw"))
+            .and(query_param("ref", "main"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("fn main() {}\n"))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let content = client.fetch_file_raw("src/main.rs", "main").await.unwrap();
+        assert_eq!(content, "fn main() {}\n");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_file_raw_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/repository/files/src%2Fmissing.rs/raw"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("{\"message\":\"404 File Not Found\"}"))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let err = client.fetch_file_raw("src/missing.rs", "main").await.unwrap_err();
+        assert!(err.to_string().contains("404"), "error should mention 404, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_file_raw_rejects_unsafe_path() {
+        let server = MockServer::start().await;
+        let client = make_test_client(&server);
+        assert!(client.fetch_file_raw("../secret", "main").await.is_err());
+    }
+
+    // ─── search_code_paths ────────────────────────
+
+    #[tokio::test]
+    async fn test_search_code_paths_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/search"))
+            .and(query_param("scope", "blobs"))
+            .and(query_param("search", "authenticate"))
+            .and(query_param("per_page", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"basename": "auth.rs", "path": "src/auth.rs", "data": "fn authenticate()"},
+                {"basename": "login.rs", "path": "src/login.rs", "data": "authenticate()"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let paths = client.search_code_paths("authenticate", 20).await.unwrap();
+        assert_eq!(paths, vec!["src/auth.rs".to_string(), "src/login.rs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_search_code_paths_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/search"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let err = client.search_code_paths("x", 20).await.unwrap_err();
+        assert!(err.to_string().contains("401"), "error should mention 401, got: {err}");
+    }
 }

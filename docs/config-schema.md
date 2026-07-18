@@ -35,6 +35,7 @@ The config file uses TOML format. Below is the complete schema with all availabl
 | `drop_low_confidence` | boolean | `false` | When `true`, findings below `min_confidence` are dropped entirely instead of downgraded |
 | `verification_pass` | boolean | `false` | Extra LLM pass that re-checks each finding against the diff hunks, the referenced file's full content, and the changed-file list; drops findings the evidence disproves (fail-open, adds LLM cost) |
 | `verification_max_file_bytes` | integer | `20000` | Max bytes of referenced file content injected into the verification prompt |
+| `feedback_filtering` | boolean | `true` | When `true`, findings previously marked as false positives via the feedback API (matched by stable fingerprint) are filtered out of subsequent reviews and listed in `dropped_findings`; fail-open when the feedback file is missing or unreadable |
 
 ## `[scoring]`
 

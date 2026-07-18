@@ -17,7 +17,7 @@ use axum::{
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::server::feedback::{fingerprint, FindingFeedback, Verdict};
+use crate::feedback::{fingerprint, FindingFeedback, Verdict};
 use crate::server::AppState;
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -143,7 +143,7 @@ async fn get_feedback_stats(State(state): State<Arc<AppState>>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server::feedback::FeedbackStore;
+    use crate::feedback::FeedbackStore;
 
     fn test_state(path: Option<std::path::PathBuf>) -> Arc<AppState> {
         let mut state = AppState::new(vec![]);

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.7.11] - 2026-07-18
+
+### Added
+- **Feedback-driven finding filtering** (A9 feedback loop, second half): findings previously marked as `false_positive` via `POST /api/v1/feedback` are now automatically filtered out of subsequent reviews. After the verification pass and before lead consolidation, the pipeline matches each finding by its stable fingerprint against the false-positive feedback set and drops the hits, listing them in `dropped_findings` with the reason "marked false positive by user feedback". Controlled by the new `[report] feedback_filtering` option (default `true`); fail-open when the feedback file is missing or unreadable. `useful` verdicts are neither filtered nor boosted yet (weighting is future work).
+- **Shared feedback module**: the fingerprint algorithm and feedback storage moved from `server::feedback` to the crate-level `feedback` module (re-exported as `server::feedback` for API compatibility), so the CLI review pipeline and the server feedback API compute identical fingerprints; `Finding::fingerprint()` exposes the same algorithm on the finding model, and `load_false_positive_fingerprints` provides the read-only, fail-open loader used by the pipeline.
+
 ## [0.7.10] - 2026-07-18
 
 ### Added

@@ -59,6 +59,18 @@ pub struct Finding {
     pub references: Vec<String>,
 }
 
+impl Finding {
+    /// Stable fingerprint identifying this finding across repeated reviews.
+    ///
+    /// Delegates to [`crate::feedback::fingerprint`] — the exact algorithm the
+    /// feedback API uses when recording user verdicts — so feedback submitted
+    /// through `POST /api/v1/feedback` matches the fingerprint computed here
+    /// when later reviews filter false positives.
+    pub fn fingerprint(&self) -> String {
+        crate::feedback::fingerprint(&self.file, self.line, &self.title, &self.category)
+    }
+}
+
 /// Severity level of a review finding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub enum Severity {
@@ -178,5 +190,46 @@ impl ReviewOutput {
     pub fn with_consolidated(mut self, consolidated: crate::team::lead_consolidator::ConsolidatedReport) -> Self {
         self.consolidated = Some(consolidated);
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `Finding` method must produce the exact fingerprint the feedback
+    /// API computes, so verdicts recorded server-side match findings seen by
+    /// the review pipeline.
+    #[test]
+    fn test_finding_fingerprint_matches_feedback_algorithm() {
+        let finding = Finding {
+            file: "src/main.rs".to_string(),
+            line: Some(42),
+            line_end: None,
+            severity: Severity::High,
+            confidence: 9,
+            category: "security".to_string(),
+            title: "SQL injection".to_string(),
+            summary: String::new(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: String::new(),
+            effort: Effort::Small,
+            expert_name: "security".to_string(),
+            expert_role: String::new(),
+            agrees_with: vec![],
+            references: vec![],
+        };
+        assert_eq!(
+            finding.fingerprint(),
+            crate::feedback::fingerprint("src/main.rs", Some(42), "SQL injection", "security")
+        );
+
+        // A missing line hashes identically on both paths too.
+        let no_line = Finding { line: None, ..finding };
+        assert_eq!(
+            no_line.fingerprint(),
+            crate::feedback::fingerprint("src/main.rs", None, "SQL injection", "security")
+        );
     }
 }

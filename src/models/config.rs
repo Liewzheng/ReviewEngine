@@ -98,6 +98,13 @@ pub struct ReportConfig {
     /// Maximum bytes of referenced file content injected into the verification prompt.
     #[serde(default = "default_verification_max_file_bytes")]
     pub verification_max_file_bytes: usize,
+    /// If `true`, findings previously marked as false positives via the
+    /// feedback API (matched by stable fingerprint) are filtered out of
+    /// subsequent reviews, after the verification pass and before lead
+    /// consolidation. Fail-open: a missing or unreadable feedback file
+    /// disables the filter silently. On by default.
+    #[serde(default = "default_feedback_filtering")]
+    pub feedback_filtering: bool,
 }
 
 /// Parameters controlling how large diffs are processed and chunked.
@@ -352,6 +359,7 @@ impl Default for ReportConfig {
             drop_low_confidence: false,
             verification_pass: false,
             verification_max_file_bytes: 20000,
+            feedback_filtering: true,
         }
     }
 }
@@ -422,6 +430,9 @@ fn default_verification_pass() -> bool {
 }
 fn default_verification_max_file_bytes() -> usize {
     20000
+}
+fn default_feedback_filtering() -> bool {
+    true
 }
 
 fn default_scoring_enabled() -> bool {

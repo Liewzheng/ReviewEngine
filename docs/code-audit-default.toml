@@ -30,6 +30,11 @@ max_findings_per_expert = 5
 verification_pass = false
 # Maximum bytes of referenced file content injected into the verification prompt
 verification_max_file_bytes = 20000
+# Feedback-driven filtering: findings previously marked as false positives via
+# the feedback API (POST /api/v1/feedback) are automatically filtered out of
+# subsequent reviews, matched by stable fingerprint. Fail-open: a missing or
+# unreadable feedback file disables the filter silently.
+feedback_filtering = true
 
 [scoring]
 # Expert weight: determines the influence of this expert in the team overall score; the sum of weights of all enabled experts should be 100

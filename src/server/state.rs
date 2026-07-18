@@ -8,9 +8,9 @@
 use prometheus::Registry;
 use std::sync::{Arc, Mutex, RwLock};
 
+use crate::feedback::FeedbackStore;
 use crate::models::LLMConfig;
 use crate::server::api::config::UiConfig;
-use crate::server::feedback::FeedbackStore;
 use crate::server::log_collector::LogCollector;
 use crate::server::task_queue::TaskStore;
 

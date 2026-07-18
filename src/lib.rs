@@ -19,6 +19,7 @@ pub mod context;
 pub mod diff;
 pub mod error;
 pub mod expert;
+pub mod feedback;
 pub mod git;
 pub mod git_provider;
 pub mod input;

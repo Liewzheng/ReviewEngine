@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use futures::future::join_all;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::time::Instant;
@@ -467,6 +467,49 @@ fn build_consolidated_report(reports: &[ExpertReport], config: &AppConfig) -> Co
     .consolidate(reports, None)
 }
 
+/// Reason recorded in [`DroppedFinding`] for findings filtered out because
+/// the user previously marked them as false positives via the feedback API.
+const FEEDBACK_FALSE_POSITIVE_REASON: &str = "marked false positive by user feedback";
+
+/// Drop findings the user previously marked as false positives via the
+/// feedback API (A9 feedback loop, second half).
+///
+/// No-op when `enabled` is `false` (`[report] feedback_filtering`) or when
+/// the feedback store yields no false-positive fingerprints — the loader is
+/// fail-open, so a missing or unreadable feedback file simply disables the
+/// filter. Returns the dropped findings for the report appendix.
+fn apply_feedback_filter(reports: &mut [ExpertReport], enabled: bool) -> Vec<DroppedFinding> {
+    if !enabled {
+        return Vec::new();
+    }
+    let false_positives = crate::feedback::load_false_positive_fingerprints();
+    if false_positives.is_empty() {
+        return Vec::new();
+    }
+    filter_feedback_false_positives(reports, &false_positives)
+}
+
+/// Remove findings whose fingerprint is in `false_positives` from every
+/// report, returning them as [`DroppedFinding`]s with the feedback reason.
+/// Findings marked `useful` are neither filtered nor boosted.
+fn filter_feedback_false_positives(
+    reports: &mut [ExpertReport],
+    false_positives: &HashSet<String>,
+) -> Vec<DroppedFinding> {
+    let mut dropped = Vec::new();
+    for report in reports {
+        let (kept, removed): (Vec<Finding>, Vec<Finding>) = std::mem::take(&mut report.findings)
+            .into_iter()
+            .partition(|f| !false_positives.contains(&f.fingerprint()));
+        report.findings = kept;
+        dropped.extend(removed.into_iter().map(|finding| DroppedFinding {
+            finding,
+            reason: FEEDBACK_FALSE_POSITIVE_REASON.to_string(),
+        }));
+    }
+    dropped
+}
+
 /// Run the core expert pipeline: diff parsing → large PR handling → parallel LLM execution.
 ///
 /// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context,
@@ -646,7 +689,7 @@ pub(crate) async fn run_experts_inner(
     // Optional LLM verification pass: re-check findings against the diff
     // hunks, the referenced files' full content, and the changed-file list.
     // Fail-open by construction — `verify_findings` never returns an error.
-    let dropped_findings = if config.report.verification_pass {
+    let mut dropped_findings = if config.report.verification_pass {
         let dropped = verifier::verify_findings(
             &mut reports,
             &files,
@@ -666,6 +709,18 @@ pub(crate) async fn run_experts_inner(
     } else {
         Vec::new()
     };
+
+    // Feedback-driven filtering (A9): drop findings the user previously
+    // marked as false positives, matched by stable fingerprint. Runs after
+    // the verification pass and before lead consolidation; fail-open.
+    let feedback_dropped = apply_feedback_filter(&mut reports, config.report.feedback_filtering);
+    if !feedback_dropped.is_empty() {
+        info!(
+            "Feedback filtering: dropped {} finding(s) marked as false positives by user feedback",
+            feedback_dropped.len()
+        );
+        dropped_findings.extend(feedback_dropped);
+    }
 
     // Lead consolidation over the validated findings: confidence filtering,
     // deduplication, conflict detection, and overall scoring. Pure
@@ -935,5 +990,98 @@ mod tests {
         assert!(consolidated.conflicts.is_empty());
         assert!(consolidated.findings.is_empty());
         assert!(!consolidated.assessment.tl_dr.is_empty());
+    }
+
+    // ─── feedback-driven filtering ───────────────
+
+    fn make_categorized_finding(file: &str, line: Option<u32>, title: &str, category: &str) -> Finding {
+        let mut f = make_finding(Severity::High, 9, file, line, title);
+        f.category = category.to_string();
+        f
+    }
+
+    #[test]
+    fn test_filter_feedback_false_positives_removes_hits_keeps_misses() {
+        let hit = make_categorized_finding("src/main.rs", Some(42), "SQL injection", "security");
+        let miss = make_categorized_finding("src/lib.rs", Some(7), "style nit", "style");
+        let false_positives: HashSet<String> = [hit.fingerprint()].into_iter().collect();
+        let mut reports = vec![make_report("security", vec![hit.clone(), miss.clone()])];
+
+        let dropped = filter_feedback_false_positives(&mut reports, &false_positives);
+
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].finding.title, "SQL injection");
+        assert_eq!(dropped[0].reason, "marked false positive by user feedback");
+        assert_eq!(reports[0].findings.len(), 1);
+        assert_eq!(reports[0].findings[0].title, "style nit");
+    }
+
+    #[test]
+    fn test_filter_feedback_false_positives_empty_set_keeps_all() {
+        let mut reports = vec![make_report(
+            "security",
+            vec![make_categorized_finding(
+                "src/main.rs",
+                Some(42),
+                "SQL injection",
+                "security",
+            )],
+        )];
+        let dropped = filter_feedback_false_positives(&mut reports, &HashSet::new());
+        assert!(dropped.is_empty());
+        assert_eq!(reports[0].findings.len(), 1);
+    }
+
+    #[test]
+    fn test_apply_feedback_filter_disabled_is_noop() {
+        let mut reports = vec![make_report(
+            "security",
+            vec![make_categorized_finding(
+                "src/main.rs",
+                Some(42),
+                "SQL injection",
+                "security",
+            )],
+        )];
+        let dropped = apply_feedback_filter(&mut reports, false);
+        assert!(dropped.is_empty());
+        assert_eq!(reports[0].findings.len(), 1);
+    }
+
+    /// End-to-end: a feedback JSON file on disk (written through
+    /// `FeedbackStore`) drives the filter — the false-positive-marked
+    /// finding is dropped, the useful-marked and unmarked ones are kept.
+    #[test]
+    fn test_feedback_filter_end_to_end_from_feedback_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("feedback.json");
+
+        let false_positive = make_categorized_finding("src/main.rs", Some(42), "SQL injection", "security");
+        let useful = make_categorized_finding("src/lib.rs", Some(7), "missing test", "quality");
+        let unmarked = make_categorized_finding("src/api.rs", Some(3), "n+1 query", "performance");
+
+        let record = |finding: &Finding, verdict: crate::feedback::Verdict| crate::feedback::FindingFeedback {
+            finding_fingerprint: finding.fingerprint(),
+            verdict,
+            comment: None,
+            category: Some(finding.category.clone()),
+            created_at: chrono::Utc::now(),
+        };
+        let store = crate::feedback::FeedbackStore::with_path(Some(path.clone()));
+        store
+            .record(record(&false_positive, crate::feedback::Verdict::FalsePositive))
+            .unwrap();
+        store.record(record(&useful, crate::feedback::Verdict::Useful)).unwrap();
+        drop(store);
+
+        let false_positives = crate::feedback::load_false_positive_fingerprints_from(&path);
+        let mut reports = vec![make_report("security", vec![false_positive, useful, unmarked])];
+        let dropped = filter_feedback_false_positives(&mut reports, &false_positives);
+
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(dropped[0].finding.title, "SQL injection");
+        assert_eq!(dropped[0].reason, "marked false positive by user feedback");
+        let kept_titles: Vec<&str> = reports[0].findings.iter().map(|f| f.title.as_str()).collect();
+        assert_eq!(kept_titles, ["missing test", "n+1 query"]);
     }
 }

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Provider save blocked by main-form validation**: on the Configuration page, saving Additional LLM Providers ran the main form's validation first, so an incomplete main config (e.g. empty GitLab URL/token or no required experts) blocked provider add/edit/delete. Provider-only changes now skip main-form validation and save directly; when the main config is also modified and fails validation, a confirmation offers to save only the provider changes.
+- **Provider temperature precision noise in the read-only view**: the expanded read-only provider details rendered the raw f32→f64 value (e.g. `0.30000001192092896`); it is now formatted to the edit slider's 0.1-step precision.
+
 ## [0.7.11] - 2026-07-18
 
 ### Added

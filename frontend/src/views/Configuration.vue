@@ -21,7 +21,7 @@
         </template>
         <template v-else>
           <el-badge :is-dot="dirty" type="danger">
-            <el-button type="primary" :loading="saving" :disabled="!dirty || !formValid" @click="saveChanges">
+            <el-button type="primary" :loading="saving" :disabled="!dirty || (!formValid && !providersDirty)" @click="saveChanges">
               <el-icon><Check /></el-icon>
               <span>Save Changes</span>
             </el-button>
@@ -334,7 +334,7 @@
                     <el-descriptions-item label="Model">{{ provider.defaultModel || '—' }}</el-descriptions-item>
                     <el-descriptions-item label="API Base URL" :span="2">{{ provider.apiBaseUrl }}</el-descriptions-item>
                     <el-descriptions-item v-if="provider.maxTokens != null" label="Max Tokens">{{ provider.maxTokens }}</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.temperature != null" label="Temperature">{{ provider.temperature }}</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.temperature != null" label="Temperature">{{ formatTemperature(provider.temperature) }}</el-descriptions-item>
                     <el-descriptions-item v-if="provider.timeout != null" label="Timeout">{{ provider.timeout }}s</el-descriptions-item>
                     <el-descriptions-item v-if="provider.retry != null" label="Retry">{{ provider.retry }}</el-descriptions-item>
                   </el-descriptions>
@@ -567,7 +567,7 @@
     <!-- Mobile Sticky Actions -->
     <div v-if="isEditing" class="mobile-actions">
       <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
-        <el-button type="primary" :loading="saving" :disabled="!dirty || !formValid" @click="saveChanges">
+        <el-button type="primary" :loading="saving" :disabled="!dirty || (!formValid && !providersDirty)" @click="saveChanges">
           Save Changes
         </el-button>
       </el-badge>
@@ -660,6 +660,13 @@ function serializeProviders(list: ProviderEntry[]): string {
   return JSON.stringify(list.map((p) => ({ ...p, _expanded: false })))
 }
 
+// The backend stores temperature as f32, so the value echoed back as f64 can
+// carry precision noise (e.g. 0.30000001192092896). Display it at the edit
+// slider's 0.1-step precision.
+function formatTemperature(t?: number): string {
+  return t == null ? '—' : t.toFixed(1)
+}
+
 function createNewProvider(): ProviderConfig {
   return {
     provider: 'openai',
@@ -678,12 +685,18 @@ const newProvider = reactive<ProviderConfig>(createNewProvider())
 // --- Computed ---
 const availableModels = computed(() => modelOptions.value)
 
-const dirty = computed(() => {
+const configDirty = computed(() => {
   if (!isEditing.value || !originalConfig.value) return false
-  if (JSON.stringify(config) !== JSON.stringify(originalConfig.value)) return true
+  return JSON.stringify(config) !== JSON.stringify(originalConfig.value)
+})
+
+const providersDirty = computed(() => {
+  if (!isEditing.value) return false
   if (deletedProviderIds.value.length > 0) return true
   return serializeProviders(additionalProviders.value) !== originalProvidersJson.value
 })
+
+const dirty = computed(() => configDirty.value || providersDirty.value)
 
 // --- Validation ---
 function validateUrl(_rule: any, value: string, callback: Function) {
@@ -800,9 +813,38 @@ function cancelEdit() {
 }
 
 async function saveChanges() {
+  // Provider-only changes are independent of the main form: skip main-form
+  // validation, which would otherwise block provider management when the
+  // main config is incomplete (e.g. empty demo GitLab URL/token).
+  if (!configDirty.value && providersDirty.value) {
+    await saveProvidersOnly()
+    return
+  }
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) {
+    // The main form is invalid but provider edits are pending: offer to
+    // persist just the providers instead of losing them to the validation
+    // failure.
+    if (providersDirty.value) {
+      let saveOnly = false
+      try {
+        await ElMessageBox.confirm(
+          'The main configuration has validation errors. Save only the provider changes?',
+          'Validation Error',
+          {
+            confirmButtonText: 'Save Providers Only',
+            cancelButtonText: 'Cancel',
+            type: 'warning',
+          }
+        )
+        saveOnly = true
+      } catch { /* cancelled — fall through to the error highlight below */ }
+      if (saveOnly) {
+        await saveProvidersOnly()
+        return
+      }
+    }
     nextTick(() => {
       const firstError = document.querySelector('.el-form-item.is-error')
       if (firstError) {
@@ -993,6 +1035,30 @@ function confirmDeleteProvider(index: number) {
     }
     additionalProviders.value.splice(index, 1)
   }).catch(() => { /* cancelled */ })
+}
+
+// Persist only the pending provider add/edit/delete changes, leaving the
+// main config untouched. Exits edit mode when nothing else remains dirty.
+async function saveProvidersOnly() {
+  try {
+    await saveAdditionalProviders()
+    if (!configDirty.value) {
+      isEditing.value = false
+    }
+    ElNotification({
+      title: 'Success',
+      message: 'Providers saved successfully',
+      type: 'success',
+      duration: 3000,
+    })
+  } catch {
+    ElNotification({
+      title: 'Error',
+      message: 'Failed to save providers',
+      type: 'error',
+      duration: 5000,
+    })
+  }
 }
 
 async function saveAdditionalProviders() {

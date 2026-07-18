@@ -112,19 +112,6 @@ pub const STATIC_WEIGHT_SUM: u8 = 75;
 /// Total weight when all experts (including LLM) are active.
 pub const FULL_WEIGHT_SUM: u8 = 100;
 
-// ─── Risk level helpers ──────────────────────
-
-/// Canonical mapping from a 0–100 score to a risk level label.
-pub fn score_to_risk_level(score: u8) -> &'static str {
-    match score {
-        0..=40 => "critical",
-        41..=60 => "high",
-        61..=80 => "medium",
-        81..=90 => "low",
-        _ => "healthy",
-    }
-}
-
 // ─── YAML parsing helper ─────────────────────
 
 /// Parse a sequence of YAML values into `ScoreItem`s.
@@ -231,11 +218,15 @@ pub(crate) fn finding_to_score_item(f: &crate::models::Finding) -> ScoreItem {
 /// the sum of all active weights. This normalises the result to a
 /// 0–100 scale even when only a subset of experts is active.
 ///
-/// Returns `(score, risk_label)` where `risk_label` is one of
-/// `"critical"`, `"high"`, `"medium"`, `"low"`, or `"healthy"`.
-pub fn weighted_total(scores: &[ExpertScore]) -> (u8, String) {
+/// Returns `(score, risk_level)` where `risk_level` comes from the unified
+/// [`crate::scoring::review`] mapping with the default thresholds — the
+/// same bands the retired repo-local mapping used (≤40 Critical, 41–60
+/// High, 61–80 Medium, 81–90 LowMedium, 91+ Healthy).
+pub fn weighted_total(scores: &[ExpertScore]) -> (u8, crate::models::RiskLevel) {
     let pairs: Vec<(u8, u8)> = scores.iter().map(|s| (s.score, s.weight)).collect();
     let score = crate::scoring::review::compute_weighted(&pairs);
+    let risk =
+        crate::scoring::review::score_to_risk_level_with_config(score, &crate::models::RiskThresholdConfig::default());
 
-    (score, score_to_risk_level(score).to_string())
+    (score, risk)
 }

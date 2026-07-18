@@ -26,7 +26,10 @@ pub struct RepoReviewOutput {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReportOverview {
     pub health_score: u8,
-    pub risk_level: String,
+    /// Unified risk level; serialized lowercase to keep the JSON contract
+    /// (e.g. `"healthy"`, `"medium"`).
+    #[serde(with = "crate::models::risk_level_lowercase")]
+    pub risk_level: RiskLevel,
     pub total_experts: usize,
     pub total_files: usize,
     pub total_loc: usize,
@@ -41,14 +44,18 @@ pub struct ScoreRow {
     pub score: u8,
     pub weight: u8,
     pub weighted_contrib: f64,
-    pub risk_label: String,
+    /// Unified risk level; serialized lowercase (see [`ReportOverview::risk_level`]).
+    #[serde(with = "crate::models::risk_level_lowercase")]
+    pub risk_label: RiskLevel,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RiskCategory {
     pub area: String,
     pub score: u8,
-    pub risk_level: String,
+    /// Unified risk level; serialized lowercase (see [`ReportOverview::risk_level`]).
+    #[serde(with = "crate::models::risk_level_lowercase")]
+    pub risk_level: RiskLevel,
     pub finding_count: usize,
     pub findings: Vec<ScoreItemDetail>,
 }
@@ -66,7 +73,9 @@ pub struct ActionItem {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ReportConclusion {
     pub aggregated_score: u8,
-    pub risk_level: String,
+    /// Unified risk level; serialized lowercase (see [`ReportOverview::risk_level`]).
+    #[serde(with = "crate::models::risk_level_lowercase")]
+    pub risk_level: RiskLevel,
     pub top_risks: Vec<(String, u8)>,
     pub recommendation: String,
 }
@@ -168,6 +177,13 @@ fn total_weight_f(expert_scores: &[ExpertScoreOutput]) -> f64 {
     expert_scores.iter().map(|s| s.weight as u32).sum::<u32>().max(1) as f64
 }
 
+/// Map a 0–100 score to the unified [`RiskLevel`] using the default
+/// thresholds — the same bands the retired repo-local mapping used
+/// (≤40 Critical, 41–60 High, 61–80 Medium, 81–90 LowMedium, 91+ Healthy).
+fn repo_risk_level(score: u8) -> RiskLevel {
+    crate::scoring::review::score_to_risk_level_with_config(score, &RiskThresholdConfig::default())
+}
+
 /// Build the per-expert score breakdown table rows.
 fn build_score_breakdown(expert_scores: &[ExpertScoreOutput], divisor: f64) -> Vec<ScoreRow> {
     expert_scores
@@ -177,7 +193,7 @@ fn build_score_breakdown(expert_scores: &[ExpertScoreOutput], divisor: f64) -> V
             score: s.score,
             weight: s.weight,
             weighted_contrib: s.score as f64 * s.weight as f64 / divisor,
-            risk_label: crate::repo::experts::score_to_risk_level(s.score).to_string(),
+            risk_label: repo_risk_level(s.score),
         })
         .collect()
 }
@@ -190,7 +206,7 @@ fn build_risk_categories(expert_scores: &[ExpertScoreOutput]) -> Vec<RiskCategor
         .map(|s| RiskCategory {
             area: s.name.clone(),
             score: s.score,
-            risk_level: crate::repo::experts::score_to_risk_level(s.score).to_string(),
+            risk_level: repo_risk_level(s.score),
             finding_count: s.details.len(),
             findings: s.details.clone(),
         })
@@ -731,7 +747,7 @@ pub fn render_repo_review_output(
                     row.area, row.score, row.weight, row.weighted_contrib, row.risk_label
                 ));
             }
-            let total_risk = crate::repo::experts::score_to_risk_level(output.overview.health_score);
+            let total_risk = repo_risk_level(output.overview.health_score);
             md.push_str(&format!(
                 "| **Total** | **{}/100** | **100%** | **{:.1}** | {} |\n\n",
                 output.overview.health_score, total_weighted, total_risk
@@ -844,7 +860,10 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
     let cleaned = crate::output::parser::clean_yaml(response);
     if let Ok(value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned) {
         let health_score = value["health_score"].as_u64().unwrap_or(50) as u8;
-        let risk_level = value["risk_level"].as_str().unwrap_or("medium").to_string();
+        let risk_level: RiskLevel = value["risk_level"]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(RiskLevel::Medium);
         let lead_summary = value["summary"].as_str().map(|s| s.to_string());
 
         let overview = ReportOverview {
@@ -893,7 +912,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
     }
     let overview = ReportOverview {
         health_score: 50,
-        risk_level: "medium".to_string(),
+        risk_level: RiskLevel::Medium,
         total_experts: 0,
         total_files: 0,
         total_loc: 0,
@@ -908,7 +927,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
         action_items: vec![],
         conclusion: ReportConclusion {
             aggregated_score: 50,
-            risk_level: "medium".to_string(),
+            risk_level: RiskLevel::Medium,
             top_risks: vec![],
             recommendation: String::new(),
         },
@@ -1029,14 +1048,14 @@ mod tests {
             RiskCategory {
                 area: "a".to_string(),
                 score: 80,
-                risk_level: "low".to_string(),
+                risk_level: RiskLevel::Low,
                 finding_count: 1,
                 findings: vec![],
             },
             RiskCategory {
                 area: "b".to_string(),
                 score: 60,
-                risk_level: "medium".to_string(),
+                risk_level: RiskLevel::Medium,
                 finding_count: 1,
                 findings: vec![],
             },
@@ -1054,7 +1073,7 @@ mod tests {
             .map(|i| RiskCategory {
                 area: format!("e{i}"),
                 score: 50 + i as u8,
-                risk_level: "low".to_string(),
+                risk_level: RiskLevel::Low,
                 finding_count: 1,
                 findings: vec![],
             })
@@ -1072,21 +1091,21 @@ mod tests {
             RiskCategory {
                 area: "a".to_string(),
                 score: 90,
-                risk_level: "healthy".to_string(),
+                risk_level: RiskLevel::Healthy,
                 finding_count: 0,
                 findings: vec![],
             },
             RiskCategory {
                 area: "b".to_string(),
                 score: 40,
-                risk_level: "critical".to_string(),
+                risk_level: RiskLevel::Critical,
                 finding_count: 3,
                 findings: vec![],
             },
             RiskCategory {
                 area: "c".to_string(),
                 score: 70,
-                risk_level: "medium".to_string(),
+                risk_level: RiskLevel::Medium,
                 finding_count: 2,
                 findings: vec![],
             },
@@ -1291,7 +1310,7 @@ action_items:
 "#;
         let output = parse_repo_review_response(yaml).unwrap();
         assert_eq!(output.overview.health_score, 75);
-        assert_eq!(output.overview.risk_level, "low");
+        assert_eq!(output.overview.risk_level, RiskLevel::Low);
         assert_eq!(output.action_items.len(), 1);
         assert_eq!(output.action_items[0].message, "Add more tests");
     }
@@ -1302,7 +1321,7 @@ action_items:
         RepoReviewOutput {
             overview: ReportOverview {
                 health_score: 80,
-                risk_level: "low".to_string(),
+                risk_level: RiskLevel::Low,
                 total_experts: 1,
                 total_files: 10,
                 total_loc: 1000,
@@ -1315,7 +1334,7 @@ action_items:
             action_items: vec![],
             conclusion: ReportConclusion {
                 aggregated_score: 80,
-                risk_level: "low".to_string(),
+                risk_level: RiskLevel::Low,
                 top_risks: vec![],
                 recommendation: String::new(),
             },
@@ -1366,6 +1385,56 @@ action_items:
         assert_eq!(de.dropped_findings.len(), 1);
         assert_eq!(de.dropped_findings[0].finding.title, "False alarm");
         assert_eq!(de.dropped_findings[0].reason, "Disproven by file content");
+    }
+
+    // ── risk_level JSON contract ──
+
+    #[test]
+    fn test_risk_level_serializes_lowercase() {
+        // The repo-review JSON contract uses lowercase risk labels; the
+        // unified RiskLevel enum must keep that exact form.
+        let output = minimal_output();
+        let value = serde_json::to_value(&output).unwrap();
+        assert_eq!(value["overview"]["risk_level"], serde_json::json!("low"));
+        assert_eq!(value["conclusion"]["risk_level"], serde_json::json!("low"));
+    }
+
+    #[test]
+    fn test_risk_level_deserializes_legacy_lowercase() {
+        // Every label the retired repo-side mapping could emit must still parse.
+        for (label, expected) in [
+            ("critical", RiskLevel::Critical),
+            ("high", RiskLevel::High),
+            ("medium", RiskLevel::Medium),
+            ("low", RiskLevel::Low),
+            ("healthy", RiskLevel::Healthy),
+            ("low-medium", RiskLevel::LowMedium),
+        ] {
+            let value = serde_json::json!({
+                "overview": {
+                    "health_score": 80,
+                    "risk_level": label,
+                    "total_experts": 0,
+                    "total_files": 0,
+                    "total_loc": 0,
+                    "languages": [],
+                    "lead_summary": null,
+                    "score_breakdown": []
+                },
+                "expert_scores": [],
+                "risk_categories": [],
+                "action_items": [],
+                "conclusion": {
+                    "aggregated_score": 80,
+                    "risk_level": label,
+                    "top_risks": [],
+                    "recommendation": ""
+                }
+            });
+            let de: RepoReviewOutput = serde_json::from_value(value).unwrap();
+            assert_eq!(de.overview.risk_level, expected);
+            assert_eq!(de.conclusion.risk_level, expected);
+        }
     }
 
     // ── strip_dropped_from_scores ──

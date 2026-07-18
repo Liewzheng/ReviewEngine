@@ -29,7 +29,11 @@ related:
 
 剩余差距：
 
-- repo 侧仍保留独立的 `score_to_risk_level()`（`src/repo/experts/mod.rs:118`，返回 `&str`），未与 `scoring::review` 的 `RiskLevel` 映射统一
+- ~~repo 侧仍保留独立的 `score_to_risk_level()`（`src/repo/experts/mod.rs:118`，返回 `&str`），未与 `scoring::review` 的 `RiskLevel` 映射统一~~ **已解决（v0.7.11）**：
+  - `RiskLevel` 新增 `Healthy` 变体（最高档，score > `healthy_min`，默认 90，即 91+）
+  - `RiskThresholdConfig` 新增 `healthy_min`（默认 90）；`score_to_risk_level_with_config()` 先判 healthy 档，再按原 5 档映射，既有阈值 20/40/60/80 不变
+  - repo 侧 `score_to_risk_level()` 已删除，`weighted_total()` 与报告构建统一走 `scoring::review::score_to_risk_level_with_config()`（默认阈值 40/60/80/90，与旧 repo 分段一致，仅 81–90 档标签由 `low` 更名为 `low-medium`）
+  - `RepoReviewOutput` 的 `risk_level` / `risk_label` 字段改为 `RiskLevel` 枚举，经 `models::risk_level_lowercase` serde 适配器序列化为小写字符串（如 `"healthy"` / `"medium"`），JSON 形式与旧输出保持一致
 
 > 注意：下文「文件变更清单」与「迁移对照表」描述的是未被采纳的原始方案（`Scorable` trait 路线），仅作历史记录，请勿当作当前实现状态。
 

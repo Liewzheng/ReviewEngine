@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.7.11] - 2026-07-18
+
+### Added
+- **Unified risk-level mapping across MR review and repo-review** (final item of the unified scoring architecture): `RiskLevel` gains a `Healthy` variant (top band, scores above `healthy_min`) and `RiskThresholdConfig` gains `healthy_min` (default 90). `score_to_risk_level_with_config()` checks the healthy band first; the frozen default bands (20/40/60/80) are unchanged. The repo-review side deleted its local string-based `score_to_risk_level()` and now maps scores through `scoring::review` with the default thresholds (same bands as before; the 81–90 band is now labelled `low-medium`). `RepoReviewOutput`'s `risk_level` / `risk_label` fields are now the `RiskLevel` enum, serialized as lowercase strings (e.g. `"healthy"`, `"medium"`) via a serde adapter, so the repo-review JSON and Markdown contracts are unchanged. Docs updated: `docs/decisions/unified-scoring-architecture.md` gap closed, `docs/config-schema.md` documents `healthy_min`.
+
 ## [0.7.10] - 2026-07-18
 
 ### Added

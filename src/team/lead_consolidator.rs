@@ -473,6 +473,7 @@ mod tests {
                     high_max: 50,
                     medium_max: 70,
                     low_max: 90,
+                    healthy_min: 95,
                 },
             }),
             ..Default::default()

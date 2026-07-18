@@ -59,7 +59,7 @@ Penalty points deducted per finding severity. All default to built-in values.
 
 ### `[scoring.risk_thresholds]`
 
-Score-to-risk-level mapping thresholds. Scores are compared with `<=`.
+Score-to-risk-level mapping thresholds. The `*_max` fields are compared with `<=`; `healthy_min` is compared with `>` and takes precedence over the other bands.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -67,6 +67,7 @@ Score-to-risk-level mapping thresholds. Scores are compared with `<=`.
 | `high_max` | integer | `60` | Scores ≤ this (but > critical_max) are High |
 | `medium_max` | integer | `80` | Scores ≤ this (but > high_max) are Medium |
 | `low_max` | integer | `95` | Scores ≤ this (but > medium_max) are LowMedium |
+| `healthy_min` | integer | `90` | Scores > this are Healthy (checked first) |
 
 ```toml
 [scoring]
@@ -87,6 +88,7 @@ critical_max = 40
 high_max = 60
 medium_max = 80
 low_max = 95
+healthy_min = 90
 ```
 
 ## `[commands]`

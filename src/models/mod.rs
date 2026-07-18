@@ -22,8 +22,12 @@ use serde::{Deserialize, Serialize};
 // ─── Risk Level & Overall Assessment ───────────
 
 /// Overall risk level for a review.
+///
+/// Ordered from least to most severe: `Healthy` (score above
+/// `healthy_min`, default 91+) is the best band, `Critical` the worst.
 #[derive(Debug, Clone, PartialEq, PartialOrd, Serialize, Deserialize, Default)]
 pub enum RiskLevel {
+    Healthy,
     Low,
     LowMedium,
     #[default]
@@ -35,12 +39,51 @@ pub enum RiskLevel {
 impl std::fmt::Display for RiskLevel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            RiskLevel::Healthy => write!(f, "healthy"),
             RiskLevel::Low => write!(f, "low"),
             RiskLevel::LowMedium => write!(f, "low-medium"),
             RiskLevel::Medium => write!(f, "medium"),
             RiskLevel::High => write!(f, "high"),
             RiskLevel::Critical => write!(f, "critical"),
         }
+    }
+}
+
+impl std::str::FromStr for RiskLevel {
+    type Err = String;
+
+    /// Parse the lowercase `Display` form (e.g. "healthy", "low-medium").
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "healthy" => Ok(RiskLevel::Healthy),
+            "low" => Ok(RiskLevel::Low),
+            "low-medium" => Ok(RiskLevel::LowMedium),
+            "medium" => Ok(RiskLevel::Medium),
+            "high" => Ok(RiskLevel::High),
+            "critical" => Ok(RiskLevel::Critical),
+            other => Err(format!("unknown risk level: {other}")),
+        }
+    }
+}
+
+/// Serde adapter that serializes [`RiskLevel`] as its lowercase `Display`
+/// string (e.g. `"healthy"`, `"low-medium"`) and parses it back.
+///
+/// The repo-review JSON contract has always used lowercase risk labels,
+/// while the MR-review JSON keeps serde's default variant names. Attach
+/// with `#[serde(with = "risk_level_lowercase")]` on repo-side fields to
+/// keep that contract while sharing the enum.
+pub mod risk_level_lowercase {
+    use super::RiskLevel;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(level: &RiskLevel, serializer: S) -> Result<S::Ok, S::Error> {
+        level.to_string().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<RiskLevel, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        s.parse().map_err(serde::de::Error::custom)
     }
 }
 

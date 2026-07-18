@@ -116,13 +116,16 @@ pub fn weighted_overall_score(expert_scores: &[(String, u8, u8)]) -> u8 {
 /// Map an overall score (0-100) to a RiskLevel using configurable thresholds.
 ///
 /// Uses the provided `RiskThresholdConfig` to determine boundaries:
+/// - score > thresholds.healthy_min → Healthy
 /// - score <= thresholds.critical_max → Critical
 /// - score <= thresholds.high_max → High
 /// - score <= thresholds.medium_max → Medium
 /// - score <= thresholds.low_max → LowMedium
 /// - otherwise → Low
 pub fn score_to_risk_level_with_config(score: u8, thresholds: &RiskThresholdConfig) -> RiskLevel {
-    if score <= thresholds.critical_max {
+    if score > thresholds.healthy_min {
+        RiskLevel::Healthy
+    } else if score <= thresholds.critical_max {
         RiskLevel::Critical
     } else if score <= thresholds.high_max {
         RiskLevel::High
@@ -137,14 +140,16 @@ pub fn score_to_risk_level_with_config(score: u8, thresholds: &RiskThresholdConf
 
 /// Backward-compatible wrapper that uses the original hardcoded thresholds.
 ///
-/// Original defaults: Critical (0-20), High (21-40), Medium (41-60), LowMedium (61-80), Low (81+).
-/// These values are frozen to preserve backward compatibility for callers that do not pass a config.
+/// Original defaults: Critical (0-20), High (21-40), Medium (41-60), LowMedium (61-80),
+/// Low (81-90), Healthy (91+). These values are frozen to preserve backward
+/// compatibility for callers that do not pass a config.
 pub fn score_to_risk_level(score: u8) -> RiskLevel {
     let old_thresholds = RiskThresholdConfig {
         critical_max: 20,
         high_max: 40,
         medium_max: 60,
         low_max: 80,
+        healthy_min: 90,
     };
     score_to_risk_level_with_config(score, &old_thresholds)
 }
@@ -171,7 +176,7 @@ pub fn compute_overall_with_config(
 /// Backward-compatible wrapper that uses original hardcoded penalties and thresholds.
 ///
 /// Preserves v0.6.11 scoring behavior exactly: penalties of 30/15/5/1/0 and
-/// risk thresholds of 20/40/60/80.
+/// risk thresholds of 20/40/60/80 (with scores above 90 mapping to Healthy).
 pub fn compute_overall(expert_data: &[(&str, &[Finding], u8)]) -> (u8, RiskLevel) {
     compute_overall_with_config(
         expert_data,
@@ -187,6 +192,7 @@ pub fn compute_overall(expert_data: &[(&str, &[Finding], u8)]) -> (u8, RiskLevel
             high_max: 40,
             medium_max: 60,
             low_max: 80,
+            healthy_min: 90,
         },
     )
 }
@@ -276,7 +282,7 @@ mod tests {
 
     #[test]
     fn test_score_to_risk_level() {
-        assert_eq!(score_to_risk_level(100), RiskLevel::Low);
+        assert_eq!(score_to_risk_level(100), RiskLevel::Healthy);
         assert_eq!(score_to_risk_level(70), RiskLevel::LowMedium);
         assert_eq!(score_to_risk_level(50), RiskLevel::Medium);
         assert_eq!(score_to_risk_level(30), RiskLevel::High);
@@ -353,9 +359,13 @@ mod tests {
         assert_eq!(score_to_risk_level(80), RiskLevel::LowMedium);
         // Just over: 81 -> Low
         assert_eq!(score_to_risk_level(81), RiskLevel::Low);
-        // u8::MAX = 255 -> Low
-        assert_eq!(score_to_risk_level(u8::MAX), RiskLevel::Low);
-        assert_eq!(score_to_risk_level(100), RiskLevel::Low);
+        // Upper boundary of Low: 90
+        assert_eq!(score_to_risk_level(90), RiskLevel::Low);
+        // Just over: 91 -> Healthy
+        assert_eq!(score_to_risk_level(91), RiskLevel::Healthy);
+        // u8::MAX = 255 -> Healthy
+        assert_eq!(score_to_risk_level(u8::MAX), RiskLevel::Healthy);
+        assert_eq!(score_to_risk_level(100), RiskLevel::Healthy);
     }
 
     #[test]
@@ -388,7 +398,7 @@ mod tests {
         let data = vec![("expert", &[] as &[Finding], 100u8)];
         let (score, risk) = compute_overall(&data);
         assert_eq!(score, 100);
-        assert_eq!(risk, RiskLevel::Low);
+        assert_eq!(risk, RiskLevel::Healthy);
     }
 
     #[test]
@@ -477,7 +487,7 @@ mod tests {
 
     #[test]
     fn test_score_to_risk_level_max_value() {
-        assert_eq!(score_to_risk_level(200), RiskLevel::Low);
+        assert_eq!(score_to_risk_level(200), RiskLevel::Healthy);
     }
 
     #[test]
@@ -588,12 +598,14 @@ mod tests {
             high_max: 50,
             medium_max: 70,
             low_max: 90,
+            healthy_min: 95,
         };
         assert_eq!(score_to_risk_level_with_config(25, &thresholds), RiskLevel::Critical);
         assert_eq!(score_to_risk_level_with_config(40, &thresholds), RiskLevel::High);
         assert_eq!(score_to_risk_level_with_config(60, &thresholds), RiskLevel::Medium);
         assert_eq!(score_to_risk_level_with_config(80, &thresholds), RiskLevel::LowMedium);
         assert_eq!(score_to_risk_level_with_config(95, &thresholds), RiskLevel::Low);
+        assert_eq!(score_to_risk_level_with_config(96, &thresholds), RiskLevel::Healthy);
     }
 
     #[test]
@@ -610,6 +622,7 @@ mod tests {
             high_max: 50,
             medium_max: 70,
             low_max: 90,
+            healthy_min: 90,
         };
         let findings = [make_finding(Severity::Critical)];
         let data = vec![("security", &findings[..], 100u8)];
@@ -640,6 +653,7 @@ mod tests {
             high_max: 40,
             medium_max: 60,
             low_max: 80,
+            healthy_min: 90,
         };
         let score2 = score_to_risk_level_with_config(70, &old_thresholds);
         assert_eq!(score1, score2);
@@ -663,6 +677,7 @@ mod tests {
             high_max: 40,
             medium_max: 60,
             low_max: 80,
+            healthy_min: 90,
         };
         let (score2, risk2) = compute_overall_with_config(&data, &old_penalties, &old_thresholds);
         assert_eq!(score1, score2);

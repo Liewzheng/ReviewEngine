@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use super::{ExpertScore, ScoreItem};
-use crate::models::{AppConfig, ExpertReport, Finding};
+use crate::models::{AppConfig, ExpertReport, Finding, RiskLevel};
 use crate::team::lead_consolidator::ConsolidatorConfig;
 
 // ─── AggregatedResult ────────────────────────
@@ -17,7 +17,7 @@ pub struct AggregatedResult {
 #[derive(Debug, Clone)]
 pub struct ReportConclusion {
     pub aggregated_score: u8,
-    pub risk_level: String,
+    pub risk_level: RiskLevel,
     pub top_risks: Vec<(String, u8)>,
     pub recommendation: String,
 }

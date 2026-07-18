@@ -51,6 +51,8 @@ critical_max = 40
 high_max = 60
 medium_max = 80
 low_max = 95
+# Scores strictly above this are Healthy (default 90, i.e. 91+)
+healthy_min = 90
 
 [diff]
 # Maximum input token count; exceeding this triggers compression

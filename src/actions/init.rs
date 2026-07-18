@@ -337,7 +337,7 @@ fn generate_toml(
     toml.push_str("[diff]\n");
     toml.push_str("max_input_tokens = 120000\n");
     toml.push_str(&format!("large_pr_file_threshold = {large_pr_threshold}\n"));
-    toml.push_str("compression_level = \"aggressive\"\n\n");
+    toml.push_str("compression_level = \"auto\"\n\n");
 
     for (idx, (name, _def_w, role, _desc)) in selected.iter().enumerate() {
         let weight = weights[idx];

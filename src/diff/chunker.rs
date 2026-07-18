@@ -244,6 +244,30 @@ pub fn adaptive_chunk(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
     }
 }
 
+/// Semantic chunking: group files by language-level module boundaries.
+///
+/// Files are grouped by `(directory, extension)` — a cheap proxy for module
+/// and language boundaries — so files from the same module stay adjacent and
+/// land in the same chunk where possible. Groups are packed into chunks up to
+/// `max_tokens_per_chunk`; a single file exceeding the budget on its own is
+/// split by hunks (same fallback as [`chunk_by_hunks`]).
+pub fn semantic_chunk(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<DiffChunk> {
+    let mut sorted = files.to_vec();
+    // Stable sort: keeps the incoming (priority) order within each group.
+    sorted.sort_by_key(|f| semantic_key(&f.new_path));
+    chunk_by_hunks(&sorted, max_tokens_per_chunk)
+}
+
+/// Module-boundary key for [`semantic_chunk`]: `(directory, extension)`.
+fn semantic_key(path: &str) -> (String, String) {
+    let (dir, name) = match path.rfind('/') {
+        Some(i) => (&path[..i], &path[i + 1..]),
+        None => ("", path),
+    };
+    let ext = name.rfind('.').map(|i| &name[i + 1..]).unwrap_or("");
+    (dir.to_string(), ext.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +336,92 @@ mod tests {
         let files = vec![make_simple_file("large.rs", vec!["+x"; 100])];
         let chunks = adaptive_chunk(&files, 100);
         assert!(chunks.len() >= 1);
+    }
+
+    // ─── semantic_chunk ───
+
+    fn make_multi_hunk_file(path: &str, hunk_lines: Vec<Vec<&str>>) -> DiffFile {
+        let hunks = hunk_lines
+            .into_iter()
+            .map(|lines| DiffHunk {
+                header: "@@ -1 +1 @@".to_string(),
+                old_start: 1,
+                old_lines: 1,
+                new_start: 1,
+                new_lines: 1,
+                lines: lines
+                    .into_iter()
+                    .map(|c| DiffLine {
+                        kind: DiffLineKind::Add,
+                        content: c.to_string(),
+                        old_line_no: Some(1),
+                        new_line_no: Some(1),
+                    })
+                    .collect(),
+            })
+            .collect();
+        DiffFile {
+            path: path.to_string(),
+            old_path: path.to_string(),
+            new_path: path.to_string(),
+            status: "modified".to_string(),
+            additions: 1,
+            deletions: 0,
+            hunks,
+        }
+    }
+
+    #[test]
+    fn test_semantic_chunk_empty() {
+        assert!(semantic_chunk(&[], 1000).is_empty());
+    }
+
+    #[test]
+    fn test_semantic_chunk_groups_by_dir_and_extension() {
+        // Interleaved input: same (dir, ext) groups must end up contiguous.
+        let files = vec![
+            make_simple_file("src/auth/login.rs", vec!["+a"]),
+            make_simple_file("src/db/query.rs", vec!["+b"]),
+            make_simple_file("src/auth/token.rs", vec!["+c"]),
+            make_simple_file("src/db/schema.sql", vec!["+d"]),
+            make_simple_file("README.md", vec!["+e"]),
+        ];
+        let chunks = semantic_chunk(&files, 100_000);
+        assert_eq!(chunks.len(), 1);
+        let paths: Vec<&str> = chunks[0].files.iter().map(|f| f.new_path.as_str()).collect();
+        assert_eq!(
+            paths,
+            vec![
+                "README.md", // ("", "md") sorts before the src/* groups
+                "src/auth/login.rs",
+                "src/auth/token.rs",
+                "src/db/query.rs",
+                "src/db/schema.sql",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_semantic_chunk_keeps_groups_together_across_chunks() {
+        // Budget forces one file per chunk; group order must be preserved.
+        let files = vec![
+            make_simple_file("b/y.rs", vec!["+y"]),
+            make_simple_file("a/x.rs", vec!["+x"]),
+            make_simple_file("a/z.rs", vec!["+z"]),
+        ];
+        let chunks = semantic_chunk(&files, 1);
+        assert_eq!(chunks.len(), 3);
+        let paths: Vec<&str> = chunks.iter().map(|c| c.files[0].new_path.as_str()).collect();
+        assert_eq!(paths, vec!["a/x.rs", "a/z.rs", "b/y.rs"]);
+    }
+
+    #[test]
+    fn test_semantic_chunk_splits_oversized_file_by_hunks() {
+        // Budget of 1 token makes every hunk oversized → one chunk per hunk.
+        let file = make_multi_hunk_file("src/big.rs", vec![vec!["+a"], vec!["+b"], vec!["+c"]]);
+        let chunks = semantic_chunk(&[file], 1);
+        assert_eq!(chunks.len(), 3);
+        assert!(chunks.iter().all(|c| c.files.len() == 1 && c.files[0].hunks.len() == 1));
+        assert_eq!(chunks[0].total_chunks, 3);
     }
 }

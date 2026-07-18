@@ -34,6 +34,8 @@ pub struct ReviewRequest {
     pub source: ReviewSource,
     pub config: Option<String>,
     pub llm_configs: Option<Vec<LLMConfig>>,
+    /// Optional webhook URL POSTed once the task completes or fails.
+    pub webhook: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

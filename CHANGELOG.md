@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.7.10] - 2026-07-18
+
+### Added
+- **Lead consolidation wired into the MR review path** (A1): the standard review report now carries a Lead Summary with the overall score, TL;DR, and cross-expert conflicts.
+- **Full contents of changed files injected into expert prompts** (A2): the review user template gains a `## Full File Contents` section with the current contents of MR-changed files, bounded by the new `[diff] max_context_file_bytes` budget (long files truncated and noted, over-budget files listed as omitted).
+- **Repo-scan REST API** (A3): new `POST /api/v1/repo-scan` and `GET /api/v1/repo-scan/{task_id}` endpoints for submitting repository scans and polling their results.
+- **Remote RepoBrowser backends** (A4): the GitLab and GitHub browsers now implement `get_file` / `search_code`, so remote reviews can fetch file contents and search code without a local checkout.
+- **Confidence factor and consensus multiplier in expert scoring** (A5): expert scores now combine an LLM-reported confidence factor with a cross-expert consensus multiplier, and `consensus_threshold` is wired into consolidation.
+- **Webhook completion callback for review tasks** (A6): a review task may carry a callback URL (http/https, validated) that is POSTed when the task completes.
+- **Reviewer Discussion rendering for expert conflicts** (A7): conflicting expert verdicts are rendered as a reviewer discussion in the report.
+- **Content-pattern expert routing and semantic chunking** (A8): files are routed to experts by content patterns, large diffs are split into semantic chunks, and `compression_level` is wired.
+- **Finding feedback loop** (A9): new `POST /api/v1/feedback` records verdicts on findings (by fingerprint or payload) and `GET /api/v1/feedback/stats` exposes aggregated feedback statistics.
+- **Dispatcher timeout recovery and state persistence** (A10): the MR dispatcher recovers timed-out reviews and persists its state across restarts.
+- **Docs**: synced `config-schema`, `rest-api`, and decision documents with the implementation.
+
+### Fixed
+- **Context-boundary prompt outdated after file-content injection** (A2 follow-up): `CONTEXT_BOUNDARY_BLOCK` in `REVIEW_SYSTEM_TEMPLATE` still claimed experts could only see the diff. It now states that experts see the diff plus the full contents of changed files when provided, that "missing X" claims may be proven from either source, and that claims about code not provided still require `note` severity, confidence ≤ 4, and an explicit `Assumption:`.
+- **Resolver tests raced on shared process state**: the config resolver test module replaced its mix of a local `ENV_LOCK` and unlocked tests with a single poison-safe `fs_lock()` guard, and tests resolving config through `apply_env_overrides` now clear leaked `CODE_AUDIT_*` variables via `clear_code_audit_env()` before asserting.
+
 ## [0.7.9] - 2026-07-17
 
 ### Added

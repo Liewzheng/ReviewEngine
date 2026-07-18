@@ -13,6 +13,8 @@ related:
 ---
 > **Status:** Design proposal — future phases described here may not be fully implemented yet.
 >
+> **状态（v0.7.10）**：多专家团队（TOML 定义角色/权重/trigger/commands）与 Lead 汇总（`lead_consolidator` 合并去重）已落地。进行中：A5（评分公式统一）、A7（冲突呈现）；关联项 A2（仓库感知 prompt 注入）亦在推进，MR 主路径评分接入（A1）尚未完成。
+>
 > 视角：产品设计师。
 > 目标：让 AI 审核团队不仅“人多”，更要“专业”——像一支真实、可信、高效的 senior engineering team 那样工作。
 

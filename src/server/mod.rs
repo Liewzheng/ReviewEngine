@@ -4,8 +4,9 @@
 //! review-engine REST API (routes under `api/`), handles incoming
 //! webhooks from GitLab and GitHub (via the `gitlab`, `github`, and
 //! provider-agnostic `webhook` submodules), manages review
-//! authentication via `auth`, and provides a background task queue
-//! (`task_queue`) for asynchronous review processing. Application state
+//! authentication via `auth`, provides a background task queue
+//! (`task_queue`) for asynchronous review processing, and persists
+//! finding feedback via `feedback`. Application state
 //! is defined in [`state`], and the Axum [`Router`] is constructed by the
 //! [`router`] submodule.
 #![allow(clippy::unwrap_used)]
@@ -15,6 +16,7 @@ use std::sync::Arc;
 pub mod api;
 pub mod auth;
 pub mod dispatcher;
+pub mod feedback;
 pub mod github;
 pub mod gitlab;
 pub mod log_collector;
@@ -81,7 +83,7 @@ pub(crate) async fn run_review_common(
     // Run the review with progress tracking
     let progress_map = crate::progress::new_progress_map();
     let review_id = uuid::Uuid::new_v4().to_string();
-    let (reports, global_context, dropped_findings) = orchestrator::run_experts(
+    let (reports, global_context, dropped_findings, consolidated) = orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -114,7 +116,9 @@ pub(crate) async fn run_review_common(
     crate::progress::complete_progress(Some(&progress_map), &review_id);
 
     // Publish results
-    let output = crate::models::ReviewOutput::new(reports).with_dropped_findings(dropped_findings);
+    let output = crate::models::ReviewOutput::new(reports)
+        .with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated);
     if let Err(e) = crate::publish_review(token, url, &output).await {
         tracing::warn!("Publish failed: {:?}", e);
     }

@@ -33,7 +33,10 @@ pub async fn run_single_expert(
 ) -> Result<ExpertReport> {
     let lang = "Unknown";
 
-    let (system, user) = prompt_engine.build_review_prompt(expert, mr_info, diff_text, lang, settings, lead_context)?;
+    // This path does not gather changed-file contents; the prompt is built
+    // from the diff alone.
+    let (system, user) =
+        prompt_engine.build_review_prompt(expert, mr_info, diff_text, lang, settings, lead_context, None)?;
 
     let config = crate::llm::select_llm_config(expert, llm_configs);
     let result = llm_client.complete_with_fallback(&config, &system, &user).await?;

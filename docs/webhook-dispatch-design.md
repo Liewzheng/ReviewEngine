@@ -9,6 +9,7 @@ tags:
 related:
   - ../src/server/dispatcher.rs
   - ../src/server/gitlab.rs
+  - ../src/git_provider/mod.rs
   - ../src/publisher/mod.rs
   - ../.notes/review_engine_rs_roadmap.md
 ---
@@ -210,7 +211,7 @@ impl MrDispatcher {
 | Review panic 崩溃 | `complete()` 不会执行，`running` 保持 `true`，后续事件永远 InProgress |
 | 服务重启 | 内存状态丢失，视为未审核（可接受，多一次 LLM 调用） |
 
-> **关于 panic 安全**：当前为 Phase 2.5 设计可接受。Phase 4 引入持久化后可加超时恢复机制：若 `running` 超过 10 分钟且未有 `complete`，自动重置。
+> **关于 panic 安全与持久化（状态：v0.7.10，A10 已实现）**：review 失败/panic 时调用方执行 `dispatcher.reset()` 释放 `running` 锁，后续 webhook 可正常重试（`src/server/gitlab.rs:363`、`src/server/gitlab.rs:500`）；dispatcher 作为共享单例在 router 注入（`src/server/router.rs`）。A10 已实现超时恢复与磁盘持久化：`running` 带时间戳，超过 `REVIEW_DISPATCH_TIMEOUT_SECS`（默认 900s）判过期可重新发起；状态持久化到 `REVIEW_DISPATCH_STATE`（默认 `~/.config/review-engine/dispatcher-state.json`），重启后自动加载、过期 running 自动判过期。
 
 ---
 
@@ -279,7 +280,9 @@ async fn run_review_for_mr(
 
 ---
 
-### 3.3 修改 `src/publisher/mod.rs` — Publisher trait
+### 3.3 修改 `src/git_provider/mod.rs` — GitProvider trait
+
+> **落地更正**：实际实现未新建 `Publisher` trait。`find_or_update_discussion`（含默认实现）与 `update_discussion` 直接加在现有 `GitProvider` trait 上（`src/git_provider/mod.rs:42-48`）；`src/publisher/mod.rs` 现仅保留 `InlineNote`、`publish_inline_notes` 等辅助函数。下文代码块为原设计，签名以 `GitProvider` trait 为准。
 
 ```rust
 #[async_trait]
@@ -303,7 +306,9 @@ pub trait Publisher: Send + Sync {
 
 ---
 
-### 3.4 修改 `src/publisher/gitlab.rs`
+### 3.4 修改 `src/git_provider/gitlab/mod.rs`（原设计为 `src/publisher/gitlab.rs`）
+
+> **落地更正**：GitLab 侧的 `find_or_update_discussion` / `update_discussion` 实现位于 `impl GitProvider for GitLabProvider`（`src/git_provider/gitlab/mod.rs:58`、`:75`），GitHub 侧对应实现在 `src/git_provider/github/mod.rs:70`、`:92`。
 
 ```rust
 const BOT_DISCUSSION_TITLE: &str = "# CodeReview Board";
@@ -388,8 +393,8 @@ let ws_state = std::env::var("GITLAB_WEBHOOK_SECRET").ok().map(|secret| {
 |------|------|------|------|
 | `src/server/dispatcher.rs` | **新增** | MrDispatcher：try_start / complete / wait | ~80 |
 | `src/server/gitlab.rs` | **修改** | handle_mr_hook 集成 dispatcher | +30 |
-| `src/publisher/mod.rs` | **修改** | Publisher trait 新增 find_or_update_discussion | +5 |
-| `src/publisher/gitlab.rs` | **修改** | 实现 find_or_update_discussion | +20 |
+| `src/git_provider/mod.rs` | **修改** | GitProvider trait 新增 find_or_update_discussion（默认实现）与 update_discussion（原设计为 `src/publisher/mod.rs` 的 Publisher trait） | +5 |
+| `src/git_provider/gitlab/mod.rs` | **修改** | 实现 find_or_update_discussion / update_discussion（原设计为 `src/publisher/gitlab.rs`） | +20 |
 | `src/git_provider/gitlab/client.rs` | **修改** | 新增 list_discussions + Discussion 结构体 | +30 |
 | `src/server/mod.rs` | **修改** | serve() 创建 dispatcher 注入 WebhookState | +3 |
 | **合计** | | | **~168 行** |
@@ -411,8 +416,8 @@ let ws_state = std::env::var("GITLAB_WEBHOOK_SECRET").ok().map(|secret| {
 | 步骤 | 内容 | 前置 |
 |------|------|------|
 | 1 | `src/git_provider/gitlab/client.rs` — 新增 `list_discussions` + `Discussion` 结构体 | 无 |
-| 2 | `src/publisher/mod.rs` — trait 新增 `find_or_update_discussion` 默认方法 | 无 |
-| 3 | `src/publisher/gitlab.rs` — 实现 `find_or_update_discussion` | 1 |
+| 2 | `src/git_provider/mod.rs` — GitProvider trait 新增 `find_or_update_discussion` 默认方法 | 无 |
+| 3 | `src/git_provider/gitlab/mod.rs` — 实现 `find_or_update_discussion` | 1 |
 | 4 | `src/server/dispatcher.rs` — MrDispatcher | 无 |
 | 5 | `src/server/gitlab.rs` — handle_mr_hook 集成 dispatcher | 4 |
 | 6 | `src/server/mod.rs` — serve() 创建并注入 dispatcher | 4 |

@@ -12,6 +12,8 @@ related:
   - professional_team_design.md
 --->
 > **Status:** Design proposal — future phases described here may not be fully implemented yet.
+>
+> **状态（v0.7.10）**：Lead Overview 全局上下文（Pass 1 生成 `GlobalReviewContext`，注入每个专家 prompt）与 finding 证据校验（`[report] verification_pass`）已落地。进行中：A2（仓库感知 prompt 注入）；关联项 A5（评分公式）、A7（冲突呈现）亦在推进。本文所述 RepoBrowser 工具化仓库浏览仍未实现。
 
 # review_engine 仓库感知型 MR 审核方案
 

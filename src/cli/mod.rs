@@ -548,10 +548,11 @@ pub async fn run() -> Result<()> {
                 review_engine::server::log_collector::get_global_collector()
                     .unwrap_or_else(review_engine::server::log_collector::init_global_collector),
             );
+            app_state.feedback_store = Some(Arc::new(review_engine::server::feedback::FeedbackStore::persistent()));
             app_state.ui_config =
                 std::sync::RwLock::new(review_engine::server::api::config::UiConfig::from_app_config(&config));
             let state = Arc::new(app_state);
-            let dispatcher = review_engine::server::dispatcher::MrDispatcher::new();
+            let dispatcher = review_engine::server::dispatcher::MrDispatcher::persistent();
             let mut handlers: Vec<Arc<dyn review_engine::server::webhook::WebhookHandler>> = vec![];
             let gitlab_token = gitlab_token
                 .or_else(|| std::env::var("GITLAB_TOKEN").ok())

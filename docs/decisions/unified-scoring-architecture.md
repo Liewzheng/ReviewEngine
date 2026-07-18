@@ -16,6 +16,25 @@ related:
 
 # 统一评分系统架构设计
 
+## 状态更新（v0.7.10）
+
+> 本节为实施后的状态记录；下文为原始设计，保留作历史决策记录。
+
+实际落地的是**函数级复用**方案，而非本文的 `Scorable` trait 方案：
+
+- repo 侧 `weighted_total()` 复用 `scoring::review::compute_weighted()`（`src/repo/experts/mod.rs:236`）
+- findings 统一走 `src/team/lead_consolidator.rs` 合并过滤
+- `src/scoring/repo.rs` 已删除，scoring 模块收敛为 `mod.rs` + `review.rs`
+- MR 主路径已接入 Lead 聚合与总分（v0.7.10 的 A1 项，见 `CHANGELOG.md`）：`run_experts` 返回 `ConsolidatedReport`，报告渲染 Lead Summary（Overall Score / TL;DR / 冲突）
+
+剩余差距：
+
+- repo 侧仍保留独立的 `score_to_risk_level()`（`src/repo/experts/mod.rs:118`，返回 `&str`），未与 `scoring::review` 的 `RiskLevel` 映射统一
+
+> 注意：下文「文件变更清单」与「迁移对照表」描述的是未被采纳的原始方案（`Scorable` trait 路线），仅作历史记录，请勿当作当前实现状态。
+
+---
+
 ## 背景
 
 当前项目存在**三套独立的评分系统**，彼此不共享类型或函数：

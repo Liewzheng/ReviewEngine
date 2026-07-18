@@ -57,7 +57,8 @@ review-engine 需要支持多个 Git 平台（GitLab、GitHub 等）。每个平
 │  ├── post_inline_comment()                   │
 │  ├── fetch_code_audit_toml()                │
 │  ├── add_reaction()                         │
-│  └── supported_capabilities()               │
+│  ├── find_or_update_discussion()            │
+│  └── update_discussion()                    │
 ├─────────────────────────────────────────────┤
 │  GitLabProvider          GitHubProvider      │
 │  (reqwest + 自有 client)  (reqwest + 自有    │
@@ -67,6 +68,15 @@ review-engine 需要支持多个 Git 平台（GitLab、GitHub 等）。每个平
 │  (各用各的 reqwest client)                   │
 └─────────────────────────────────────────────┘
 ```
+
+方法语义补充（v0.7.10 同步）：
+
+- `post_review_comment()` — 新建一条顶层评论，用于发布完整评审报告。
+- `post_inline_comment()` — 在 diff 的特定行上发内联评论。
+- `find_or_update_discussion()` — upsert 语义：查找本工具已创建的讨论（通过标记识别），存在则更新其内容，不存在则新建。用于 webhook 重发时避免刷屏式重复评论。
+- `update_discussion()` — 全量替换指定讨论的内容，要求讨论已存在；是 `find_or_update_discussion` 默认实现内部使用的基础操作。
+
+> 注：早期设计图中的 `supported_capabilities()` 从未在代码中存在（`src/git_provider/mod.rs` 的 trait 无此方法），已从本文档移除，不涉及任何代码破坏性变更。
 
 ### 可接受的重复
 

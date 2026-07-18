@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::models::*;
 use crate::scoring::review;
 
@@ -28,8 +30,8 @@ impl Default for ConsolidatorConfig {
 }
 
 /// Result of the consolidation process.
-#[derive(Debug, Clone)]
-pub struct ConsolidationResult {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConsolidatedReport {
     /// Consolidated findings (deduplicated, filtered).
     pub findings: Vec<Finding>,
     /// Number of findings removed for low confidence.
@@ -40,10 +42,15 @@ pub struct ConsolidationResult {
     pub conflicts: Vec<ExpertConflict>,
     /// Overall assessment.
     pub assessment: OverallAssessment,
+    /// Whether the overall weighted score reached `scoring.consensus_threshold`
+    /// (default 70). Informational marker only — a score below the threshold
+    /// is not modified.
+    #[serde(default)]
+    pub consensus_reached: bool,
 }
 
 /// A conflict between two or more experts on the same issue.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpertConflict {
     pub file: String,
     pub line: Option<u32>,
@@ -54,7 +61,7 @@ pub struct ExpertConflict {
 
 impl ConsolidatorConfig {
     /// Run the full consolidation pipeline.
-    pub fn consolidate(&self, reports: &[ExpertReport], total_score: Option<u8>) -> ConsolidationResult {
+    pub fn consolidate(&self, reports: &[ExpertReport], total_score: Option<u8>) -> ConsolidatedReport {
         let mut all_findings: Vec<Finding> = reports.iter().flat_map(|r| r.findings.clone()).collect();
 
         // Step 1: Filter by confidence
@@ -81,6 +88,11 @@ impl ConsolidatorConfig {
             Some(s) => review::score_to_risk_level_with_config(score, &s.risk_thresholds),
             None => review::score_to_risk_level(score),
         };
+        let consensus_threshold = self.scoring.as_ref().map_or_else(
+            || ScoringConfig::default().consensus_threshold,
+            |s| s.consensus_threshold,
+        );
+        let consensus_reached = score >= consensus_threshold;
         let tl_dr = self.generate_tldr(reports, &risk_level, all_findings.len());
 
         let assessment = OverallAssessment {
@@ -90,12 +102,13 @@ impl ConsolidatorConfig {
             tl_dr,
         };
 
-        ConsolidationResult {
+        ConsolidatedReport {
             findings: all_findings,
             low_confidence_removed,
             duplicates_merged,
             conflicts,
             assessment,
+            consensus_reached,
         }
     }
 
@@ -384,8 +397,8 @@ mod tests {
         let reports = vec![make_report("security", findings)];
         let result = config.consolidate(&reports, None);
         assert!(result.assessment.score < 100);
-        // 1 critical finding: expert_score is 70, weight 100 → overall 70
-        // score_to_risk_level(70) = LowMedium
+        // 1 critical finding (confidence 9): expert_score = 70 × 0.98 = 69, weight 100 → overall 69
+        // score_to_risk_level(69) = LowMedium
         assert_eq!(result.assessment.risk_level, RiskLevel::LowMedium);
     }
 
@@ -467,10 +480,54 @@ mod tests {
         let findings = vec![make_finding(Severity::Critical, 9, "a.rs", Some(1), "Security hole")];
         let reports = vec![make_report("security", findings)];
         let result = config.consolidate(&reports, None);
-        // 1 critical finding with custom penalty 50: expert_score = 50, weight 100 -> overall 50
-        assert_eq!(result.assessment.score, 50);
-        // With custom thresholds (critical_max=30, high_max=50), score 50 => High
+        // 1 critical finding with custom penalty 50: (100 - 50) × 0.98 = 49, weight 100 -> overall 49
+        assert_eq!(result.assessment.score, 49);
+        // With custom thresholds (critical_max=30, high_max=50), score 49 => High
         assert_eq!(result.assessment.risk_level, RiskLevel::High);
+        // 49 < consensus_threshold 70 → consensus not reached
+        assert!(!result.consensus_reached);
+    }
+
+    #[test]
+    fn test_consensus_reached_above_threshold() {
+        let config = ConsolidatorConfig {
+            scoring: Some(ScoringConfig {
+                consensus_threshold: 70,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let reports = vec![make_report("security", vec![])];
+        let result = config.consolidate(&reports, None);
+        // No findings → score 100 ≥ 70 → consensus reached
+        assert_eq!(result.assessment.score, 100);
+        assert!(result.consensus_reached);
+    }
+
+    #[test]
+    fn test_consensus_reached_uses_default_threshold_without_scoring() {
+        // Without a scoring config the default threshold (70) applies.
+        let config = ConsolidatorConfig::default();
+        let reports = vec![make_report("security", vec![])];
+        let result = config.consolidate(&reports, None);
+        assert_eq!(result.assessment.score, 100);
+        assert!(result.consensus_reached);
+    }
+
+    #[test]
+    fn test_consensus_reached_with_explicit_total_score() {
+        // An explicit total_score is also compared against the threshold.
+        let config = ConsolidatorConfig {
+            scoring: Some(ScoringConfig {
+                consensus_threshold: 70,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let reports = vec![make_report("security", vec![])];
+        let result = config.consolidate(&reports, Some(69));
+        assert_eq!(result.assessment.score, 69);
+        assert!(!result.consensus_reached);
     }
 
     #[test]
@@ -479,9 +536,9 @@ mod tests {
         let findings = vec![make_finding(Severity::Critical, 9, "a.rs", Some(1), "Security hole")];
         let reports = vec![make_report("security", findings)];
         let result = config.consolidate(&reports, None);
-        // Default penalty: critical = 30, so score = 70, weight 100 -> overall 70
-        assert_eq!(result.assessment.score, 70);
-        // Default thresholds: score 70 => LowMedium
+        // Default penalty: critical = 30, so (100 - 30) × 0.98 = 69, weight 100 -> overall 69
+        assert_eq!(result.assessment.score, 69);
+        // Default thresholds: score 69 => LowMedium
         assert_eq!(result.assessment.risk_level, RiskLevel::LowMedium);
     }
 }

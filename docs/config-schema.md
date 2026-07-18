@@ -31,6 +31,8 @@ The config file uses TOML format. Below is the complete schema with all availabl
 |-------|------|---------|-------------|
 | `aggregated` | boolean | `false` | Whether to produce an aggregated report |
 | `max_findings_per_expert` | integer | `5` | Max findings per expert in the prompt |
+| `min_confidence` | integer | `6` | Minimum confidence (0-10) for a finding; findings below this have their severity downgraded one level by the lead consolidator |
+| `drop_low_confidence` | boolean | `false` | When `true`, findings below `min_confidence` are dropped entirely instead of downgraded |
 | `verification_pass` | boolean | `false` | Extra LLM pass that re-checks each finding against the diff hunks, the referenced file's full content, and the changed-file list; drops findings the evidence disproves (fail-open, adds LLM cost) |
 | `verification_max_file_bytes` | integer | `20000` | Max bytes of referenced file content injected into the verification prompt |
 
@@ -110,7 +112,7 @@ LLM provider configuration. Multiple providers can be configured for fallback.
 | `provider` | string | yes | Provider name: `openai`, `anthropic`, or any custom name |
 | `model` | string | yes | Model name (e.g., `gpt-4o`, `claude-sonnet-4-20250514`) |
 | `api_key` | string | no* | API key (use env var for production) |
-| `api_base` | string | no | API base URL (defaults to provider standard) |
+| `api_base` | string | no | API base URL (defaults to provider standard); also accepts `base_url` as an alias |
 | `max_tokens` | integer | no | Max tokens per response (default: `4096`) |
 | `temperature` | float | no | Temperature for generation (default: `0.3`) |
 
@@ -166,9 +168,10 @@ Large PR detection and chunking configuration. Controls when compression, chunki
 | `max_tokens_per_chunk` | integer | `30000` | Token budget per chunk |
 | `large_pr_file_threshold` | integer | `21` | PRs with more files than this are treated as large PRs |
 | `large_pr_line_threshold` | integer | `1000` | PRs with more changed lines than this are treated as large PRs |
-| `compression_level` | string | `"aggressive"` | Compression level: `"none"` / `"light"` / `"medium"` / `"aggressive"` |
-| `chunking_strategy` | string | `"adaptive"` | Chunking strategy: `"files"` / `"hunks"` / `"adaptive"` |
+| `compression_level` | string | `"aggressive"` | Compression level: `"none"` / `"moderate"` / `"aggressive"`. Note: compression level is currently auto-determined by `assess_large_pr()` (severity-driven); this config field is not yet honored |
+| `chunking_strategy` | string | `"adaptive"` | Chunking strategy: `"files"` / `"hunks"` / `"adaptive"` (see `src/team/orchestrator.rs`) |
 | `max_chunks_per_expert` | integer | `3` | Maximum number of chunks each expert receives |
+| `max_context_file_bytes` | integer | `60000` | Total byte budget for full changed-file contents injected into expert prompts (local reviews only, per-file cap 20000 bytes; `0` disables) |
 
 **Detection logic:**
 
@@ -186,7 +189,29 @@ large_pr_line_threshold = 1000
 compression_level = "aggressive"
 chunking_strategy = "adaptive"
 max_chunks_per_expert = 3
+max_context_file_bytes = 60000
 ```
+
+## `[languages]`
+
+Language detection and per-language profiles (see `LanguagesConfig` / `LanguageProfile` in `src/models/config.rs`).
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `dominant` | string | `""` | When set to a non-empty language name, overrides auto-detection |
+| `profiles` | table | `{}` | Per-language profiles, keyed by language name |
+
+### `[languages.profiles.<name>]`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | `""` | Language name (e.g. `Rust`, `Python`) |
+| `comment_prefixes` | string[] | `[]` | Inline comment prefixes (e.g. `["//"]` for Rust, `["#"]` for Python) |
+| `doc_prefixes` | string[] | `[]` | Doc comment prefixes (e.g. `["///", "//!"]` for Rust, `["\"\"\""]` for Python) |
+| `test_patterns` | string[] | `[]` | File-path patterns that indicate a test file |
+| `style_configs` | string[] | `[]` | Style/linter configuration files to check for this language |
+| `naming_hint` | string | `""` | Naming convention hint for LLM prompts |
+| `error_hint` | string | `""` | Error-handling convention hint for LLM prompts |
 
 ## `[rate_limit]`
 

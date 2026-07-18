@@ -101,7 +101,7 @@ pub async fn run_review(
         None => (crate::progress::new_progress_map(), uuid::Uuid::new_v4().to_string()),
     };
 
-    let (findings, global_context, dropped_findings) = crate::team::orchestrator::run_experts(
+    let (findings, global_context, dropped_findings, consolidated) = crate::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -132,7 +132,9 @@ pub async fn run_review(
     } else {
         ReviewOutput::new(findings)
     };
-    let output = output.with_dropped_findings(dropped_findings);
+    let output = output
+        .with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated);
 
     // Mark progress complete
     crate::progress::complete_progress(Some(&progress_map), &review_id);
@@ -163,6 +165,12 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
     let mut md = String::from("# CodeReview Board\n\n");
     for report in &output.reports {
         md.push_str(&report.markdown);
+        md.push_str("\n\n---\n\n");
+    }
+    // Lead consolidation summary (score / TL;DR / conflicts), rendered after
+    // the per-expert reports and before the verification appendix.
+    if let Some(ref consolidated) = output.consolidated {
+        md.push_str(&crate::output::team_renderer::render_lead_summary(consolidated));
         md.push_str("\n\n---\n\n");
     }
     // `false` keeps the historical list-only rendering here; the run-summary

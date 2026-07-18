@@ -46,6 +46,7 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
     let source = body.source.clone();
     let config_toml = body.config.clone();
     let llm_configs = body.llm_configs.clone().unwrap_or_default();
+    let webhook = body.webhook.clone();
     let cfg = state.app_config.read().unwrap().clone();
 
     tokio::spawn(async move {
@@ -54,63 +55,20 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
         }
         store_clone.update(task_id, TaskState::Running, None, None).await;
 
-        let diff_raw = match resolve_source(source, &cfg).await {
-            Ok(d) => d,
-            Err(e) => {
-                store_clone
-                    .update(task_id, TaskState::Failed, None, Some(e.to_string()))
-                    .await;
-                return;
-            }
-        };
-
-        let config_source = config_toml.map(crate::models::ConfigSource::Inline);
-        let app_config = match crate::config::resolve_config(config_source).await {
-            Ok(c) => c,
-            Err(e) => {
-                store_clone
-                    .update(task_id, TaskState::Failed, None, Some(e.to_string()))
-                    .await;
-                return;
-            }
-        };
-
-        let experts = app_config.build_expert_defs();
-        let mr_info = crate::models::MRInfo::new(
-            "api".to_string(),
-            "API Review".to_string(),
-            "unknown".to_string(),
-            "unknown".to_string(),
-        );
-
-        let review_result = tokio::time::timeout(
-            std::time::Duration::from_secs(600),
-            orchestrator::run_experts(&experts, &mr_info, &diff_raw, &llm_configs, &app_config, None, ""),
-        )
-        .await;
-
-        match review_result {
-            Ok(Ok((reports, _, dropped_findings))) => {
-                let output = crate::models::ReviewOutput::new(reports).with_dropped_findings(dropped_findings);
-                let value = serde_json::to_value(&output).unwrap_or_default();
+        // Single exit point: persist the outcome, then fire the webhook callback.
+        match run_review(source, &cfg, config_toml, llm_configs).await {
+            Ok((value, summary)) => {
                 store_clone
                     .update(task_id, TaskState::Completed, Some(value), None)
                     .await;
+                super::callback::spawn_callback(webhook, task_id, "completed", Some(summary), None);
             }
-            Ok(Err(e)) => {
+            Err(e) => {
+                let message = e.to_string();
                 store_clone
-                    .update(task_id, TaskState::Failed, None, Some(e.to_string()))
+                    .update(task_id, TaskState::Failed, None, Some(message.clone()))
                     .await;
-            }
-            Err(_) => {
-                store_clone
-                    .update(
-                        task_id,
-                        TaskState::Failed,
-                        None,
-                        Some("Task timed out after 600 seconds".to_string()),
-                    )
-                    .await;
+                super::callback::spawn_callback(webhook, task_id, "failed", None, Some(message));
             }
         }
     });
@@ -242,7 +200,7 @@ async fn delete_review(State(state): State<Arc<AppState>>, Path(task_id): Path<U
     }
 }
 
-fn task_to_status(entry: &TaskEntry) -> TaskStatus {
+pub(crate) fn task_to_status(entry: &TaskEntry) -> TaskStatus {
     let meta = &entry.source_meta;
     TaskStatus {
         task_id: entry.task_id,
@@ -294,6 +252,48 @@ fn source_meta_from_request(source: &ReviewSource) -> SourceMeta {
         },
         ReviewSource::StaticDiff { .. } => SourceMeta::default(),
     }
+}
+
+/// Execute a review task end to end: resolve the diff source, build the
+/// configuration, and run the expert team. On success returns the stored
+/// result value plus a short human-readable summary for the webhook callback.
+async fn run_review(
+    source: ReviewSource,
+    cfg: &Option<Arc<crate::models::AppConfig>>,
+    config_toml: Option<String>,
+    llm_configs: Vec<crate::models::LLMConfig>,
+) -> anyhow::Result<(serde_json::Value, String)> {
+    let diff_raw = resolve_source(source, cfg).await?;
+
+    let config_source = config_toml.map(crate::models::ConfigSource::Inline);
+    let app_config = crate::config::resolve_config(config_source).await?;
+
+    let experts = app_config.build_expert_defs();
+    let mr_info = crate::models::MRInfo::new(
+        "api".to_string(),
+        "API Review".to_string(),
+        "unknown".to_string(),
+        "unknown".to_string(),
+    );
+
+    let review_result = tokio::time::timeout(
+        std::time::Duration::from_secs(600),
+        orchestrator::run_experts(&experts, &mr_info, &diff_raw, &llm_configs, &app_config, None, ""),
+    )
+    .await;
+
+    let (reports, _, dropped_findings, consolidated) = match review_result {
+        Ok(result) => result?,
+        Err(_) => anyhow::bail!("Task timed out after 600 seconds"),
+    };
+
+    let output = crate::models::ReviewOutput::new(reports)
+        .with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated);
+    let findings: usize = output.reports.iter().map(|r| r.findings.len()).sum();
+    let summary = format!("{} expert report(s), {} finding(s)", output.reports.len(), findings);
+    let value = serde_json::to_value(&output).unwrap_or_default();
+    Ok((value, summary))
 }
 
 async fn resolve_source(

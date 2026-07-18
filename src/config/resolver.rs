@@ -404,8 +404,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     /// Helper: returns a TOML string with all default experts disabled.
     /// Tests append their own expert sections to override specific ones.
     fn base_disabled_toml() -> String {
@@ -482,9 +480,22 @@ weight = 5
         }
     }
 
+    /// Capture and clear the `CODE_AUDIT_*` override variables, restoring
+    /// their original values on drop. Tests that resolve configuration
+    /// through `apply_env_overrides` use this so a variable leaked from the
+    /// process environment (or left over by an unlocked test) cannot skew
+    /// assertions. Must only be called while holding [`fs_lock()`].
+    fn clear_code_audit_env() -> (EnvGuard, EnvGuard) {
+        let commands = EnvGuard::new("CODE_AUDIT_COMMANDS");
+        std::env::remove_var("CODE_AUDIT_COMMANDS");
+        let scoring = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
+        std::env::remove_var("CODE_AUDIT_SCORING_ENABLED");
+        (commands, scoring)
+    }
+
     #[test]
     fn test_apply_env_overrides_invalid_toml() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         env_guard.set("not valid toml {{{");
 
@@ -496,7 +507,7 @@ weight = 5
 
     #[test]
     fn test_apply_env_overrides_scoring_non_bool() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
         env_guard.set("not_a_boolean");
 
@@ -508,7 +519,7 @@ weight = 5
 
     #[test]
     fn test_apply_env_overrides_commands() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         env_guard.set("review = true\ndescribe = true");
 
@@ -524,7 +535,7 @@ weight = 5
 
     #[test]
     fn test_apply_env_overrides_empty_commands() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         env_guard.set("");
 
@@ -536,6 +547,7 @@ weight = 5
 
     #[test]
     fn test_validate_experts_weight_sum_not_100() {
+        let _guard = fs_lock();
         let user_toml = r#"
 [review_experts.lead]
 enabled = true
@@ -585,6 +597,7 @@ enabled = false
 
     #[test]
     fn test_validate_experts_weight_sum_100() {
+        let _guard = fs_lock();
         // Explicit config — disable all defaults, use only alice+bob = 100
         let user_toml = format!("{}[review_experts.alice]\nenabled = true\nweight = 60\n\n[review_experts.bob]\nenabled = true\nweight = 40\n", base_disabled_toml());
         let cfg = load_and_apply(&user_toml).unwrap();
@@ -593,6 +606,7 @@ enabled = false
 
     #[test]
     fn test_validate_experts_no_enabled_experts() {
+        let _guard = fs_lock();
         let user_toml = base_disabled_toml();
         let cfg = load_and_apply(&user_toml).unwrap();
         validate_experts(&cfg).unwrap();
@@ -600,6 +614,7 @@ enabled = false
 
     #[test]
     fn test_validate_experts_zero_weight_sum() {
+        let _guard = fs_lock();
         let user_toml = r#"
 [review_experts.lead]
 enabled = true
@@ -652,13 +667,31 @@ enabled = false
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_default_path() {
+        // resolve_config(None) reads the user-level config from $HOME and the
+        // project-level config from the current directory (both process-wide),
+        // and may push into FALLBACK_WARNINGS. Hold FS_LOCK and redirect all
+        // of them so parallel tests (and the developer's real ~/.config or a
+        // stray project-level file) cannot interfere.
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let _home_guard = HomeGuard::set(&home);
+        let _cwd_guard = CwdGuard::set(&project_dir);
         let cfg = resolve_config(None).await.unwrap();
         assert!(cfg.review_experts.contains_key("lead"));
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_inline() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let cfg = resolve_config(Some(ConfigSource::Inline("[commands]\nreview = true".to_string())))
             .await
             .unwrap();
@@ -666,7 +699,10 @@ enabled = false
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_with_invalid_weight_sum() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         // TOML that overrides lead.weight to make sum != 100
         let toml = r#"
 [review_experts.lead]
@@ -679,7 +715,10 @@ weight = 99
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_inline_full_toml() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let toml = r#"
 output_dir = "/tmp/test-reports"
 
@@ -696,7 +735,10 @@ describe = true
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_inline_empty_still_defaults() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let cfg = resolve_config(Some(ConfigSource::Inline(String::new()))).await.unwrap();
         // With empty inline, should parse with all defaults
         assert!(cfg.review_experts.contains_key("lead"));
@@ -705,7 +747,7 @@ describe = true
 
     #[test]
     fn test_apply_env_overrides_enables_scoring() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
         env_guard.set("true");
 
@@ -716,7 +758,7 @@ describe = true
 
     #[test]
     fn test_apply_env_overrides_disables_scoring_with_0() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
         env_guard.set("0");
 
@@ -727,7 +769,7 @@ describe = true
 
     #[test]
     fn test_apply_env_overrides_scoring_with_1() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
         env_guard.set("1");
 
@@ -738,7 +780,7 @@ describe = true
 
     #[test]
     fn test_apply_env_overrides_unset_does_nothing() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         // If the env var was set, restore original; otherwise leave it unset
         if std::env::var("CODE_AUDIT_COMMANDS").is_ok() {
@@ -758,7 +800,7 @@ describe = true
 
     #[test]
     fn test_load_and_apply_full_flow() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         env_guard.set("review = true\ndescribe = true");
         let env_guard2 = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
@@ -778,7 +820,7 @@ describe = true
 
     #[test]
     fn test_load_and_apply_env_override_precedence() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
         env_guard.set("false");
 
@@ -794,6 +836,7 @@ enabled = true
 
     #[test]
     fn test_validate_experts_weight_overflow() {
+        let _guard = fs_lock();
         let user_toml = format!(
             "{}[review_experts.alice]\nenabled = true\nweight = 255\n",
             base_disabled_toml()
@@ -808,7 +851,7 @@ enabled = true
 
     #[test]
     fn test_apply_env_overrides_commands_multiple() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         env_guard.set("review = true\ndescribe = true\nimprove = false\nask = true");
 
@@ -822,6 +865,7 @@ enabled = true
 
     #[test]
     fn test_load_and_apply_invalid_weight_expert() {
+        let _guard = fs_lock();
         let user_toml = format!(
             "{}[review_experts.alice]\nenabled = true\nweight = 50\n[review_experts.bob]\nenabled = true\nweight = 60\n",
             base_disabled_toml()
@@ -832,6 +876,7 @@ enabled = true
 
     #[test]
     fn test_load_and_apply_missing_required_model() {
+        let _guard = fs_lock();
         // model is not required in ExpertTomlDef (it defaults to empty string)
         let user_toml = format!(
             "{}[review_experts.alice]\nenabled = true\nweight = 100\nrole = \"Test Role\"\n",
@@ -842,7 +887,10 @@ enabled = true
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_with_scoring_penalties() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let toml = r#"
 [scoring.penalties]
 critical = 50
@@ -859,7 +907,10 @@ high = 25
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_with_risk_thresholds() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let toml = r#"
 [scoring.risk_thresholds]
 critical_max = 30
@@ -875,7 +926,10 @@ high_max = 50
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_with_consensus_threshold() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let toml = r#"
 [scoring]
 consensus_threshold = 80
@@ -888,6 +942,7 @@ consensus_threshold = 80
 
     #[test]
     fn test_validate_experts_returns_ok_for_sum_100() {
+        let _guard = fs_lock();
         let user_toml = format!(
             "{}[review_experts.alice]\nenabled = true\nweight = 50\n\n[review_experts.bob]\nenabled = true\nweight = 50\n",
             base_disabled_toml()
@@ -898,6 +953,7 @@ consensus_threshold = 80
 
     #[test]
     fn test_validate_experts_err_for_sum_not_100() {
+        let _guard = fs_lock();
         let user_toml = format!(
             "{}[review_experts.alice]\nenabled = true\nweight = 30\n",
             base_disabled_toml()
@@ -916,12 +972,12 @@ consensus_threshold = 80
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_inline_with_commands() {
-        // resolve_config reads the user-level config from $HOME (process-wide).
-        // Hold FS_LOCK and use a clean home so parallel tests that redirect
-        // $HOME (and the machine's real user config) cannot interfere.
-        let _guard = FS_LOCK.lock().unwrap();
-        let tmp = tempfile::tempdir().unwrap();
-        let _home_guard = HomeGuard::set(tmp.path());
+        // resolve_config(Inline) pipes the TOML through apply_env_overrides,
+        // which reads the process-wide CODE_AUDIT_* variables. Hold FS_LOCK
+        // and clear them so parallel tests that set those variables cannot
+        // flip the commands asserted below.
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let toml = r#"
 [commands]
 improve = true
@@ -939,7 +995,10 @@ ask = true
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_inline_with_diff_config() {
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
         let toml = r#"
 [diff]
 compression_level = "none"
@@ -961,9 +1020,8 @@ chunking_strategy = "files"
 enabled = false
 display_individual_scores = false
 "#;
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
-        std::env::remove_var("CODE_AUDIT_SCORING_ENABLED");
+        let _guard = fs_lock();
+        let _env = clear_code_audit_env();
 
         let cfg = resolve_config(Some(ConfigSource::Inline(toml.to_string())))
             .await
@@ -974,6 +1032,7 @@ display_individual_scores = false
 
     #[test]
     fn test_load_and_apply_empty_toml() {
+        let _guard = fs_lock();
         let cfg = load_and_apply("").unwrap();
         assert!(cfg.review_experts.contains_key("lead"));
         assert_eq!(cfg.diff.max_input_tokens, 120000);
@@ -987,7 +1046,7 @@ display_individual_scores = false
 
     #[test]
     fn test_apply_env_overrides_commands_partial() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         env_guard.set("review = true");
 
@@ -1001,6 +1060,7 @@ display_individual_scores = false
 
     #[test]
     fn test_validate_experts_single_expert_weight_100() {
+        let _guard = fs_lock();
         let user_toml = format!(
             "{}[review_experts.solo]\nenabled = true\nweight = 100\n",
             base_disabled_toml()
@@ -1011,7 +1071,7 @@ display_individual_scores = false
 
     #[test]
     fn test_load_and_apply_full_pipeline() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let env_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
         env_guard.set("true");
 
@@ -1027,7 +1087,7 @@ display_individual_scores = false
 
     #[test]
     fn test_apply_env_overrides_multiple_vars() {
-        let _guard = ENV_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let cmd_guard = EnvGuard::new("CODE_AUDIT_COMMANDS");
         cmd_guard.set("review = true\ndescribe = true");
         let score_guard = EnvGuard::new("CODE_AUDIT_SCORING_ENABLED");
@@ -1042,6 +1102,7 @@ display_individual_scores = false
 
     #[test]
     fn test_validate_experts_fails_on_missing_role() {
+        let _guard = fs_lock();
         // Expert without role is still accepted by ExpertTomlDef default (role defaults to "")
         // but validate does not check role. The validation only checks weights sum to 100.
         let user_toml = format!(
@@ -1054,6 +1115,7 @@ display_individual_scores = false
 
     #[test]
     fn test_load_and_apply_invalid_expert_weight_sum() {
+        let _guard = fs_lock();
         let user_toml = format!(
             "{}[review_experts.alice]\nenabled = true\nweight = 30\n[review_experts.bob]\nenabled = true\nweight = 30\n",
             base_disabled_toml()
@@ -1116,7 +1178,20 @@ api_key = "user-key"
         }
     }
 
+    /// Serializes every test that touches process-global state: the
+    /// `CODE_AUDIT_*` environment variables, `$HOME`, the current directory,
+    /// and `FALLBACK_WARNINGS`. Acquire it via [`fs_lock()`] *before*
+    /// creating any `EnvGuard` / `HomeGuard` / `CwdGuard`.
     static FS_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Acquire the global test lock, tolerating mutex poisoning. The guards
+    /// above restore process-global state on drop even when a test panics,
+    /// so a poisoned lock only means "another test already failed" —
+    /// ignoring the poison keeps one panicking test from cascading
+    /// `PoisonError` failures into every other serialized test.
+    fn fs_lock() -> std::sync::MutexGuard<'static, ()> {
+        FS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn clear_fallback_warnings() {
         let mut guard = super::FALLBACK_WARNINGS.lock().unwrap_or_else(|e| e.into_inner());
@@ -1131,7 +1206,7 @@ api_key = "user-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_path_uses_user_llm_fallback() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         clear_fallback_warnings();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1161,7 +1236,7 @@ api_key = "user-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_path_invalid_project_llm_fallback() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         clear_fallback_warnings();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1194,7 +1269,7 @@ model = "gpt-4"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_path_project_llm_wins() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         clear_fallback_warnings();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1227,7 +1302,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_project_missing_uses_user_llm() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         clear_fallback_warnings();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1259,7 +1334,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_invalid_project_llm_fallback() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         clear_fallback_warnings();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1291,7 +1366,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_project_llm_wins() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         clear_fallback_warnings();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1322,7 +1397,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_path_same_as_user_config_no_duplicate() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         clear_fallback_warnings();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
@@ -1348,7 +1423,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_user_report_applied() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let user_path = home.join(".config").join("review-engine");
@@ -1377,7 +1452,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_project_report_overrides_user() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let user_path = home.join(".config").join("review-engine");
@@ -1410,7 +1485,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_project_report_disables_user_setting() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let user_path = home.join(".config").join("review-engine");
@@ -1440,7 +1515,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_no_report_keeps_builtin_default() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let user_path = home.join(".config").join("review-engine");
@@ -1469,7 +1544,7 @@ api_key = "project-key"
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]
     async fn test_resolve_config_none_invalid_user_toml_keeps_default_report() {
-        let _guard = FS_LOCK.lock().unwrap();
+        let _guard = fs_lock();
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         let user_path = home.join(".config").join("review-engine");

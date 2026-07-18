@@ -33,7 +33,7 @@ review-engine init --default  # 写入内置默认配置到 .code-audit-config.t
 
 ### 技术选型
 
-使用 `inquire = "0.7"` 而非手写 `print!` + `read_line`，原因：
+使用 `inquire = "0.9"` 而非手写 `print!` + `read_line`，原因：
 
 | 方案 | 优点 | 缺点 |
 |------|------|------|
@@ -133,6 +133,8 @@ None => {
 | 项目有 `.code-audit-config.toml`，无 `[[llm]]` | 全局配置 fallback ✅ | 不在（安全上传）|
 | 项目有 `.code-audit-config.toml`，有 `[[llm]]` | 项目配置覆盖全局 | 在（用户自愿）|
 
+> **实现状态**：当前实现仅 `[[llm]]` 与 `[report]` 的用户级 fallback（项目配置缺省时回退到用户级 `[[llm]]`，`[report]` 作为全局默认）；上述全字段通用 fill/override 未实现。
+
 ### 文件变更
 
 | 文件 | 行数 | 说明 |
@@ -154,7 +156,7 @@ None => {
 | 文件 | 行数 | 说明 |
 |------|------|------|
 | `Cargo.toml` | +1 | 加 `inquire` 依赖 |
-| `src/tools/init.rs` | ~200 | 重写为交互式 |
+| `src/actions/init.rs` | ~200 | 重写为交互式 |
 | `src/cli/mod.rs` | -3 | 去掉 `Init` 的 `output` 字段 |
 | `src/cli/handlers.rs` | ~5 | 简化 handler |
 | `docs/decisions/interactive-init.md` | — | 本文 |

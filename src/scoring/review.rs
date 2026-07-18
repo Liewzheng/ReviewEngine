@@ -3,6 +3,14 @@
 //! Computes numerical scores (0–100) from expert findings using a
 //! penalty-based system: critical findings deduct 30 points, high
 //! deduct 15, medium deduct 5, low deduct 1, and notes deduct 0.
+//! Two adjustment factors refine the raw penalty score:
+//!
+//! - **Consensus multiplier** — a finding corroborated by at least one
+//!   other expert (`agrees_with` non-empty) deducts 1.5× its base penalty.
+//! - **Confidence factor** — the expert's average finding confidence,
+//!   mapped to [0.8, 1.0] (confidence 10 → 1.0, 0 → 0.8), is multiplied
+//!   onto the post-deduction score.
+//!
 //! [`expert_score`] calculates a single expert's score, while
 //! [`weighted_overall_score`] combines multiple expert scores
 //! weighted by their configured importance. The module also defines
@@ -36,21 +44,39 @@ pub struct ReviewScoreRecord {
 /// - High findings: -penalties.high each
 /// - Medium findings: -penalties.medium each
 /// - Low findings: -penalties.low each
-/// - Note findings: no penalty
-/// - Clamp to 0-100 range
+/// - Note findings: -penalties.note each (0 by default)
+/// - Consensus multiplier: a finding with a non-empty `agrees_with` list
+///   (corroborated by ≥1 other expert) deducts 1.5× its base penalty
+/// - Clamp the post-deduction score to 0-100
+/// - Confidence factor: the findings' average confidence mapped to
+///   [0.8, 1.0] (confidence 10 → 1.0, 0 → 0.8), multiplied onto the
+///   post-deduction score; experts reporting low-confidence findings
+///   keep a higher score
+/// - Round and clamp the final score to 0-100
 pub fn expert_score_with_config(findings: &[Finding], penalties: &PenaltyConfig) -> u8 {
-    let mut penalty = 0i32;
-    for finding in findings {
-        match finding.severity {
-            crate::models::Severity::Critical => penalty += penalties.critical as i32,
-            crate::models::Severity::High => penalty += penalties.high as i32,
-            crate::models::Severity::Medium => penalty += penalties.medium as i32,
-            crate::models::Severity::Low => penalty += penalties.low as i32,
-            crate::models::Severity::Note => penalty += penalties.note as i32,
-        }
+    if findings.is_empty() {
+        return 100;
     }
-    let score = 100i32 - penalty;
-    score.clamp(0, 100) as u8
+
+    let mut penalty = 0f64;
+    let mut confidence_sum = 0u32;
+    for finding in findings {
+        let base = match finding.severity {
+            crate::models::Severity::Critical => penalties.critical,
+            crate::models::Severity::High => penalties.high,
+            crate::models::Severity::Medium => penalties.medium,
+            crate::models::Severity::Low => penalties.low,
+            crate::models::Severity::Note => penalties.note,
+        } as f64;
+        let consensus_multiplier = if finding.agrees_with.is_empty() { 1.0 } else { 1.5 };
+        penalty += base * consensus_multiplier;
+        confidence_sum += finding.confidence as u32;
+    }
+
+    let score_after_penalty = (100f64 - penalty).clamp(0.0, 100.0);
+    let avg_confidence = (confidence_sum as f64 / findings.len() as f64).min(10.0);
+    let confidence_factor = 0.8 + 0.02 * avg_confidence;
+    (score_after_penalty * confidence_factor).round().clamp(0.0, 100.0) as u8
 }
 
 /// Backward-compatible wrapper that uses the built-in default penalties.
@@ -199,14 +225,16 @@ mod tests {
 
     #[test]
     fn test_expert_score_critical() {
+        // 100 - 30 = 70, confidence factor 0.96 (avg confidence 8) → 67
         let score = expert_score(&[make_finding(Severity::Critical)]);
-        assert_eq!(score, 70);
+        assert_eq!(score, 67);
     }
 
     #[test]
     fn test_expert_score_high() {
+        // 100 - 15 = 85, × 0.96 → 82
         let score = expert_score(&[make_finding(Severity::High)]);
-        assert_eq!(score, 85);
+        assert_eq!(score, 82);
     }
 
     #[test]
@@ -217,7 +245,7 @@ mod tests {
             make_finding(Severity::Medium),
         ];
         let score = expert_score(&findings);
-        assert_eq!(score, 50); // 100 - 30 - 15 - 5
+        assert_eq!(score, 48); // (100 - 30 - 15 - 5) × 0.96 = 48
     }
 
     #[test]
@@ -260,7 +288,7 @@ mod tests {
         let bob_findings = [make_finding(Severity::Critical)];
         let data = vec![("alice", &[] as &[Finding], 50u8), ("bob", &bob_findings[..], 50u8)];
         let (score, risk) = compute_overall(&data);
-        assert_eq!(score, 85); // (100*0.5 + 70*0.5) = 85
+        assert_eq!(score, 84); // (100*0.5 + 67*0.5) = 83.5 → 84
         assert_eq!(risk, RiskLevel::Low);
     }
 
@@ -275,15 +303,16 @@ mod tests {
             make_finding(Severity::Low),      // -1
             make_finding(Severity::Note),     // -0
         ];
-        // 100 - 30 - 15 - 15 - 5 - 1 - 1 - 0 = 33
+        // (100 - 30 - 15 - 15 - 5 - 1 - 1 - 0) × 0.96 = 33 × 0.96 = 31.68 → 32
         let score = expert_score(&findings);
-        assert_eq!(score, 33);
+        assert_eq!(score, 32);
     }
 
     #[test]
     fn test_expert_score_only_notes() {
+        // Notes deduct 0, but the confidence factor (avg 8 → 0.96) still applies.
         let findings = vec![make_finding(Severity::Note), make_finding(Severity::Note)];
-        assert_eq!(expert_score(&findings), 100);
+        assert_eq!(expert_score(&findings), 96);
     }
 
     #[test]
@@ -294,12 +323,14 @@ mod tests {
 
     #[test]
     fn test_expert_score_single_low() {
-        assert_eq!(expert_score(&[make_finding(Severity::Low)]), 99);
+        // 99 × 0.96 = 95.04 → 95
+        assert_eq!(expert_score(&[make_finding(Severity::Low)]), 95);
     }
 
     #[test]
     fn test_expert_score_single_medium() {
-        assert_eq!(expert_score(&[make_finding(Severity::Medium)]), 95);
+        // 95 × 0.96 = 91.2 → 91
+        assert_eq!(expert_score(&[make_finding(Severity::Medium)]), 91);
     }
 
     #[test]
@@ -362,12 +393,12 @@ mod tests {
 
     #[test]
     fn test_compute_overall_multiple_experts() {
-        let alice_findings = [make_finding(Severity::High)]; // score 85
-        let bob_findings = [make_finding(Severity::Medium), make_finding(Severity::Low)]; // score 94
+        let alice_findings = [make_finding(Severity::High)]; // score 82
+        let bob_findings = [make_finding(Severity::Medium), make_finding(Severity::Low)]; // score 90
         let data = vec![("alice", &alice_findings[..], 50u8), ("bob", &bob_findings[..], 50u8)];
         let (score, _risk) = compute_overall(&data);
-        // (85*0.5 + 94*0.5) = 89.5 -> 90
-        assert_eq!(score, 90);
+        // (82*0.5 + 90*0.5) = 86
+        assert_eq!(score, 86);
     }
 
     #[test]
@@ -388,7 +419,41 @@ mod tests {
             make_finding(Severity::Low),      // -1
             make_finding(Severity::Note),     // -0
         ];
-        assert_eq!(expert_score(&findings), 49); // 100 - 30 - 15 - 5 - 1 = 49
+        assert_eq!(expert_score(&findings), 47); // (100 - 30 - 15 - 5 - 1) × 0.96 = 47.04 → 47
+    }
+
+    #[test]
+    fn test_expert_score_confidence_factor_full_confidence() {
+        // confidence 10 → factor 1.0: pure severity penalty
+        let mut finding = make_finding(Severity::Critical);
+        finding.confidence = 10;
+        assert_eq!(expert_score(&[finding]), 70);
+    }
+
+    #[test]
+    fn test_expert_score_confidence_factor_zero_confidence() {
+        // confidence 0 → factor 0.8: (100 - 30) × 0.8 = 56
+        let mut finding = make_finding(Severity::Critical);
+        finding.confidence = 0;
+        assert_eq!(expert_score(&[finding]), 56);
+    }
+
+    #[test]
+    fn test_expert_score_consensus_multiplier() {
+        // Corroborated finding (agrees_with non-empty): penalty ×1.5
+        // (100 - 30×1.5) × 0.96 = 55 × 0.96 = 52.8 → 53
+        let mut finding = make_finding(Severity::Critical);
+        finding.agrees_with = vec!["other-expert".to_string()];
+        assert_eq!(expert_score(&[finding]), 53);
+    }
+
+    #[test]
+    fn test_expert_score_consensus_multiplier_with_full_confidence() {
+        // Isolates the consensus multiplier: 100 - 30×1.5 = 55
+        let mut finding = make_finding(Severity::Critical);
+        finding.confidence = 10;
+        finding.agrees_with = vec!["other-expert".to_string()];
+        assert_eq!(expert_score(&[finding]), 55);
     }
 
     #[test]
@@ -422,26 +487,26 @@ mod tests {
 
     #[test]
     fn test_compute_overall_single_expert() {
-        let findings = [make_finding(Severity::Critical)]; // score 70
+        let findings = [make_finding(Severity::Critical)]; // score 67
         let data = vec![("security", &findings[..], 100u8)];
         let (score, risk) = compute_overall(&data);
-        assert_eq!(score, 70);
+        assert_eq!(score, 67);
         assert_eq!(risk, RiskLevel::LowMedium);
     }
 
     #[test]
     fn test_compute_overall_three_experts_asymmetric_weights() {
-        let a = [make_finding(Severity::Critical)]; // score 70
-        let b = [make_finding(Severity::High)]; // score 85
-        let c = [make_finding(Severity::Medium)]; // score 95
+        let a = [make_finding(Severity::Critical)]; // score 67
+        let b = [make_finding(Severity::High)]; // score 82
+        let c = [make_finding(Severity::Medium)]; // score 91
         let data = vec![
             ("lead", &a[..], 50u8),
             ("quality", &b[..], 30u8),
             ("docs", &c[..], 20u8),
         ];
         let (score, _) = compute_overall(&data);
-        // (70*0.5 + 85*0.3 + 95*0.2) = 35 + 25.5 + 19 = 79.5 -> 80
-        assert_eq!(score, 80);
+        // (67*0.5 + 82*0.3 + 91*0.2) = 33.5 + 24.6 + 18.2 = 76.3 → 76
+        assert_eq!(score, 76);
     }
 
     #[test]
@@ -491,14 +556,15 @@ mod tests {
             low: 2,
             note: 0,
         };
+        // All findings have confidence 8 → confidence factor 0.96
         let score = expert_score_with_config(&[make_finding(Severity::Critical)], &penalties);
-        assert_eq!(score, 50); // 100 - 50
+        assert_eq!(score, 48); // (100 - 50) × 0.96
 
         let score = expert_score_with_config(&[make_finding(Severity::High)], &penalties);
-        assert_eq!(score, 75); // 100 - 25
+        assert_eq!(score, 72); // (100 - 25) × 0.96
 
         let score = expert_score_with_config(&[make_finding(Severity::Medium)], &penalties);
-        assert_eq!(score, 90); // 100 - 10
+        assert_eq!(score, 86); // (100 - 10) × 0.96 = 86.4 → 86
     }
 
     #[test]
@@ -512,7 +578,7 @@ mod tests {
         };
         let findings = vec![make_finding(Severity::Note), make_finding(Severity::Note)];
         let score = expert_score_with_config(&findings, &penalties);
-        assert_eq!(score, 90); // 100 - 5 - 5 = 90
+        assert_eq!(score, 86); // (100 - 5 - 5) × 0.96 = 86.4 → 86
     }
 
     #[test]
@@ -548,8 +614,8 @@ mod tests {
         let findings = [make_finding(Severity::Critical)];
         let data = vec![("security", &findings[..], 100u8)];
         let (score, risk) = compute_overall_with_config(&data, &penalties, &thresholds);
-        assert_eq!(score, 50); // 100 - 50
-        assert_eq!(risk, RiskLevel::High); // 50 <= high_max=50
+        assert_eq!(score, 48); // (100 - 50) × 0.96
+        assert_eq!(risk, RiskLevel::High); // 48 <= high_max=50
     }
 
     #[test]
@@ -563,7 +629,7 @@ mod tests {
         let score1 = expert_score(&findings);
         let score2 = expert_score_with_config(&findings, &PenaltyConfig::default());
         assert_eq!(score1, score2);
-        assert_eq!(score1, 50); // 100 - 30 - 15 - 5
+        assert_eq!(score1, 48); // (100 - 30 - 15 - 5) × 0.96
     }
 
     #[test]

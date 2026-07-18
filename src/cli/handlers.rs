@@ -150,6 +150,7 @@ pub async fn run_improve(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -205,6 +206,7 @@ pub async fn run_improve_local_diff(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -263,6 +265,7 @@ pub async fn run_improve_local_repo(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -320,6 +323,7 @@ pub async fn run_describe(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -377,6 +381,7 @@ pub async fn run_describe_local_diff(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -437,6 +442,7 @@ pub async fn run_describe_local_repo(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -491,6 +497,7 @@ pub async fn run_ask(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -534,6 +541,7 @@ pub async fn run_ask_local_diff(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -592,6 +600,7 @@ pub async fn run_ask_local_repo(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -654,6 +663,7 @@ pub async fn run_update_changelog(
         }],
         aggregated: None,
         dropped_findings: vec![],
+        consolidated: None,
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -695,7 +705,7 @@ pub async fn run_local(
 
     let (experts, mr_info) = prepare_review(&config, "local", "local", "main");
 
-    let (reports, _, dropped_findings) = review_engine::team::orchestrator::run_experts(
+    let (reports, _, dropped_findings, consolidated) = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -706,7 +716,9 @@ pub async fn run_local(
     )
     .await?;
 
-    let out = ReviewOutput::new(reports).with_dropped_findings(dropped_findings);
+    let out = ReviewOutput::new(reports)
+        .with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated);
     write_output(
         &out,
         format,
@@ -775,7 +787,7 @@ pub async fn run_local_repo(
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", base_ref);
 
-    let (reports, _, dropped_findings) = review_engine::team::orchestrator::run_experts(
+    let (reports, _, dropped_findings, consolidated) = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -786,7 +798,9 @@ pub async fn run_local_repo(
     )
     .await?;
 
-    let out = ReviewOutput::new(reports).with_dropped_findings(dropped_findings);
+    let out = ReviewOutput::new(reports)
+        .with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated);
 
     let repo_root = match std::fs::canonicalize(local_path) {
         Ok(p) => Some(p),
@@ -875,7 +889,9 @@ fn normalize_all_findings(output: &mut ReviewOutput, repo_root: &Path) {
 ///
 /// `verification_enabled` tells the Markdown renderer whether the finding
 /// verification pass ran, so the "Dropped by verification" appendix can show
-/// a run summary even when nothing was dropped.
+/// a run summary even when nothing was dropped. When `result.consolidated`
+/// is present, a "Lead Summary" section is rendered after the per-expert
+/// reports and before that appendix.
 fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool) -> Result<String> {
     Ok(match format {
         "markdown" => {
@@ -894,6 +910,15 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
             };
             let checked =
                 result.reports.iter().map(|r| r.findings.len()).sum::<usize>() + result.dropped_findings.len();
+            // Lead consolidation summary: after the per-expert reports,
+            // before the "Dropped by verification" appendix.
+            if let Some(ref consolidated) = result.consolidated {
+                if !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str("\n---\n\n");
+                text.push_str(&review_engine::output::team_renderer::render_lead_summary(consolidated));
+            }
             let appendix = review_engine::output::renderer::render_dropped_findings_appendix(
                 &result.dropped_findings,
                 verification_enabled,
@@ -1025,4 +1050,124 @@ pub async fn watch_config_file(path: std::path::PathBuf) {
     })
     .await
     .ok();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use review_engine::team::lead_consolidator::{ConsolidatedReport, ExpertConflict};
+
+    fn make_finding(severity: Severity, file: &str) -> Finding {
+        Finding {
+            file: file.to_string(),
+            line: Some(42),
+            line_end: None,
+            severity,
+            confidence: 8,
+            category: String::new(),
+            title: "Test finding".to_string(),
+            summary: "Detail".to_string(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: "Fix it".to_string(),
+            effort: Effort::Small,
+            expert_name: "security".to_string(),
+            expert_role: "Security".to_string(),
+            agrees_with: vec![],
+            references: vec![],
+        }
+    }
+
+    fn make_consolidated() -> ConsolidatedReport {
+        ConsolidatedReport {
+            findings: vec![],
+            low_confidence_removed: 0,
+            duplicates_merged: 1,
+            conflicts: vec![ExpertConflict {
+                file: "src/auth.rs".to_string(),
+                line: Some(10),
+                issue: "Token comparison".to_string(),
+                experts: vec!["security".to_string(), "performance".to_string()],
+                resolutions: vec![
+                    "Use constant-time comparison".to_string(),
+                    "Cache the token hash".to_string(),
+                ],
+            }],
+            assessment: OverallAssessment {
+                score: 72,
+                risk_level: RiskLevel::Medium,
+                lead_override: None,
+                tl_dr: "Risk Level: Medium. 1 high found by 2 reviewers.".to_string(),
+            },
+            consensus_reached: true,
+        }
+    }
+
+    fn sample_output(consolidated: Option<ConsolidatedReport>) -> ReviewOutput {
+        ReviewOutput {
+            reports: vec![ExpertReport {
+                expert_name: "security".to_string(),
+                findings: vec![make_finding(Severity::High, "src/main.rs")],
+                markdown: "## Security Review\n\nSome findings.\n".to_string(),
+                raw_llm_response: String::new(),
+            }],
+            aggregated: None,
+            dropped_findings: vec![],
+            consolidated,
+        }
+    }
+
+    fn render(result: &ReviewOutput, format: &str, verification_enabled: bool) -> String {
+        match format_output(result, format, verification_enabled) {
+            Ok(s) => s,
+            Err(e) => panic!("format_output failed: {}", e),
+        }
+    }
+
+    #[test]
+    fn test_format_output_markdown_includes_lead_summary() {
+        let out = render(&sample_output(Some(make_consolidated())), "markdown", false);
+        assert!(out.contains("## Security Review"));
+        assert!(out.contains("## Lead Summary"));
+        assert!(out.contains("Overall Score: **72/100**"));
+        assert!(out.contains("Risk Level: medium"));
+        assert!(out.contains("### TL;DR"));
+        assert!(out.contains("1 high found by 2 reviewers"));
+        assert!(out.contains("### ⚖️ Reviewer Discussion"));
+        assert!(out.contains("`src/auth.rs:10`"));
+        // Lead Summary renders after the expert report.
+        let expert_pos = out.find("## Security Review");
+        let lead_pos = out.find("## Lead Summary");
+        assert!(expert_pos < lead_pos);
+    }
+
+    #[test]
+    fn test_format_output_markdown_lead_summary_before_appendix() {
+        let mut output = sample_output(Some(make_consolidated()));
+        output
+            .dropped_findings
+            .push(review_engine::team::verifier::DroppedFinding {
+                finding: make_finding(Severity::Medium, "src/lib.rs"),
+                reason: "Not in diff".to_string(),
+            });
+        let out = render(&output, "markdown", true);
+        let lead_pos = out.find("## Lead Summary");
+        let appendix_pos = out.find("## Dropped by verification");
+        assert!(lead_pos < appendix_pos);
+    }
+
+    #[test]
+    fn test_format_output_markdown_without_consolidated_unchanged() {
+        let out = render(&sample_output(None), "markdown", false);
+        assert!(out.contains("## Security Review"));
+        assert!(!out.contains("Lead Summary"));
+    }
+
+    #[test]
+    fn test_format_output_json_has_consolidated_field() {
+        let out = render(&sample_output(Some(make_consolidated())), "json", false);
+        assert!(out.contains("\"consolidated\""));
+        assert!(out.contains("\"score\": 72"));
+        assert!(out.contains("\"risk_level\": \"Medium\""));
+    }
 }

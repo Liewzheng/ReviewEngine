@@ -336,6 +336,76 @@ impl Client {
         })
     }
 
+    /// Fetch the raw content of a repository file at the given git ref.
+    ///
+    /// Uses `GET /repos/:owner/:repo/contents/:path?ref=:ref` with the
+    /// `application/vnd.github.raw+json` media type so the response body is
+    /// the file content itself.
+    pub async fn fetch_file_raw(&self, path: &str, git_ref: &str) -> Result<String> {
+        // Defensive: validate file path, consistent with create_review_comment
+        if path.is_empty() || path.contains("..") || path.starts_with('/') || path.starts_with('~') {
+            anyhow::bail!("Invalid repository file path: {path}");
+        }
+        let url = self.api_url(&format!("contents/{}", encode_content_path(path)));
+        let resp = self
+            .http
+            .get(&url)
+            .headers({
+                let mut h = self.headers();
+                h.insert(
+                    reqwest::header::ACCEPT,
+                    reqwest::header::HeaderValue::from_static("application/vnd.github.raw+json"),
+                );
+                h
+            })
+            .query(&[("ref", git_ref)])
+            .send()
+            .await
+            .with_context(|| format!("Failed to fetch file '{path}'"))?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!(status = %status, path = %path, "Failed to fetch file content");
+            anyhow::bail!("GitHub API returned {status} for file '{path}': {body}");
+        }
+
+        resp.text()
+            .await
+            .with_context(|| format!("Failed to read file content response for '{path}'"))
+    }
+
+    /// Search code in this repository, returning up to `limit` distinct
+    /// matching file paths.
+    ///
+    /// Uses `GET /search/code` scoped with `repo:owner/repo`.
+    pub async fn search_code_paths(&self, query: &str, limit: usize) -> Result<Vec<String>> {
+        let url = format!("{}/search/code", self.api_base);
+        let q = format!("{} repo:{}/{}", query, self.owner, self.repo);
+        let per_page = limit.to_string();
+        let resp = self
+            .http
+            .get(&url)
+            .headers(self.headers())
+            .query(&[("q", q.as_str()), ("per_page", per_page.as_str())])
+            .send()
+            .await
+            .with_context(|| "Failed to search code")?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            error!(status = %status, "Failed to search code");
+            anyhow::bail!("GitHub API returned {status} for code search: {body}");
+        }
+
+        let value: serde_json::Value = resp
+            .json()
+            .await
+            .with_context(|| "Failed to parse code search response")?;
+        Ok(parse_code_search_paths(&value, limit))
+    }
+
     /// Get the authenticated user's GitHub user ID.
     pub async fn get_current_user(&self) -> Result<GitHubUser> {
         let url = format!("{}/user", self.api_base);
@@ -355,6 +425,43 @@ impl Client {
 
         Ok(resp.json().await?)
     }
+}
+
+/// Percent-encode each segment of a repository file path for the contents
+/// API, keeping `/` separators intact (GitHub expects real path segments).
+fn encode_content_path(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            segment
+                .bytes()
+                .map(|b| match b {
+                    b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+                    _ => format!("%{b:02X}"),
+                })
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Extract distinct file paths from a GitHub code-search response, capped at
+/// `limit` entries.
+fn parse_code_search_paths(value: &serde_json::Value, limit: usize) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Some(items) = value.get("items").and_then(|i| i.as_array()) else {
+        return paths;
+    };
+    for item in items {
+        if let Some(path) = item.get("path").and_then(|p| p.as_str()) {
+            if !paths.iter().any(|p| p == path) {
+                paths.push(path.to_string());
+            }
+        }
+        if paths.len() >= limit {
+            break;
+        }
+    }
+    paths
 }
 
 #[cfg(test)]
@@ -611,5 +718,118 @@ mod tests {
         let user = client.get_current_user().await.unwrap();
         assert_eq!(user.id, 200);
         assert_eq!(user.login, "botuser");
+    }
+
+    // ─── encode_content_path / parse_code_search_paths ──
+
+    #[test]
+    fn test_encode_content_path() {
+        assert_eq!(encode_content_path("src/main.rs"), "src/main.rs");
+        assert_eq!(encode_content_path("a b/c#.rs"), "a%20b/c%23.rs");
+    }
+
+    #[test]
+    fn test_parse_code_search_paths_dedups_and_caps() {
+        let value = json!({
+            "total_count": 3,
+            "items": [
+                {"path": "src/a.rs"},
+                {"path": "src/b.rs"},
+                {"path": "src/a.rs"},
+                {"path": "src/c.rs"}
+            ]
+        });
+        assert_eq!(
+            parse_code_search_paths(&value, 20),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string(), "src/c.rs".to_string()]
+        );
+        assert_eq!(
+            parse_code_search_paths(&value, 2),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_code_search_paths_tolerates_garbage() {
+        assert!(parse_code_search_paths(&json!({"unexpected": true}), 20).is_empty());
+        assert!(parse_code_search_paths(&json!({"items": [{"no_path": 1}]}), 20).is_empty());
+    }
+
+    // ─── fetch_file_raw ───────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_file_raw_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/contents/src/main.rs"))
+            .and(query_param("ref", "main"))
+            .and(header("Accept", "application/vnd.github.raw+json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("fn main() {}\n"))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+        let content = client.fetch_file_raw("src/main.rs", "main").await.unwrap();
+        assert_eq!(content, "fn main() {}\n");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_file_raw_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/contents/src/missing.rs"))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({"message": "Not Found"})))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+        let err = client.fetch_file_raw("src/missing.rs", "main").await.unwrap_err();
+        assert!(err.to_string().contains("404"), "error should mention 404, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_fetch_file_raw_rejects_unsafe_path() {
+        let server = MockServer::start().await;
+        let client = make_client(&server);
+        assert!(client.fetch_file_raw("../secret", "main").await.is_err());
+        assert!(client.fetch_file_raw("/etc/passwd", "main").await.is_err());
+    }
+
+    // ─── search_code_paths ────────────────────────
+
+    #[tokio::test]
+    async fn test_search_code_paths_ok() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/code"))
+            .and(query_param("q", "authenticate repo:owner/repo"))
+            .and(query_param("per_page", "20"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "total_count": 2,
+                "items": [
+                    {"path": "src/auth.rs"},
+                    {"path": "src/login.rs"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+        let paths = client.search_code_paths("authenticate", 20).await.unwrap();
+        assert_eq!(paths, vec!["src/auth.rs".to_string(), "src/login.rs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_search_code_paths_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/search/code"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let client = make_client(&server);
+        let err = client.search_code_paths("x", 20).await.unwrap_err();
+        assert!(err.to_string().contains("401"), "error should mention 401, got: {err}");
     }
 }

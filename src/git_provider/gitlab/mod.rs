@@ -13,7 +13,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::git_provider::GitProvider;
-use crate::models::MRInfo;
+use crate::models::{MRInfo, RepoBrowser};
 
 const BOT_DISCUSSION_TITLE: &str = "# CodeReview Board";
 
@@ -26,6 +26,30 @@ impl GitLabProvider {
     pub fn new(gitlab_token: &str, mr_url: &str) -> Result<Self> {
         let client = client::Client::new(gitlab_token, mr_url)?;
         Ok(Self { client })
+    }
+}
+
+/// Synchronous [`RepoBrowser`] backend over the GitLab API.
+///
+/// The underlying client is async; each call is bridged via
+/// [`crate::git_provider::block_on_remote`]. Search results are capped at
+/// [`crate::git_provider::SEARCH_RESULTS_LIMIT`] file paths.
+impl RepoBrowser for GitLabProvider {
+    fn get_file(&self, path: &str, git_ref: &str) -> Result<String> {
+        let client = self.client.clone();
+        let path = path.to_string();
+        let git_ref = git_ref.to_string();
+        crate::git_provider::block_on_remote(async move { client.fetch_file_raw(&path, &git_ref).await })
+    }
+
+    fn search_code(&self, query: &str) -> Result<Vec<String>> {
+        let client = self.client.clone();
+        let query = query.to_string();
+        crate::git_provider::block_on_remote(async move {
+            client
+                .search_code_paths(&query, crate::git_provider::SEARCH_RESULTS_LIMIT)
+                .await
+        })
     }
 }
 

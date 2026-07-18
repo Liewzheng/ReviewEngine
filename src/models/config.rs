@@ -115,15 +115,22 @@ pub struct DiffConfig {
     /// Line count threshold above which a PR is considered "large".
     #[serde(default = "default_diff_large_pr_line_threshold")]
     pub large_pr_line_threshold: usize,
-    /// Compression strategy: "aggressive", "moderate", or "none".
+    /// Compression level for large PRs: "auto" (derive from PR size), "none"
+    /// (skip compression), "light" (deletion-only files only), "medium", or
+    /// "aggressive". Anything other than the explicit levels keeps the
+    /// automatic, assessment-driven behaviour.
     #[serde(default = "default_diff_compression_level")]
     pub compression_level: String,
-    /// Chunking strategy: "adaptive", "files", or "tokens".
+    /// Chunking strategy: "adaptive", "files", "hunks", or "semantic".
     #[serde(default = "default_diff_chunking_strategy")]
     pub chunking_strategy: String,
     /// Maximum number of chunks sent to a single expert.
     #[serde(default = "default_diff_max_chunks_per_expert")]
     pub max_chunks_per_expert: usize,
+    /// Total byte budget for full changed-file contents injected into expert
+    /// prompts (local reviews only). `0` disables the injection.
+    #[serde(default = "default_diff_max_context_file_bytes")]
+    pub max_context_file_bytes: usize,
 }
 
 /// Rate-limiting parameters for LLM API requests.
@@ -308,6 +315,7 @@ impl Default for DiffConfig {
             compression_level: default_diff_compression_level(),
             chunking_strategy: default_diff_chunking_strategy(),
             max_chunks_per_expert: default_diff_max_chunks_per_expert(),
+            max_context_file_bytes: default_diff_max_context_file_bytes(),
         }
     }
 }
@@ -375,13 +383,16 @@ fn default_diff_large_pr_line_threshold() -> usize {
     1000
 }
 fn default_diff_compression_level() -> String {
-    "aggressive".to_string()
+    "auto".to_string()
 }
 fn default_diff_chunking_strategy() -> String {
     "adaptive".to_string()
 }
 fn default_diff_max_chunks_per_expert() -> usize {
     3
+}
+fn default_diff_max_context_file_bytes() -> usize {
+    60000
 }
 
 fn default_rate_limit_max_rpm() -> usize {
@@ -471,6 +482,7 @@ mod tests {
             weight: 10,
             commands: vec!["review".to_string()],
             trigger: None,
+            content_patterns: vec![],
             prompt: Some("prompt".to_string()),
         }
     }

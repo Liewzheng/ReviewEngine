@@ -18,6 +18,32 @@ use async_trait::async_trait;
 
 use crate::models::*;
 
+/// Default upper bound on `search_code` results returned by remote browsers.
+pub(crate) const SEARCH_RESULTS_LIMIT: usize = 20;
+
+/// Run an async provider call from a synchronous context.
+///
+/// [`RepoBrowser`] is a synchronous trait while the provider HTTP clients are
+/// async. Each call runs on a freshly spawned thread with its own
+/// current-thread tokio runtime, which is safe both inside and outside an
+/// existing tokio runtime (a nested `block_on` on the caller's runtime would
+/// panic).
+pub(crate) fn block_on_remote<F, T>(fut: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>> + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| anyhow::anyhow!("failed to create tokio runtime for remote call: {e}"))?;
+        rt.block_on(fut)
+    })
+    .join()
+    .map_err(|_| anyhow::anyhow!("remote repo browser task panicked"))?
+}
+
 /// Unified interface for Git provider operations (GitLab, GitHub, etc.).
 #[async_trait]
 pub trait GitProvider: Send + Sync {
@@ -56,5 +82,25 @@ mod tests {
     fn test_git_provider_trait_is_object_safe() {
         // If the trait compiles, this test passes
         assert!(true);
+    }
+
+    #[test]
+    fn test_block_on_remote_returns_value() {
+        let v = super::block_on_remote(async { Ok(42) }).unwrap();
+        assert_eq!(v, 42);
+    }
+
+    #[test]
+    fn test_block_on_remote_propagates_error() {
+        let res: anyhow::Result<()> = super::block_on_remote(async { anyhow::bail!("boom") });
+        assert!(res.unwrap_err().to_string().contains("boom"));
+    }
+
+    /// Called from within a tokio runtime, the bridge must not panic with
+    /// "Cannot start a runtime from within a runtime".
+    #[tokio::test]
+    async fn test_block_on_remote_inside_runtime() {
+        let v = super::block_on_remote(async { Ok("ok".to_string()) }).unwrap();
+        assert_eq!(v, "ok");
     }
 }

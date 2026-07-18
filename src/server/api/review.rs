@@ -242,7 +242,7 @@ async fn delete_review(State(state): State<Arc<AppState>>, Path(task_id): Path<U
     }
 }
 
-fn task_to_status(entry: &TaskEntry) -> TaskStatus {
+pub(crate) fn task_to_status(entry: &TaskEntry) -> TaskStatus {
     let meta = &entry.source_meta;
     TaskStatus {
         task_id: entry.task_id,

@@ -166,26 +166,57 @@ Default `per_page`: 20, max `per_page`: 100. When `page` exceeds range, returns 
 
 ### 2. 仓库健康扫描
 
-与 review 共用同一套 task 机制，但扫描只走本地文件系统，不需要 LLM，可快速返回。
+与 review 共用同一套 task 机制（`TaskStore` 队列 + 进度跟踪）。扫描只走服务器本地文件系统：未配置 LLM 时运行纯静态专家分析（`run_local_repo_review`），不依赖外部 LLM，可快速返回；配置了 LLM 时自动走 LLM 增强的 3-pass 流水线（`run_repo_review`）。
 
 #### `POST /api/v1/repo-scan`
 
 ```
 Request:
 {
-  "path": "/path/to/repo"
+  "path": "/path/to/repo"   // 必填，服务器本地目录路径（允许绝对路径）
 }
 
 Response 202:
 {
   "task_id": "...",
-  "status": "running"
+  "status": "pending",       // 入队后为 pending，获得执行槽位后转 running
+  "created_at": "...",
+  "result": null,
+  "error": null,
+  ...                        // 其余字段同 TaskStatus
 }
+
+Response 400:   // 路径校验失败（路径为空 / 含 '..' / 不存在 / 不是目录）
+{ "error": "path does not exist: ..." }
+
+Response 503:   // task store 未初始化
+{ "error": "task store not initialized" }
 ```
 
 #### `GET /api/v1/repo-scan/:task_id`
 
-返回 `RepoHealthReport`（复用 `repo` 模块的输出）。
+返回 `TaskStatus`（同 reviews 端点）：`status` 为 `pending` / `running` / `completed` / `failed`；`completed` 时 `result` 为 `RepoReviewOutput` JSON（含 `overview.health_score`、`expert_scores`、`risk_categories`、`action_items`、`conclusion` 等），`failed` 时 `error` 为错误信息。
+
+```
+Response 200 (completed):
+{
+  "task_id": "...",
+  "status": "completed",
+  "result": {
+    "overview": { "health_score": 82, "risk_level": "low", ... },
+    "expert_scores": [ ... ],
+    "risk_categories": [ ... ],
+    "action_items": [ ... ],
+    "conclusion": { ... },
+    "dropped_findings": []
+  },
+  "error": null,
+  ...
+}
+
+Response 404:   // task_id 不存在
+{ "error": "task not found" }
+```
 
 ---
 

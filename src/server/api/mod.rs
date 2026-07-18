@@ -1,11 +1,11 @@
 //! REST API route definitions for the review-engine server.
 //!
-//! Nests sub-routers for reviews (`/reviews`), system health
-//! (`/system`), configuration (`/config`), and server-sent events
-//! (`/events`). Applies CORS middleware that allows all origins and
-//! optionally adds authentication middleware when [`AuthConfig`]
-//! indicates auth is enabled. The `routes` function assembles the full
-//! [`Router`] with shared [`AppState`] and returns it to the caller.
+//! Nests sub-routers for reviews (`/reviews`), repository health scans
+//! (`/repo-scan`), system health (`/system`), configuration (`/config`),
+//! and server-sent events (`/events`). Applies CORS middleware that allows
+//! all origins and optionally adds authentication middleware when
+//! [`AuthConfig`] indicates auth is enabled. The `routes` function assembles
+//! the full [`Router`] with shared [`AppState`] and returns it to the caller.
 
 use axum::{middleware, Router};
 use std::sync::Arc;
@@ -20,6 +20,7 @@ pub mod events;
 pub mod llm;
 pub mod logs;
 pub mod queue;
+pub mod repo;
 pub mod review;
 pub mod system;
 pub mod types;
@@ -29,6 +30,7 @@ pub fn routes(state: Arc<AppState>, auth: Arc<AuthConfig>) -> Router<Arc<AppStat
 
     let mut router = Router::new()
         .nest("/reviews", review::routes())
+        .nest("/repo-scan", repo::routes())
         .nest("/system", system::routes())
         .nest("/config", config::routes())
         .nest("/events", events::routes())

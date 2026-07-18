@@ -43,6 +43,42 @@ fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
     config
 }
 
+/// Parse LLM provider configs from the `LLM_CONFIG` environment variable.
+///
+/// The variable must contain a JSON array of [`LLMConfig`] objects. Returns
+/// an empty vector when the variable is unset, empty, `"[]"`, or fails to
+/// parse — in the last case a warning is logged instead of aborting, so
+/// callers can fall through to the next source in their precedence chain.
+pub fn llm_configs_from_env() -> Vec<LLMConfig> {
+    let Ok(json) = std::env::var("LLM_CONFIG") else {
+        return Vec::new();
+    };
+    if json.is_empty() || json == "[]" {
+        return Vec::new();
+    }
+    match serde_json::from_str(&json) {
+        Ok(configs) => configs,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "LLM_CONFIG is set but could not be parsed as a JSON array of LLM configs; ignoring"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Fill `config.llm` from the `LLM_CONFIG` environment variable when no
+/// `[[llm]]` providers were resolved from config files.
+///
+/// The environment variable is a fallback only: a non-empty `config.llm`
+/// always wins and is never overridden.
+pub fn apply_llm_env_fallback(config: &mut AppConfig) {
+    if config.llm.is_empty() {
+        config.llm = llm_configs_from_env();
+    }
+}
+
 /// Validate that all enabled experts' weights sum to 100.
 pub(crate) fn validate_experts(config: &AppConfig) -> Result<()> {
     let total_weight: u16 = config
@@ -796,6 +832,94 @@ describe = true
         assert!(*overridden.commands.get("review").unwrap());
         // describe is false by default; env var is unset so should remain false
         assert!(!*overridden.commands.get("describe").unwrap());
+    }
+
+    #[test]
+    fn test_llm_configs_from_env_valid_json() {
+        let _guard = fs_lock();
+        let env_guard = EnvGuard::new("LLM_CONFIG");
+        env_guard.set(r#"[{"provider":"openai","model":"gpt-4o","api_key":"sk-env"}]"#);
+
+        let configs = llm_configs_from_env();
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].provider, "openai");
+        assert_eq!(configs[0].model, "gpt-4o");
+        assert_eq!(configs[0].api_key, "sk-env");
+    }
+
+    #[test]
+    fn test_llm_configs_from_env_invalid_json_returns_empty() {
+        let _guard = fs_lock();
+        let env_guard = EnvGuard::new("LLM_CONFIG");
+        env_guard.set("not valid json {{{");
+
+        assert!(llm_configs_from_env().is_empty());
+    }
+
+    #[test]
+    fn test_llm_configs_from_env_unset_returns_empty() {
+        let _guard = fs_lock();
+        let _env_guard = EnvGuard::new("LLM_CONFIG");
+        std::env::remove_var("LLM_CONFIG");
+
+        assert!(llm_configs_from_env().is_empty());
+    }
+
+    #[test]
+    fn test_llm_configs_from_env_empty_values_return_empty() {
+        let _guard = fs_lock();
+        let env_guard = EnvGuard::new("LLM_CONFIG");
+
+        env_guard.set("");
+        assert!(llm_configs_from_env().is_empty());
+
+        env_guard.set("[]");
+        assert!(llm_configs_from_env().is_empty());
+    }
+
+    #[test]
+    fn test_apply_llm_env_fallback_fills_empty_config() {
+        let _guard = fs_lock();
+        let env_guard = EnvGuard::new("LLM_CONFIG");
+        env_guard.set(r#"[{"provider":"openai","model":"gpt-4o","api_key":"sk-env"}]"#);
+
+        let mut config = default_config().unwrap();
+        assert!(config.llm.is_empty());
+        apply_llm_env_fallback(&mut config);
+        assert_eq!(config.llm.len(), 1);
+        assert_eq!(config.llm[0].api_key, "sk-env");
+    }
+
+    #[test]
+    fn test_apply_llm_env_fallback_keeps_file_providers() {
+        let _guard = fs_lock();
+        let env_guard = EnvGuard::new("LLM_CONFIG");
+        env_guard.set(r#"[{"provider":"openai","model":"gpt-4o","api_key":"sk-env"}]"#);
+
+        let mut config = default_config().unwrap();
+        config.llm = vec![LLMConfig {
+            provider: "anthropic".to_string(),
+            model: "claude-sonnet-4-20250514".to_string(),
+            api_key: "sk-file".to_string(),
+            api_base: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+        }];
+        apply_llm_env_fallback(&mut config);
+        // File-based providers win; the env var never overrides them.
+        assert_eq!(config.llm.len(), 1);
+        assert_eq!(config.llm[0].api_key, "sk-file");
+    }
+
+    #[test]
+    fn test_apply_llm_env_fallback_unset_keeps_empty() {
+        let _guard = fs_lock();
+        let _env_guard = EnvGuard::new("LLM_CONFIG");
+        std::env::remove_var("LLM_CONFIG");
+
+        let mut config = default_config().unwrap();
+        apply_llm_env_fallback(&mut config);
+        assert!(config.llm.is_empty());
     }
 
     #[test]

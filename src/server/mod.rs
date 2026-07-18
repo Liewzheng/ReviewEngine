@@ -71,10 +71,8 @@ pub(crate) async fn run_review_common(
     // Set up LLM configs
     let llm_configs: Vec<crate::models::LLMConfig> = if !config.llm.is_empty() {
         config.llm.clone()
-    } else if let Ok(json) = std::env::var("LLM_CONFIG") {
-        serde_json::from_str(&json)?
     } else {
-        Vec::new()
+        crate::config::llm_configs_from_env()
     };
 
     // Select experts for the review command

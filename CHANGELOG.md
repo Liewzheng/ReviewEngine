@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- **`serve` ignored the `LLM_CONFIG` environment variable**: the server built its provider list only from config files, so a Docker deployment (where `LLM_CONFIG` is required and the mounted config has no `[[llm]]`) started with an empty provider list — `GET /api/v1/llm/providers` returned no items and the LLM Status / Dashboard pages showed no providers. `serve` now falls back to `LLM_CONFIG` when the resolved config has no `[[llm]]` entries; file-based providers still win, matching the webhook-review precedence. The env-parsing logic is now shared (`config::llm_configs_from_env`) across CLI review, webhook review, and `serve`, and a malformed `LLM_CONFIG` now logs a warning and falls through to the next source instead of aborting the CLI review with a parse error.
 - **Provider save blocked by main-form validation**: on the Configuration page, saving Additional LLM Providers ran the main form's validation first, so an incomplete main config (e.g. empty GitLab URL/token or no required experts) blocked provider add/edit/delete. Provider-only changes now skip main-form validation and save directly; when the main config is also modified and fails validation, a confirmation offers to save only the provider changes.
 - **Provider temperature precision noise in the read-only view**: the expanded read-only provider details rendered the raw f32→f64 value (e.g. `0.30000001192092896`); it is now formatted to the edit slider's 0.1-step precision.
 

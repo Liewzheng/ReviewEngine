@@ -86,6 +86,18 @@ impl RepoExpert for ArchitectureLead {
     }
 }
 
+/// Render the CodeQuality system prompt by substituting the `{{ ... }}`
+/// placeholders in [`templates::CODE_QUALITY_SYSTEM_TEMPLATE`]. The template
+/// uses MiniJinja-style `{{ name }}` markers but is not routed through the
+/// `PromptEngine`, so the substitution is done here with plain `str::replace`.
+fn render_code_quality_system(module: &str, lang: &str, naming_hint: &str, error_hint: &str) -> String {
+    templates::CODE_QUALITY_SYSTEM_TEMPLATE
+        .replace("{{ module }}", module)
+        .replace("{{ lang }}", lang)
+        .replace("{{ naming_hint }}", naming_hint)
+        .replace("{{ error_hint }}", error_hint)
+}
+
 /// CodeQuality: Pass 2 expert that evaluates code quality for a specific chunk.
 /// Requires RepoGlobalContext injected via the prompt.
 pub struct CodeQuality;
@@ -136,11 +148,7 @@ impl RepoExpert for CodeQuality {
         let first_lang = first_file.map(|e| e.language.as_str()).unwrap_or("Rust");
         let profile = crate::language::get_profile(first_lang, app_config);
 
-        let system = templates::CODE_QUALITY_SYSTEM_TEMPLATE
-            .replace("{module}", module_name)
-            .replace("{lang}", first_lang)
-            .replace("{naming_hint}", &profile.naming_hint)
-            .replace("{error_hint}", &profile.error_hint);
+        let system = render_code_quality_system(module_name, first_lang, &profile.naming_hint, &profile.error_hint);
 
         let user = format!(
             "## Module: {module} ({lang})\n\
@@ -338,6 +346,31 @@ findings:
     #[test]
     fn test_yaml_empty_document() {
         assert_eq!(parse_score(""), 70);
+    }
+
+    #[test]
+    fn test_render_code_quality_system_substitutes_placeholders() {
+        let rendered = render_code_quality_system("auth", "Rust", "use snake_case names", "prefer Result");
+        assert!(rendered.contains("**auth**"));
+        assert!(rendered.contains("Primary language: Rust"));
+        assert!(rendered.contains("use snake_case names"));
+        assert!(rendered.contains("prefer Result"));
+    }
+
+    #[test]
+    fn test_render_code_quality_system_leaves_no_placeholder_residue() {
+        // Regression guard: every `{{ ... }}` marker in the template must be
+        // substituted — a literal marker reaching the LLM means the replace
+        // targets drifted from the template again.
+        let rendered = render_code_quality_system("m", "l", "n", "e");
+        assert!(
+            !rendered.contains("{{"),
+            "unsubstituted placeholder in prompt:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("}}"),
+            "unsubstituted placeholder in prompt:\n{rendered}"
+        );
     }
 
     #[test]

@@ -174,6 +174,16 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
         md.push_str(&crate::output::team_renderer::render_lead_summary(consolidated));
         md.push_str("\n\n---\n\n");
     }
+    // Aggregator expert's LLM-aggregated report: rendered after the lead
+    // summary (if any) so it can build on the same context, then before the
+    // verification appendix. The markdown is already pre-rendered by the
+    // aggregator; we emit it verbatim and skip empty fragments.
+    if let Some(ref aggregated) = output.aggregated {
+        if !aggregated.markdown.trim().is_empty() {
+            md.push_str(&aggregated.markdown);
+            md.push_str("\n\n---\n\n");
+        }
+    }
     // `false` keeps the historical list-only rendering here; the run-summary
     // lines are only added to the CLI Markdown report.
     md.push_str(&crate::output::renderer::render_dropped_findings_appendix(

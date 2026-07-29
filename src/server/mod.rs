@@ -71,8 +71,16 @@ pub(crate) fn build_review_output_from_reports(
 /// Shared review execution logic used by both GitLab and GitHub webhook handlers.
 ///
 /// Creates the appropriate provider from the URL, fetches the MR/PR info and diff,
-/// runs the expert team, optionally runs the aggregator, publishes results, and
-/// notifies the dispatcher upon completion.
+/// runs the expert team, then:
+///
+/// 1. **Aggregator** — if `report.aggregated` is enabled _and_ an `"aggregator"` expert
+///    exists in the team, runs it synchronously after all experts complete.
+///    - **Success:** the aggregated report is merged into the [`ReviewOutput`](crate::models::ReviewOutput) and published alongside individual findings.
+///    - **Failure:** fail-soft — logs a warning via `tracing::warn!`, sets aggregator output to `None`, _and_ continues with reports-only (all experts' findings are still published). The review itself is not aborted.
+///
+/// 2. **Output** — built by [`build_review_output_from_reports`](crate::server::build_review_output_from_reports) from expert reports and the optional aggregator result, then published via [`publish_review`].
+///
+/// Finally, notifies the dispatcher of completion.
 pub(crate) async fn run_review_common(
     url: &str,
     token: &str,

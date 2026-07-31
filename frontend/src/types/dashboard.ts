@@ -31,7 +31,11 @@ export interface SystemHealth {
   lastChecked: string;
 }
 
-export type ReviewStatus = 'success' | 'failed' | 'running' | 'queued';
+// Display-facing status for recent reviews. The backend reports the real task
+// vocabulary (`pending`/`running`/`completed`/`failed`/`cancelled`); the
+// service layer (`services/dashboard.ts`) normalizes `pending` -> `queued`.
+// `success` is retained as a legacy value from older dashboard responses.
+export type ReviewStatus = 'success' | 'failed' | 'running' | 'queued' | 'completed' | 'cancelled';
 
 export interface ReviewAuthor {
   name: string;

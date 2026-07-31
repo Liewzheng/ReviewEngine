@@ -21,6 +21,12 @@ pub struct RepoReviewOutput {
     /// reasons. Empty when the pass was disabled or kept everything.
     #[serde(default)]
     pub dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
+    /// Whether the verification pass actually executed during this review.
+    /// `false` when the pass was disabled, when there were no code_quality
+    /// findings to verify, or on the local-only path. Drives the honest
+    /// "ran / skipped" wording in the Markdown appendix.
+    #[serde(default)]
+    pub verification_ran: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -295,6 +301,7 @@ fn build_output(scores: &[ExpertScore], stats: &crate::repo::RepoStats) -> RepoR
         action_items,
         conclusion,
         dropped_findings: Vec::new(),
+        verification_ran: false,
     }
 }
 
@@ -303,6 +310,7 @@ fn build_output_from_aggregated(
     agg: &crate::repo::experts::aggregator::AggregatedResult,
     stats: &crate::repo::RepoStats,
     dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
+    verification_ran: bool,
 ) -> RepoReviewOutput {
     let (health_score, risk_level) = experts::weighted_total(&agg.scores);
     let conv = convert_scores(&agg.scores);
@@ -339,6 +347,7 @@ fn build_output_from_aggregated(
         action_items,
         conclusion,
         dropped_findings,
+        verification_ran,
     }
 }
 
@@ -444,6 +453,10 @@ pub async fn run_repo_review(
 
     // ── 3-pass LLM architecture ──
     let mut dropped_findings: Vec<crate::team::verifier::DroppedFinding> = Vec::new();
+    // True only when the verification pass below actually invokes
+    // `verify_findings`; stays false when the pass is disabled or there were
+    // no code_quality findings to hand to the verifier.
+    let mut verification_ran = false;
     if !llm_configs.is_empty() {
         // ── Pass 1: Architecture Lead ──
         if let Some(ref map) = progress_map {
@@ -613,13 +626,17 @@ pub async fn run_repo_review(
                     strip_dropped_from_scores(&mut scores, &kept);
                 }
                 dropped_findings = dropped;
+                // The verifier genuinely ran, even if it dropped nothing. The
+                // flag distinguishes this from the enabled-but-empty case so
+                // the Markdown appendix says "ran" only when it did.
+                verification_ran = true;
             }
         }
     }
 
     // ── Pass 3: Aggregator ──
     let aggregated = crate::repo::experts::aggregator::aggregate(scores, ctx.config.as_deref());
-    let output = build_output_from_aggregated(&aggregated, &ctx.stats, dropped_findings);
+    let output = build_output_from_aggregated(&aggregated, &ctx.stats, dropped_findings, verification_ran);
 
     // Mark progress complete
     crate::progress::complete_repo_progress(progress_map.as_ref(), review_id);
@@ -830,7 +847,10 @@ pub fn render_repo_review_output(
 
             // ── Verification appendix ──
             // checked = surviving code_quality findings + dropped ones, the
-            // same "kept + dropped" accounting the review pipeline uses.
+            // same "kept + dropped" accounting the review pipeline uses. The
+            // explicit ran-state keeps the wording honest: "skipped" when the
+            // pass was enabled but had no code_quality findings to verify,
+            // "ran" only when `verify_findings` actually executed.
             let checked = output
                 .expert_scores
                 .iter()
@@ -838,9 +858,10 @@ pub fn render_repo_review_output(
                 .map(|s| s.details.len())
                 .sum::<usize>()
                 + output.dropped_findings.len();
-            let appendix = crate::output::renderer::render_dropped_findings_appendix(
+            let appendix = crate::output::renderer::render_dropped_findings_appendix_with_state(
                 &output.dropped_findings,
                 verification_enabled,
+                output.verification_ran,
                 checked,
             );
             if !appendix.is_empty() {
@@ -908,6 +929,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
             action_items,
             conclusion,
             dropped_findings: vec![],
+            verification_ran: false,
         });
     }
     let overview = ReportOverview {
@@ -932,6 +954,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
             recommendation: String::new(),
         },
         dropped_findings: vec![],
+        verification_ran: false,
     })
 }
 
@@ -1339,6 +1362,7 @@ action_items:
                 recommendation: String::new(),
             },
             dropped_findings: vec![],
+            verification_ran: false,
         }
     }
 
@@ -1519,6 +1543,7 @@ action_items:
     #[test]
     fn test_render_markdown_appends_verification_appendix() {
         let mut output = minimal_output();
+        output.verification_ran = true;
         output.dropped_findings.push(make_dropped_finding("False alarm"));
         let md = render_repo_review_output(&output, "markdown", true).unwrap();
         assert!(md.contains("## Dropped by verification"));
@@ -1527,11 +1552,24 @@ action_items:
     }
 
     #[test]
-    fn test_render_markdown_verification_enabled_no_drops() {
-        let output = minimal_output();
+    fn test_render_markdown_verification_ran_no_drops() {
+        let mut output = minimal_output();
+        output.verification_ran = true;
         let md = render_repo_review_output(&output, "markdown", true).unwrap();
         assert!(md.contains("## Dropped by verification"));
         assert!(md.contains("no findings were dropped (0 checked)"));
+    }
+
+    #[test]
+    fn test_render_markdown_verification_enabled_but_skipped() {
+        // The pass is configured on but the review had no code_quality
+        // findings to verify: the appendix must say "skipped", never "ran".
+        let output = minimal_output();
+        let md = render_repo_review_output(&output, "markdown", true).unwrap();
+        assert!(md.contains("## Dropped by verification"));
+        assert!(md.contains("Verification pass skipped"));
+        assert!(!md.contains("Verification pass ran"));
+        assert!(!md.contains("no findings were dropped"));
     }
 
     #[test]

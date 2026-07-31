@@ -2,7 +2,7 @@
 //!
 //! @module review-engine: part of the CodeReview Board virtual engineering team
 use axum::{
-    extract::State,
+    extract::{rejection::JsonRejection, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
@@ -37,7 +37,19 @@ async fn get_schema() -> Json<serde_json::Value> {
     Json(value)
 }
 
-async fn validate_config(Json(body): Json<ConfigValidateRequest>) -> impl IntoResponse {
+async fn validate_config(body: Result<Json<ConfigValidateRequest>, JsonRejection>) -> impl IntoResponse {
+    let Json(body) = match body {
+        Ok(json) => json,
+        Err(rejection) => {
+            // Malformed/missing body: keep the 422 status but return the same
+            // JSON error shape as every other endpoint.
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": rejection.body_text() })),
+            )
+                .into_response();
+        }
+    };
     let mut errors = Vec::new();
 
     match crate::config::parse_toml(&body.body) {
@@ -335,6 +347,7 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
             api_base: body.llm.api_base_url.clone(),
             max_tokens: body.llm.max_tokens,
             temperature: body.llm.temperature,
+            disable_thinking: None,
         });
     }
 
@@ -356,6 +369,7 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
                 api_base: p.api_base_url.clone(),
                 max_tokens: p.max_tokens,
                 temperature: p.temperature,
+                disable_thinking: None,
             });
         }
     }
@@ -428,6 +442,7 @@ async fn test_config(Json(body): Json<TestConfigRequest>) -> impl IntoResponse {
         api_base: body.api_base,
         max_tokens: 4096,
         temperature: 0.3,
+        disable_thinking: None,
     };
 
     let start = std::time::Instant::now();

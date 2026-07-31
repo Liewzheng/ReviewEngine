@@ -50,6 +50,11 @@ impl RepoExpert for CodeOrganization {
                 severity: "medium".to_string(),
                 message: format!("Deep directory nesting ({} levels)", max_depth),
                 file: None,
+                recommendation: Some(
+                    "Flatten the directory structure to keep nesting below 4 levels and reduce import complexity."
+                        .to_string(),
+                ),
+                effort: Some("medium".to_string()),
                 ..Default::default()
             });
             score -= 10;
@@ -61,6 +66,10 @@ impl RepoExpert for CodeOrganization {
                 severity: "high".to_string(),
                 message: "Very few files for the code volume".to_string(),
                 file: None,
+                recommendation: Some(
+                    "Split the monolithic file(s) into modules by responsibility to separate concerns.".to_string(),
+                ),
+                effort: Some("large".to_string()),
                 ..Default::default()
             });
             score -= 20;
@@ -92,6 +101,8 @@ impl RepoExpert for CodeOrganization {
                     large_count, excess
                 ),
                 file: None,
+                recommendation: Some("Split the oversized files into smaller modules by responsibility.".to_string()),
+                effort: Some("medium".to_string()),
                 ..Default::default()
             });
             score -= large_deduction;
@@ -107,6 +118,27 @@ impl RepoExpert for CodeOrganization {
             ),
             details,
         })
+    }
+}
+
+/// Per-pattern recommendation and effort for a credential-leak finding.
+///
+/// All patterns here are credential leaks, so the advice is uniform: verify,
+/// rotate, and move the secret out of the repository.
+fn security_recommendation(pattern: &str) -> (&'static str, &'static str) {
+    match pattern {
+        "Private key" => (
+            "Remove the private key from the repository immediately, rotate it, and store it in a secret manager or CI secret.",
+            "small",
+        ),
+        "Hardcoded password" => (
+            "Confirm whether this is a real password; if so, rotate it and load it from an environment variable or secret manager.",
+            "small",
+        ),
+        _ => (
+            "Confirm whether this is a real credential; if so, rotate it and load it from an environment variable or secret manager.",
+            "small",
+        ),
     }
 }
 
@@ -127,13 +159,18 @@ impl RepoExpert for Security {
     async fn evaluate(&self, ctx: &RepoContext, _llm: Option<&LLMClient>) -> Result<ExpertScore> {
         use crate::repo::analysis::scan_security_patterns;
         let findings = scan_security_patterns(&ctx.entries);
-        let mut details: Vec<ScoreItem> = findings
+        let details: Vec<ScoreItem> = findings
             .iter()
-            .map(|f| ScoreItem {
-                severity: f.severity.clone(),
-                message: format!("{} at {}", f.pattern, f.file),
-                file: Some(f.file.clone()),
-                ..Default::default()
+            .map(|f| {
+                let (recommendation, effort) = security_recommendation(&f.pattern);
+                ScoreItem {
+                    severity: f.severity.clone(),
+                    message: format!("{} at {}", f.pattern, f.file),
+                    file: Some(f.file.clone()),
+                    recommendation: Some(recommendation.to_string()),
+                    effort: Some(effort.to_string()),
+                    ..Default::default()
+                }
             })
             .collect();
 
@@ -144,23 +181,17 @@ impl RepoExpert for Security {
             (100 - deduction).clamp(0, 100) as u8
         };
 
-        if !details.is_empty() {
-            details.insert(
-                0,
-                ScoreItem {
-                    severity: "high".to_string(),
-                    message: format!("{} security patterns detected", findings.len()),
-                    file: None,
-                    ..Default::default()
-                },
-            );
-        }
+        // Section header and Summary both count the same `details` list;
+        // deriving them from one source means they cannot drift apart again
+        // (the old synthetic banner inflated `details` by one, making the
+        // count diverge from `findings`).
+        let finding_count = details.len();
 
         Ok(ExpertScore {
             expert_name: self.name().to_string(),
             weight: self.weight(),
             score,
-            summary: format!("{} security findings", findings.len()),
+            summary: format!("{} security findings", finding_count),
             details,
         })
     }
@@ -200,6 +231,8 @@ impl RepoExpert for Documentation {
                 severity: "medium".to_string(),
                 message: "Missing README.md".to_string(),
                 file: None,
+                recommendation: Some("Add a README.md describing the project's purpose, setup, and usage.".to_string()),
+                effort: Some("small".to_string()),
                 ..Default::default()
             });
         }
@@ -213,6 +246,8 @@ impl RepoExpert for Documentation {
                 severity: "note".to_string(),
                 message: "Missing CHANGELOG.md".to_string(),
                 file: None,
+                recommendation: Some("Add a CHANGELOG.md to track user-visible changes per release.".to_string()),
+                effort: Some("small".to_string()),
                 ..Default::default()
             });
         }
@@ -226,6 +261,8 @@ impl RepoExpert for Documentation {
                 severity: "medium".to_string(),
                 message: "Missing LICENSE file".to_string(),
                 file: None,
+                recommendation: Some("Add a LICENSE file at the repository root.".to_string()),
+                effort: Some("trivial".to_string()),
                 ..Default::default()
             });
         }
@@ -264,6 +301,10 @@ impl RepoExpert for Documentation {
                 severity: "note".to_string(),
                 message: format!("Low comment ratio ({:.1}%)", comment_ratio * 100.0),
                 file: None,
+                recommendation: Some(
+                    "Add doc comments to public API items and comments to non-obvious logic.".to_string(),
+                ),
+                effort: Some("medium".to_string()),
                 ..Default::default()
             });
         }
@@ -334,6 +375,11 @@ impl RepoExpert for Dependency {
                 severity: "medium".to_string(),
                 message: format!("{} dependencies — consider auditing for stale packages", dep_count),
                 file: None,
+                recommendation: Some(
+                    "Run `cargo audit` for known vulnerabilities and update stale or duplicate dependencies."
+                        .to_string(),
+                ),
+                effort: Some("medium".to_string()),
                 ..Default::default()
             });
         }
@@ -380,6 +426,10 @@ impl RepoExpert for CodeStyle {
                 severity: "note".to_string(),
                 message: "Missing .editorconfig".to_string(),
                 file: None,
+                recommendation: Some(
+                    "Add an .editorconfig to standardize indentation and line endings across editors.".to_string(),
+                ),
+                effort: Some("trivial".to_string()),
                 ..Default::default()
             });
         }
@@ -419,5 +469,153 @@ impl RepoExpert for CodeStyle {
             summary,
             details,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo::experts::{ExpertScore, RepoContext, RepoExpert};
+    use crate::repo::{FileEntry, RepoStats};
+
+    fn entry(path: &str, language: &str, loc: usize) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            language: language.to_string(),
+            loc,
+            is_binary: false,
+            is_generated: false,
+        }
+    }
+
+    fn ctx(entries: Vec<FileEntry>) -> RepoContext {
+        let stats = RepoStats {
+            total_files: entries.len(),
+            total_loc: entries.iter().map(|e| e.loc).sum(),
+            ..Default::default()
+        };
+        RepoContext {
+            entries,
+            stats,
+            llm_configs: Vec::new(),
+            config: None,
+        }
+    }
+
+    async fn evaluate<E: RepoExpert + ?Sized>(expert: &E, context: &RepoContext) -> ExpertScore {
+        expert
+            .evaluate(context, None)
+            .await
+            .expect("static expert should not fail")
+    }
+
+    /// Build a temp fixture repo that triggers every static finding: a
+    /// credential leak (security), a 600-line file (code_organization),
+    /// a Cargo.lock with 201 packages (dependency), and nothing else so the
+    /// documentation/code_style "missing file" findings fire. Returns the
+    /// context plus the TempDir keep-alive handle.
+    fn fixture_context() -> (RepoContext, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let big_path = dir.path().join("src").join("big.rs");
+        std::fs::create_dir_all(big_path.parent().unwrap()).unwrap();
+        let big_body = (0..600)
+            .map(|i| format!("fn f{i}() {{}}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(&big_path, big_body).unwrap();
+
+        let secret_path = dir.path().join("config").join("secret.env");
+        std::fs::create_dir_all(secret_path.parent().unwrap()).unwrap();
+        std::fs::write(&secret_path, "api_key = \"aaaaaaaaaaaaaaaa\"\n").unwrap();
+
+        let lock_path = dir.path().join("Cargo.lock");
+        let mut lock = String::from("version = 3\n\n");
+        for i in 0..201 {
+            lock.push_str(&format!("[[package]]\nname = \"pkg{i}\"\nversion = \"0.1.0\"\n\n"));
+        }
+        std::fs::write(&lock_path, lock).unwrap();
+
+        let entries = vec![
+            entry(big_path.to_str().unwrap(), "Rust", 600),
+            entry(secret_path.to_str().unwrap(), "Config", 1),
+            entry(lock_path.to_str().unwrap(), "Config", 604),
+        ];
+        (ctx(entries), dir)
+    }
+
+    #[tokio::test]
+    async fn security_details_len_matches_summary_and_has_no_banner() {
+        let (context, _dir) = fixture_context();
+        let score = evaluate(&Security, &context).await;
+        assert!(!score.details.is_empty(), "fixture must contain a credential hit");
+
+        // Summary count must equal the rendered details count (the old
+        // synthetic banner inflated details by one and made them diverge).
+        let summary_count: usize = score
+            .summary
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .expect("summary should start with a count");
+        assert_eq!(summary_count, score.details.len());
+
+        // No synthetic banner: every detail is a real hit with a file path,
+        // and none claims a bare "N security patterns detected" count.
+        for d in &score.details {
+            assert!(d.file.is_some(), "banner pseudo-finding must be gone: {}", d.message);
+            assert!(
+                !d.message.ends_with(" security patterns detected"),
+                "banner message should not exist: {}",
+                d.message
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn static_findings_have_recommendation_and_effort() {
+        let (context, _dir) = fixture_context();
+        let experts: Vec<Box<dyn RepoExpert>> = vec![
+            Box::new(CodeOrganization),
+            Box::new(Security),
+            Box::new(Documentation),
+            Box::new(Dependency),
+            Box::new(CodeStyle),
+        ];
+        for expert in &experts {
+            let score = evaluate(expert.as_ref(), &context).await;
+            for d in &score.details {
+                let rec = d
+                    .recommendation
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{} detail missing recommendation: {}", score.expert_name, d.message));
+                assert!(
+                    !rec.trim().is_empty(),
+                    "{} detail has empty recommendation: {}",
+                    score.expert_name,
+                    d.message
+                );
+                let effort = d
+                    .effort
+                    .as_deref()
+                    .unwrap_or_else(|| panic!("{} detail missing effort: {}", score.expert_name, d.message));
+                assert!(
+                    ["trivial", "small", "medium", "large"].contains(&effort),
+                    "{} detail has unexpected effort {effort:?}: {}",
+                    score.expert_name,
+                    d.message
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn security_clean_repo_has_no_findings() {
+        // A context with no credentials must score 100 and emit no details —
+        // including no synthetic "0 security patterns detected" banner.
+        let context = ctx(vec![entry("src/main.rs", "Rust", 10)]);
+        let score = evaluate(&Security, &context).await;
+        assert_eq!(score.score, 100);
+        assert!(score.details.is_empty());
+        assert_eq!(score.summary, "0 security findings");
     }
 }

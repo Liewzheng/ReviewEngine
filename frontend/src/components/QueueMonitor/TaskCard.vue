@@ -1,12 +1,19 @@
 <template>
   <el-card class="task-card" :class="{ 'is-paused': isPaused && task.status === 'queued', 'sse-update': wasUpdated }" shadow="never">
     <div class="task-header">
-      <span class="status-dot" :class="{ 'is-running': task.status === 'running' }" :style="{ backgroundColor: statusColor }"></span>
+      <span
+        role="img"
+        :aria-label="task.status"
+        class="status-dot"
+        :class="{ 'is-running': task.status === 'running' }"
+        :style="{ backgroundColor: statusColor }"
+      ></span>
       <span class="task-title" :title="task.mrTitle">{{ task.mrTitle }}</span>
     </div>
     <div class="task-subtitle">{{ task.project }} / {{ task.repository }}</div>
 
     <el-progress
+      v-if="task.progress != null"
       :percentage="task.progress"
       :color="statusColor"
       :stroke-width="6"
@@ -14,10 +21,10 @@
       class="task-progress"
     />
 
-    <div class="task-meta">
-      <span>Expert: {{ task.expertName }}</span>
-      <span class="meta-sep">·</span>
-      <span>{{ formattedElapsed }}</span>
+    <div v-if="hasExpert || hasElapsed" class="task-meta">
+      <span v-if="hasExpert">Expert: {{ task.expertName }}</span>
+      <span v-if="hasExpert && hasElapsed" class="meta-sep">·</span>
+      <span v-if="hasElapsed">{{ formattedElapsed }}</span>
     </div>
 
     <div v-if="task.errorMessage" class="task-error">
@@ -92,8 +99,20 @@ const statusColor = computed(() => {
     case 'queued': return 'var(--info)'
     case 'failed': return 'var(--error)'
     case 'completed': return 'var(--success)'
+    case 'cancelled': return 'var(--text-secondary)'
     default: return 'var(--text-secondary)'
   }
+})
+
+// Show a meta segment only when it carries content. `expertName` needs a
+// non-empty string; `elapsedMs` is a number that is meaningful even at 0 for
+// settled (completed/failed) tasks. Queued/cancelled tasks only show elapsed
+// time if they actually ran (e.g. cancelled mid-flight).
+const hasExpert = computed(() => props.task.expertName != null && props.task.expertName !== '')
+const hasElapsed = computed(() => {
+  if (props.task.status === 'running') return props.task.startedAt != null
+  if (props.task.status === 'completed' || props.task.status === 'failed') return props.task.elapsedMs != null
+  return props.task.elapsedMs != null && props.task.elapsedMs > 0
 })
 
 const now = ref(Date.now())

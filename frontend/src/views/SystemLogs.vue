@@ -327,6 +327,9 @@ async function downloadLogs() {
   }
 }
 
+// Explicit user actions (the Resume/new-logs button, toggling auto-scroll)
+// may resume a paused stream. The auto-scroll watcher only calls this when
+// `!logs.isPaused`, so it never silently resumes the stream.
 function scrollToBottom() {
   if (logs.isPaused) {
     logs.togglePause()
@@ -361,7 +364,10 @@ watch(() => logs.error, (err) => {
   }
 })
 
-// Watch for new logs to clear isCleared and update newLogCount
+// Watch for new logs: update the floating-button count, and pin the terminal
+// to the latest entry when auto-scroll is on AND the user is not paused.
+// Paused means the user is reading history — do not scroll, and never let the
+// auto path resume the stream (scrollToBottom's unpause is for explicit clicks).
 watch(() => logs.logs.length, (newLength, oldLength) => {
   if (oldLength !== undefined && newLength > oldLength) {
     isCleared.value = false
@@ -370,6 +376,9 @@ watch(() => logs.logs.length, (newLength, oldLength) => {
       if (newLogDismissTimer) window.clearTimeout(newLogDismissTimer)
       newLogDismissTimer = window.setTimeout(() => { newLogCount.value = 0 }, 10000)
     }
+  }
+  if (autoScroll.value && !logs.isPaused) {
+    scrollToBottom()
   }
 })
 

@@ -145,10 +145,9 @@ async fn compute_health(state: &AppState) -> serde_json::Value {
 }
 
 fn compute_recent_reviews(items: &[TaskEntry]) -> Vec<serde_json::Value> {
-    let mut recent: Vec<&TaskEntry> = items
-        .iter()
-        .filter(|e| e.state == TaskState::Completed || e.state == TaskState::Failed)
-        .collect();
+    // No state filter: all tasks (including pending/cancelled) surface here,
+    // each with its real status vocabulary.
+    let mut recent: Vec<&TaskEntry> = items.iter().collect();
     recent.sort_by_key(|b| std::cmp::Reverse(b.created_at));
     recent.truncate(10);
 
@@ -158,17 +157,16 @@ fn compute_recent_reviews(items: &[TaskEntry]) -> Vec<serde_json::Value> {
             let meta = &e.source_meta;
             serde_json::json!({
                 "id": e.task_id.to_string(),
-                "mrTitle": meta.mr_title.as_deref().unwrap_or("Untitled Review"),
-                "project": meta.project.as_deref().unwrap_or("unknown"),
+                // Absent values are `null`, consistent with `/reviews` (the
+                // frontend applies its own display defaults).
+                "mrTitle": meta.mr_title.clone(),
+                "project": meta.project.clone(),
                 "author": {
-                    "name": meta.author_name.as_deref().unwrap_or("unknown"),
-                    "avatarUrl": meta.author_avatar_url,
+                    "name": meta.author_name.clone(),
+                    "avatarUrl": meta.author_avatar_url.clone(),
                 },
-                "status": match e.state {
-                    TaskState::Completed => "success",
-                    TaskState::Failed => "failed",
-                    _ => "running",
-                },
+                // Real task state vocabulary, consistent with `/reviews`.
+                "status": super::review::task_status_str(&e.state),
                 "durationMs": e.duration_ms().unwrap_or(0),
                 "createdAt": e.created_at.to_rfc3339(),
             })
@@ -208,4 +206,60 @@ fn default_health() -> serde_json::Value {
         "overall": "offline",
         "lastChecked": chrono::Utc::now().to_rfc3339(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::task_queue::SourceMeta;
+
+    fn entry(id: &str, state: TaskState) -> TaskEntry {
+        TaskEntry {
+            task_id: uuid::Uuid::parse_str(id).unwrap(),
+            state,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            error: None,
+            request: None,
+            source_meta: SourceMeta {
+                mr_title: Some("MR".to_string()),
+                ..SourceMeta::default()
+            },
+            progress: None,
+            expert_name: None,
+        }
+    }
+
+    /// Unit 5: `recentReviews` reports the real task state vocabulary
+    /// (pending/running/completed/failed/cancelled), consistent with `/reviews`,
+    /// and surfaces every state instead of only completed/failed.
+    #[test]
+    fn recent_reviews_use_real_status_vocabulary() {
+        let items = vec![
+            entry("00000000-0000-0000-0000-000000000001", TaskState::Pending),
+            entry("00000000-0000-0000-0000-000000000002", TaskState::Running),
+            entry("00000000-0000-0000-0000-000000000003", TaskState::Completed),
+            entry("00000000-0000-0000-0000-000000000004", TaskState::Failed),
+            entry("00000000-0000-0000-0000-000000000005", TaskState::Cancelled),
+        ];
+        let recent = compute_recent_reviews(&items);
+        assert_eq!(recent.len(), 5, "every state must surface in recentReviews");
+
+        let by_id: std::collections::HashMap<String, String> = recent
+            .iter()
+            .map(|r| {
+                (
+                    r["id"].as_str().unwrap().to_string(),
+                    r["status"].as_str().unwrap().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(by_id["00000000-0000-0000-0000-000000000001"], "pending");
+        assert_eq!(by_id["00000000-0000-0000-0000-000000000002"], "running");
+        assert_eq!(by_id["00000000-0000-0000-0000-000000000003"], "completed");
+        assert_eq!(by_id["00000000-0000-0000-0000-000000000004"], "failed");
+        assert_eq!(by_id["00000000-0000-0000-0000-000000000005"], "cancelled");
+    }
 }

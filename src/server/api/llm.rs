@@ -39,7 +39,7 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
                 "apiBaseUrl": cfg.api_base,
                 "defaultModel": cfg.model,
                 "maxTokens": cfg.max_tokens,
-                "temperature": cfg.temperature,
+                "temperature": round_temperature(cfg.temperature),
                 "latencyMs": 0,
                 "errorRate": 0.0,
                 "requestCount": 0,
@@ -117,6 +117,7 @@ async fn add_provider(
         api_base: body.api_base.clone(),
         max_tokens: body.max_tokens,
         temperature: body.temperature,
+        disable_thinking: None,
     };
 
     // Derive the new id for the response
@@ -429,4 +430,26 @@ fn logo_for_provider(provider: &str) -> String {
         _ => "Generic",
     }
     .to_string()
+}
+
+/// Serialize an `f32` temperature at 2-decimal precision so the JSON output is
+/// `0.3` instead of the raw f32 noise (`0.30000001192092896`).
+fn round_temperature(t: f32) -> f64 {
+    ((t as f64) * 100.0).round() / 100.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unit 12: temperature serializes at 2-decimal precision, free of f32 noise.
+    #[test]
+    fn round_temperature_removes_f32_noise() {
+        assert_eq!(round_temperature(0.3), 0.3);
+        assert_eq!(round_temperature(0.7), 0.7);
+        assert_eq!(round_temperature(1.0), 1.0);
+        assert_eq!(round_temperature(0.0), 0.0);
+        // Not the raw f32 value 0.30000001192092896.
+        assert_eq!(serde_json::to_string(&round_temperature(0.3)).unwrap(), "0.3");
+    }
 }

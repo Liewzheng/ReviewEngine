@@ -31,6 +31,7 @@ pub(crate) fn select_llm_config(expert: &ExpertDef, configs: &[LLMConfig]) -> Ve
             api_base: String::new(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }]
     }
 }

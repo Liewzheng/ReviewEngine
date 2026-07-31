@@ -89,6 +89,7 @@ async fn get_queue_tasks(
         "queued" => Some(TaskState::Pending),
         "failed" => Some(TaskState::Failed),
         "completed" => Some(TaskState::Completed),
+        "cancelled" => Some(TaskState::Cancelled),
         _ => None,
     });
 
@@ -216,6 +217,7 @@ fn task_to_queue_task(entry: &TaskEntry) -> serde_json::Value {
             TaskState::Running => "running",
             TaskState::Completed => "completed",
             TaskState::Failed => "failed",
+            TaskState::Cancelled => "cancelled",
         },
         "progress": entry.progress,
         "expertName": entry.expert_name,

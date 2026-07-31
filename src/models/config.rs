@@ -283,6 +283,16 @@ pub struct LLMConfig {
     /// Sampling temperature (0.0–1.0; lower = more deterministic).
     #[serde(default = "default_temperature")]
     pub temperature: f32,
+    /// Disable chain-of-thought reasoning for reasoning models that spend the
+    /// whole `max_tokens` output budget on `reasoning_tokens` and then return
+    /// an empty `content` (observed with `deepseek-v4-flash` on large prompts,
+    /// e.g. repo-review CodeQuality chunks). When `true` the request body
+    /// carries `"thinking": {"type": "disabled"}` so the full budget goes to
+    /// the answer; the field is only sent when enabled, to avoid rejecting
+    /// providers that do not recognise it. Defaults to off (`None`) so
+    /// existing configs are unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_thinking: Option<bool>,
 }
 
 impl std::fmt::Debug for LLMConfig {
@@ -294,6 +304,7 @@ impl std::fmt::Debug for LLMConfig {
             .field("api_base", &self.api_base)
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
+            .field("disable_thinking", &self.disable_thinking)
             .finish()
     }
 }

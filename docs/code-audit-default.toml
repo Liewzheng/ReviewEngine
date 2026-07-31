@@ -10,6 +10,22 @@
 #   4. review-engine only provides the generic ExpertDef interface and orchestrator; it does not recognize any fixed roles
 #   5. Commands (/review /describe /improve /ask /repo-review, etc.) are disabled by default and must be explicitly enabled in [commands]
 # ========================================
+#
+# LLM provider config lives in the user-level .code-audit-config.toml (or
+# $REVIEW_ENGINE_HOME), not here. When a reasoning model such as
+# deepseek-v4-flash spends its whole `max_tokens` output budget on
+# `reasoning_tokens` and returns an empty `content` for large prompts
+# (e.g. repo-review CodeQuality chunks), add to the relevant [[llm]] entry:
+#
+#   [[llm]]
+#   provider = "openai"
+#   model = "deepseek-v4-flash"
+#   ...
+#   disable_thinking = true   # sends "thinking": {"type": "disabled"}; only
+#                             # set this for providers that accept the field
+#
+# Leave it unset (or false) for providers that do not recognise the field.
+# ========================================
 
 [project]
 name = "default"

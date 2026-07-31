@@ -34,10 +34,18 @@ api_key = "sk-your-key"
 api_base = "https://api.openai.com/v1"
 max_tokens = 4096
 temperature = 0.3
+# disable_thinking = true
 ```
 
 Save this as `.code-audit-config.toml` in your project or in
 `~/.config/review-engine/.code-audit-config.toml`.
+
+> `disable_thinking = true` makes ReviewEngine send
+> `"thinking": {"type": "disabled"}` in the chat request. Set it for reasoning
+> models (e.g. `deepseek-v4-flash`) that otherwise consume the whole
+> `max_tokens` budget on `reasoning_tokens` and return an empty `content` on
+> large prompts (repo-review CodeQuality chunks are the common case). Leave it
+> unset for providers that do not recognise the field.
 
 ## Multi-provider fallback
 

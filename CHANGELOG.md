@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.8.0] - 2026-07-31
+
+### Added
+- **`POST /api/v1/reviews/{task_id}/rerun`**: re-runs a settled review with the original submission parameters and returns `202 Accepted` with a fresh `task_id`, so an already-completed review can be reproduced without re-submitting the payload. Unknown tasks return `404`, tasks still queued or running return `409` (with distinct wording for the two states), and tasks whose stored parameters are not replayable return `422`. The stored source parameters are shared with `POST /api/v1/reviews`, so a rerun replays identical inputs.
+- **`TaskState::Cancelled`**: `DELETE /api/v1/reviews/{task_id}` on a queued or running task now migrates the task to `Cancelled` instead of removing it, so the record is retained; terminal states (completed/failed/cancelled) are left untouched. The SSE stream emits a new `review.cancelled` event, the review list supports the `?status=cancelled` filter, and cancelled tasks are no longer counted among failed in queue statistics.
+- **camelCase structured fields on review detail and list**: `GET /api/v1/reviews/{id}` and `GET /api/v1/reviews` keep the existing snake_case keys and merge the camelCase fields the frontend already expects on top. The detail response adds `experts[]`, `rawComment`, and `rawApiResponse`; the list response adds a lightweight camelCase item shape.
+- **`disable_thinking` LLM config option**: LLM providers gain a `disable_thinking` option that injects a thinking-disabled directive into the request body for reasoning models, preventing the model's reasoning from consuming the whole output budget and returning an empty response.
+- **SystemLogs replays history on load**: the System Logs page now fetches historical log lines (`/logs/download`) when it mounts and then subscribes to the SSE increment stream, deduplicating overlap and auto-scrolling; previously it only showed lines arriving after the page was opened.
+
+### Fixed
+- **repo-review silently swallowed LLM expert results on parse failure**: when an LLM expert response could not be parsed, the report pipeline failed open and dropped the findings silently, leaving a score of 70 with zero findings and no explanation. The three failure modes (empty response, parse failure, schema drift) now each log a distinct `warn` and can be told apart.
+- **Reasoning models produced empty expert content on large prompts**: with a reasoning model such as `deepseek-v4-flash`, large prompts exhausted the output budget on reasoning and left `content` empty, so `code_quality` / `architecture_lead` produced no findings. After enabling `disable_thinking` the experts produce output again (measured: `code_quality` went from 0 to 20 findings).
+- **"Verification pass ran" claimed when verification did not run**: the output now reports the verification pass only when it actually executed, instead of asserting it unconditionally.
+- **Security expert emitted a synthetic banner finding**: the synthetic banner pseudo-finding was removed, and finding-count accounting across experts is unified.
+- **Static expert findings lacked `recommendation`/`effort`**: findings produced by the static experts now carry the `recommendation` and `effort` fields they previously omitted.
+- **Zero-output reviews recorded as `completed`**: when every expert fails and a review produces no output at all, the task is now marked `failed` with an error instead of being recorded as `completed`.
+- **Dashboard `recentReviews` status values**: the dashboard no longer outputs the placeholder `"success"` for review statuses — it reports the real status vocabulary — and no longer filters out `pending`/`cancelled` reviews.
+- **Reviews list/detail camelCase vs snake_case null inconsistency**: empty camelCase and snake_case values in the list and detail responses now use a unified `null` strategy, and the default review title is consistent across endpoints.
+- **`/system/version` missing the `commit` field**: the version response now includes a `commit` field; the rerun `409` distinguishes queued vs running copy; `/config/validate` errors are returned in a unified JSON format.
+- **`/logs` level hardcoded to `INFO`**: the log level is now inferred from the line text, and `LogMetadata` serializes camelCase (`requestId`/`durationMs`/...) so the metadata badge renders in the UI, with aliases keeping old log files readable.
+- **`/llm/providers` temperature float noise**: the endpoint no longer returns the raw f32→f64 value (`0.30000001192092896`) but the rounded value (`0.3`).
+- **Frontend rerun handling and status normalization**: rerun calls align with the backend return type and show friendly messages for `404`/`409`/`422`; the `pending`→`queued` status normalization is shared between the reviews and dashboard service layers via `normalizeStatus`; the Queue page groups cancelled reviews and shows card placeholders; the rerun confirmation copy now varies by task source.
+
 ## [0.7.12] - 2026-07-29
 
 ### Fixed

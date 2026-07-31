@@ -904,6 +904,7 @@ describe = true
             api_base: String::new(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         apply_llm_env_fallback(&mut config);
         // File-based providers win; the env var never overrides them.

@@ -10,7 +10,7 @@ export interface QueueStats {
   isPaused: boolean;
 }
 
-export type TaskStatus = 'running' | 'queued' | 'failed' | 'completed';
+export type TaskStatus = 'running' | 'queued' | 'failed' | 'completed' | 'cancelled';
 
 export interface QueueTask {
   id: string;
@@ -18,8 +18,9 @@ export interface QueueTask {
   project: string;
   repository: string;
   status: TaskStatus;
-  progress: number;
-  expertName: string;
+  // The queue API sends `null` for tasks that have not started (queued/cancelled).
+  progress: number | null;
+  expertName: string | null;
   elapsedMs: number;
   createdAt: string;
   startedAt?: string;

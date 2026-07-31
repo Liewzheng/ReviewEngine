@@ -534,3 +534,99 @@ async fn repo_scan_completes_and_returns_health_score() {
     );
     assert!(output.overview.total_experts > 0, "static experts should have run");
 }
+
+/// Unit 7: a review whose every expert fails (no valid LLM configured) must be
+/// recorded as `failed` with a descriptive error, not `completed` with an empty
+/// report set. The spawned server runs with a temp HOME, so the default config's
+/// 11 LLM-backed experts all fail and `run_experts` bails.
+#[tokio::test]
+async fn review_zero_output_with_expert_failures_marks_failed() {
+    let port = find_free_port();
+    let _guard = spawn_server(port);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{}/api/v1/reviews", port);
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({
+            "source": {"type": "static_diff", "diff": "diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-f()\n+g()\n"}
+        }))
+        .send()
+        .await
+        .expect("failed to POST /api/v1/reviews");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "POST /api/v1/reviews returned {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("POST response body is not JSON");
+    let task_id = body["task_id"].as_str().expect("POST response missing task_id");
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let final_body = loop {
+        let resp = client
+            .get(format!("{}/{}", url, task_id))
+            .send()
+            .await
+            .expect("failed to GET /api/v1/reviews/{task_id}");
+        let body: serde_json::Value = resp.json().await.expect("GET response body is not JSON");
+        match body["status"].as_str().unwrap_or("") {
+            "failed" => break body,
+            "completed" => panic!("empty-report review must not be recorded as completed"),
+            _ if Instant::now() > deadline => panic!("review did not settle within 30s: {:?}", body),
+            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    };
+    assert!(
+        final_body["result"].is_null(),
+        "failed task must not carry a result, got {:?}",
+        final_body["result"]
+    );
+    let error = final_body["error"].as_str().expect("failed task must carry an error");
+    assert!(
+        error.contains("all experts failed"),
+        "error should summarize the expert failures, got: {}",
+        error
+    );
+}
+
+/// Unit 10: `POST /config/validate` with a malformed/missing body returns a JSON
+/// `{"error": ...}` payload (not axum's default plain-text 422).
+#[tokio::test]
+async fn config_validate_missing_body_returns_json_error() {
+    let port = find_free_port();
+    let _guard = spawn_server(port);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("http://127.0.0.1:{}/api/v1/config/validate", port))
+        .json(&serde_json::json!({})) // missing required `body` field
+        .send()
+        .await
+        .expect("failed to POST /api/v1/config/validate");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNPROCESSABLE_ENTITY,
+        "expected 422 for a body missing `body`, got {}",
+        resp.status()
+    );
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(
+        content_type.contains("application/json"),
+        "error response must be JSON, got content-type {}",
+        content_type
+    );
+    let body: serde_json::Value = resp.json().await.expect("422 body must be JSON");
+    assert!(
+        body.get("error").is_some(),
+        "422 body must contain an `error` key, got {:?}",
+        body
+    );
+}

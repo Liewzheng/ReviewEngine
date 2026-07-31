@@ -1,7 +1,9 @@
 import { ref, computed, onMounted, onUnmounted, reactive } from 'vue';
-import { createLogStream, downloadLogs } from '../services/logs';
+import { createLogStream, downloadLogs, fetchLogHistory } from '../services/logs';
 import type { LogEntry } from '../types/logs';
 import type { LogLevel } from '../types/logs';
+
+const MAX_LOGS = 1000;
 
 export function useLogs() {
   const logs = ref<LogEntry[]>([]);
@@ -12,19 +14,52 @@ export function useLogs() {
   const keyword = ref('');
   let es: EventSource | null = null;
   let buffered: LogEntry[] = [];
+  // Ids currently held in `logs`; used to drop SSE entries that overlap the
+  // tail of the history backfill and to keep reconnect idempotent.
+  const seenIds = new Set<string>();
 
-  function connect() {
+  /** Append one entry, enforcing the buffer cap and deduplicating by id. */
+  function pushEntry(entry: LogEntry) {
+    if (entry.id && seenIds.has(entry.id)) return;
+    if (entry.id) seenIds.add(entry.id);
+    logs.value.push(entry);
+    if (logs.value.length > MAX_LOGS) {
+      const removed = logs.value.shift();
+      if (removed?.id) seenIds.delete(removed.id);
+    }
+  }
+
+  /** Backfill the buffer with history, oldest first, respecting the cap. */
+  function loadHistory(entries: LogEntry[]) {
+    const sorted = [...entries].sort(
+      (a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime()
+    );
+    for (const entry of sorted) pushEntry(entry);
+  }
+
+  async function connect() {
+    if (es) {
+      es.close();
+      es = null;
+    }
     loading.value = true;
     error.value = null;
+    try {
+      const history = await fetchLogHistory();
+      loadHistory(history);
+    } catch (e) {
+      // Backfill is best-effort; the live stream still starts below.
+      console.warn('Failed to load log history:', e);
+      error.value = 'Failed to load log history';
+    } finally {
+      loading.value = false;
+    }
     es = createLogStream(
       (entry) => {
         if (isPaused.value) {
           buffered.push(entry);
         } else {
-          logs.value.push(entry);
-          if (logs.value.length > 1000) {
-            logs.value.shift();
-          }
+          pushEntry(entry);
         }
       },
       (err) => {
@@ -32,7 +67,6 @@ export function useLogs() {
         console.error('SSE error:', err);
       }
     );
-    loading.value = false;
   }
 
   function disconnect() {
@@ -45,17 +79,15 @@ export function useLogs() {
   function togglePause() {
     isPaused.value = !isPaused.value;
     if (!isPaused.value && buffered.length > 0) {
-      logs.value.push(...buffered);
+      for (const entry of buffered) pushEntry(entry);
       buffered = [];
-      if (logs.value.length > 1000) {
-        logs.value = logs.value.slice(-1000);
-      }
     }
   }
 
   function clearLogs() {
     logs.value = [];
     buffered = [];
+    seenIds.clear();
   }
 
   async function download() {

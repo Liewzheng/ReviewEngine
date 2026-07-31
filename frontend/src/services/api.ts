@@ -61,7 +61,11 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    throw new Error(`HTTP ${resp.status}: ${resp.statusText}${text ? ' — ' + text : ''}`);
+    const err = new Error(`HTTP ${resp.status}: ${resp.statusText}${text ? ' — ' + text : ''}`) as Error & { status?: number };
+    // Attach the numeric status so callers can branch on 4xx/5xx instead of
+    // parsing the message text (e.g. rerun's 404/409/422 handling).
+    err.status = resp.status;
+    throw err;
   }
 
   const contentType = resp.headers.get('content-type') || '';

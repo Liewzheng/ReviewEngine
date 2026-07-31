@@ -12,11 +12,13 @@ use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
+use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState, TaskStore};
 use crate::server::AppState;
 use crate::team::orchestrator;
 
-use super::types::{ReviewRequest, ReviewSource, TaskStatus};
+use super::types::{
+    ExpertResultDetail, ReviewDetail, ReviewDetailAuthor, ReviewListItem, ReviewRequest, ReviewSource, TaskStatus,
+};
 
 const MAX_STATIC_DIFF_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 
@@ -26,6 +28,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/", get(list_reviews))
         .route("/{task_id}", get(get_review))
         .route("/{task_id}", delete(delete_review))
+        .route("/{task_id}/rerun", post(rerun_review))
 }
 
 async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<ReviewRequest>) -> impl IntoResponse {
@@ -40,13 +43,53 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
         }
     };
 
-    let source_meta = source_meta_from_request(&body.source);
-    let task_id = store.create(Some(source_meta)).await;
+    let request_json = match serde_json::to_value(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "failed to serialize review request"})),
+            )
+                .into_response()
+        }
+    };
+    let task_id = enqueue_review(&state, &store, body, request_json).await;
+
+    let status = task_to_status(&TaskEntry {
+        task_id,
+        state: TaskState::Pending,
+        created_at: chrono::Utc::now(),
+        started_at: None,
+        completed_at: None,
+        result: None,
+        error: None,
+        request: None,
+        source_meta: SourceMeta::default(),
+        progress: None,
+        expert_name: None,
+    });
+
+    (StatusCode::ACCEPTED, Json(status)).into_response()
+}
+
+/// Enqueue a review task and spawn its background execution.
+///
+/// Shared by `POST /reviews` and `POST /reviews/{task_id}/rerun` so both
+/// creation paths behave identically. The serialized `request_json` is stored
+/// on the task so a later rerun can replay the same inputs.
+async fn enqueue_review(
+    state: &Arc<AppState>,
+    store: &TaskStore,
+    request: ReviewRequest,
+    request_json: serde_json::Value,
+) -> Uuid {
+    let source_meta = source_meta_from_request(&request.source);
+    let task_id = store.create_with_request(Some(source_meta), Some(request_json)).await;
     let store_clone = store.clone();
-    let source = body.source.clone();
-    let config_toml = body.config.clone();
-    let llm_configs = body.llm_configs.clone().unwrap_or_default();
-    let webhook = body.webhook.clone();
+    let source = request.source;
+    let config_toml = request.config;
+    let llm_configs = request.llm_configs.unwrap_or_default();
+    let webhook = request.webhook;
     let cfg = state.app_config.read().unwrap().clone();
 
     tokio::spawn(async move {
@@ -72,21 +115,7 @@ async fn submit_review(State(state): State<Arc<AppState>>, Json(body): Json<Revi
             }
         }
     });
-
-    let status = task_to_status(&TaskEntry {
-        task_id,
-        state: TaskState::Pending,
-        created_at: chrono::Utc::now(),
-        started_at: None,
-        completed_at: None,
-        result: None,
-        error: None,
-        source_meta: SourceMeta::default(),
-        progress: None,
-        expert_name: None,
-    });
-
-    (StatusCode::ACCEPTED, Json(status)).into_response()
+    task_id
 }
 
 async fn get_review(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
@@ -101,13 +130,92 @@ async fn get_review(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid
         }
     };
     match store.get(task_id).await {
-        Some(entry) => (StatusCode::OK, Json(task_to_status(&entry))).into_response(),
+        Some(entry) => {
+            let mut status_value = serde_json::to_value(task_to_status(&entry)).unwrap_or_default();
+            // Merge the camelCase structured detail on top of the existing
+            // TaskStatus fields so the frontend `ReviewDetail` type is served
+            // without breaking the snake_case contract.
+            if let Ok(detail_value) = serde_json::to_value(build_review_detail(&entry)) {
+                merge_camel_case_fields(&mut status_value, &detail_value);
+            }
+            (StatusCode::OK, Json(status_value)).into_response()
+        }
         None => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "task not found"})),
         )
             .into_response(),
     }
+}
+
+/// Re-run a settled review task with its original request parameters.
+///
+/// Creates a brand-new task in the queue with the same source, config, LLM
+/// configs, and webhook as the original, returning the new task id (202).
+/// Rejects unknown tasks (404) and tasks still queued or running (409).
+async fn rerun_review(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
+    let store = match &state.task_store {
+        Some(s) => s.clone(),
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "task store not initialized"})),
+            )
+                .into_response()
+        }
+    };
+
+    let existing = match store.get(task_id).await {
+        Some(entry) => entry,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "task not found"})),
+            )
+                .into_response()
+        }
+    };
+
+    // A queued or running task cannot be re-run until it settles.
+    if existing.state == TaskState::Pending {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "task is still queued"})),
+        )
+            .into_response();
+    }
+    if existing.state == TaskState::Running {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "task is still running"})),
+        )
+            .into_response();
+    }
+
+    let request_json = match existing.request {
+        Some(r) => r,
+        None => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": "original request parameters are not available"})),
+            )
+                .into_response()
+        }
+    };
+
+    let request = match serde_json::from_value::<ReviewRequest>(request_json.clone()) {
+        Ok(r) => r,
+        Err(_) => {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({"error": "stored request parameters are not replayable"})),
+            )
+                .into_response()
+        }
+    };
+
+    let new_task_id = enqueue_review(&state, &store, request, request_json).await;
+    (StatusCode::ACCEPTED, Json(serde_json::json!({"task_id": new_task_id}))).into_response()
 }
 
 #[derive(Deserialize)]
@@ -139,6 +247,7 @@ async fn list_reviews(State(state): State<Arc<AppState>>, Query(params): Query<L
         "running" => Some(TaskState::Running),
         "completed" => Some(TaskState::Completed),
         "failed" => Some(TaskState::Failed),
+        "cancelled" => Some(TaskState::Cancelled),
         _ => None,
     });
     let page = params.page.unwrap_or(1).max(1);
@@ -167,7 +276,19 @@ async fn list_reviews(State(state): State<Arc<AppState>>, Query(params): Query<L
             date_to,
         )
         .await;
-    let items: Vec<TaskStatus> = items.iter().map(task_to_status).collect();
+    let items: Vec<serde_json::Value> = items
+        .iter()
+        .map(|entry| {
+            let mut status_value = serde_json::to_value(task_to_status(entry)).unwrap_or_default();
+            // Merge the lightweight camelCase `ReviewListItem` fields on top of
+            // the snake_case `TaskStatus` so the frontend list renders without
+            // defensive fallbacks (snake_case keys stay intact).
+            if let Ok(item_value) = serde_json::to_value(build_review_list_item(entry)) {
+                merge_camel_case_fields(&mut status_value, &item_value);
+            }
+            status_value
+        })
+        .collect();
 
     Json(serde_json::json!({
         "items": items,
@@ -200,16 +321,34 @@ async fn delete_review(State(state): State<Arc<AppState>>, Path(task_id): Path<U
     }
 }
 
+/// Canonical task status string, consistent across the reviews list/detail and
+/// the dashboard `recentReviews`. Mirrors the frontend `ReviewStatus` vocabulary.
+pub(crate) fn task_status_str(state: &TaskState) -> &'static str {
+    match state {
+        TaskState::Pending => "pending",
+        TaskState::Running => "running",
+        TaskState::Completed => "completed",
+        TaskState::Failed => "failed",
+        TaskState::Cancelled => "cancelled",
+    }
+}
+
+/// Merge the camelCase keys of `extra` into `base` in place, preserving every
+/// original snake_case `TaskStatus` key (backward compatibility with consumers
+/// that read the legacy fields).
+fn merge_camel_case_fields(base: &mut serde_json::Value, extra: &serde_json::Value) {
+    if let (Some(base_obj), Some(extra_obj)) = (base.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra_obj {
+            base_obj.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 pub(crate) fn task_to_status(entry: &TaskEntry) -> TaskStatus {
     let meta = &entry.source_meta;
     TaskStatus {
         task_id: entry.task_id,
-        status: match entry.state {
-            TaskState::Pending => "pending",
-            TaskState::Running => "running",
-            TaskState::Completed => "completed",
-            TaskState::Failed => "failed",
-        },
+        status: task_status_str(&entry.state),
         created_at: entry.created_at.to_rfc3339(),
         completed_at: entry.completed_at.map(|t| t.to_rfc3339()),
         duration_ms: entry.duration_ms(),
@@ -226,6 +365,94 @@ pub(crate) fn task_to_status(entry: &TaskEntry) -> TaskStatus {
         commit_sha: meta.commit_sha.clone(),
         progress: entry.progress,
         expert_name: entry.expert_name.clone(),
+    }
+}
+
+/// Build the structured, camelCase `ReviewDetail` from a task entry.
+///
+/// `experts[]` is derived from the stored `ReviewOutput` per-expert reports;
+/// per-expert scores reuse the same [`expert_score`](crate::scoring::review::expert_score)
+/// used by the lead consolidator. `raw_comment` carries the aggregated report's
+/// markdown (the full MR comment) when an aggregator ran.
+fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
+    let meta = &entry.source_meta;
+    let status = task_status_str(&entry.state);
+
+    let (experts, raw_comment) = match &entry.result {
+        Some(result) => match serde_json::from_value::<crate::models::ReviewOutput>(result.clone()) {
+            Ok(output) => {
+                let experts = output
+                    .reports
+                    .iter()
+                    .map(|report| ExpertResultDetail {
+                        expert_id: report.expert_name.clone(),
+                        expert_name: report.expert_name.clone(),
+                        status: "success".to_string(),
+                        score: Some(crate::scoring::review::expert_score(&report.findings)),
+                        summary: if report.markdown.is_empty() {
+                            format!("{} finding(s)", report.findings.len())
+                        } else {
+                            report.markdown.clone()
+                        },
+                        details: if report.raw_llm_response.is_empty() {
+                            None
+                        } else {
+                            Some(report.raw_llm_response.clone())
+                        },
+                    })
+                    .collect();
+                let raw_comment = output.aggregated.as_ref().map(|agg| agg.markdown.clone());
+                (experts, raw_comment)
+            }
+            Err(_) => (Vec::new(), None),
+        },
+        None => (Vec::new(), None),
+    };
+
+    ReviewDetail {
+        id: entry.task_id.to_string(),
+        mr_title: meta.mr_title.clone(),
+        project: meta.project.clone(),
+        repository: meta.repository.clone(),
+        branch: meta.branch.clone(),
+        target_branch: meta.target_branch.clone(),
+        author: ReviewDetailAuthor {
+            name: meta.author_name.clone(),
+            avatar_url: meta.author_avatar_url.clone(),
+        },
+        status: status.to_string(),
+        duration_ms: entry.duration_ms(),
+        created_at: entry.created_at.to_rfc3339(),
+        completed_at: entry.completed_at.map(|t| t.to_rfc3339()),
+        commit_sha: meta.commit_sha.clone(),
+        experts,
+        raw_comment,
+        raw_api_response: entry.result.clone(),
+        gitlab_mr_url: meta.gitlab_mr_url.clone(),
+    }
+}
+
+/// Build the lightweight, camelCase `ReviewListItem` for a task entry.
+///
+/// Mirrors `build_review_detail` but omits the heavy per-expert fields that
+/// only the detail view consumes (`experts`, `rawComment`, `rawApiResponse`).
+fn build_review_list_item(entry: &TaskEntry) -> ReviewListItem {
+    let meta = &entry.source_meta;
+    ReviewListItem {
+        id: entry.task_id.to_string(),
+        mr_title: meta.mr_title.clone(),
+        project: meta.project.clone(),
+        repository: meta.repository.clone(),
+        branch: meta.branch.clone(),
+        target_branch: meta.target_branch.clone(),
+        author: ReviewDetailAuthor {
+            name: meta.author_name.clone(),
+            avatar_url: meta.author_avatar_url.clone(),
+        },
+        status: task_status_str(&entry.state).to_string(),
+        duration_ms: entry.duration_ms(),
+        created_at: entry.created_at.to_rfc3339(),
+        gitlab_mr_url: meta.gitlab_mr_url.clone(),
     }
 }
 
@@ -430,5 +657,320 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("forbidden shell metacharacters"));
+    }
+
+    // ─── cancelled / rerun / structured detail ─────────────────────
+
+    fn make_finding(severity: crate::models::Severity) -> crate::models::Finding {
+        crate::models::Finding {
+            file: "src/main.rs".to_string(),
+            line: Some(1),
+            line_end: None,
+            severity,
+            confidence: 8,
+            category: "security".to_string(),
+            title: "Test finding".to_string(),
+            summary: "detail".to_string(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: String::new(),
+            effort: crate::models::Effort::Small,
+            expert_name: "security".to_string(),
+            expert_role: "Security Expert".to_string(),
+            agrees_with: vec![],
+            references: vec![],
+        }
+    }
+
+    fn make_report(name: &str, findings: Vec<crate::models::Finding>) -> crate::models::ExpertReport {
+        crate::models::ExpertReport {
+            expert_name: name.to_string(),
+            findings,
+            markdown: format!("## {} review\n", name),
+            raw_llm_response: format!("raw {}", name),
+        }
+    }
+
+    fn source_meta_with_commit() -> SourceMeta {
+        SourceMeta {
+            mr_title: Some("Fix login bug".to_string()),
+            project: Some("group/repo".to_string()),
+            repository: Some("group/repo".to_string()),
+            branch: Some("feature/x".to_string()),
+            target_branch: Some("main".to_string()),
+            author_name: Some("alice".to_string()),
+            author_avatar_url: Some("http://avatar".to_string()),
+            gitlab_mr_url: Some("http://gitlab/mr/1".to_string()),
+            commit_sha: Some("abc123".to_string()),
+        }
+    }
+
+    fn state_with_store() -> Arc<AppState> {
+        let store = Arc::new(TaskStore::new());
+        let mut state = AppState::new(vec![]);
+        state.task_store = Some(store);
+        Arc::new(state)
+    }
+
+    /// Unit 1: DELETE migrates a queued task to `Cancelled` (record kept), the
+    /// serialized status is "cancelled", and cancelled is not counted as failed.
+    #[tokio::test]
+    async fn test_cancel_migrates_task_to_cancelled() {
+        let store = TaskStore::new();
+        let id = store.create(None).await;
+
+        assert!(store.delete(id).await, "delete should cancel a pending task");
+        let entry = store.get(id).await.expect("cancelled task record must be kept");
+        assert_eq!(entry.state, TaskState::Cancelled);
+        assert!(entry.completed_at.is_some());
+
+        // Serialization + list filtering agree on the "cancelled" string.
+        let status = task_to_status(&entry);
+        assert_eq!(status.status, "cancelled");
+
+        // Cancelled tasks are not counted among failed in queue stats.
+        let stats = store.queue_stats().await;
+        assert_eq!(stats.failed, 0, "cancelled must not count as failed");
+
+        // A second delete on an already-cancelled task is a no-op (not Pending/Running).
+        assert!(!store.delete(id).await);
+    }
+
+    /// Unit 2: rerunning a settled task returns a new, distinct `task_id` (202)
+    /// and the new task replays the original request parameters.
+    #[tokio::test]
+    async fn test_rerun_returns_new_task_id() {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+
+        let request = ReviewRequest {
+            source: ReviewSource::StaticDiff {
+                diff: "diff content".to_string(),
+            },
+            config: None,
+            llm_configs: None,
+            webhook: None,
+        };
+        let request_json = serde_json::to_value(&request).unwrap();
+        let original_id = store
+            .create_with_request(Some(SourceMeta::default()), Some(request_json))
+            .await;
+        store
+            .update(
+                original_id,
+                TaskState::Completed,
+                Some(serde_json::json!({"reports": []})),
+                None,
+            )
+            .await;
+
+        let resp = rerun_review(State(state), Path(original_id)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED, "rerun must return 202");
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+        assert_ne!(new_id, original_id, "rerun must create a fresh task id");
+
+        let new_entry = store.get(new_id).await.expect("new task must exist");
+        assert_eq!(new_entry.state, TaskState::Pending);
+        let replayed: ReviewRequest = serde_json::from_value(new_entry.request.unwrap()).unwrap();
+        assert!(
+            matches!(replayed.source, ReviewSource::StaticDiff { .. }),
+            "rerun must replay the original source parameters"
+        );
+    }
+
+    /// Unit 2 error path: a task still queued or running cannot be re-run.
+    /// The 409 message distinguishes the two (unit 9).
+    #[tokio::test]
+    async fn test_rerun_rejects_still_running_task() {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+
+        let request = ReviewRequest {
+            source: ReviewSource::StaticDiff {
+                diff: "diff".to_string(),
+            },
+            config: None,
+            llm_configs: None,
+            webhook: None,
+        };
+        let request_json = serde_json::to_value(&request).unwrap();
+
+        // Queued (Pending) task → "task is still queued".
+        let queued_id = store
+            .create_with_request(Some(SourceMeta::default()), Some(request_json.clone()))
+            .await;
+        let resp = rerun_review(State(state.clone()), Path(queued_id))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "queued task rerun must be 409");
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "task is still queued");
+
+        // Running task → "task is still running".
+        let running_id = store
+            .create_with_request(Some(SourceMeta::default()), Some(request_json))
+            .await;
+        store.update(running_id, TaskState::Running, None, None).await;
+        let resp = rerun_review(State(state), Path(running_id)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::CONFLICT, "running task rerun must be 409");
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "task is still running");
+    }
+
+    /// Unit 3: `GET /reviews/{task_id}` merges the structured camelCase
+    /// `ReviewDetail` on top of the existing snake_case `TaskStatus` fields.
+    #[tokio::test]
+    async fn test_get_review_exposes_camelcase_detail_and_keeps_snakecase() {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+
+        let output = crate::models::ReviewOutput::new(vec![make_report(
+            "security",
+            vec![make_finding(crate::models::Severity::High)],
+        )]);
+        let result = serde_json::to_value(&output).unwrap();
+        let id = store.create(Some(source_meta_with_commit())).await;
+        store.update(id, TaskState::Completed, Some(result), None).await;
+
+        let resp = get_review(State(state), Path(id)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        // Backward compatibility: snake_case TaskStatus fields survive untouched.
+        assert_eq!(json["task_id"], id.to_string());
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["commit_sha"], "abc123");
+        assert_eq!(json["gitlab_mr_url"], "http://gitlab/mr/1");
+
+        // New camelCase ReviewDetail fields are present and correctly named.
+        assert_eq!(json["id"], id.to_string());
+        assert_eq!(json["mrTitle"], "Fix login bug");
+        assert_eq!(json["commitSha"], "abc123");
+        assert_eq!(json["gitlabMrUrl"], "http://gitlab/mr/1");
+        assert_eq!(json["author"]["name"], "alice");
+        assert_eq!(json["rawApiResponse"]["reports"][0]["expert_name"], "security");
+
+        let experts = json["experts"].as_array().expect("experts must be an array");
+        assert_eq!(experts.len(), 1);
+        let expert = &experts[0];
+        assert_eq!(expert["expertId"], "security");
+        assert_eq!(expert["expertName"], "security");
+        assert_eq!(expert["status"], "success");
+        assert!(
+            expert["score"].is_number(),
+            "expert score must be derived from findings"
+        );
+        assert!(expert["summary"].as_str().unwrap().contains("security"));
+        assert_eq!(expert["details"].as_str().unwrap(), "raw security");
+    }
+
+    /// Unit 4: `GET /reviews` list items merge camelCase `ReviewListItem` fields
+    /// on top of the snake_case `TaskStatus` keys, with both naming schemes
+    /// agreeing, and without the heavy detail-only fields.
+    #[tokio::test]
+    async fn test_list_reviews_merges_camelcase_and_keeps_snakecase() {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+
+        let id = store.create(Some(source_meta_with_commit())).await;
+        store
+            .update(id, TaskState::Completed, Some(serde_json::json!({"reports": []})), None)
+            .await;
+
+        let params = ListParams {
+            status: None,
+            page: None,
+            per_page: None,
+            q: None,
+            project: None,
+            repository: None,
+            date_from: None,
+            date_to: None,
+        };
+        let resp = list_reviews(State(state), Query(params)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let item = &json["items"][0];
+
+        // Backward compatibility: snake_case TaskStatus keys are preserved.
+        assert_eq!(item["task_id"], id.to_string());
+        assert_eq!(item["mr_title"], "Fix login bug");
+        assert_eq!(item["author_name"], "alice");
+        assert_eq!(item["target_branch"], "main");
+        assert_eq!(item["gitlab_mr_url"], "http://gitlab/mr/1");
+
+        // camelCase ReviewListItem keys are merged and agree with snake_case.
+        assert_eq!(item["id"], id.to_string());
+        assert_eq!(item["mrTitle"], "Fix login bug");
+        assert_eq!(item["author"]["name"], "alice");
+        assert_eq!(item["author"]["avatarUrl"], "http://avatar");
+        assert_eq!(item["targetBranch"], "main");
+        assert_eq!(item["status"], "completed");
+        assert_eq!(item["durationMs"], item["duration_ms"]);
+        assert_eq!(item["createdAt"], item["created_at"]);
+        assert_eq!(item["gitlabMrUrl"], "http://gitlab/mr/1");
+
+        // Heavy detail-only fields must not leak into list items.
+        assert!(item.get("experts").is_none(), "list items must not carry experts");
+        assert!(
+            item.get("rawApiResponse").is_none(),
+            "list items must not carry rawApiResponse"
+        );
+        assert!(item.get("rawComment").is_none(), "list items must not carry rawComment");
+    }
+
+    /// Unit 6: absent metadata serializes as `null` in both naming schemes —
+    /// a task with no source metadata must not show `""`/`"unknown"` in camelCase
+    /// while the snake_case side is `null`.
+    #[tokio::test]
+    async fn test_absent_metadata_is_null_in_both_naming_schemes() {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+
+        // Pending task with default SourceMeta: no title/project/branch/commit,
+        // and no completed_at so duration_ms is also absent.
+        let id = store.create(None).await;
+
+        // Detail
+        let resp = get_review(State(state.clone()), Path(id)).await.into_response();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json["mrTitle"].is_null(),
+            "mrTitle must be null, got {:?}",
+            json["mrTitle"]
+        );
+        assert_eq!(json["mr_title"], serde_json::Value::Null);
+        assert!(json["author"]["name"].is_null(), "author.name must be null");
+        assert_eq!(json["author_name"], serde_json::Value::Null);
+        assert!(json["commitSha"].is_null(), "commitSha must be null");
+        assert_eq!(json["commit_sha"], serde_json::Value::Null);
+        assert!(json["durationMs"].is_null(), "durationMs must be null");
+        assert_eq!(json["duration_ms"], serde_json::Value::Null);
+
+        // List
+        let params = ListParams {
+            status: None,
+            page: None,
+            per_page: None,
+            q: None,
+            project: None,
+            repository: None,
+            date_from: None,
+            date_to: None,
+        };
+        let resp = list_reviews(State(state), Query(params)).await.into_response();
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let item = &json["items"][0];
+        assert!(item["mrTitle"].is_null(), "list mrTitle must be null");
+        assert!(item["author"]["name"].is_null(), "list author.name must be null");
+        assert!(item["durationMs"].is_null(), "list durationMs must be null");
     }
 }

@@ -68,6 +68,11 @@ async fn version_info() -> Json<serde_json::Value> {
     };
     Json(serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
+        // No build.rs / version-injection mechanism exists in this repo yet;
+        // fall back to common CI env vars at compile time, else "unknown".
+        "commit": option_env!("GIT_COMMIT")
+            .or_else(|| option_env!("GITHUB_SHA"))
+            .unwrap_or("unknown"),
         "features": features,
     }))
 }
@@ -240,5 +245,21 @@ async fn update_expert(
             Json(serde_json::json!({"error": "expert not found"})),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unit 8: `/system/version` always exposes a `commit` string (from a
+    /// compile-time env var, falling back to "unknown" when none is set).
+    #[tokio::test]
+    async fn version_info_includes_commit_field() {
+        let json = version_info().await;
+        let commit = json.0["commit"].as_str().expect("commit must be a string");
+        assert!(!commit.is_empty());
+        let version = json.0["version"].as_str().expect("version must be a string");
+        assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
 }

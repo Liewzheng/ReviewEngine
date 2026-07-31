@@ -21,10 +21,17 @@ pub struct LogEntry {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct LogMetadata {
+    /// `requestId` on the wire (frontend `types/logs.ts`); the snake_case
+    /// aliases keep legacy `logs.ndjson` files readable on load.
+    #[serde(alias = "request_id")]
     pub request_id: Option<String>,
+    #[serde(alias = "duration_ms")]
     pub duration_ms: Option<u64>,
+    #[serde(alias = "review_id")]
     pub review_id: Option<String>,
+    #[serde(alias = "expert_id")]
     pub expert_id: Option<String>,
 }
 
@@ -151,7 +158,7 @@ impl LogCollector {
             LogEntry {
                 id: uuid::Uuid::new_v4().to_string(),
                 timestamp: chrono::Utc::now().to_rfc3339(),
-                level: "INFO".to_string(),
+                level: infer_level_from_line(line),
                 message: line.to_string(),
                 metadata: None,
             }
@@ -163,6 +170,21 @@ impl LogCollector {
             self.entries.remove(0);
         }
     }
+}
+
+/// Infer the tracing level from a plain-text (non-JSON) log line.
+///
+/// The `LogWriter` receives tracing's pre-formatted text, so the level token
+/// (e.g. ` 2026-01-01T00:00:00Z  WARN crate: ...`) is only recoverable by
+/// scanning the line. Unknown lines default to `INFO`.
+fn infer_level_from_line(line: &str) -> String {
+    let upper = line.to_uppercase();
+    for level in ["ERROR", "WARN", "DEBUG", "TRACE"] {
+        if upper.contains(level) {
+            return level.to_string();
+        }
+    }
+    "INFO".to_string()
 }
 
 pub struct LogWriter {
@@ -215,4 +237,57 @@ pub fn get_global_collector() -> Option<Arc<Mutex<LogCollector>>> {
 
 fn default_ndjson_path() -> Option<PathBuf> {
     home::home_dir().map(|p| p.join(".config").join("review-engine").join("logs.ndjson"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unit 11: the plain-text (non-JSON) branch infers the level from the
+    /// line instead of hardcoding INFO.
+    #[test]
+    fn infer_level_from_plain_text_lines() {
+        assert_eq!(infer_level_from_line("2026-01-01T00:00:00Z  INFO x: hi"), "INFO");
+        assert_eq!(infer_level_from_line("2026-01-01T00:00:00Z  WARN x: slow"), "WARN");
+        assert_eq!(infer_level_from_line("ERROR: boom"), "ERROR");
+        assert_eq!(infer_level_from_line("2026-01-01T00:00:00Z  DEBUG x: trace"), "DEBUG");
+        assert_eq!(infer_level_from_line("2026-01-01T00:00:00Z  TRACE x: detail"), "TRACE");
+        assert_eq!(infer_level_from_line("plain line without level"), "INFO");
+    }
+
+    #[test]
+    fn parse_line_records_inferred_level() {
+        let mut c = LogCollector::new_with_path(None);
+        c.add_bytes(b"2026-01-01T00:00:00Z  WARN module: something is off\n");
+        let entries = c.recent_entries(10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, "WARN");
+        assert!(entries[0].message.contains("something is off"));
+    }
+
+    /// Unit 13: `LogMetadata` serializes camelCase (`requestId`/`durationMs`/
+    /// `reviewId`/`expertId`) to match `frontend/src/types/logs.ts`, so SSE and
+    /// download (which share the same serializer) render the badge metadata.
+    /// Legacy snake_case lines still deserialize via aliases.
+    #[test]
+    fn log_metadata_serializes_camelcase() {
+        let meta = LogMetadata {
+            request_id: Some("req-1".to_string()),
+            duration_ms: Some(12),
+            review_id: Some("rev-1".to_string()),
+            expert_id: Some("exp-1".to_string()),
+        };
+        let json = serde_json::to_value(&meta).unwrap();
+        assert_eq!(json["requestId"], "req-1");
+        assert_eq!(json["durationMs"], 12);
+        assert_eq!(json["reviewId"], "rev-1");
+        assert_eq!(json["expertId"], "exp-1");
+        assert!(json.get("request_id").is_none(), "snake_case key must not be emitted");
+
+        // Legacy snake_case input (pre-rename logs.ndjson) still parses.
+        let legacy: LogMetadata =
+            serde_json::from_value(serde_json::json!({"request_id": "r", "duration_ms": 3})).unwrap();
+        assert_eq!(legacy.request_id.as_deref(), Some("r"));
+        assert_eq!(legacy.duration_ms, Some(3));
+    }
 }

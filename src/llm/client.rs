@@ -46,6 +46,28 @@ impl LLMClient {
         ]
     }
 
+    /// Build the OpenAI-compatible chat request body.
+    ///
+    /// Injects `"thinking": {"type": "disabled"}` only when the config opts in
+    /// via `disable_thinking`, so providers that do not recognise the field
+    /// never receive it. Reasoning models otherwise spend the whole
+    /// `max_tokens` budget on `reasoning_tokens` and return an empty content.
+    fn build_chat_request_body(config: &LLMConfig, system_prompt: &str, user_prompt: &str) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "model": config.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            "max_tokens": config.max_tokens,
+            "temperature": config.temperature,
+        });
+        if config.disable_thinking == Some(true) {
+            body["thinking"] = serde_json::json!({"type": "disabled"});
+        }
+        body
+    }
+
     fn record_llm_metrics(provider: &str, model: &str, success: bool) {
         let status = if success { "success" } else { "error" };
         crate::metrics::LLM_REQUESTS
@@ -76,6 +98,7 @@ impl LLMClient {
                     max_tokens: config.max_tokens,
                     temperature: config.temperature,
                     reasoning_effort: None,
+                    disable_thinking: config.disable_thinking,
                 };
                 let result = provider.complete(&params).await;
                 Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
@@ -112,15 +135,7 @@ impl LLMClient {
             );
         }
         let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-        let body = serde_json::json!({
-            "model": config.model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}
-            ],
-            "max_tokens": config.max_tokens,
-            "temperature": config.temperature,
-        });
+        let body = Self::build_chat_request_body(config, system_prompt, user_prompt);
 
         let latency_send = _start.elapsed();
         let resp = self
@@ -328,6 +343,79 @@ mod tests {
     }
 
     #[test]
+    fn test_build_chat_request_body_omits_thinking_by_default() {
+        let config = LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        };
+        let body = LLMClient::build_chat_request_body(&config, "sys", "user");
+        assert!(
+            body.get("thinking").is_none(),
+            "thinking must be omitted unless opted in"
+        );
+        assert_eq!(body["model"], "gpt-4");
+        assert_eq!(body["max_tokens"], 4096);
+    }
+
+    #[test]
+    fn test_build_chat_request_body_includes_thinking_when_disabled() {
+        let config = LLMConfig {
+            provider: "openai".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: Some(true),
+        };
+        let body = LLMClient::build_chat_request_body(&config, "sys", "user");
+        assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
+    }
+
+    #[test]
+    fn test_build_chat_request_body_thinking_false_is_omitted() {
+        // Explicitly false must behave like unset: no unknown field sent.
+        let config = LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: Some(false),
+        };
+        let body = LLMClient::build_chat_request_body(&config, "sys", "user");
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn test_llm_config_deserializes_without_disable_thinking() {
+        // Legacy LLM_CONFIG JSON (or TOML) without the new field must still parse.
+        let config: LLMConfig = serde_json::from_str(
+            r#"{"provider":"openai","model":"gpt-4","api_key":"k","api_base":"https://api.openai.com/v1","max_tokens":4096,"temperature":0.3}"#,
+        )
+        .unwrap();
+        assert_eq!(config.disable_thinking, None);
+        // And the absent field must not be re-serialized (clean contract).
+        let json = serde_json::to_value(&config).unwrap();
+        assert!(json.get("disable_thinking").is_none());
+    }
+
+    #[test]
+    fn test_llm_config_deserializes_disable_thinking_true() {
+        let config: LLMConfig = serde_json::from_str(
+            r#"{"provider":"openai","model":"deepseek-v4-flash","api_key":"k","api_base":"https://api.deepseek.com","max_tokens":4096,"temperature":0.3,"disable_thinking":true}"#,
+        )
+        .unwrap();
+        assert_eq!(config.disable_thinking, Some(true));
+    }
+
+    #[test]
     fn test_complete_direct_rejects_empty_api_base() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
@@ -339,6 +427,7 @@ mod tests {
                 api_base: String::new(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                disable_thinking: None,
             };
             let result = client.complete_direct(&config, "sys", "user").await;
             assert!(result.is_err());
@@ -356,6 +445,7 @@ mod tests {
             api_base: String::new(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert_eq!(order, vec!["anthropic"]);
@@ -371,6 +461,7 @@ mod tests {
             api_base: String::new(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert_eq!(order, vec!["openai"]);
@@ -386,6 +477,7 @@ mod tests {
             api_base: "https://api.custom.com/v1".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert_eq!(order, vec!["custom"]);
@@ -401,6 +493,7 @@ mod tests {
             api_base: "https://api.custom.com/v1".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert_eq!(order, vec!["openai-compatible"]);
@@ -417,6 +510,7 @@ mod tests {
                 api_base: String::new(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                disable_thinking: None,
             },
             LLMConfig {
                 provider: "anthropic".to_string(),
@@ -425,6 +519,7 @@ mod tests {
                 api_base: String::new(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                disable_thinking: None,
             },
         ];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
@@ -442,6 +537,7 @@ mod tests {
             api_base: "https://custom.anthropic.com".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, _order) = ProviderRegistry::from_configs(&configs);
         // The provider should exist; we can't directly inspect the base URL,
@@ -514,6 +610,7 @@ mod tests {
             api_base: "https://api.mock.com/v1".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
 
         let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -536,6 +633,7 @@ mod tests {
             api_base: "https://api.mock.com/v1".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
 
         let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -558,6 +656,7 @@ mod tests {
             api_base: "https://api.mock.com/v1".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
 
         let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -581,6 +680,7 @@ mod tests {
             api_base: "https://api.mock.com/v1".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
 
         let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -607,6 +707,7 @@ mod tests {
                 api_base: "https://api.first.com/v1".to_string(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                disable_thinking: None,
             },
             LLMConfig {
                 provider: "second".to_string(),
@@ -615,6 +716,7 @@ mod tests {
                 api_base: "https://api.second.com/v1".to_string(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                disable_thinking: None,
             },
         ];
 

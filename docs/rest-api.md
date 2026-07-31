@@ -103,11 +103,13 @@ Response 202:
 
 #### `GET /api/v1/reviews/:task_id`
 
+返回单个任务详情。snake_case `TaskStatus` 字段全部保留，之上合并 camelCase 结构化字段（`ReviewDetail`）：`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `status` / `durationMs` / `createdAt` / `completedAt` / `commitSha` / `experts[{expertId, expertName, status, score, summary, details}]` / `rawComment` / `rawApiResponse` / `gitlabMrUrl`。
+
 ```
 Response 200:
 {
   "task_id": "550e8400-e29b-41d4-a716-446655440000",
-  "status": "completed",           // pending | running | completed | failed
+  "status": "completed",           // pending | running | completed | failed | cancelled
   "created_at": "2026-06-26T12:00:00Z",
   "completed_at": "2026-06-26T12:00:28Z",
   "duration_ms": 28400,
@@ -138,7 +140,32 @@ Response 200:
     ],
     "aggregated": null
   },
-  "error": null
+  "error": null,
+  "mr_title": "Fix login",                    // 原 snake_case MR 元数据字段全部保留
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "mrTitle": "Fix login",
+  "project": "owner/repo",
+  "repository": "owner/repo",
+  "branch": "feature/x",
+  "targetBranch": "main",
+  "author": { "name": "alice", "avatarUrl": "https://gitlab.com/avatar.png" },
+  "durationMs": 28400,
+  "createdAt": "2026-06-26T12:00:00Z",
+  "completedAt": "2026-06-26T12:00:28Z",
+  "commitSha": "abc123",
+  "experts": [
+    {
+      "expertId": "security",
+      "expertName": "Security",
+      "status": "success",
+      "score": 9,
+      "summary": "## Security review ...",
+      "details": "raw LLM response ..."
+    }
+  ],
+  "rawComment": "aggregated markdown ...",
+  "rawApiResponse": { "reports": [ ... ] },
+  "gitlabMrUrl": "https://gitlab.com/owner/repo/-/merge_requests/23"
 }
 ```
 
@@ -161,9 +188,39 @@ Response 200:
 
 Default `per_page`: 20, max `per_page`: 100. When `page` exceeds range, returns empty `items` with correct `total`.
 
+`status` 过滤支持 `pending` / `running` / `completed` / `failed` / `cancelled`。
+
+列表项在 snake_case `TaskStatus` 字段之上合并轻量 camelCase 字段（`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `status` / `durationMs` / `createdAt` / `gitlabMrUrl`）；detail 才有的 `experts` / `rawComment` / `rawApiResponse` 不会出现在列表项中。
+
 #### `DELETE /api/v1/reviews/:task_id`
 
-取消 `pending` 或 `running` 状态的 task。
+将 `pending` / `running` 状态的 task 迁移为 `cancelled`：状态迁移而非物理删除，记录保留、可继续通过 `GET` 查询。`completed` / `failed` / 已 `cancelled` 的任务返回 `400`。
+
+```
+Response 200: { "status": "deleted" }
+Response 400: { "error": "task not found or cannot be cancelled" }
+```
+
+#### `POST /api/v1/reviews/:task_id/rerun`
+
+用原任务的请求参数（source / config / llm_configs / webhook）重新创建任务并排入队列，返回新任务 id；原任务记录不变。
+
+```
+Response 202:
+{
+  "task_id": "9c7f2d1e-b3a4-4c5d-8e6f-7a8b9c0d1e2f"
+}
+
+Response 404: { "error": "task not found" }
+Response 409: { "error": "task is still running" }
+Response 409: { "error": "original request parameters are not available" }
+Response 422: { "error": "stored request parameters are not replayable" }
+```
+
+- `404`：任务不存在
+- `409`：任务仍处于 `pending` / `running`
+- `409`：原任务未保存请求参数（不可回放）
+- `422`：保存的请求参数无法反序列化为 `ReviewRequest`（参数不可回放）
 
 ---
 
@@ -329,6 +386,8 @@ Response 200:
 }
 ```
 
+`cancelled` 任务不计入 `failed` 或 `failedLast24h`。
+
 #### `GET /api/v1/queue/tasks`
 
 分页列出任务，支持按状态过滤。
@@ -337,7 +396,7 @@ Response 200:
 Query:
   ?status=failed&page=1&per_page=50
 
-status: running | queued | failed | completed
+status: running | queued | failed | completed | cancelled
 
 Response 200:
 {
@@ -525,6 +584,8 @@ Response 200:
 data: {"task_id":"...","status":"completed","event":"review.completed"}
 
 data: {"task_id":"...","status":"running","event":"review.started"}
+
+data: {"task_id":"...","status":"cancelled","event":"review.cancelled"}
 ```
 
 Web UI 和 Desktop App 通过 `EventSource` 监听，无需轮询。
@@ -646,13 +707,15 @@ Response 200:
       "mrTitle": "Fix login",
       "project": "owner/repo",
       "author": { "name": "alice", "avatarUrl": null },
-      "status": "success",
+      "status": "completed",       // pending | running | completed | failed | cancelled
       "durationMs": 28400,
       "createdAt": "2026-07-18T02:00:00Z"
     }
   ]
 }
 ```
+
+`recentReviews` 不再按状态过滤（pending / running / completed / failed / cancelled 都会出现），`status` 使用与 `/reviews` 一致的真实状态词汇（不再输出 `"success"`）。
 
 ---
 
@@ -827,6 +890,7 @@ review-engine serve --bind 0.0.0.0 --api-token $(review-engine generate-token)
 | `GET /api/v1/system/experts` | 不认证 | 不认证 | expert 列表 |
 | `POST /api/v1/config/validate` | 不认证 | 不认证 | 纯校验，无副作用 |
 | `POST /api/v1/reviews` | 不认证 | **认证** | 消耗 LLM token，有成本风险 |
+| `POST /api/v1/reviews/:id/rerun` | 不认证 | **认证** | 重新消耗 LLM token |
 | `GET /api/v1/reviews` | 不认证 | **认证** | 可能泄漏代码 diff |
 | `GET /api/v1/reviews/:id` | 不认证 | **认证** | 同上 |
 | `GET /api/v1/config` | 不认证 | **认证** | 可能泄漏敏感配置 |

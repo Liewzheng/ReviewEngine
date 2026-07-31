@@ -27,7 +27,9 @@ const statusTextMap: Record<string, string> = {
   offline: 'Offline',
   running: 'In Progress',
   queued: 'Queued',
+  completed: 'Completed',
   failed: 'Failed',
+  cancelled: 'Cancelled',
 }
 
 const displayText = computed(() => statusTextMap[props.status] || props.status)
@@ -75,6 +77,14 @@ const displayText = computed(() => statusTextMap[props.status] || props.status)
 .status-dot.status-failed {
   background: var(--error);
   box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+}
+.status-dot.status-completed {
+  background: var(--success);
+  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+}
+.status-dot.status-cancelled {
+  background: var(--text-secondary);
+  box-shadow: 0 0 0 2px rgba(148, 163, 184, 0.2);
 }
 
 .status-text {

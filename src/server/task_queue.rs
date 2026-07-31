@@ -9,6 +9,7 @@ pub enum TaskState {
     Running,
     Completed,
     Failed,
+    Cancelled,
 }
 
 /// Metadata about the source merge request or pull request.
@@ -34,6 +35,9 @@ pub struct TaskEntry {
     pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     pub result: Option<serde_json::Value>,
     pub error: Option<String>,
+    /// Original review request parameters (serialized `ReviewRequest`),
+    /// retained so the task can be re-run with identical inputs.
+    pub request: Option<serde_json::Value>,
     pub source_meta: SourceMeta,
     pub progress: Option<u8>,        // 0-100
     pub expert_name: Option<String>, // current active expert
@@ -102,6 +106,16 @@ impl TaskStore {
     }
 
     pub async fn create(&self, source_meta: Option<SourceMeta>) -> Uuid {
+        self.create_with_request(source_meta, None).await
+    }
+
+    /// Create a task, optionally retaining the serialized request parameters so
+    /// it can later be re-run (`POST /reviews/{task_id}/rerun`).
+    pub async fn create_with_request(
+        &self,
+        source_meta: Option<SourceMeta>,
+        request: Option<serde_json::Value>,
+    ) -> Uuid {
         let id = Uuid::new_v4();
         let entry = TaskEntry {
             task_id: id,
@@ -111,6 +125,7 @@ impl TaskStore {
             completed_at: None,
             result: None,
             error: None,
+            request,
             source_meta: source_meta.unwrap_or_default(),
             progress: None,
             expert_name: None,
@@ -174,10 +189,16 @@ impl TaskStore {
         error: Option<String>,
     ) {
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
+            // Cancelled is terminal: a background task racing past a DELETE
+            // must not flip the record back to running/completed.
+            if entry.state == TaskState::Cancelled {
+                return;
+            }
             entry.state = new_state.clone();
             entry.result = result;
             entry.error = error.clone();
-            if new_state == TaskState::Completed || new_state == TaskState::Failed {
+            if new_state == TaskState::Completed || new_state == TaskState::Failed || new_state == TaskState::Cancelled
+            {
                 entry.completed_at = Some(chrono::Utc::now());
             }
             let event = match new_state {
@@ -185,12 +206,14 @@ impl TaskStore {
                 TaskState::Running => "review.started",
                 TaskState::Completed => "review.completed",
                 TaskState::Failed => "review.failed",
+                TaskState::Cancelled => "review.cancelled",
             };
             let status = match new_state {
                 TaskState::Pending => "pending",
                 TaskState::Running => "running",
                 TaskState::Completed => "completed",
                 TaskState::Failed => "failed",
+                TaskState::Cancelled => "cancelled",
             };
             let elapsed = entry
                 .started_at
@@ -282,12 +305,18 @@ impl TaskStore {
         (items, total)
     }
 
+    /// Cancel a queued or running task by migrating it to [`TaskState::Cancelled`].
+    ///
+    /// The record is kept (not physically removed) so history pages can show it
+    /// as `cancelled`. Tasks that are already in a terminal state (`Completed`,
+    /// `Failed`, `Cancelled`) are left untouched and return `false`.
     pub async fn delete(&self, task_id: Uuid) -> bool {
         let mut map = self.inner.write().await;
-        if let Some(entry) = map.get(&task_id) {
+        if let Some(entry) = map.get_mut(&task_id) {
             if entry.state == TaskState::Pending || entry.state == TaskState::Running {
+                entry.state = TaskState::Cancelled;
+                entry.completed_at = Some(chrono::Utc::now());
                 let meta = entry.source_meta.clone();
-                map.remove(&task_id);
                 let _ = self.tx.send(TaskEvent {
                     task_id,
                     status: "cancelled",
@@ -345,7 +374,9 @@ impl TaskStore {
                 TaskState::Running => active += 1,
                 TaskState::Pending => queued += 1,
                 TaskState::Failed => failed += 1,
-                _ => {}
+                // Completed and Cancelled are terminal; Cancelled is not
+                // counted as a failure in any queue stat.
+                TaskState::Completed | TaskState::Cancelled => {}
             }
             if entry.created_at >= cutoff_24h {
                 total_last_24h += 1;

@@ -182,6 +182,8 @@ function statusToBadgeStatus(status: RecentReview['status']) {
     case 'failed': return 'error'
     case 'running': return 'running'
     case 'queued': return 'queued'
+    case 'completed': return 'completed'
+    case 'cancelled': return 'cancelled'
     default: return 'offline'
   }
 }
@@ -192,6 +194,8 @@ function statusLabel(status: RecentReview['status']): string {
     case 'failed': return 'Failed'
     case 'running': return 'In Progress'
     case 'queued': return 'Queued'
+    case 'completed': return 'Completed'
+    case 'cancelled': return 'Cancelled'
   }
 }
 

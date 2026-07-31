@@ -1,9 +1,14 @@
+// Display-facing review status. The API emits `pending` for queued tasks; the
+// service layer (`services/reviews.ts`) maps `pending` -> `queued` so the UI
+// never sees the raw string.
 export type ReviewStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type ExpertResultStatus = 'success' | 'warning' | 'error' | 'skipped'
 
 export interface ReviewAuthor {
   name: string
   avatarUrl?: string
+  // Not part of the backend contract (`author` is `{ name, avatarUrl }`);
+  // retained for compatibility, currently unused.
   email?: string
 }
 

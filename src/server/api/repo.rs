@@ -149,6 +149,7 @@ async fn submit_repo_scan(State(state): State<Arc<AppState>>, Json(body): Json<R
         completed_at: None,
         result: None,
         error: None,
+        request: None,
         source_meta: meta,
         progress: None,
         expert_name: None,

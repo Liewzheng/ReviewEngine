@@ -78,6 +78,7 @@ mod tests {
             api_base: String::new(),
             max_tokens: 4096,
             temperature: 0.7,
+            disable_thinking: None,
         }];
         let state = AppState::new(configs);
         let llm = state.llm_configs.read().unwrap();

@@ -44,6 +44,7 @@ const stats = computed<QueueStats>(() => queue.stats.value ?? {
 const activeTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'running'))
 const queuedTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'queued'))
 const failedTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'failed'))
+const cancelledTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'cancelled'))
 const allTasks = computed(() => queue.items.value)
 
 // --- Load queue data ---
@@ -383,6 +384,31 @@ onUnmounted(() => {
         <TransitionGroup name="task" tag="div" class="task-grid">
           <TaskCard
             v-for="task in failedTasks"
+            :key="task.id"
+            :task="task"
+            :is-paused="isPaused"
+            :was-updated="recentlyUpdated.includes(task.id)"
+            @cancel="handleCancel"
+            @retry="handleRetry"
+            @view-logs="handleViewLogs"
+          />
+        </TransitionGroup>
+      </div>
+
+      <!-- Cancelled Tasks -->
+      <div
+        v-if="cancelledTasks.length > 0"
+        class="task-section"
+      >
+        <div class="section-header">
+          <div class="section-title">
+            <span>Cancelled Tasks</span>
+            <el-badge :value="cancelledTasks.length" type="info" />
+          </div>
+        </div>
+        <TransitionGroup name="task" tag="div" class="task-grid">
+          <TaskCard
+            v-for="task in cancelledTasks"
             :key="task.id"
             :task="task"
             :is-paused="isPaused"

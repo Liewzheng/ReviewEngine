@@ -778,7 +778,7 @@ pub async fn run_experts(
         }
     }
 
-    let (reports, _, _, _, global_context, dropped_findings, consolidated) = run_experts_inner(
+    let (reports, _, _, errors, global_context, dropped_findings, consolidated) = run_experts_inner(
         experts,
         mr_info,
         diff_raw,
@@ -790,6 +790,20 @@ pub async fn run_experts(
         Some(&mr_info.source_branch),
     )
     .await?;
+
+    // Zero output must not be recorded as success: when every expert task
+    // failed (e.g. no valid LLM provider), surface the run as an error instead
+    // of returning an empty report set. A legitimately empty team (no experts
+    // configured) produces no errors and is left untouched, and a successful
+    // review with zero findings still has non-empty reports.
+    if reports.is_empty() && !errors.is_empty() {
+        let sample = errors.first().map(|s| s.as_str()).unwrap_or("");
+        anyhow::bail!(
+            "all experts failed: {} expert task(s) errored (first error: {})",
+            errors.len(),
+            sample
+        );
+    }
 
     Ok((reports, global_context, dropped_findings, consolidated))
 }

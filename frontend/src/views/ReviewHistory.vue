@@ -101,7 +101,9 @@ function readUrl() {
   const q = route.query
   filters.value.q = (q.q as string) || ''
   filters.value.project = (q.project as string) || null
-  filters.value.status = (q.status as string) || null
+  // The API filter value is `pending`; map it back to the display-facing
+  // `queued` so the status select shows the right option.
+  filters.value.status = q.status === 'pending' ? 'queued' : (q.status as string) || null
   filters.value.dateFrom = (q.from as string) || null
   filters.value.dateTo = (q.to as string) || null
   filters.value.repository = (q.repo as string) || null
@@ -150,14 +152,24 @@ async function openDrawer(row: ReviewListItem) {
 }
 
 /* ─────────────── Actions ─────────────── */
-function handleRerun(row: ReviewListItem) {
+function rerunConfirmMessage(row: { mrTitle: string; gitlabMrUrl?: string }): string {
+  const title = (row.mrTitle || '').trim()
+  if (!row.gitlabMrUrl && !title) {
+    // Static-diff / local-repo tasks have no MR context; use a generic message.
+    return 'Re-run this review? A new task will be created with the same parameters.'
+  }
+  return `Re-run review for "${title || 'Untitled Review'}"? This will post a new comment to the MR.`
+}
+
+function handleRerun(row: { id: string; mrTitle: string; gitlabMrUrl?: string }) {
   ElMessageBox.confirm(
-    `Re-run review for "${row.mrTitle}"? This will post a new comment to the MR.`,
+    rerunConfirmMessage(row),
     'Re-run Review',
     { confirmButtonText: 'Re-run', cancelButtonText: 'Cancel', type: 'warning' }
   ).then(() => {
     reviews.rerun(row.id).then(() => {
-      ElNotification.success({ title: 'Review re-queued', message: `A new review has been queued for ${row.mrTitle}.` })
+      const title = (row.mrTitle || '').trim() || 'Untitled Review'
+      ElNotification.success({ title: 'Review re-queued', message: `A new review has been queued for ${title}.` })
       fetchReviewsData()
     })
   }).catch(() => {})

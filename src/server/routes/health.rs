@@ -47,6 +47,7 @@ mod tests {
             api_base: String::new(),
             max_tokens: 100,
             temperature: 0.0,
+            disable_thinking: None,
         }]));
         let (status, body) = health_ready(axum::extract::State(state)).await;
         assert_eq!(status, axum::http::StatusCode::OK);

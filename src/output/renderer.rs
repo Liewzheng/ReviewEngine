@@ -94,15 +94,75 @@ fn capitalize(s: &str) -> String {
 /// nothing, a one-line note is rendered so users can tell the pass ran;
 /// otherwise each dropped finding is listed with file, title, expert, and the
 /// verifier's reason, followed by the run summary.
+///
+/// Legacy entry point: treats `verification_enabled` as "the pass ran".
+/// Callers that can distinguish "enabled" from "actually executed" should use
+/// [`render_dropped_findings_appendix_with_state`] instead.
 pub fn render_dropped_findings_appendix(
     dropped: &[crate::team::verifier::DroppedFinding],
     verification_enabled: bool,
     checked: usize,
 ) -> String {
-    if dropped.is_empty() {
-        if !verification_enabled {
+    render_dropped_findings_appendix_with_state(dropped, verification_enabled, verification_enabled, checked)
+}
+
+/// Like [`render_dropped_findings_appendix`], but takes an explicit
+/// `verification_ran` flag so a pass that was *enabled yet never executed*
+/// (e.g. repo-review with no code_quality findings to verify) is reported
+/// honestly as skipped instead of claiming it ran.
+pub fn render_dropped_findings_appendix_with_state(
+    dropped: &[crate::team::verifier::DroppedFinding],
+    verification_enabled: bool,
+    verification_ran: bool,
+    checked: usize,
+) -> String {
+    // Pass not enabled: no run-summary lines. An empty drop list yields an
+    // empty string (no appendix); a non-empty list keeps the historical
+    // list-only rendering used by publish.
+    if !verification_enabled {
+        if dropped.is_empty() {
             return String::new();
         }
+        let mut out = String::from("## Dropped by verification\n\n");
+        for d in dropped {
+            let line = d.finding.line.map_or(String::new(), |l| format!(":{}", l));
+            out.push_str(&format!(
+                "- `{file}{line}` — **{title}** ({expert}): {reason}\n",
+                file = d.finding.file,
+                line = line,
+                title = d.finding.title,
+                expert = d.finding.expert_name,
+                reason = d.reason,
+            ));
+        }
+        return out;
+    }
+
+    // Enabled but never executed: say so instead of claiming a run. This is
+    // the repo-review case where the pass is configured on but the review
+    // produced no code_quality findings to hand to the verifier.
+    if !verification_ran {
+        if dropped.is_empty() {
+            return String::from("## Dropped by verification\n\n_Verification pass skipped: no findings to verify._\n");
+        }
+        // Defensive: ran=false with drops should not happen; fall back to a
+        // plain list without the run-summary claim.
+        let mut out = String::from("## Dropped by verification\n\n");
+        for d in dropped {
+            let line = d.finding.line.map_or(String::new(), |l| format!(":{}", l));
+            out.push_str(&format!(
+                "- `{file}{line}` — **{title}** ({expert}): {reason}\n",
+                file = d.finding.file,
+                line = line,
+                title = d.finding.title,
+                expert = d.finding.expert_name,
+                reason = d.reason,
+            ));
+        }
+        return out;
+    }
+
+    if dropped.is_empty() {
         return format!(
             "## Dropped by verification\n\n_Verification pass ran: no findings were dropped ({} checked)._\n",
             checked
@@ -111,24 +171,21 @@ pub fn render_dropped_findings_appendix(
 
     let mut out = String::from("## Dropped by verification\n\n");
     for d in dropped {
-        let f = &d.finding;
-        let line = f.line.map_or(String::new(), |l| format!(":{}", l));
+        let line = d.finding.line.map_or(String::new(), |l| format!(":{}", l));
         out.push_str(&format!(
             "- `{file}{line}` — **{title}** ({expert}): {reason}\n",
-            file = f.file,
+            file = d.finding.file,
             line = line,
-            title = f.title,
-            expert = f.expert_name,
+            title = d.finding.title,
+            expert = d.finding.expert_name,
             reason = d.reason,
         ));
     }
-    if verification_enabled {
-        out.push_str(&format!(
-            "\n_Verification pass ran: {} findings checked, {} dropped._\n",
-            checked,
-            dropped.len()
-        ));
-    }
+    out.push_str(&format!(
+        "\n_Verification pass ran: {} findings checked, {} dropped._\n",
+        checked,
+        dropped.len()
+    ));
     out
 }
 
@@ -279,5 +336,37 @@ mod tests {
         assert!(md.contains("## Dropped by verification"));
         assert!(md.contains("False alarm"));
         assert!(!md.contains("Verification pass ran"));
+    }
+
+    #[test]
+    fn test_render_dropped_findings_appendix_with_state_enabled_but_skipped() {
+        // Enabled yet never executed: must say "skipped", never "ran".
+        let md = render_dropped_findings_appendix_with_state(&[], true, false, 0);
+        assert!(md.contains("## Dropped by verification"));
+        assert!(md.contains("Verification pass skipped"));
+        assert!(!md.contains("Verification pass ran"));
+        assert!(!md.contains("no findings were dropped"));
+    }
+
+    #[test]
+    fn test_render_dropped_findings_appendix_with_state_skipped_with_drops_lists_without_claim() {
+        // Defensive path: skipped with a non-empty drop list must not claim a run.
+        let dropped = vec![crate::team::verifier::DroppedFinding {
+            finding: make_test_finding(Severity::High, "False alarm", "src/lib.rs"),
+            reason: "Claim disproven by file content".to_string(),
+        }];
+        let md = render_dropped_findings_appendix_with_state(&dropped, true, false, 0);
+        assert!(md.contains("False alarm"));
+        assert!(!md.contains("Verification pass ran"));
+    }
+
+    #[test]
+    fn test_render_dropped_findings_appendix_with_state_ran_matches_legacy() {
+        // Legacy function (enabled ⇒ ran) must agree with the stateful
+        // variant when verification_ran == verification_enabled.
+        let legacy = render_dropped_findings_appendix(&[], true, 7);
+        let stateful = render_dropped_findings_appendix_with_state(&[], true, true, 7);
+        assert_eq!(legacy, stateful);
+        assert!(stateful.contains("no findings were dropped (7 checked)"));
     }
 }

@@ -373,6 +373,12 @@ watch(() => logs.logs.length, (newLength, oldLength) => {
   }
 })
 
+// Keep the terminal pinned to the latest entry when auto-scroll is on. This
+// covers both the initial history backfill and live SSE increments.
+watch(() => logs.logs.length, () => {
+  if (autoScroll.value) scrollToBottom()
+})
+
 // ==================== Lifecycle ====================
 onMounted(() => {
   nextTick(() => {

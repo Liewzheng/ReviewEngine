@@ -142,6 +142,7 @@ mod tests {
                 api_base: String::new(),
                 max_tokens: 4096,
                 temperature: 0.7,
+                disable_thinking: None,
             }];
             let state = Arc::new(AppState::new(configs));
             let auth = Arc::new(AuthConfig::default());

@@ -5,6 +5,95 @@ use super::{ExpertScore, RepoContext, RepoExpert};
 use crate::llm::client::LLMClient;
 use crate::prompt::templates;
 
+/// Maximum bytes of a raw LLM response kept in a parse-failure warning.
+/// Bounded so a huge or runaway response cannot flood the log line, while
+/// still leaving enough to identify the shape the model actually returned.
+const EXCERPT_MAX_BYTES: usize = 300;
+
+/// Keys that mark a CodeQuality response as schema-conforming. A mapping that
+/// has none of these (e.g. an unexpected `verdicts:` shape) is treated as a
+/// schema drift and falls back, because every field would default silently.
+const CODE_QUALITY_KEYS: &[&str] = &["score", "summary", "findings"];
+
+/// Keys that mark an ArchitectureLead response as schema-conforming.
+const ARCHITECTURE_LEAD_KEYS: &[&str] = &["score", "summary", "risk_areas", "guidance", "focus_modules"];
+
+/// Parse an LLM expert's YAML response into a [`serde_yaml_ng::Value`].
+///
+/// Mirrors `crate::output::parser`'s extraction strategy: strip code fences
+/// via [`crate::output::parser::clean_yaml`], attempt a strict parse, and on
+/// failure retry with the first fenced YAML block in isolation. When neither
+/// yields a schema-conforming mapping, logs a `warn!` (with a truncated
+/// excerpt of the raw response) and returns `Null`, so the caller's field
+/// fallbacks apply.
+///
+/// The warning distinguishes three failure modes so operators can tell them
+/// apart without a full response dump:
+/// 1. **Empty response** — the API returned zero bytes (observed with
+///    reasoning models whose whole `max_tokens` budget is consumed by
+///    `reasoning_tokens`, leaving `content` empty).
+/// 2. **Unparseable** — non-empty text that is not valid YAML (prose prefix,
+///    broken fences, truncated document).
+/// 3. **Schema drift** — valid YAML that is a mapping but has none of
+///    `expected_keys`, so `score`/`findings` would all silently fall back.
+///
+/// A `Null` return means the caller is about to use fallback values — never
+/// model-provided ones — which lets `score`/`findings` fallbacks be told apart
+/// from genuine model output in the logs.
+fn parse_expert_yaml(expert: &str, raw: &str, expected_keys: &[&str]) -> serde_yaml_ng::Value {
+    if raw.trim().is_empty() {
+        tracing::warn!(
+            expert_name = expert,
+            "LLM returned empty response; using fallback score and empty findings"
+        );
+        return serde_yaml_ng::Value::Null;
+    }
+
+    let cleaned = crate::output::parser::clean_yaml(raw);
+    let parsed = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned).ok();
+    if let Some(v) = &parsed {
+        if v.is_mapping() && expected_keys.iter().any(|k| !v[*k].is_null()) {
+            return v.clone();
+        }
+    }
+    if let Some(fenced) = crate::output::parser::extract_first_fenced_yaml(raw) {
+        if let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&fenced) {
+            if v.is_mapping() && expected_keys.iter().any(|k| !v[*k].is_null()) {
+                return v;
+            }
+        }
+    }
+
+    if parsed.as_ref().is_some_and(|v| v.is_mapping()) {
+        tracing::warn!(
+            expert_name = expert,
+            raw_len = raw.len(),
+            excerpt = %truncate_excerpt(raw),
+            "LLM response parsed as YAML but missing expected keys {expected_keys:?}; using fallback score and empty findings"
+        );
+    } else {
+        tracing::warn!(
+            expert_name = expert,
+            raw_len = raw.len(),
+            excerpt = %truncate_excerpt(raw),
+            "LLM response failed YAML parse; using fallback score and empty findings"
+        );
+    }
+    serde_yaml_ng::Value::Null
+}
+
+/// First ~300 bytes of a raw response, with newlines collapsed, for logs.
+fn truncate_excerpt(raw: &str) -> String {
+    let mut excerpt = String::new();
+    for ch in raw.chars() {
+        if excerpt.len() + ch.len_utf8() > EXCERPT_MAX_BYTES {
+            break;
+        }
+        excerpt.push(ch);
+    }
+    excerpt.replace('\n', "\\n")
+}
+
 /// Architecture Lead: Pass 1 expert that examines the file tree and produces a
 /// high-level assessment of the repository structure and risks.
 pub struct ArchitectureLead;
@@ -65,9 +154,7 @@ impl RepoExpert for ArchitectureLead {
         let response = llm.complete_with_fallback(&ctx.llm_configs, system, &user).await?;
 
         // Parse YAML response
-        let cleaned = crate::output::parser::clean_yaml(&response.content);
-        let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&cleaned).unwrap_or(serde_yaml_ng::Value::Null);
-
+        let value = parse_expert_yaml("architecture_lead", &response.content, ARCHITECTURE_LEAD_KEYS);
         let score = value["score"].as_u64().unwrap_or(70).min(100) as u8;
         let summary = value["summary"]
             .as_str()
@@ -163,9 +250,7 @@ impl RepoExpert for CodeQuality {
 
         let response = llm.complete_with_fallback(&ctx.llm_configs, &system, &user).await?;
 
-        let cleaned = crate::output::parser::clean_yaml(&response.content);
-        let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&cleaned).unwrap_or(serde_yaml_ng::Value::Null);
-
+        let value = parse_expert_yaml("code_quality", &response.content, CODE_QUALITY_KEYS);
         let score = value["score"].as_u64().unwrap_or(70).min(100) as u8;
         let summary = value["summary"]
             .as_str()
@@ -346,6 +431,84 @@ findings:
     #[test]
     fn test_yaml_empty_document() {
         assert_eq!(parse_score(""), 70);
+    }
+
+    // ─── parse_expert_yaml fallback / robustness ──────────
+    // These exercise the shared entry point used by both LLM experts: on any
+    // failure it returns `Null` (so score falls back to 70 and findings to
+    // empty) and logs a distinct warn — never panics.
+
+    #[test]
+    fn test_parse_expert_yaml_plain_yaml() {
+        let v = parse_expert_yaml("code_quality", "score: 85\nsummary: \"ok\"", CODE_QUALITY_KEYS);
+        assert_eq!(v["score"].as_u64(), Some(85));
+    }
+
+    #[test]
+    fn test_parse_expert_yaml_fenced_yaml_recovers() {
+        let raw = "Here is my assessment:\n```yaml\nscore: 88\nfindings: []\n```\n";
+        let v = parse_expert_yaml("code_quality", raw, CODE_QUALITY_KEYS);
+        assert_eq!(v["score"].as_u64(), Some(88));
+    }
+
+    #[test]
+    fn test_parse_expert_yaml_architecture_keys_accepted() {
+        let raw = "summary: \"ok\"\nscore: 72\nrisk_areas: []\n";
+        let v = parse_expert_yaml("architecture_lead", raw, ARCHITECTURE_LEAD_KEYS);
+        assert_eq!(v["score"].as_u64(), Some(72));
+    }
+
+    #[test]
+    fn test_parse_expert_yaml_empty_response_falls_back() {
+        // Observed failure mode: reasoning models exhaust their max_tokens
+        // budget and return zero bytes. Must fall back, not panic.
+        let v = parse_expert_yaml("code_quality", "", CODE_QUALITY_KEYS);
+        assert!(v.is_null());
+        let score = v["score"].as_u64().unwrap_or(70).min(100) as u8;
+        assert_eq!(score, 70);
+    }
+
+    #[test]
+    fn test_parse_expert_yaml_malformed_yaml_falls_back_without_panic() {
+        let raw = "score: [unclosed\n  findings:\n    - severity: \"high\"\n";
+        let v = parse_expert_yaml("code_quality", raw, CODE_QUALITY_KEYS);
+        assert!(v.is_null());
+        // Fallback score and empty findings, mirroring the evaluate path.
+        let score = v["score"].as_u64().unwrap_or(70).min(100) as u8;
+        assert_eq!(score, 70);
+        let details = if let Some(findings) = v["findings"].as_sequence() {
+            crate::repo::experts::parse_yaml_findings(findings)
+        } else {
+            Vec::new()
+        };
+        assert!(details.is_empty());
+    }
+
+    #[test]
+    fn test_parse_expert_yaml_schema_drift_falls_back() {
+        // Model returned valid YAML with the wrong shape (no expected keys):
+        // must fall back rather than silently report 70/0 as model output.
+        let raw = "verdicts: []\n";
+        let v = parse_expert_yaml("code_quality", raw, CODE_QUALITY_KEYS);
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn test_parse_expert_yaml_prose_without_fence_falls_back() {
+        let raw = "The module looks fine overall. No issues worth flagging.";
+        let v = parse_expert_yaml("code_quality", raw, CODE_QUALITY_KEYS);
+        assert!(v.is_null());
+    }
+
+    #[test]
+    fn test_truncate_excerpt_bounds_length_and_collapses_newlines() {
+        let long = "x".repeat(500);
+        let ex = truncate_excerpt(&long);
+        assert!(ex.len() <= EXCERPT_MAX_BYTES);
+        assert!(!ex.is_empty());
+        assert!(!ex.contains('\n'));
+        assert_eq!(truncate_excerpt("line1\nline2"), "line1\\nline2");
+        assert_eq!(truncate_excerpt(""), "");
     }
 
     #[test]

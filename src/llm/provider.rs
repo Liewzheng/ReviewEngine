@@ -27,6 +27,10 @@ pub struct CompletionParams {
     pub max_tokens: u32,
     pub temperature: f32,
     pub reasoning_effort: Option<String>,
+    /// When `Some(true)`, request `"thinking": {"type": "disabled"}` for
+    /// reasoning models that would otherwise exhaust `max_tokens` on
+    /// `reasoning_tokens` and return empty content.
+    pub disable_thinking: Option<bool>,
 }
 
 /// Abstract interface for LLM providers.
@@ -69,6 +73,33 @@ impl OpenAIProvider {
     }
 }
 
+/// Build the OpenAI-compatible chat request body from completion params.
+///
+/// Adds `reasoning_effort` (o1/o3) and `"thinking": {"type": "disabled"}`
+/// (reasoning models) only when the caller set them, so unknown providers
+/// never receive fields they might reject.
+fn build_openai_compatible_body(params: &CompletionParams) -> serde_json::Value {
+    let mut body = json!({
+        "model": params.model,
+        "messages": params.messages.iter().map(|m| {
+            json!({"role": m.role, "content": m.content})
+        }).collect::<Vec<_>>(),
+        "max_tokens": params.max_tokens,
+        "temperature": params.temperature,
+    });
+
+    // Add reasoning_effort if set (o1/o3 models)
+    if let Some(ref effort) = params.reasoning_effort {
+        body["reasoning_effort"] = json!(effort);
+    }
+    // Disable chain-of-thought for reasoning models that would otherwise burn
+    // the whole output budget on `reasoning_tokens` and return empty content.
+    if params.disable_thinking == Some(true) {
+        body["thinking"] = json!({"type": "disabled"});
+    }
+    body
+}
+
 #[async_trait]
 impl LLMProvider for OpenAIProvider {
     fn name(&self) -> &str {
@@ -78,19 +109,7 @@ impl LLMProvider for OpenAIProvider {
     async fn complete(&self, params: &CompletionParams) -> Result<CompletionResult> {
         let url = format!("{}/chat/completions", self.api_base.trim_end_matches('/'));
 
-        let mut body = json!({
-            "model": params.model,
-            "messages": params.messages.iter().map(|m| {
-                json!({"role": m.role, "content": m.content})
-            }).collect::<Vec<_>>(),
-            "max_tokens": params.max_tokens,
-            "temperature": params.temperature,
-        });
-
-        // Add reasoning_effort if set (o1/o3 models)
-        if let Some(ref effort) = params.reasoning_effort {
-            body["reasoning_effort"] = json!(effort);
-        }
+        let body = build_openai_compatible_body(params);
 
         let resp = self
             .client
@@ -374,6 +393,7 @@ mod tests {
             api_base: String::new(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert!(registry.get("openai").is_some());
@@ -389,10 +409,45 @@ mod tests {
             api_base: String::new(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert!(registry.get("anthropic").is_some());
         assert_eq!(order, vec!["anthropic"]);
+    }
+
+    #[test]
+    fn test_openai_body_omits_thinking_and_effort_by_default() {
+        let params = CompletionParams {
+            model: "gpt-4".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            max_tokens: 4096,
+            temperature: 0.3,
+            reasoning_effort: None,
+            disable_thinking: None,
+        };
+        let body = build_openai_compatible_body(&params);
+        assert!(body.get("thinking").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+        assert_eq!(body["model"], "gpt-4");
+    }
+
+    #[test]
+    fn test_openai_body_includes_thinking_when_disabled() {
+        let params = CompletionParams {
+            model: "deepseek-v4-flash".to_string(),
+            messages: vec![],
+            max_tokens: 4096,
+            temperature: 0.3,
+            reasoning_effort: None,
+            disable_thinking: Some(true),
+        };
+        let body = build_openai_compatible_body(&params);
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -404,6 +459,7 @@ mod tests {
             api_base: "https://custom.example.com/v1".to_string(),
             max_tokens: 4096,
             temperature: 0.3,
+            disable_thinking: None,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         // Unknown providers fall back to OpenAI-compatible
@@ -439,6 +495,7 @@ mod tests {
                 api_base: String::new(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                disable_thinking: None,
             },
             LLMConfig {
                 provider: "anthropic".to_string(),
@@ -447,6 +504,7 @@ mod tests {
                 api_base: String::new(),
                 max_tokens: 4096,
                 temperature: 0.3,
+                disable_thinking: None,
             },
         ];
         let (registry, order) = ProviderRegistry::from_configs(&configs);

@@ -7,6 +7,7 @@
     <div class="task-subtitle">{{ task.project }} / {{ task.repository }}</div>
 
     <el-progress
+      v-if="task.progress != null"
       :percentage="task.progress"
       :color="statusColor"
       :stroke-width="6"
@@ -14,10 +15,10 @@
       class="task-progress"
     />
 
-    <div class="task-meta">
-      <span>Expert: {{ task.expertName }}</span>
-      <span class="meta-sep">·</span>
-      <span>{{ formattedElapsed }}</span>
+    <div v-if="hasExpert || hasElapsed" class="task-meta">
+      <span v-if="hasExpert">Expert: {{ task.expertName }}</span>
+      <span v-if="hasExpert && hasElapsed" class="meta-sep">·</span>
+      <span v-if="hasElapsed">{{ formattedElapsed }}</span>
     </div>
 
     <div v-if="task.errorMessage" class="task-error">
@@ -92,8 +93,17 @@ const statusColor = computed(() => {
     case 'queued': return 'var(--info)'
     case 'failed': return 'var(--error)'
     case 'completed': return 'var(--success)'
+    case 'cancelled': return 'var(--text-secondary)'
     default: return 'var(--text-secondary)'
   }
+})
+
+// Only render the expert / elapsed meta segments when they carry content, so a
+// cancelled (never-started) card does not show "Expert:", an orphan "·", or "0s".
+const hasExpert = computed(() => !!props.task.expertName)
+const hasElapsed = computed(() => {
+  if (props.task.status === 'running' && props.task.startedAt) return true
+  return props.task.elapsedMs != null && props.task.elapsedMs > 0
 })
 
 const now = ref(Date.now())

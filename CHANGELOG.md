@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.1] - 2026-08-03
+
+### Added
+- **`unplugin-vue-components` build dependency**: the frontend build now resolves `<el-*>` components and the `v-loading` directive through `unplugin-vue-components` with the `ElementPlusResolver`, injecting per-component JS + CSS at build time. This is the mechanism behind the on-demand Element Plus bundling below.
+
+### Changed
+- **Route-level code splitting**: all 7 page routes (`/dashboard`, `/history`, `/config`, `/queue`, `/llm`, `/logs`, `/experts`) now lazy-load via dynamic `import()`, so each page's chunk (10–34 kB) is fetched only when that route is visited. The Dashboard-only chart library `lightweight-charts` (162 kB) no longer contributes to the initial load.
+- **Vendor chunking**: third-party code is split into stable, separately cacheable chunks — `vendor-vue` (Vue core, router, pinia), Element Plus, `vendor-charts`, and `vendor-misc` — so framework code stays cached across releases instead of sitting in one ~1.4 MB bundle.
+- **On-demand Element Plus**: the full-library registration and the global icon loop in `main.ts` are removed; components are imported per use and string icon references become explicit imports. The 1.1 MB `vendor-element-plus` chunk splits into ~10 sub-chunks (largest 170.8 kB JS), and the build emits zero chunks over the 500 kB warning threshold.
+- **Suspense removed around `router-view`**: the fallback could never trigger for route-level lazy components — vue-router resolves them during navigation — so the wrapper is gone.
+- **Removed unused `axios` dependency**: dropped from `package.json`; the generated `components.d.ts` is now gitignored.
+
+### Fixed
+- **Unresolved icons after removing the global icon registry**: the QueueMonitor page still referenced the `Delete`, `Refresh`, and `InfoFilled` icons by string, which left the Cancel-All-Failed and Refresh buttons blank and the empty-state icon missing. They are now explicit imports; a full-template audit confirms no other string-resolved icons remain.
+
 ## [0.8.0] - 2026-07-31
 
 ### Added

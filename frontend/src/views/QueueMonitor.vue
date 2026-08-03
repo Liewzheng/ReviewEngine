@@ -1,5 +1,16 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import {
+  Loading,
+  Collection,
+  Warning,
+  DataLine,
+  VideoPlay,
+  VideoPause,
+  Delete,
+  Refresh,
+  InfoFilled,
+} from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
 import type { QueueStats, QueueTask } from '../types/queue'
 import StatsCard from '../components/QueueMonitor/StatsCard.vue'
@@ -246,7 +257,7 @@ onUnmounted(() => {
           @click="togglePause"
         >
           <el-icon class="btn-icon">
-            <component :is="isPaused ? 'VideoPlay' : 'VideoPause'" />
+            <component :is="isPaused ? VideoPlay : VideoPause" />
           </el-icon>
           <span>{{ isPaused ? 'Resume Queue' : 'Pause Queue' }}</span>
         </el-button>
@@ -293,28 +304,28 @@ onUnmounted(() => {
         <StatsCard
           label="Active Tasks"
           :value="stats.active"
-          icon="Loading"
+          :icon="Loading"
           color="var(--brand)"
           :max="stats.maxConcurrent"
         />
         <StatsCard
           label="Queued Tasks"
           :value="stats.queued"
-          icon="Collection"
+          :icon="Collection"
           color="var(--info)"
           :max="stats.queueCapacity"
         />
         <StatsCard
           label="Failed Tasks"
           :value="stats.failed"
-          icon="Warning"
+          :icon="Warning"
           color="var(--error)"
           :max="Math.max(stats.totalLast24h, 1)"
         />
         <StatsCard
           label="Queue Depth"
           :value="stats.totalDepth"
-          icon="DataLine"
+          :icon="DataLine"
           color="var(--warning)"
           :max="stats.queueCapacity"
         />

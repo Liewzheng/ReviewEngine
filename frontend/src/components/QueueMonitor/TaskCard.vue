@@ -79,6 +79,7 @@
 
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { Close, List, Refresh, VideoPause } from '@element-plus/icons-vue'
 import type { QueueTask } from '../../types/queue'
 
 const props = defineProps<{

@@ -579,6 +579,22 @@
 <script setup lang="ts">
 import { ref, computed, reactive, watch, onMounted, onUnmounted, nextTick } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
+import {
+  ArrowDown,
+  ArrowUp,
+  Check,
+  Close,
+  Collection,
+  Connection,
+  Cpu,
+  Delete,
+  Edit,
+  Link,
+  Plus,
+  Refresh,
+  Tools,
+  View,
+} from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification, type FormInstance, type FormRules } from 'element-plus'
 import { useConfig } from '../composables/useConfig'
 import { type AppConfig } from '../types/config'

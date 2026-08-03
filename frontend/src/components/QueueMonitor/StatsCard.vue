@@ -22,12 +22,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, type Component } from 'vue'
 
 const props = defineProps<{
   label: string
   value: number
-  icon: string
+  icon: Component
   color: string
   max: number
 }>()

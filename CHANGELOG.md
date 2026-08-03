@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.2] - 2026-08-03
+
+### Fixed
+- **Docker builds no longer fall back to the slow crates.io index**: the builder stage pinned rustup's dist server to the USTC mirror, which now returns 404 for its dist payload, and cargo 1.97+ ignores the legacy `[registries]` mirror block, so builds silently fell back to the slow official index. The Dockerfile now uses `rsproxy.cn` with the modern `[source.*] replace-with` sparse-index configuration, and both the rustup dist server (`RUSTUP_DIST_SERVER` / `RUSTUP_UPDATE_ROOT`) and the cargo registry (`CARGO_REGISTRY`) remain `--build-arg`-overridable back to the official sources — verified by a lab deployment. (`Dockerfile`)
+- **`DELETE /api/v1/reviews/{task_id}` distinguishes "not found" from "already settled"**: both cases previously shared a single `400`. The endpoint now returns `404` when the task does not exist and `409` when it is already in a terminal state (`completed` / `failed` / `cancelled`), while cancelling a `pending` / `running` task still returns `200`. The frontend needs no change — its request layer surfaces the status code and has no status-code branches. (`src/server/api/review.rs`, `tests/server.rs`)
+- **`GET /api/v1/system/upgrade/check` failure path covered by an integration test**: an upstream (GitHub) failure is surfaced as `502` with an `error: "check failed: ..."` JSON body, and the failed result is never written into the 1h server cache. The test calls the endpoint twice against a wiremock that counts upstream hits — the second call must re-query GitHub rather than serve a stale failure. (`tests/server.rs`)
+
+### Changed
+- **Log metadata is populated at the source instead of staying `None`**: `LogMetadata` (reviewId / requestId / durationMs) was only ever assigned by the text/JSON parse path, which never set it, so every entry serialized `metadata: null` and the frontend log badges were permanently empty. The log pipeline gains `push_entry` / `push_global_entry`, and the review lifecycle now records structured `started` / `completed` / `failed` entries carrying the metadata (duration on the two settled states), flowing through the same ring buffer / SSE / NDJSON path; parsed lines keep `metadata: None`, so stream behavior is unchanged. (`src/server/log_collector.rs`, `src/server/api/review.rs`)
+- **Frontend checkboxes migrate off `label`-as-value**: Element Plus 3.0 removes the `label`-as-value semantics, so the `el-checkbox` items in the configuration and system-log pages switch to the `value` prop (display text stays on `label`). The `v-model` value semantics are unchanged — no config or filter value changes — and the deprecation warnings are gone. (`frontend/src/views/Configuration.vue`, `frontend/src/views/SystemLogs.vue`)
+
 ## [0.9.1] - 2026-08-03
 
 ### Fixed

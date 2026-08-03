@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::server::log_collector::{push_global_entry, LogMetadata};
 use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState, TaskStore};
 use crate::server::AppState;
 use crate::team::orchestrator;
@@ -108,9 +109,35 @@ async fn enqueue_review(
         }
         store_clone.update(task_id, TaskState::Running, None, None).await;
 
+        // Structured lifecycle entries carry LogMetadata (reviewId/requestId/
+        // durationMs) at the source, so the frontend log-page badges are not
+        // dead fields. `push_global_entry` no-ops where the collector is
+        // uninitialised (e.g. lib unit tests), so logging is unconditional.
+        let task_started = std::time::Instant::now();
+        push_global_entry(
+            "INFO",
+            format!("Review task {} started", task_id),
+            Some(LogMetadata {
+                request_id: Some(task_id.to_string()),
+                duration_ms: None,
+                review_id: Some(task_id.to_string()),
+                expert_id: None,
+            }),
+        );
+
         // Single exit point: persist the outcome, then fire the webhook callback.
         match run_review(source, &cfg, config_toml, llm_configs).await {
             Ok((value, summary)) => {
+                push_global_entry(
+                    "INFO",
+                    format!("Review task {} completed: {}", task_id, summary),
+                    Some(LogMetadata {
+                        request_id: Some(task_id.to_string()),
+                        duration_ms: Some(task_started.elapsed().as_millis() as u64),
+                        review_id: Some(task_id.to_string()),
+                        expert_id: None,
+                    }),
+                );
                 store_clone
                     .update(task_id, TaskState::Completed, Some(value), None)
                     .await;
@@ -118,6 +145,16 @@ async fn enqueue_review(
             }
             Err(e) => {
                 let message = e.to_string();
+                push_global_entry(
+                    "ERROR",
+                    format!("Review task {} failed: {}", task_id, message),
+                    Some(LogMetadata {
+                        request_id: Some(task_id.to_string()),
+                        duration_ms: Some(task_started.elapsed().as_millis() as u64),
+                        review_id: Some(task_id.to_string()),
+                        expert_id: None,
+                    }),
+                );
                 store_clone
                     .update(task_id, TaskState::Failed, None, Some(message.clone()))
                     .await;
@@ -320,12 +357,36 @@ async fn delete_review(State(state): State<Arc<AppState>>, Path(task_id): Path<U
                 .into_response()
         }
     };
+    // Distinguish "does not exist" (404) from "exists but already settled"
+    // (409): only queued/running tasks can be cancelled.
+    let existing = match store.get(task_id).await {
+        Some(entry) => entry,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "task not found"})),
+            )
+                .into_response()
+        }
+    };
+    if matches!(
+        existing.state,
+        TaskState::Completed | TaskState::Failed | TaskState::Cancelled
+    ) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "task is already in a terminal state and cannot be cancelled"})),
+        )
+            .into_response();
+    }
     if store.delete(task_id).await {
         (StatusCode::OK, Json(serde_json::json!({"status": "deleted"}))).into_response()
     } else {
+        // The task settled between the check above and the delete; treat it as
+        // already-terminal rather than a generic client error.
         (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "task not found or cannot be cancelled"})),
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "task is already in a terminal state and cannot be cancelled"})),
         )
             .into_response()
     }
@@ -744,6 +805,71 @@ mod tests {
 
         // A second delete on an already-cancelled task is a no-op (not Pending/Running).
         assert!(!store.delete(id).await);
+    }
+
+    /// Unit 2 (DELETE semantics): cancelling a task that does not exist is a
+    /// 404, distinct from the 409 returned for an existing terminal-state task.
+    #[tokio::test]
+    async fn test_delete_review_404_when_task_not_found() {
+        let state = state_with_store();
+        let missing = Uuid::new_v4();
+        let resp = delete_review(State(state), Path(missing)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "missing task must be 404");
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "task not found");
+    }
+
+    /// Unit 2 (DELETE semantics): an existing task already in a terminal state
+    /// (completed/failed/cancelled) cannot be cancelled → 409.
+    #[tokio::test]
+    async fn test_delete_review_409_when_terminal_state() {
+        for state in [TaskState::Completed, TaskState::Failed, TaskState::Cancelled] {
+            let app_state = state_with_store();
+            let store = app_state.task_store.clone().unwrap();
+            let id = store.create(None).await;
+            store.update(id, state.clone(), None, None).await;
+
+            let resp = delete_review(State(app_state), Path(id)).await.into_response();
+            assert_eq!(
+                resp.status(),
+                StatusCode::CONFLICT,
+                "task in {state:?} must be rejected with 409"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(
+                json["error"],
+                "task is already in a terminal state and cannot be cancelled"
+            );
+            // The terminal record must be left untouched.
+            assert_eq!(store.get(id).await.expect("record kept").state, state);
+        }
+    }
+
+    /// Unit 2 (DELETE semantics): a running (or queued) task cancels cleanly
+    /// with 200 and migrates to `Cancelled` — unchanged behaviour.
+    #[tokio::test]
+    async fn test_delete_review_200_when_running_or_pending() {
+        for initial in [TaskState::Pending, TaskState::Running] {
+            let app_state = state_with_store();
+            let store = app_state.task_store.clone().unwrap();
+            let id = store.create(None).await;
+            if initial == TaskState::Running {
+                store.update(id, TaskState::Running, None, None).await;
+            }
+
+            let resp = delete_review(State(app_state), Path(id)).await.into_response();
+            assert_eq!(
+                resp.status(),
+                StatusCode::OK,
+                "task in {initial:?} must cancel with 200"
+            );
+            let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["status"], "deleted");
+            assert_eq!(store.get(id).await.expect("record kept").state, TaskState::Cancelled);
+        }
     }
 
     /// Unit 2: rerunning a settled task returns a new, distinct `task_id` (202)

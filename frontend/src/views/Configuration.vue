@@ -486,13 +486,13 @@
             <el-col :xs="24">
               <el-form-item label="Required experts" prop="rules.requiredExperts">
                 <el-checkbox-group v-model="config.rules.requiredExperts" :disabled="!isEditing">
-                  <el-checkbox label="Security" />
-                  <el-checkbox label="Performance" />
-                  <el-checkbox label="Quality" />
-                  <el-checkbox label="Maintainability" />
-                  <el-checkbox label="Test Coverage" />
-                  <el-checkbox label="Documentation" />
-                  <el-checkbox label="Dependencies" />
+                  <el-checkbox value="Security" label="Security" />
+                  <el-checkbox value="Performance" label="Performance" />
+                  <el-checkbox value="Quality" label="Quality" />
+                  <el-checkbox value="Maintainability" label="Maintainability" />
+                  <el-checkbox value="Test Coverage" label="Test Coverage" />
+                  <el-checkbox value="Documentation" label="Documentation" />
+                  <el-checkbox value="Dependencies" label="Dependencies" />
                 </el-checkbox-group>
               </el-form-item>
             </el-col>

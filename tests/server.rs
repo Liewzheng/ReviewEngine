@@ -808,6 +808,59 @@ async fn review_request_llm_configs_take_priority_over_server_state() {
     );
 }
 
+/// Unit 1 (integration): a completed review emits structured lifecycle log
+/// entries carrying `metadata.reviewId`/`requestId`/`durationMs`, so the
+/// log-page badges are no longer dead fields.
+#[tokio::test]
+async fn review_lifecycle_logs_carry_metadata() {
+    let mock = MockServer::start().await;
+    mount_mock_llm(&mock).await;
+    let llm_config_env = serde_json::json!([mock_llm_provider(&mock.uri())]).to_string();
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", port);
+    let final_body = post_review_and_poll(&base, &client, None).await;
+    assert_eq!(final_body["status"].as_str(), Some("completed"));
+    let task_id = final_body["task_id"].as_str().expect("task_id").to_string();
+
+    // The completed lifecycle entry is pushed before the store update, so once
+    // the task reports `completed` the log must already carry its metadata.
+    let logs = client
+        .get(format!("{}/api/v1/logs/download", base))
+        .send()
+        .await
+        .expect("GET /api/v1/logs/download")
+        .text()
+        .await
+        .expect("logs body");
+
+    let mut found_review_meta = false;
+    let mut found_duration = false;
+    for line in logs.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap_or(serde_json::Value::Null);
+        if value["metadata"]["reviewId"].as_str() == Some(&task_id) {
+            found_review_meta = true;
+            if value["metadata"]["durationMs"].is_number() {
+                found_duration = true;
+            }
+        }
+    }
+    assert!(
+        found_review_meta,
+        "logs must contain a lifecycle entry with metadata.reviewId == {task_id}, got:\n{}",
+        logs
+    );
+    assert!(
+        found_duration,
+        "the completed lifecycle entry must carry metadata.durationMs, got:\n{}",
+        logs
+    );
+}
+
 /// Unit 10: `POST /config/validate` with a malformed/missing body returns a JSON
 /// `{"error": ...}` payload (not axum's default plain-text 422).
 #[tokio::test]
@@ -1050,6 +1103,72 @@ async fn upgrade_check_caches_github_result() {
     assert_eq!(
         latest_hits, 1,
         "releases/latest must be hit exactly once across two checks"
+    );
+}
+
+/// `GET /upgrade/check` must surface an upstream failure as a 502 +
+/// `{"error": "check failed: ..."}` — and must NOT write the failed result into
+/// the 1h server cache. The GitHub client rejects a non-2xx release endpoint
+/// as `UpgradeError::Api`; `refresh_check` only stores `Ok(check)`, so a
+/// subsequent check must retry the upstream instead of serving a stale failure.
+/// The instance runs with a fresh temp HOME (per-test `ServerGuard`), so no
+/// cached key leaks across tests either.
+#[tokio::test]
+async fn upgrade_check_upstream_failure_returns_502_and_is_not_cached() {
+    let mock = MockServer::start().await;
+    // Non-2xx from the release endpoint — the upgrade service must map it to a
+    // clear check failure, not a 200 with garbage or a hang.
+    Mock::given(method("GET"))
+        .and(path("/repos/Liewzheng/ReviewEngine/releases/latest"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .mount(&mock)
+        .await;
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(
+        port,
+        None,
+        &[
+            ("REVIEW_UPGRADE_API_BASE", &mock.uri()),
+            ("REVIEW_UPGRADE_METHOD", "binary"),
+        ],
+    );
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{}/api/v1/system/upgrade/check", port);
+
+    // Call twice: both must be 502 with a non-empty error. The second call
+    // hitting the upstream again proves the failure was not cached.
+    for attempt in ["first", "second"] {
+        let resp = client.get(&url).send().await.expect("GET check");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::BAD_GATEWAY,
+            "{attempt} check against a 500 upstream must be 502, got {}",
+            resp.status()
+        );
+        let body: serde_json::Value = resp.json().await.expect("502 body is JSON");
+        let error = body["error"].as_str().expect("502 body must carry an error string");
+        assert!(!error.is_empty(), "{attempt} error must be non-empty");
+        assert!(
+            error.contains("check failed: "),
+            "{attempt} error should carry the check-failure framing, got: {error}"
+        );
+        assert!(
+            error.contains("500"),
+            "{attempt} error should surface the upstream status, got: {error}"
+        );
+    }
+
+    let requests = mock.received_requests().await.expect("received requests");
+    let latest_hits = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/releases/latest"))
+        .count();
+    assert_eq!(
+        latest_hits, 2,
+        "each failed check must hit the upstream again (failed results must not be cached)"
     );
 }
 

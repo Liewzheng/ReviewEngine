@@ -7,6 +7,9 @@ import {
   DataLine,
   VideoPlay,
   VideoPause,
+  Delete,
+  Refresh,
+  InfoFilled,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
 import type { QueueStats, QueueTask } from '../types/queue'

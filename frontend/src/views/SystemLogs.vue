@@ -39,19 +39,19 @@
         <div class="filter-group">
           <span class="filter-label">Levels:</span>
           <el-checkbox-group v-model="logs.levels" size="small">
-            <el-checkbox label="INFO">
+            <el-checkbox value="INFO">
               <span class="level-dot" style="background-color: var(--info)"></span>
               INFO
             </el-checkbox>
-            <el-checkbox label="WARN">
+            <el-checkbox value="WARN">
               <span class="level-dot" style="background-color: var(--warning)"></span>
               WARN
             </el-checkbox>
-            <el-checkbox label="ERROR">
+            <el-checkbox value="ERROR">
               <span class="level-dot" style="background-color: var(--error)"></span>
               ERROR
             </el-checkbox>
-            <el-checkbox label="DEBUG">
+            <el-checkbox value="DEBUG">
               <span class="level-dot" style="background-color: var(--offline)"></span>
               DEBUG
             </el-checkbox>

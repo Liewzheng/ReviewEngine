@@ -27,6 +27,10 @@ import { computed, ref, watch, type Component } from 'vue'
 const props = defineProps<{
   label: string
   value: number
+  // `icon` contract: string name (resolved via global component registry) →
+  // Component reference, to survive removal of the global Element Plus icon
+  // registration in main.ts. Aligned with Dashboard/KpiCard's `icon: Component`.
+  // Sole consumer is QueueMonitor.vue, which passes imported icon components.
   icon: Component
   color: string
   max: number

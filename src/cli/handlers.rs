@@ -1189,11 +1189,25 @@ fn resolve_install_method() -> InstallMethod {
     }
 }
 
+/// Resolve the executable to replace. Always canonicalized first: on macOS
+/// `std::env::current_exe()` returns the *symlink invocation path* (e.g.
+/// `.../bin/reng`), not the real binary — upgrading the link would replace the
+/// symlink with a real file and leave the actual `review-engine` untouched.
+/// `REVIEW_UPGRADE_EXE` is the test seam that also feeds this path, so it is
+/// canonicalized the same way. Falls back to the raw path if it cannot be
+/// resolved.
 fn current_exe_path() -> PathBuf {
-    if let Some(p) = std::env::var_os(ENV_EXE_OVERRIDE) {
-        return PathBuf::from(p);
-    }
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("review-engine"))
+    let raw = match std::env::var_os(ENV_EXE_OVERRIDE) {
+        Some(p) => PathBuf::from(p),
+        None => std::env::current_exe().unwrap_or_else(|_| PathBuf::from("review-engine")),
+    };
+    canonical_exe_path(&raw)
+}
+
+/// Canonicalize `raw` so a symlink invocation path resolves to the real
+/// binary; falls back to the raw path when it cannot be resolved.
+fn canonical_exe_path(raw: &Path) -> PathBuf {
+    std::fs::canonicalize(raw).unwrap_or_else(|_| raw.to_path_buf())
 }
 
 fn test_release_override() -> Option<TestReleaseOverride> {
@@ -1650,6 +1664,30 @@ mod upgrade_tests {
         std::fs::write(root.join("bin").join("other"), "x").unwrap();
         assert_eq!(find_binary_in(&root, "review-engine"), Some(target));
         assert_eq!(find_binary_in(&root, "review-engine.exe"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn canonical_exe_path_resolves_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("review-engine");
+        std::fs::write(&real, "#!/bin/sh").unwrap();
+        let link = dir.path().join("reng");
+        symlink(&real, &link).unwrap();
+        // macOS tempdirs live under /var/folders which is a symlink to
+        // /private/var/folders, so compare against the canonicalized real path.
+        let real_canonical = std::fs::canonicalize(&real).unwrap();
+
+        // A symlink invocation path (what macOS current_exe() returns) must
+        // resolve to the real binary, not stay as the link.
+        assert_eq!(canonical_exe_path(&link), real_canonical);
+        // A real path is returned as its canonical form.
+        assert_eq!(canonical_exe_path(&real), real_canonical);
+        // A missing path falls back to the raw value.
+        let missing = dir.path().join("nope");
+        assert_eq!(canonical_exe_path(&missing), missing);
     }
 }
 

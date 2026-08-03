@@ -14,7 +14,7 @@
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -141,7 +141,15 @@ fn cached_at_str(state: &AppState) -> String {
 
 // ─── POST /api/v1/system/upgrade ─────────────────────────────────
 
-async fn start_upgrade(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+async fn start_upgrade(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    // Cross-site defense (B2): a browser-triggered POST that is not same-site
+    // (CSRF / DNS-rebinding) is rejected before any state is touched. Requests
+    // without an `Origin` header (curl, scripts, in-process callers) already
+    // hold loopback-equivalent authority and pass through.
+    if let Err(resp) = validate_origin(&headers) {
+        return *resp;
+    }
+
     match state.upgrade.install_method {
         // Package-managed installs: we must not fight the package manager. Tell
         // the user the right command instead of mutating files behind its back.
@@ -186,6 +194,37 @@ fn reject_with_hint(message: &'static str, hint: &'static str) -> axum::response
         Json(serde_json::json!({ "error": message, "upgradeHint": hint })),
     )
         .into_response()
+}
+
+/// Reject cross-site browser-triggered upgrades.
+///
+/// A request carrying an `Origin` header came from a browser (or a
+/// browser-like client). Its authority must match the request `Host` header —
+/// i.e. the request is same-site — otherwise it is a cross-site POST (CSRF,
+/// DNS-rebinding) and is rejected with 403. Requests without `Origin` (curl,
+/// scripts) are not browser-initiated and are allowed.
+fn validate_origin(headers: &HeaderMap) -> Result<(), Box<axum::response::Response>> {
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return Ok(());
+    };
+    // `Origin` is `scheme://authority`; only the authority is compared.
+    let origin_authority = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+        .and_then(|rest| rest.split('/').next())
+        .unwrap_or(origin);
+    let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or_default();
+    if origin_authority == host {
+        Ok(())
+    } else {
+        Err(Box::new(
+            (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({ "error": "cross-origin upgrade rejected" })),
+            )
+                .into_response(),
+        ))
+    }
 }
 
 /// Start a binary upgrade for a plain install. Single-flight: only one upgrade
@@ -425,24 +464,35 @@ fn make_executable(path: &Path) -> crate::upgrade::Result<()> {
     Ok(())
 }
 
+/// Canonicalized `current_exe()` — resolves the macOS symlink-invocation path
+/// (macOS `current_exe()` returns the symlink path used to exec, not the real
+/// binary), mirroring `upgrade::InstallMethod::detect`. Falls back to the raw
+/// path if canonicalization fails (e.g. the binary was deleted mid-run).
+fn current_exe_canonical() -> Option<PathBuf> {
+    let raw = std::env::current_exe().ok()?;
+    Some(std::fs::canonicalize(&raw).unwrap_or(raw))
+}
+
 /// Directory that receives the replaced binary: `REVIEW_UPGRADE_INSTALL_DIR`
-/// override (tests / dry-run), else the current executable's directory.
+/// override (tests / dry-run), else the *real* binary's directory — never a
+/// symlink's directory, so a `reng` → `review-engine` symlink invocation
+/// upgrades the actual binary, not the symlink (B1).
 fn resolve_install_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("REVIEW_UPGRADE_INSTALL_DIR") {
         if !dir.is_empty() {
             return PathBuf::from(dir);
         }
     }
-    std::env::current_exe()
-        .ok()
+    current_exe_canonical()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Name of the running binary (`review-engine` on most platforms).
+/// Name of the *real* binary (canonicalized), e.g. `review-engine` even when
+/// invoked through a `reng` symlink. The symlink keeps pointing at the same
+/// name and stays valid after the replace (B1).
 fn current_exe_name() -> String {
-    std::env::current_exe()
-        .ok()
+    current_exe_canonical()
         .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "review-engine".to_string())
 }
@@ -480,15 +530,67 @@ mod tests {
     }
 
     #[test]
-    fn install_dir_prefers_env_override() {
-        // Env override wins; fall back to a PathBuf that always exists.
+    fn install_dir_resolution_override_then_canonical() {
+        // Single sequential test for the two env-dependent resolutions (they
+        // share the same env var and must not race each other in parallel).
         let saved = std::env::var("REVIEW_UPGRADE_INSTALL_DIR").ok();
+
+        // 1) Env override wins.
         std::env::set_var("REVIEW_UPGRADE_INSTALL_DIR", "/tmp/reng-upgrade-test");
+        assert_eq!(resolve_install_dir(), PathBuf::from("/tmp/reng-upgrade-test"));
+
+        // 2) Without override: derived from the canonicalized real binary —
+        // absolute path, non-empty name.
+        std::env::remove_var("REVIEW_UPGRADE_INSTALL_DIR");
         let dir = resolve_install_dir();
-        assert_eq!(dir, PathBuf::from("/tmp/reng-upgrade-test"));
+        assert!(dir.is_absolute(), "install dir must be absolute, got {dir:?}");
+        assert!(!current_exe_name().is_empty());
+
         match saved {
             Some(v) => std::env::set_var("REVIEW_UPGRADE_INSTALL_DIR", v),
-            None => std::env::remove_var("REVIEW_UPGRADE_INSTALL_DIR"),
+            None => {}
         }
+    }
+
+    // ─── Origin validation (B2) ────────────────────────────────
+
+    fn headers_with(origin: Option<&str>, host: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Some(o) = origin {
+            headers.insert("origin", o.parse().expect("valid origin header value"));
+        }
+        if let Some(h) = host {
+            headers.insert("host", h.parse().expect("valid host header value"));
+        }
+        headers
+    }
+
+    #[test]
+    fn origin_none_passes() {
+        assert!(validate_origin(&headers_with(None, Some("127.0.0.1:8080"))).is_ok());
+        assert!(validate_origin(&HeaderMap::new()).is_ok());
+    }
+
+    #[test]
+    fn origin_same_authority_passes() {
+        assert!(validate_origin(&headers_with(Some("http://127.0.0.1:8080"), Some("127.0.0.1:8080"))).is_ok());
+        assert!(validate_origin(&headers_with(Some("https://localhost:5173"), Some("localhost:5173"))).is_ok());
+        // Origin default-port form vs Host without port.
+        assert!(validate_origin(&headers_with(Some("http://example.com"), Some("example.com"))).is_ok());
+    }
+
+    #[test]
+    fn origin_cross_site_rejected() {
+        for (origin, host) in [
+            ("http://evil.example", "127.0.0.1:8080"),
+            ("http://127.0.0.1:9999", "127.0.0.1:8080"),
+            ("https://evil.example", "localhost:5173"),
+        ] {
+            let err = validate_origin(&headers_with(Some(origin), Some(host))).expect_err("must reject");
+            let status = err.status();
+            assert_eq!(status, StatusCode::FORBIDDEN, "origin {origin} vs host {host}");
+        }
+        // Origin present but no Host at all → rejected (cannot be same-site).
+        assert!(validate_origin(&headers_with(Some("http://evil.example"), None)).is_err());
     }
 }

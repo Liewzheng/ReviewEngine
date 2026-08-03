@@ -741,3 +741,84 @@ fn rollback_without_backup_errors() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("no backup found"), "{stderr}");
 }
+
+/// Regression (HIGH): on macOS `std::env::current_exe()` returns the *symlink
+/// invocation path* (e.g. `.../bin/reng`) rather than the resolved binary, so
+/// an upgrade must canonicalize the exe path before replacing it. This test
+/// drives the plain self-replace through a `reng -> review-engine` symlink
+/// (the REVIEW_UPGRADE_EXE seam simulates what macOS current_exe() returns)
+/// and asserts the REAL binary is upgraded, the symlink survives, and the
+/// backup is the real old binary — not the link.
+#[cfg(unix)]
+#[tokio::test]
+async fn plain_upgrade_through_symlink_upgrades_real_binary() {
+    use std::os::unix::fs::symlink;
+
+    let server = wiremock::MockServer::start().await;
+    let script = fake_binary("9.9.9");
+    let archive = single_file_tar_gz("review-engine", &script, 0o755);
+    let (asset_url, checksum_url, asset_size, checksum_size) = mount_release(&server, &archive, &shasum(&script)).await;
+
+    let dir = TempDir::new().unwrap();
+    let bin_dir = dir.path().join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    let real = dir.path().join("review-engine");
+    std::fs::write(&real, fake_binary("0.8.2")).unwrap();
+    let link = bin_dir.join("reng");
+    symlink(&real, &link).unwrap();
+
+    let release = test_release_json("v9.9.9", &asset_url, asset_size, &checksum_url, checksum_size);
+    let output = run_with_env(
+        &["upgrade", "--yes"],
+        &[
+            ("REVIEW_UPGRADE_INSTALL_METHOD", "plain"),
+            ("REVIEW_UPGRADE_CURRENT_VERSION", "0.8.2"),
+            // Simulate macOS current_exe() returning the symlink invocation path.
+            ("REVIEW_UPGRADE_EXE", link.to_str().unwrap()),
+            ("REVIEW_UPGRADE_TEST_RELEASE", &release),
+        ],
+    );
+    assert!(output.status.success(), "upgrade through symlink failed: {:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("done. Upgraded review-engine to v9.9.9."), "{stdout}");
+
+    // The REAL binary was upgraded...
+    let real_out = Command::new(&real).arg("--version").output().unwrap();
+    assert!(
+        real_out.status.success(),
+        "real binary failed after upgrade: {:?}",
+        real_out
+    );
+    assert!(
+        String::from_utf8_lossy(&real_out.stdout).contains("v9.9.9"),
+        "real binary must be upgraded, got: {}",
+        String::from_utf8_lossy(&real_out.stdout)
+    );
+
+    // ...the symlink is still a symlink pointing at it...
+    let meta = std::fs::symlink_metadata(&link).unwrap();
+    assert!(meta.file_type().is_symlink(), "reng must remain a symlink");
+    assert_eq!(
+        std::fs::read_link(&link).unwrap(),
+        real,
+        "reng must still point at the real binary"
+    );
+
+    // ...and running through the symlink reports the new version.
+    let via_link = Command::new(&link).arg("--version").output().unwrap();
+    assert!(String::from_utf8_lossy(&via_link.stdout).contains("v9.9.9"));
+
+    // The backup is the real old binary, next to the real binary (not the
+    // symlink's directory), and is a real file rather than the link.
+    let bak = dir.path().join("review-engine.bak");
+    assert!(bak.exists(), "backup must sit next to the real binary");
+    assert!(
+        !std::fs::symlink_metadata(&bak).unwrap().file_type().is_symlink(),
+        "backup must be a real file, not a symlink"
+    );
+    assert_eq!(std::fs::read(&bak).unwrap(), fake_binary("0.8.2"));
+    assert!(
+        !bin_dir.join("reng.bak").exists(),
+        "no backup may appear in the symlink dir"
+    );
+}

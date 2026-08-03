@@ -28,18 +28,30 @@ impl Drop for ServerGuard {
 }
 
 fn spawn_server(port: u16) -> ServerGuard {
+    spawn_server_inner(port, None)
+}
+
+/// Spawn `serve` with `REVIEW_API_TOKEN` set when `token` is `Some`, enabling
+/// the API auth middleware (a token is honored on loopback binds too).
+fn spawn_server_with_token(port: u16, token: &str) -> ServerGuard {
+    spawn_server_inner(port, Some(token))
+}
+
+fn spawn_server_inner(port: u16, token: Option<&str>) -> ServerGuard {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-    let child = Command::new(bin_path())
-        .arg("serve")
+    let mut cmd = Command::new(bin_path());
+    cmd.arg("serve")
         .arg("--bind")
         .arg("127.0.0.1")
         .arg("--port")
         .arg(port.to_string())
         .env("HOME", temp_dir.path())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to spawn review-engine serve");
+        .stderr(std::process::Stdio::null());
+    if let Some(token) = token {
+        cmd.env("REVIEW_API_TOKEN", token);
+    }
+    let child = cmd.spawn().expect("failed to spawn review-engine serve");
     ServerGuard {
         child,
         _temp_dir: temp_dir,
@@ -628,5 +640,114 @@ async fn config_validate_missing_body_returns_json_error() {
         body.get("error").is_some(),
         "422 body must contain an `error` key, got {:?}",
         body
+    );
+}
+
+// ─── API Auth (P1: type-mismatch fix) ─────────────────────────────
+//
+// Regression tests for the auth middleware. `api::routes` stores the shared
+// auth config in request extensions as `Arc<AuthConfig>`; the middleware must
+// read it back with the same type. When it read plain `AuthConfig` it always
+// got `None` and silently allowed every request, so a token-less server
+// exposed /api/v1 to the world. These tests spawn real servers both with and
+// without `REVIEW_API_TOKEN` and assert the gate on /api/v1/system/version.
+
+const API_TOKEN: &str = "test-token-123";
+
+async fn get_version(port: u16, auth_header: Option<&str>, api_key: Option<&str>) -> reqwest::Response {
+    let mut req = reqwest::Client::new().get(format!("http://127.0.0.1:{}/api/v1/system/version", port));
+    if let Some(v) = auth_header {
+        req = req.header("Authorization", v);
+    }
+    if let Some(k) = api_key {
+        req = req.header("X-API-Key", k);
+    }
+    req.send().await.expect("failed to GET /api/v1/system/version")
+}
+
+/// Auth enabled: no token and a wrong token must both be rejected with
+/// 401 + `{"error":"unauthorized"}` JSON.
+#[tokio::test]
+async fn api_auth_enabled_rejects_missing_and_wrong_token() {
+    let port = find_free_port();
+    let _guard = spawn_server_with_token(port, API_TOKEN);
+    wait_for_server(port).await;
+
+    for (label, req) in [
+        ("no token", get_version(port, None, None).await),
+        (
+            "wrong bearer",
+            get_version(port, Some("Bearer wrong-token"), None).await,
+        ),
+        ("wrong api key", get_version(port, None, Some("wrong-key")).await),
+    ] {
+        assert_eq!(
+            req.status(),
+            reqwest::StatusCode::UNAUTHORIZED,
+            "expected 401 for {label}, got {}",
+            req.status()
+        );
+        let content_type = req
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.contains("application/json"),
+            "401 for {label} must be JSON, got content-type {content_type}"
+        );
+        let body: serde_json::Value = req.json().await.expect("401 body must be JSON");
+        assert_eq!(
+            body,
+            serde_json::json!({"error": "unauthorized"}),
+            "unexpected 401 body for {label}"
+        );
+    }
+}
+
+/// Auth enabled: a correct Bearer token and a correct X-API-Key must both
+/// pass through to the endpoint (200).
+#[tokio::test]
+async fn api_auth_enabled_accepts_valid_bearer_and_api_key() {
+    let port = find_free_port();
+    let _guard = spawn_server_with_token(port, API_TOKEN);
+    wait_for_server(port).await;
+
+    let bearer = format!("Bearer {API_TOKEN}");
+    let resp = get_version(port, Some(&bearer), None).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "valid Bearer token returned {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("version body must be JSON");
+    assert!(body["version"].is_string(), "version body missing `version`: {body}");
+
+    let resp = get_version(port, None, Some(API_TOKEN)).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "valid X-API-Key returned {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("version body must be JSON");
+    assert!(body["version"].is_string(), "version body missing `version`: {body}");
+}
+
+/// Auth disabled (loopback bind, no token): the API must stay open — no
+/// token → 200. The auth middleware must not be mounted at all.
+#[tokio::test]
+async fn api_auth_disabled_allows_without_token() {
+    let port = find_free_port();
+    let _guard = spawn_server(port);
+    wait_for_server(port).await;
+
+    let resp = get_version(port, None, None).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "auth-disabled server returned {} for an unauthenticated request",
+        resp.status()
     );
 }

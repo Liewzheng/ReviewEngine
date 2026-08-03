@@ -1,6 +1,8 @@
 //! API authentication middleware. Validates Bearer tokens for REST API endpoints.
 //!
 //! @module review-engine: CodeReview Board platform
+use std::sync::Arc;
+
 use axum::{extract::Request, http::StatusCode, middleware::Next, response::IntoResponse, Json};
 use rand::rngs::OsRng;
 use rand::RngCore;
@@ -160,8 +162,13 @@ mod tests {
 }
 
 /// Axum middleware that checks Authorization / X-API-Key headers.
+///
+/// The router stores the shared config in request extensions as `Arc<AuthConfig>`
+/// (see [`crate::server::api::routes`]), so it must be read back with the same
+/// type — reading `AuthConfig` directly would never match and silently allow
+/// every request.
 pub async fn auth_middleware(req: Request, next: Next) -> impl IntoResponse {
-    let auth = req.extensions().get::<AuthConfig>();
+    let auth = req.extensions().get::<Arc<AuthConfig>>();
     match auth {
         Some(config) if config.is_enabled() && !config.check(&req) => {
             return Err((

@@ -38,6 +38,10 @@ fn spawn_server_with_token(port: u16, token: &str) -> ServerGuard {
 }
 
 fn spawn_server_inner(port: u16, token: Option<&str>) -> ServerGuard {
+    spawn_server_inner_with_env(port, token, &[])
+}
+
+fn spawn_server_inner_with_env(port: u16, token: Option<&str>, extra_env: &[(&str, &str)]) -> ServerGuard {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let mut cmd = Command::new(bin_path());
     cmd.arg("serve")
@@ -50,6 +54,9 @@ fn spawn_server_inner(port: u16, token: Option<&str>) -> ServerGuard {
         .stderr(std::process::Stdio::null());
     if let Some(token) = token {
         cmd.env("REVIEW_API_TOKEN", token);
+    }
+    for (key, value) in extra_env {
+        cmd.env(key, value);
     }
     let child = cmd.spawn().expect("failed to spawn review-engine serve");
     ServerGuard {
@@ -750,4 +757,288 @@ async fn api_auth_disabled_allows_without_token() {
         "auth-disabled server returned {} for an unauthenticated request",
         resp.status()
     );
+}
+
+// ─── Self-upgrade API (U5) ───────────────────────────────────────
+
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
+
+/// Build a small release tar.gz whose `bin/review-engine` is a harmless shell
+/// script, so the upgrade pipeline (download → verify → extract → replace →
+/// smoke) can run end-to-end against a temp install dir.
+fn build_fake_release_tar() -> Vec<u8> {
+    const SCRIPT: &str = "#!/bin/sh\necho smoke-ok\n";
+    let mut out = Vec::new();
+    {
+        let encoder = flate2::write::GzEncoder::new(&mut out, flate2::Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        let mut header = tar::Header::new_gnu();
+        header.set_path("bin/review-engine").expect("set tar path");
+        header.set_size(SCRIPT.len() as u64);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder.append(&header, SCRIPT.as_bytes()).expect("append tar entry");
+        let encoder = builder.into_inner().expect("into_inner");
+        encoder.finish().expect("finish gzip");
+    }
+    out
+}
+
+/// `GET /upgrade/check` returns the full contract and serves the second call
+/// from the 1h server-side cache (wiremock counts exactly one GitHub request).
+#[tokio::test]
+async fn upgrade_check_caches_github_result() {
+    let mock = MockServer::start().await;
+    let api_base = mock.uri();
+    let spec = review_engine::upgrade::platform::current_asset_spec().expect("test platform has an asset spec");
+    let asset_name = spec.asset_name("review-engine");
+    let checksum_name = spec.checksum_name("review-engine");
+
+    Mock::given(method("GET"))
+        .and(path("/repos/Liewzheng/ReviewEngine/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tag_name": "v9.9.9",
+            "html_url": "https://github.com/Liewzheng/ReviewEngine/releases/tag/v9.9.9",
+            "published_at": "2026-01-01T00:00:00Z",
+            "assets": [
+                {"name": asset_name, "browser_download_url": format!("{api_base}/asset"), "size": 100},
+                {"name": checksum_name, "browser_download_url": format!("{api_base}/checksum"), "size": 72}
+            ]
+        })))
+        .mount(&mock)
+        .await;
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(
+        port,
+        None,
+        &[
+            ("REVIEW_UPGRADE_API_BASE", &api_base),
+            ("REVIEW_UPGRADE_METHOD", "binary"),
+        ],
+    );
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{}/api/v1/system/upgrade/check", port);
+
+    let resp = client.get(&url).send().await.expect("GET check");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "check must be 200");
+    let body: serde_json::Value = resp.json().await.expect("check body is JSON");
+    assert_eq!(body["currentVersion"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(body["latestVersion"], "9.9.9");
+    assert_eq!(body["updateAvailable"], serde_json::Value::Bool(true));
+    assert_eq!(body["installMethod"], "binary");
+    assert_eq!(body["platformAssetAvailable"], serde_json::Value::Bool(true));
+    assert_eq!(
+        body["releaseUrl"],
+        "https://github.com/Liewzheng/ReviewEngine/releases/tag/v9.9.9"
+    );
+    assert_eq!(body["upgradeHint"], "reng upgrade");
+    let cached_at = body["cachedAt"].as_str().expect("cachedAt is a string");
+    assert!(!cached_at.is_empty(), "cachedAt must be non-empty");
+
+    // Second call: identical body, served from cache — no new GitHub request.
+    let resp2 = client.get(&url).send().await.expect("GET check #2");
+    assert_eq!(resp2.status(), reqwest::StatusCode::OK);
+    let body2: serde_json::Value = resp2.json().await.expect("check body is JSON");
+    assert_eq!(body2, body, "cached response must match the first");
+
+    let requests = mock.received_requests().await.expect("received requests");
+    let latest_hits = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/releases/latest"))
+        .count();
+    assert_eq!(
+        latest_hits, 1,
+        "releases/latest must be hit exactly once across two checks"
+    );
+}
+
+/// `POST /upgrade` for a binary install: first call 202 + starts the pipeline,
+/// second call 409 (single-flight). The pipeline runs end-to-end against a
+/// wiremock-served asset and lands the replaced binary in a temp install dir.
+#[tokio::test]
+async fn upgrade_post_binary_single_flight_and_pipeline() {
+    let mock = MockServer::start().await;
+    let api_base = mock.uri();
+    let spec = review_engine::upgrade::platform::current_asset_spec().expect("test platform has an asset spec");
+    let asset_name = spec.asset_name("review-engine");
+    let checksum_name = spec.checksum_name("review-engine");
+    let tar_bytes = build_fake_release_tar();
+    let sha = review_engine::upgrade::verify::data_sha256_hex(&tar_bytes);
+    let checksum_text = format!("{sha}  {asset_name}");
+
+    Mock::given(method("GET"))
+        .and(path("/repos/Liewzheng/ReviewEngine/releases/latest"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "tag_name": "v9.9.9",
+            "html_url": "https://github.com/Liewzheng/ReviewEngine/releases/tag/v9.9.9",
+            "published_at": "2026-01-01T00:00:00Z",
+            "assets": [
+                {"name": asset_name, "browser_download_url": format!("{api_base}/asset"), "size": tar_bytes.len()},
+                {"name": checksum_name, "browser_download_url": format!("{api_base}/checksum"), "size": checksum_text.len()}
+            ]
+        })))
+        .mount(&mock)
+        .await;
+    // Delayed asset download keeps the job in-flight for the 409 assertion.
+    Mock::given(method("GET"))
+        .and(path("/asset"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(tar_bytes.clone())
+                .set_delay(Duration::from_secs(3)),
+        )
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/checksum"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(checksum_text))
+        .mount(&mock)
+        .await;
+
+    let install_dir = tempfile::tempdir().expect("temp install dir");
+    let install_dir_str = install_dir.path().to_str().expect("utf8 install dir").to_string();
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(
+        port,
+        None,
+        &[
+            ("REVIEW_UPGRADE_API_BASE", &api_base),
+            ("REVIEW_UPGRADE_METHOD", "binary"),
+            ("REVIEW_UPGRADE_INSTALL_DIR", &install_dir_str),
+        ],
+    );
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
+
+    let first = client.post(&base).send().await.expect("POST upgrade");
+    assert_eq!(first.status(), reqwest::StatusCode::ACCEPTED, "first POST must be 202");
+    let first_body: serde_json::Value = first.json().await.expect("202 body is JSON");
+    assert_eq!(first_body["status"], "started");
+    assert_eq!(first_body["targetVersion"], "9.9.9");
+
+    let second = client.post(&base).send().await.expect("POST upgrade #2");
+    assert_eq!(
+        second.status(),
+        reqwest::StatusCode::CONFLICT,
+        "second POST must be 409"
+    );
+    let second_body: serde_json::Value = second.json().await.expect("409 body is JSON");
+    assert!(second_body["error"].is_string(), "409 must carry an error message");
+
+    // Wait for the pipeline to finish; assert done + replaced binary.
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let status_url = format!("{base}/status");
+    loop {
+        let status: serde_json::Value = client
+            .get(&status_url)
+            .send()
+            .await
+            .expect("GET status")
+            .json()
+            .await
+            .expect("status is JSON");
+        if status["state"] == "done" {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "upgrade did not finish, last status: {status}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let final_status: serde_json::Value = client.get(&status_url).send().await.unwrap().json().await.unwrap();
+    assert_eq!(final_status["targetVersion"], "9.9.9");
+    assert!(
+        install_dir.path().join("review-engine").exists(),
+        "replaced binary must exist in install dir"
+    );
+}
+
+/// `POST /upgrade` inside a container returns `notSupported` + host-side
+/// instructions, and `/status` reflects the `notSupported` state.
+#[tokio::test]
+async fn upgrade_docker_returns_not_supported() {
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("REVIEW_UPGRADE_METHOD", "docker")]);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
+
+    let resp = client.post(&base).send().await.expect("POST upgrade");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "docker POST should be 200");
+    let body: serde_json::Value = resp.json().await.expect("body is JSON");
+    assert_eq!(body["status"], "notSupported");
+    assert_eq!(body["instructions"], "git pull && docker compose up -d --build");
+    assert!(body["note"].is_string(), "note must be present");
+
+    let status: serde_json::Value = client
+        .get(format!("{base}/status"))
+        .send()
+        .await
+        .expect("GET status")
+        .json()
+        .await
+        .expect("status is JSON");
+    assert_eq!(status["state"], "notSupported");
+}
+
+/// `POST /upgrade` for brew/cargo installs is refused (400) with the correct
+/// manual upgrade command — the API must never mutate package-managed files.
+#[tokio::test]
+async fn upgrade_brew_and_cargo_reject_with_hint() {
+    for (method, hint_fragment) in [
+        ("brew", "brew upgrade review-engine"),
+        ("cargo", "cargo install review-engine"),
+    ] {
+        let port = find_free_port();
+        let _guard = spawn_server_inner_with_env(port, None, &[("REVIEW_UPGRADE_METHOD", method)]);
+        wait_for_server(port).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/api/v1/system/upgrade", port))
+            .send()
+            .await
+            .expect("POST upgrade");
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::BAD_REQUEST,
+            "method {method} must be 400"
+        );
+        let body: serde_json::Value = resp.json().await.expect("body is JSON");
+        let hint = body["upgradeHint"].as_str().unwrap_or("");
+        assert!(
+            hint.contains(hint_fragment),
+            "hint {hint:?} must contain {hint_fragment:?}"
+        );
+    }
+}
+
+/// Auth enabled: all three upgrade endpoints reject unauthenticated requests
+/// with 401 + `{"error":"unauthorized"}` (they live under the /api/v1 auth
+/// middleware, same as every other API route).
+#[tokio::test]
+async fn upgrade_endpoints_require_auth_when_enabled() {
+    let port = find_free_port();
+    let _guard = spawn_server_with_token(port, API_TOKEN);
+    wait_for_server(port).await;
+
+    let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
+    let client = reqwest::Client::new();
+    for (label, resp) in [
+        ("check", client.get(format!("{base}/check")).send().await.unwrap()),
+        ("status", client.get(format!("{base}/status")).send().await.unwrap()),
+        ("post", client.post(&base).send().await.unwrap()),
+    ] {
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED, "{label} must be 401");
+        let body: serde_json::Value = resp.json().await.expect("401 body is JSON");
+        assert_eq!(body, serde_json::json!({"error": "unauthorized"}), "{label} 401 body");
+    }
 }

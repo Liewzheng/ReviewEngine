@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use review_engine::models::*;
 use review_engine::progress::{new_progress_map, ProgressMap, ProgressStatus};
 use std::io::Write;
@@ -11,14 +11,13 @@ pub mod handlers;
 
 #[derive(Parser)]
 #[command(
-    name = "review-engine",
     about = "Rust driven Code Review Engine",
     disable_version_flag = true,
     subcommand_required = false
 )]
 struct Cli {
     /// Show version
-    #[arg(short = 'V', long = "version", global = true)]
+    #[arg(short = 'V', long = "version")]
     version: bool,
 
     /// Show progress bar
@@ -362,6 +361,7 @@ enum Commands {
     },
 
     /// Run a full repository health review
+    #[command(visible_alias = "audit")]
     RepoReview {
         /// Path to local git repository
         #[arg(long)]
@@ -384,10 +384,49 @@ enum Commands {
         #[arg(long)]
         output: Option<String>,
     },
+
+    /// Check for and apply updates to review-engine itself
+    Upgrade {
+        /// Check only: report the latest version without downloading or installing
+        #[arg(long)]
+        check: bool,
+
+        /// Non-interactive: apply the update without prompting for confirmation
+        #[arg(long)]
+        yes: bool,
+
+        /// Target version to upgrade to (e.g. 0.9.0); only the latest release is auto-installable
+        #[arg(long, value_name = "TAG")]
+        version: Option<String>,
+
+        /// Roll back to the previous binary (review-engine.bak)
+        #[arg(long)]
+        rollback: bool,
+    },
+}
+
+/// Build the clap command whose displayed program name is derived from
+/// argv[0]'s basename, so symlinked invocations (e.g. `reng`) show their own
+/// name in --help / usage output instead of the hardcoded `review-engine`.
+fn cli_command() -> clap::Command {
+    let bin_name = std::env::args_os()
+        .next()
+        .as_deref()
+        .and_then(|arg| std::path::Path::new(arg).file_name())
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| Cli::command().get_name().to_string());
+    Cli::command().bin_name(bin_name)
+}
+
+/// Parse CLI args from the environment, applying the argv[0]-derived program
+/// name. Equivalent to `Cli::parse()` except the displayed name is dynamic.
+fn parse_cli() -> Cli {
+    let matches = cli_command().get_matches();
+    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
 }
 
 pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli();
 
     if cli.version {
         println!("Review Engine v{}", env!("CARGO_PKG_VERSION"));
@@ -397,9 +436,8 @@ pub async fn run() -> Result<()> {
     let progress_map: ProgressMap = new_progress_map();
 
     let cmd = cli.command.unwrap_or_else(|| {
-        use clap::CommandFactory;
         let mut out = std::io::stdout();
-        writeln!(out, "{}", Cli::command().render_help()).ok();
+        writeln!(out, "{}", cli_command().render_help()).ok();
         std::process::exit(0);
     });
 
@@ -862,6 +900,14 @@ pub async fn run() -> Result<()> {
         }
         Commands::RepoReview { .. } => {
             anyhow::bail!("Please specify --local-path");
+        }
+        Commands::Upgrade {
+            check,
+            yes,
+            version,
+            rollback,
+        } => {
+            handlers::run_upgrade(check, yes, version.as_deref(), rollback).await?;
         }
     }
 

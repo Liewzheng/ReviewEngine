@@ -23,16 +23,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Rust（使用中国科技大学镜像）
-ENV RUSTUP_DIST_SERVER=https://mirrors.ustc.edu.cn/rust-static
-ENV RUSTUP_UPDATE_ROOT=https://mirrors.ustc.edu.cn/rust-static/rustup
-RUN curl --proto '=https' --tlsv1.2 -sSf https://mirrors.ustc.edu.cn/rust-static/rustup/rustup-init.sh | sh -s -- -y --default-toolchain stable
+# 安装 Rust（rsproxy.cn 国内镜像；lab 实证 USTC rustup 镜像已 404、
+# cargo 1.97+ 忽略旧 [registries] 写法，必须用下方 [source.*] replace-with 现代写法）
+# 改回官方源：--build-arg RUSTUP_DIST_SERVER=https://static.rust-lang.org \
+#                --build-arg RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup \
+#                --build-arg CARGO_REGISTRY=official
+ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
+ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+ENV RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}
+ENV RUSTUP_UPDATE_ROOT=${RUSTUP_UPDATE_ROOT}
+RUN rm -rf /root/.rustup /root/.cargo && curl --proto '=https' --tlsv1.2 -sSf ${RUSTUP_UPDATE_ROOT}/rustup-init.sh | sh -s -- -y --default-toolchain stable
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-# 配置 Cargo 国内镜像源（中国科技大学 sparse 索引）
+# 配置 Cargo 国内镜像源（rsproxy sparse index；cargo 1.97+ 忽略 [registries] 旧写法）
+ARG CARGO_REGISTRY=rsproxy
 RUN mkdir -p /root/.cargo \
-    && echo '[registries]' > /root/.cargo/config.toml \
-    && echo 'crates-io = { index = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/" }' >> /root/.cargo/config.toml
+    && if [ "$CARGO_REGISTRY" = "rsproxy" ]; then \
+         printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n' > /root/.cargo/config.toml; \
+       else \
+         rm -f /root/.cargo/config.toml; \
+       fi
 
 # 复制依赖清单（用于缓存层）
 COPY Cargo.toml Cargo.lock ./

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.1] - 2026-08-03
+
+### Fixed
+- **API reviews ignored the server-side LLM configuration**: `POST /api/v1/reviews` and `POST /api/v1/reviews/{task_id}/rerun` ran the expert team with only the request body's `llm_configs` and never fell back to the server-side configuration (`state.llm_configs`, seeded from the `LLM_CONFIG` env or a config file's `[[llm]]`). The frontend's create-review POST does not send `llm_configs`, so under the Docker compose standard form (`LLM_CONFIG` env) every UI-triggered review failed with "LLM config 'default' has no api_base set". Both paths now mirror the webhook precedence: request-explicit providers win, otherwise the server configuration is used, and an explicit empty array counts as not provided. Two integration tests cover the priority and the fallback. (`src/server/api/review.rs`, `src/server/mod.rs`, `tests/server.rs`)
+
 ## [0.9.0] - 2026-08-03
 
 ### Added

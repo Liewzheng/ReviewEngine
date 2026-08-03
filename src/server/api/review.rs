@@ -88,7 +88,17 @@ async fn enqueue_review(
     let store_clone = store.clone();
     let source = request.source;
     let config_toml = request.config;
-    let llm_configs = request.llm_configs.unwrap_or_default();
+    // Request-explicit providers win; when the request omits `llm_configs`
+    // (or sends an empty list), fall back to the server-side configuration
+    // (`state.llm_configs`, seeded from env `LLM_CONFIG` or file `[[llm]]`),
+    // mirroring the webhook path. Without this the UI's POST — which never
+    // sends `llm_configs` — would run the expert team with zero providers and
+    // every LLM-backed expert would fail with "LLM config 'default' has no
+    // api_base set".
+    let llm_configs = match request.llm_configs {
+        Some(configs) if !configs.is_empty() => configs,
+        _ => state.llm_configs.read().unwrap().clone(),
+    };
     let webhook = request.webhook;
     let cfg = state.app_config.read().unwrap().clone();
 

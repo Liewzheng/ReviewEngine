@@ -53,6 +53,7 @@ __pycache__/
 
 # Node.js (if any frontend exists)
 node_modules/
+frontend/dist
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

@@ -135,7 +135,14 @@ const pageTitle = computed(() => {
 
       <!-- Content -->
       <main class="main-content">
-        <router-view />
+        <router-view v-slot="{ Component }">
+          <Suspense>
+            <component :is="Component" />
+            <template #fallback>
+              <div class="route-loading">Loading…</div>
+            </template>
+          </Suspense>
+        </router-view>
       </main>
     </div>
   </div>
@@ -357,6 +364,12 @@ const pageTitle = computed(() => {
   flex: 1;
   padding: 20px;
   overflow-y: auto;
+}
+
+.route-loading {
+  padding: 24px;
+  color: var(--text-secondary);
+  font-size: 14px;
 }
 
 .token-hint {

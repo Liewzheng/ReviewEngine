@@ -154,7 +154,11 @@ async function openDrawer(row: ReviewListItem) {
 /* ─────────────── Actions ─────────────── */
 function rerunConfirmMessage(row: { mrTitle: string; gitlabMrUrl?: string }): string {
   const title = (row.mrTitle || '').trim()
-  if (!row.gitlabMrUrl && !title) {
+  // `mrTitle` is already normalized (null -> 'Untitled Review') in the service
+  // layer, so a placeholder title does NOT count as MR context. Decide on the
+  // real signal: a GitLab MR URL, or a non-placeholder title.
+  const hasMrContext = !!row.gitlabMrUrl || (title !== '' && title !== 'Untitled Review')
+  if (!hasMrContext) {
     // Static-diff / local-repo tasks have no MR context; use a generic message.
     return 'Re-run this review? A new task will be created with the same parameters.'
   }

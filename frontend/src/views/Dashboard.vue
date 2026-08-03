@@ -18,7 +18,6 @@ import { useDashboard } from '../composables/useDashboard'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
-import DataTable from '../components/common/DataTable.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import type { KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
 
@@ -109,6 +108,30 @@ function formatTime(iso: string): string {
   return new Date(iso).toLocaleString('en-US', {
     month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit',
   })
+}
+
+// Table cell styling previously provided by the DataTable wrapper component;
+// inlined here so the table can live in the same SFC as its columns (see the
+// recent-reviews table below — cross-SFC slot columns break under on-demand
+// element-plus import).
+function headerCellStyle(): Record<string, string> {
+  return {
+    backgroundColor: 'var(--bg-card)',
+    color: 'var(--text-secondary)',
+    fontWeight: '600',
+    fontSize: '12px',
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+    padding: '12px 16px',
+    borderBottom: '1px solid var(--border-color)',
+  }
+}
+
+function cellStyle(): Record<string, string> {
+  return {
+    padding: '12px 16px',
+    borderBottom: '1px solid var(--border-color)',
+  }
 }
 
 // ─── Lightweight Charts ───────────────────────────────
@@ -405,7 +428,16 @@ onUnmounted(() => {
         <el-skeleton v-if="loading" :rows="5" animated />
         <template v-else-if="recentReviews.length > 0">
           <div class="table-wrapper">
-            <DataTable :data="recentReviews" @row-click="onRowClick">
+            <el-table
+              :data="recentReviews"
+              :header-cell-style="headerCellStyle"
+              :cell-style="cellStyle"
+              :stripe="false"
+              :border="false"
+              :highlight-current-row="false"
+              style="width: 100%"
+              @row-click="onRowClick"
+            >
               <el-table-column label="MR Title" min-width="200">
                 <template #default="{ row }">
                   <div class="mr-title-cell">
@@ -418,8 +450,8 @@ onUnmounted(() => {
               <el-table-column label="Author" width="140">
                 <template #default="{ row }">
                   <div class="author-cell">
-                    <div class="author-avatar">{{ row.author.name.charAt(0) }}</div>
-                    <span>{{ row.author.name }}</span>
+                    <div class="author-avatar">{{ (row.author?.name || '?').charAt(0) }}</div>
+                    <span>{{ row.author?.name || 'Unknown' }}</span>
                   </div>
                 </template>
               </el-table-column>
@@ -444,7 +476,7 @@ onUnmounted(() => {
                   </el-tooltip>
                 </template>
               </el-table-column>
-            </DataTable>
+            </el-table>
           </div>
         </template>
         <div v-else class="recent-empty">

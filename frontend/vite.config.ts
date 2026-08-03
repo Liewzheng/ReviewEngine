@@ -31,6 +31,15 @@ export default defineConfig({
     },
   },
   build: {
+    // Chunk size warning threshold. The element-plus single chunk lands around
+    // ~530 kB: it must NOT be split via `maxSize` on the codeSplitting group —
+    // rolldown's maxSize split of element-plus creates circular chunk imports
+    // (RovingFocusGroup across chunks), crashing the production build at runtime
+    // (`Rt is not a function`, any route renders blank; verified as P0). Bundle
+    // size is instead kept in check by on-demand import (unplugin-vue-components
+    // + ElementPlusResolver) and the remaining codeSplitting groups. Raise the
+    // warning limit accordingly rather than silencing it.
+    chunkSizeWarningLimit: 600,
     rolldownOptions: {
       output: {
         // Vendor code splitting (rolldown `codeSplitting.groups`; the
@@ -46,14 +55,15 @@ export default defineConfig({
               test: /node_modules[\\/](@vue|vue|vue-router|pinia|@vue[\\/]devtools-api)[\\/]/,
               priority: 20,
             },
-            // Element Plus on-demand subset (component core). `maxSize` forces
-            // rolldown to split this group into sub-chunks (its sole-importer
-            // deps fold into it), keeping every emitted chunk < 500 kB.
+            // Element Plus on-demand subset (component core). Kept as ONE chunk:
+            // splitting it via `maxSize` produces circular cross-chunk imports
+            // (RovingFocusGroup uninitialized) that crash the production build.
+            // Its sole-importer deps fold into it; size is bounded by on-demand
+            // import, not by chunk splitting.
             {
               name: 'vendor-element-plus',
               test: /node_modules[\\/]element-plus[\\/]/,
               priority: 20,
-              maxSize: 480 * 1024,
             },
             // Element Plus runtime deps + icons (standalone packages)
             {

@@ -15,12 +15,17 @@ import {
   Menu,
 } from '@element-plus/icons-vue'
 import { setApiToken, clearApiToken, getApiToken } from './services/api'
+import UpgradeDialog from './components/Upgrade/UpgradeDialog.vue'
+import { useUpgrade } from './composables/useUpgrade'
 
 const route = useRoute()
 const isDark = ref(true)
 const sidebarCollapsed = ref(false)
 const tokenDialogVisible = ref(false)
 const tokenInput = ref('')
+
+// Upgrade feature: module-scope singleton shared with UpgradeDialog.
+const { dialogVisible, check, open, fetchCheck } = useUpgrade()
 
 const hasApiToken = (): boolean => {
   if (typeof localStorage === 'undefined') return false
@@ -52,6 +57,9 @@ onMounted(() => {
     isDark.value = true
   }
   document.documentElement.setAttribute('data-theme', isDark.value ? 'dark' : 'light')
+
+  // One-shot version/update check at startup (server caches for 1h; no polling).
+  fetchCheck()
 
   if (!hasApiToken()) {
     tokenDialogVisible.value = true
@@ -107,6 +115,15 @@ const pageTitle = computed(() => {
         </router-link>
       </nav>
       <div class="sidebar-footer">
+        <div
+          v-if="check?.currentVersion"
+          class="version-chip"
+          :class="{ 'has-update': check?.updateAvailable }"
+          :title="check?.updateAvailable ? 'A new version is available' : 'Review Engine ' + check?.currentVersion"
+        >
+          <span class="version-dot"></span>
+          <span class="version-text" v-show="!sidebarCollapsed">v{{ check?.currentVersion }}</span>
+        </div>
         <button class="theme-toggle" @click="toggleTheme">
           <el-icon><component :is="isDark ? Sunny : Moon" /></el-icon>
         </button>
@@ -126,6 +143,10 @@ const pageTitle = computed(() => {
             <el-icon><Key /></el-icon>
             <span>API Token</span>
           </el-button>
+          <template v-if="check?.updateAvailable">
+            <span class="update-tag">Update available</span>
+            <el-button type="primary" size="small" @click="open">Upgrade</el-button>
+          </template>
           <span class="status-badge healthy">
             <span class="status-dot"></span>
             Healthy
@@ -169,6 +190,9 @@ const pageTitle = computed(() => {
       <el-button type="primary" @click="saveApiToken">Save</el-button>
     </template>
   </el-dialog>
+
+  <!-- Upgrade dialog -->
+  <UpgradeDialog v-model="dialogVisible" />
 </template>
 
 <style scoped>
@@ -257,6 +281,52 @@ const pageTitle = computed(() => {
 .sidebar-footer {
   padding: 12px 16px;
   border-top: 1px solid var(--border-color);
+}
+
+.version-chip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  margin-bottom: 8px;
+  border-radius: 12px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: var(--bg-card);
+  border: 1px solid var(--border-color);
+}
+
+.version-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.version-chip.has-update {
+  color: var(--success);
+  border-color: rgba(34, 197, 94, 0.35);
+}
+
+.version-chip.has-update .version-dot {
+  background: var(--success);
+}
+
+.version-text {
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.update-tag {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--success);
+  padding: 3px 10px;
+  border-radius: 12px;
+  background: rgba(34, 197, 94, 0.12);
+  border: 1px solid rgba(34, 197, 94, 0.35);
 }
 
 .theme-toggle {

@@ -5,8 +5,8 @@
 # This script installs the review-engine CLI tool to ~/.local/bin.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash
-#   curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash -s -- --source
+#   curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh | bash -s -- --source
 #
 # Requirements for binary install: curl, jq
 # Requirements for source install: git, cargo (rustup)
@@ -75,7 +75,7 @@ done
 # Shared configuration
 # ---------------------------------------------------------------------------
 GITHUB_OWNER="Liewzheng"
-GITHUB_REPO="Review-Engine"
+GITHUB_REPO="ReviewEngine"
 GITHUB_API="https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}"
 REPO_URL="https://github.com/${GITHUB_OWNER}/${GITHUB_REPO}.git"
 RAW_URL="https://raw.githubusercontent.com/${GITHUB_OWNER}/${GITHUB_REPO}"
@@ -138,6 +138,9 @@ install_from_source() {
     cp "target/release/review-engine" "${BIN_PATH}"
     chmod +x "${BIN_PATH}"
     success "Installed review-engine to ${BIN_PATH}"
+
+    ln -sf "${BIN_PATH}" "${BIN_DIR}/reng"
+    success "Linked reng -> ${BIN_PATH}"
 
     if [ ! -d "${CONFIG_DIR}" ]; then
         mkdir -p "${CONFIG_DIR}"
@@ -286,7 +289,7 @@ fetch_stable_release() {
 
 resolve_stable_version() {
     if [ -n "${REVIEW_ENGINE_VERSION:-}" ]; then
-        info "Using REVIEW_ENGINE_VERSION override: ${REVIEW_ENGINE_VERSION}"
+        info "Using REVIEW_ENGINE_VERSION override: ${REVIEW_ENGINE_VERSION}" >&2
         echo "${REVIEW_ENGINE_VERSION}"
         return 0
     fi
@@ -486,6 +489,9 @@ install_binary() {
     chmod +x "${BIN_PATH}"
     success "Installed review-engine to ${BIN_PATH}"
 
+    ln -sf "${BIN_PATH}" "${BIN_DIR}/reng"
+    success "Linked reng -> ${BIN_PATH}"
+
     if ! install_default_config "${config_ref}"; then
         exit 1
     fi
@@ -553,6 +559,13 @@ elif "${BIN_PATH}" --help &>/dev/null 2>&1; then
     success "review-engine is installed (--version not available, but --help works)"
 else
     warn "Binary installed but failed to run. You may need to check dependencies."
+fi
+
+if "${BIN_DIR}/reng" --version &>/dev/null 2>&1; then
+    reng_output=$("${BIN_DIR}/reng" --version 2>&1 | head -1)
+    success "reng alias is working: ${reng_output}"
+else
+    warn "reng alias missing or failed to run."
 fi
 
 # ---------------------------------------------------------------------------

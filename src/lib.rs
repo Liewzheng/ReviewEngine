@@ -38,6 +38,11 @@ pub mod server;
 pub mod team;
 pub mod tokenizer;
 
+/// Self-update support: GitHub Releases check, platform asset mapping,
+/// download + SHA-256 verification, safe extraction, install-method hints.
+/// Shared by the CLI upgrade command and the web status endpoint.
+pub mod upgrade;
+
 /// Optional PyO3 bindings for calling review-engine from Python.
 /// Only compiled when the `python` feature is enabled.
 #[cfg(feature = "python")]

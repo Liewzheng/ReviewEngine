@@ -95,6 +95,9 @@ WORKDIR /app
 # 从 builder 复制二进制
 COPY --from=builder /build/target/release/review-engine /usr/local/bin/review-engine
 
+# reng 别名（argv[0] 动态命令名，symlink 调用即可生效）
+RUN ln -s /usr/local/bin/review-engine /usr/local/bin/reng
+
 # 复制前端构建产物（由 frontend 阶段构建，全新 clone 亦可构建）
 COPY --from=frontend /frontend/dist /app/frontend/dist
 

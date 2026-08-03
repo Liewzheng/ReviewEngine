@@ -27,6 +27,7 @@ pub mod repo;
 pub mod review;
 pub mod system;
 pub mod types;
+pub mod upgrade;
 
 pub fn routes(state: Arc<AppState>, auth: Arc<AuthConfig>) -> Router<Arc<AppState>> {
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
@@ -34,7 +35,9 @@ pub fn routes(state: Arc<AppState>, auth: Arc<AuthConfig>) -> Router<Arc<AppStat
     let mut router = Router::new()
         .nest("/reviews", review::routes())
         .nest("/repo-scan", repo::routes())
-        .nest("/system", system::routes())
+        // /system hosts both the existing system endpoints and the
+        // self-upgrade endpoints (disjoint paths, merged into one nest).
+        .nest("/system", system::routes().merge(upgrade::routes()))
         .nest("/config", config::routes())
         .nest("/events", events::routes())
         .nest("/dashboard", dashboard::routes())

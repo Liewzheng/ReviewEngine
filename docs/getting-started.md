@@ -16,6 +16,8 @@ curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/inst
 
 The script detects your platform, resolves the latest stable release, verifies the SHA256 checksum, and copies the default config to `~/.config/review-engine/.code-audit-config.toml`.
 
+The installer also creates a `reng` symlink next to the binary. `reng` and `review-engine` are the same command — examples below use `reng`.
+
 ### Source build
 
 If you prefer to build from source, or a binary is not available for your platform:
@@ -78,25 +80,31 @@ See [`configuration.md`](configuration.md) for multi-provider setups, expert tea
 Review the current checkout against `main`:
 
 ```bash
-review-engine review --local-path . --base main
+reng review --local-path . --base main
 ```
 
 Review only staged changes:
 
 ```bash
-review-engine review --local-path . --staged
+reng review --local-path . --staged
 ```
 
 Review a commit range:
 
 ```bash
-review-engine review --local-path . --since HEAD~3 --until HEAD
+reng review --local-path . --since HEAD~3 --until HEAD
 ```
 
 Output Markdown to a file:
 
 ```bash
-review-engine review --local-path . --base main --format markdown --output review-report.md
+reng review --local-path . --base main --format markdown --output review-report.md
+```
+
+Run a whole-repository health audit (`audit` is the alias of `repo-review`):
+
+```bash
+reng audit --local-path . --format markdown
 ```
 
 ---
@@ -106,7 +114,7 @@ review-engine review --local-path . --base main --format markdown --output revie
 ### GitLab MR
 
 ```bash
-review-engine review \
+reng review \
   --mr-url https://gitlab.com/owner/repo/-/merge_requests/42 \
   --gitlab-token glpat-xxx
 ```
@@ -114,7 +122,7 @@ review-engine review \
 Publish the report back to the MR discussion:
 
 ```bash
-review-engine review \
+reng review \
   --mr-url https://gitlab.com/owner/repo/-/merge_requests/42 \
   --gitlab-token glpat-xxx \
   --publish
@@ -123,7 +131,7 @@ review-engine review \
 ### GitHub PR
 
 ```bash
-review-engine review \
+reng review \
   --mr-url https://github.com/owner/repo/pull/123 \
   --github-token ghp_xxx
 ```
@@ -131,7 +139,7 @@ review-engine review \
 Publish results back to the PR:
 
 ```bash
-review-engine review \
+reng review \
   --mr-url https://github.com/owner/repo/pull/123 \
   --github-token ghp_xxx \
   --publish

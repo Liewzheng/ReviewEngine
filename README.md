@@ -121,19 +121,42 @@ The installer requires `curl`, `jq`, and `sha256sum` (Linux) or `shasum` (macOS)
 > bash install.sh
 > ```
 
+The installer also creates a `reng` symlink next to the binary, so `reng` and
+`review-engine` are the same command — `reng` is the shorter alias used
+throughout this README.
+
 Configure an LLM provider. DeepSeek is accessed through the OpenAI-compatible API:
 
 ```bash
 export LLM_CONFIG='[{"provider":"openai","model":"deepseek-chat","api_key":"sk-your-key","api_base":"https://api.deepseek.com/v1","max_tokens":4096,"temperature":0.3}]'
 ```
 
-Or run `review-engine init` to generate a `.code-audit-config.toml` for your project.
+Or run `reng init` to generate a `.code-audit-config.toml` for your project.
 
 Run your first local review:
 
 ```bash
-review-engine review --local-path . --base main
+reng review --local-path . --base main
 ```
+
+### Upgrading
+
+`reng` is the alias for `review-engine` — both names run (and upgrade) the same
+binary. Check for and apply updates in place:
+
+```bash
+reng upgrade --check     # report the latest version only
+reng upgrade             # check, confirm, and apply (plain binary installs)
+reng upgrade --yes       # skip the confirmation prompt
+reng upgrade --rollback  # restore the previous binary after a bad upgrade
+```
+
+`reng upgrade` detects how you installed the binary and shows the right action:
+Homebrew installs run `brew upgrade review-engine`, cargo installs are rebuilt
+with `cargo install review-engine --locked --features cli`, Docker deployments
+upgrade on the host (`git pull && docker compose up -d --build`), and plain
+binary installs are replaced atomically (backup + smoke test + rollback on
+failure).
 
 For a detailed walkthrough, see [`docs/getting-started.md`](docs/getting-started.md).  
 For full CLI options, environment variables, LLM providers, and config reference, see [`docs/configuration.md`](docs/configuration.md), [`docs/integrations/`](docs/integrations/), and [`docs/rest-api.md`](docs/rest-api.md).
@@ -207,17 +230,17 @@ ReviewEngine fits into existing workflows through multiple entry points:
 - **GitHub PR** — review via CLI with `--mr-url` or webhook.
 - **Local repository** — review working tree, staged changes, or commit ranges without a remote.
 - **CI/CD** — run as a step in GitLab CI, GitHub Actions, or any pipeline.
-- **REST API** — start `review-engine serve` and trigger reviews over HTTP.
+- **REST API** — start `reng serve` and trigger reviews over HTTP.
 
 ```bash
 # GitLab MR review (set GITLAB_TOKEN in your environment)
-review-engine review --mr-url https://gitlab.com/owner/repo/-/merge_requests/42
+reng review --mr-url https://gitlab.com/owner/repo/-/merge_requests/42
 
 # GitHub PR review (set GITHUB_TOKEN in your environment)
-review-engine review --mr-url https://github.com/owner/repo/pull/123
+reng review --mr-url https://github.com/owner/repo/pull/123
 
 # Start the REST / webhook server
-review-engine serve --port 8080
+reng serve --port 8080
 ```
 
 > **Security tip:** Pass tokens via the `GITLAB_TOKEN` and `GITHUB_TOKEN` environment variables instead of `--gitlab-token` / `--github-token` command-line flags to avoid leaking them in shell history or process lists.
@@ -244,6 +267,10 @@ ReviewEngine ships with a `Dockerfile` and `docker-compose.yml` for containerize
    ```
 
 3. Open the web UI at `http://localhost:18080` (or the port you configured).
+
+The image also ships a `reng` symlink next to the `review-engine` binary, so
+commands run inside the container can use the same short alias
+(`docker compose exec <service> reng --version`).
 
 ### API token in the web UI
 
@@ -290,8 +317,8 @@ Input → Config Resolution → Expert Selection → Parallel Review → Consoli
 - Distributed as a **single static binary** via `install.sh`.
 - Config-driven expert team defined in `.code-audit-config.toml`.
 - Parallel LLM calls with per-expert prompts, weights, and focus areas.
-- Optional **REST API** (`review-engine serve`) for webhooks and frontends.
-- Optional **repo-wide health check** (`review-engine repo-review`) for broader codebase analysis.
+- Optional **REST API** (`reng serve`) for webhooks and frontends.
+- Optional **repo-wide health check** (`reng audit`, alias of `repo-review`) for broader codebase analysis.
 
 ### Lead overview
 
@@ -308,7 +335,7 @@ Both summaries are injected into each expert reviewer’s prompt so that subsequ
 
 ReviewEngine is designed to be lightweight and CI-friendly. Resource usage is dominated by LLM network latency, not local CPU or memory.
 
-Benchmarked on a ~30k LOC repository (3 runs, `repo-review`, local CLI, DeepSeek model):
+Benchmarked on a ~30k LOC repository (3 runs, `reng audit`, local CLI, DeepSeek model):
 
 | Metric | Average |
 |---|---|
@@ -328,15 +355,17 @@ ReviewEngine is organized around a small set of focused commands:
 | Command            | Purpose                                                    |
 | ------------------ | ---------------------------------------------------------- |
 | `review`           | Run a CodeReview Board review on an MR, PR, or local diff. |
+| `audit`            | Run a repo-wide health check across the entire codebase (alias of `repo-review`). |
 | `describe`         | Generate a summary or MR/PR description from a diff.       |
 | `improve`          | Suggest concrete code improvements for a diff.             |
-| `repo-review`      | Run a repo-wide health check across the entire codebase.   |
+| `ask`              | Ask a question about a diff.                               |
 | `update_changelog` | Generate or update a changelog from recent commits.        |
 | `serve`            | Start the REST API and webhook server.                     |
+| `upgrade`          | Check for and apply self-upgrades (`--check` / `--yes` / `--version` / `--rollback`). |
 | `validate`         | Validate your `.code-audit-config.toml`.                   |
 | `init`             | Generate a starter config for a new project.               |
 | `default`          | Print the built-in default config.                         |
-| `generate-token`   | Generate a random API token for `review-engine serve`.     |
+| `generate-token`   | Generate a random API token for `reng serve`.              |
 
 ---
 

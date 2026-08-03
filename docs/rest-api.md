@@ -549,7 +549,8 @@ Response 404: { "error": "expert not found" }
 ```
 Response 200:
 {
-  "version": "0.7.9",
+  "version": "0.9.0",
+  "commit": "unknown",
   "features": ["cli", "python"]
 }
 ```
@@ -573,6 +574,92 @@ Response 200:
 ```
 
 顶层 `GET /health`（及 `/health/ready`）保留，用于存活检查，返回简单状态（见 §7 认证策略）。
+
+#### `GET /api/v1/system/upgrade/check`
+
+检查是否有新版本可用。结果在服务端缓存 **1 小时**（GitHub 未认证 API 限流 60 次/小时/IP），缓存命中时不发起网络请求；过期或未缓存时触发一次实时检查，并在无升级任务进行的情况下短暂将任务状态置为 `checking`。
+
+```
+Response 200:
+{
+  "currentVersion": "0.8.2",
+  "latestVersion": "0.9.0",
+  "updateAvailable": true,
+  "installMethod": "binary",             // binary | brew | docker | cargo | unknown
+  "platformAssetAvailable": true,
+  "releaseUrl": "https://github.com/Liewzheng/Review-Engine/releases/tag/v0.9.0",
+  "upgradeHint": "reng upgrade",         // 按安装方式给出的升级命令（与 CLI 提示一致）
+  "cachedAt": "2026-08-03T10:00:00Z"     // RFC3339；从未缓存过则为空字符串
+}
+
+Response 502:
+{ "error": "check failed: ..." }
+```
+
+- `installMethod` 取值：`binary`（直接部署，可自动升级）/ `brew` / `docker` / `cargo` / `unknown`。
+- `upgradeHint` 对应各安装方式的升级命令：`binary` → `reng upgrade`；`brew` → `brew upgrade review-engine`；`cargo` → `cargo install review-engine --locked --features cli`；`docker` → `git pull && docker compose up -d --build`；`unknown` → 官方 `install.sh` 手动升级。
+
+#### `POST /api/v1/system/upgrade`
+
+按检测到的安装方式执行升级。`binary`（直接部署）会启动后台任务完成「下载 → SHA256 校验 → 解压 → 替换前冒烟测试 → 备份 → 原子替换 → 替换后复验」，失败即回滚并保留备份。同一时间只允许一个任务进行（single-flight），进行中并发请求返回 `409`。**运行中的服务进程不会被重启**：任务置为 `done` 表示磁盘上的二进制已替换，需重启服务后生效。
+
+```
+Response 202 (binary，任务已启动):
+{
+  "status": "started",
+  "targetVersion": "0.9.0"
+}
+
+Response 200 (docker，容器内不支持自替换，需在宿主机执行):
+{
+  "status": "notSupported",
+  "instructions": "git pull && docker compose up -d --build",
+  "note": "容器内请勿自替换二进制，请在宿主机拉取新镜像并重建容器"
+}
+
+Response 400 (brew / cargo / unknown，返回手动升级提示):
+{ "error": "检测到 Homebrew 安装，请手动执行升级命令", "upgradeHint": "brew upgrade review-engine" }
+{ "error": "检测到 cargo 安装，请手动执行升级命令", "upgradeHint": "cargo install review-engine --locked --features cli" }
+{ "error": "无法识别安装方式，请使用官方 install.sh 手动升级", "upgradeHint": "使用官方 install.sh 手动升级" }
+
+Response 400 (当前平台无对应 release 资产，无法自动升级):
+{ "error": "no release asset for this platform" }
+
+Response 409 (已有升级任务进行中):
+{ "error": "升级任务已在进行中，请稍后再试" }
+
+Response 502 (最新版本检查失败):
+{ "error": "check failed: ..." }
+```
+
+#### `GET /api/v1/system/upgrade/status`
+
+返回当前升级任务的 8 态状态机快照：
+
+| state | 含义 |
+|-------|------|
+| `idle` | 无任务（默认） |
+| `checking` | 检查最新版本 |
+| `downloading` | 下载 release 资产 |
+| `verifying` | 校验 SHA256 |
+| `installing` | 解压并替换二进制 |
+| `done` | 完成（需重启服务生效） |
+| `failed` | 失败（`message` 含原因） |
+| `notSupported` | 安装方式不支持自替换（如 docker） |
+
+`checking` / `downloading` / `verifying` / `installing` 为「进行中」状态（single-flight 门控：此时并发 `POST /api/v1/system/upgrade` 返回 `409`）。
+
+```
+Response 200:
+{
+  "state": "downloading",
+  "message": "正在下载 release 资产",
+  "currentVersion": "0.8.2",
+  "targetVersion": "0.9.0"      // 仅 binary 升级期间有值；其余为 null
+}
+```
+
+以上三个端点都在 `/api/v1` 鉴权层内（见 §7 认证策略）。
 
 ---
 
@@ -828,9 +915,9 @@ Client                    Server                        Core
 
 | 前端 | 接入方式 | 关键依赖 |
 |------|---------|---------|
-| **Web UI** | 用户启动 `review-engine serve`，前端 AJAX → `localhost:8080` | CORS + 无 auth（localhost） |
+| **Web UI** | 用户启动 `reng serve`，前端 AJAX → `localhost:8080` | CORS + 无 auth（localhost） |
 | **Desktop App** | 同机或内嵌启动 server，HTTP 通信 | 同上 + token auth 可选 |
-| **VSCode Extension** | 方案 A（推荐）：extension 激活时 `review-engine serve --port 9123` 启动后台进程，通过 `localhost:9123/api/v1/*` 通信，extension 退出时 kill | 同 Web UI |
+| **VSCode Extension** | 方案 A（推荐）：extension 激活时 `reng serve --port 9123` 启动后台进程，通过 `localhost:9123/api/v1/*` 通信，extension 退出时 kill | 同 Web UI |
 | | 方案 B（简单）：extension 每次调 CLI 子进程 `--format json` + 解析 stdout | 无 server 依赖，但每次冷启动 LLM |
 
 ---
@@ -874,11 +961,11 @@ Client                    Server                        Core
 
 ```bash
 # 生成 32 字节随机 Token
-review-engine generate-token
+reng generate-token
 # → review_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p
 
 # 安全启动方式
-review-engine serve --bind 0.0.0.0 --api-token $(review-engine generate-token)
+reng serve --bind 0.0.0.0 --api-token $(reng generate-token)
 ```
 
 ### 哪些路由需要认证
@@ -886,21 +973,28 @@ review-engine serve --bind 0.0.0.0 --api-token $(review-engine generate-token)
 | 路由 | `127.0.0.1` | `0.0.0.0` | 原因 |
 |------|------------|-----------|------|
 | `GET /health` | 不认证 | 不认证 | 存活检查，无敏感信息 |
-| `GET /api/v1/system/version` | 不认证 | 不认证 | 版本信息 |
-| `GET /api/v1/system/experts` | 不认证 | 不认证 | expert 列表 |
-| `POST /api/v1/config/validate` | 不认证 | 不认证 | 纯校验，无副作用 |
 | `POST /api/v1/reviews` | 不认证 | **认证** | 消耗 LLM token，有成本风险 |
 | `POST /api/v1/reviews/:id/rerun` | 不认证 | **认证** | 重新消耗 LLM token |
 | `GET /api/v1/reviews` | 不认证 | **认证** | 可能泄漏代码 diff |
 | `GET /api/v1/reviews/:id` | 不认证 | **认证** | 同上 |
 | `GET /api/v1/config` | 不认证 | **认证** | 可能泄漏敏感配置 |
-| `GET /api/v1/queue/stats` | 不认证 | 不认证 | 聚合统计，无敏感信息 |
+| `POST /api/v1/config/validate` | 不认证 | **认证** | 位于 `/api/v1` 鉴权层内 |
+| `GET /api/v1/system/version` | 不认证 | **认证** | 位于 `/api/v1` 鉴权层内 |
+| `GET /api/v1/system/experts` | 不认证 | **认证** | 位于 `/api/v1` 鉴权层内 |
+| `GET /api/v1/system/upgrade/check` | 不认证 | **认证** | 版本与 release 信息 |
+| `POST /api/v1/system/upgrade` | 不认证 | **认证** | 修改服务端二进制（自升级） |
+| `GET /api/v1/system/upgrade/status` | 不认证 | **认证** | 升级任务状态 |
+| `GET /api/v1/queue/stats` | 不认证 | **认证** | 位于 `/api/v1` 鉴权层内 |
 | `GET /api/v1/queue/tasks` | 不认证 | **认证** | 可能包含 MR 标题与仓库信息 |
 | `DELETE /api/v1/queue/tasks/:id` | 不认证 | **认证** | 控制任务状态 |
 | `POST /api/v1/queue/tasks/:id/retry` | 不认证 | **认证** | 重新消耗 LLM token |
 | `POST /api/v1/queue/pause` | 不认证 | **认证** | 控制队列状态 |
 | `POST /api/v1/queue/resume` | 不认证 | **认证** | 控制队列状态 |
 | `POST /api/v1/queue/max-concurrent` | 不认证 | **认证** | 修改并发配置 |
+
+> 除 `GET /health` 外，所有 `/api/v1/*` 路由都挂在同一个鉴权中间件之后：配置了
+> API token（非 loopback 绑定必填）时一律要求 `Authorization: Bearer` /
+> `X-API-Key`，未带或错误返回 `401` + `{"error":"unauthorized"}`。
 
 ### 请求方式
 

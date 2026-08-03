@@ -59,7 +59,7 @@ export LLM_CONFIG='[{"provider":"openai","model":"deepseek-chat","api_key":"sk-y
 Or generate a project config interactively:
 
 ```bash
-review-engine init
+reng init
 ```
 
 For a complete config reference see [references/config.md](references/config.md).
@@ -68,20 +68,26 @@ For a complete config reference see [references/config.md](references/config.md)
 
 | Task | Command |
 |------|---------|
-| Repo-wide health check | `review-engine repo-review --local-path .` |
-| Review current branch vs `main` | `review-engine review --local-path . --base main` |
-| Review a GitHub PR / GitLab MR | `review-engine review --mr-url <URL> --publish` |
-| Generate a PR/MR description | `review-engine describe --mr-url <URL>` |
-| Suggest concrete improvements | `review-engine improve --mr-url <URL>` |
-| Validate the config file | `review-engine validate --config .code-audit-config.toml` |
-| Start the REST / webhook server | `review-engine serve --port 8080` |
+| Audit the whole repository | `reng audit --local-path .` |
+| Review current branch vs `main` | `reng review --local-path . --base main` |
+| Review a GitHub PR / GitLab MR | `reng review --mr-url <URL> --publish` |
+| Generate a PR/MR description | `reng describe --mr-url <URL>` |
+| Suggest concrete improvements | `reng improve --mr-url <URL>` |
+| Validate the config file | `reng validate --config .code-audit-config.toml` |
+| Start the REST / webhook server | `reng serve --port 8080` |
+| Check for / apply a self-upgrade | `reng upgrade` (report only: `reng upgrade --check`) |
+| Roll back a bad upgrade | `reng upgrade --rollback` |
+
+`reng` is the short alias for `review-engine` — both names run the same binary.
+`audit` is the alias for `repo-review` (whole-repo health checks); branch and
+MR reviews stay under `review`.
 
 See [references/commands.md](references/commands.md) for the full command list
 and more examples.
 
 ## Output formats and publishing
 
-- `--format markdown` (default for `repo-review`) prints a human-readable report.
+- `--format markdown` (default for `audit`) prints a human-readable report.
 - `--format json` (default for `review`) emits structured data for CI pipelines.
 - `--output report.md` writes the report to a file; otherwise a timestamped copy
   is saved under `~/.config/review-engine/reports/`.

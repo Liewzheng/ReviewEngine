@@ -163,12 +163,33 @@ impl LogCollector {
                 metadata: None,
             }
         };
+        self.record_entry(entry);
+    }
+
+    /// Persist an entry — parsed or programmatically constructed — through the
+    /// single pipeline: ring buffer, SSE broadcast, NDJSON file, ring trim.
+    fn record_entry(&mut self, entry: LogEntry) {
         self.entries.push(entry.clone());
         let _ = self.tx.send(entry.clone());
         self.append_entry_to_file(&entry);
         if self.entries.len() > 1000 {
             self.entries.remove(0);
         }
+    }
+
+    /// Record a structured entry carrying optional [`LogMetadata`], bypassing
+    /// the text/JSON parse path. Key lifecycle points (review started /
+    /// completed / failed) use this so `LogMetadata` fields are populated at
+    /// the source instead of always being `None`.
+    pub fn push_entry(&mut self, level: &str, message: impl Into<String>, metadata: Option<LogMetadata>) {
+        let entry = LogEntry {
+            id: uuid::Uuid::new_v4().to_string(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            level: level.to_uppercase(),
+            message: message.into(),
+            metadata,
+        };
+        self.record_entry(entry);
     }
 }
 
@@ -235,6 +256,19 @@ pub fn get_global_collector() -> Option<Arc<Mutex<LogCollector>>> {
     GLOBAL_COLLECTOR.get().cloned()
 }
 
+/// Push a structured lifecycle entry onto the global collector.
+///
+/// No-op when the collector has not been initialised (e.g. lib unit tests that
+/// build `AppState` directly without going through `main`), so review-task
+/// lifecycle points can log unconditionally.
+pub fn push_global_entry(level: &str, message: String, metadata: Option<LogMetadata>) {
+    if let Some(collector) = get_global_collector() {
+        if let Ok(mut guard) = collector.lock() {
+            guard.push_entry(level, message, metadata);
+        }
+    }
+}
+
 fn default_ndjson_path() -> Option<PathBuf> {
     home::home_dir().map(|p| p.join(".config").join("review-engine").join("logs.ndjson"))
 }
@@ -263,6 +297,95 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].level, "WARN");
         assert!(entries[0].message.contains("something is off"));
+    }
+
+    /// Unit 14: `push_entry` populates `LogMetadata` at the source (instead of
+    /// the always-`None` parse path) and the entry serializes camelCase so the
+    /// frontend badge renders.
+    #[test]
+    fn push_entry_carries_metadata_and_serializes_camelcase() {
+        let mut c = LogCollector::new_with_path(None);
+        c.push_entry(
+            "info",
+            "review task started",
+            Some(LogMetadata {
+                request_id: Some("req-1".to_string()),
+                duration_ms: Some(42),
+                review_id: Some("rev-1".to_string()),
+                expert_id: Some("exp-1".to_string()),
+            }),
+        );
+        let entries = c.recent_entries(10);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].level, "INFO", "level must be normalized uppercase");
+        assert_eq!(entries[0].message, "review task started");
+
+        let meta = entries[0]
+            .metadata
+            .as_ref()
+            .expect("push_entry metadata must not be None");
+        assert_eq!(meta.request_id.as_deref(), Some("req-1"));
+        assert_eq!(meta.duration_ms, Some(42));
+        assert_eq!(meta.review_id.as_deref(), Some("rev-1"));
+        assert_eq!(meta.expert_id.as_deref(), Some("exp-1"));
+
+        let json = serde_json::to_value(&entries[0]).unwrap();
+        assert_eq!(json["metadata"]["requestId"], "req-1");
+        assert_eq!(json["metadata"]["durationMs"], 42);
+        assert_eq!(json["metadata"]["reviewId"], "rev-1");
+        assert_eq!(json["metadata"]["expertId"], "exp-1");
+    }
+
+    /// Unit 15: the parse path still records `metadata: None` (existing stream
+    /// unchanged), while a `push_entry` lifecycle record in the same buffer
+    /// carries metadata — the two sources coexist in one ring buffer.
+    #[test]
+    fn parsed_lines_keep_metadata_none_while_pushed_entries_carry_metadata() {
+        let mut c = LogCollector::new_with_path(None);
+        c.add_bytes(b"2026-01-01T00:00:00Z  INFO x: parsed line\n");
+        c.push_entry(
+            "ERROR",
+            "review task failed".to_string(),
+            Some(LogMetadata {
+                request_id: Some("req-9".to_string()),
+                duration_ms: Some(7),
+                review_id: Some("rev-9".to_string()),
+                expert_id: None,
+            }),
+        );
+        let entries = c.recent_entries(10);
+        assert_eq!(entries.len(), 2);
+        assert!(entries[0].metadata.is_none(), "parsed lines keep metadata None");
+        assert!(entries[1].metadata.is_some(), "pushed lifecycle entries carry metadata");
+        assert_eq!(entries[1].level, "ERROR");
+    }
+
+    /// Unit 16: a pushed entry round-trips through the NDJSON file — reloading
+    /// from the file preserves the camelCase metadata fields via aliases.
+    #[test]
+    fn pushed_entry_round_trips_through_ndjson_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("logs.ndjson");
+        {
+            let mut c = LogCollector::new_with_path(Some(path.clone()));
+            c.push_entry(
+                "INFO",
+                "review completed",
+                Some(LogMetadata {
+                    request_id: Some("req-r".to_string()),
+                    duration_ms: Some(123),
+                    review_id: Some("rev-r".to_string()),
+                    expert_id: None,
+                }),
+            );
+        } // collector dropped; file flushed by drop? file handle closed on drop
+        let c2 = LogCollector::new_with_path(Some(path.clone()));
+        let entries = c2.recent_entries(10);
+        assert_eq!(entries.len(), 1, "reloaded NDJSON must contain the pushed entry");
+        let meta = entries[0].metadata.as_ref().expect("metadata survives reload");
+        assert_eq!(meta.request_id.as_deref(), Some("req-r"));
+        assert_eq!(meta.duration_ms, Some(123));
+        assert_eq!(meta.review_id.as_deref(), Some("rev-r"));
     }
 
     /// Unit 13: `LogMetadata` serializes camelCase (`requestId`/`durationMs`/

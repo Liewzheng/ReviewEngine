@@ -9,7 +9,6 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: review-engine
     restart: unless-stopped
 
     ports:
@@ -40,7 +39,8 @@ services:
 
       # ── Logging ──
       RUST_LOG: ${RUST_LOG:-info}
-      RUST_LOG_FORMAT: ${RUST_LOG_FORMAT:-json}
+      # Backend reads REVIEW_LOG_FORMAT (src/main.rs); RUST_LOG_FORMAT is ignored.
+      REVIEW_LOG_FORMAT: ${REVIEW_LOG_FORMAT:-json}
 
       # ── Config & Output Paths ──
       REVIEW_ENGINE_CONFIG_DIR: /app/config

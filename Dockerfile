@@ -45,6 +45,31 @@ COPY docs ./docs
 RUN cargo build --release --no-default-features --features cli
 
 # ═══════════════════════════════════════════════════════════════════════
+# Stage 1.5: Frontend Builder (Vue SPA)
+# ═══════════════════════════════════════════════════════════════════════
+# 全新 clone 没有 frontend/dist（该目录已 gitignore，不入库），必须由容器
+# 内构建产出，否则 runtime 阶段 COPY dist 会失败。
+# Node 大版本锁定 22 LTS：满足 Vite 8 / vue-tsc 3 的 engines 要求
+# （Node >= 20.19）；仓库无 .nvmrc、package.json 无 engines，取当前 LTS。
+FROM node:22-alpine AS frontend
+
+WORKDIR /frontend
+
+# 依赖清单先行，最大化层缓存
+# npm ci 在弱网下可能静默跳过可选原生绑定（@rolldown/binding-*，Vite 8 依赖），
+# 导致 build 期报 "Cannot find native binding"。装完后校验绑定在位，缺失则清空重装一次。
+# （FROM node:22-alpine ⇒ musl libc；若换非 Alpine 基础镜像需同步改为 -gnu）
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund \
+    && node -e "require('@rolldown/binding-' + process.platform + '-' + process.arch + '-musl')" \
+    || (rm -rf node_modules && npm ci --no-audit --no-fund \
+        && node -e "require('@rolldown/binding-' + process.platform + '-' + process.arch + '-musl')")
+
+# 复制源码并构建（产出 /frontend/dist）
+COPY frontend/ ./
+RUN npm run build
+
+# ═══════════════════════════════════════════════════════════════════════
 # Stage 2: Runtime
 # ═══════════════════════════════════════════════════════════════════════
 FROM ubuntu:22.04 AS runtime
@@ -70,8 +95,8 @@ WORKDIR /app
 # 从 builder 复制二进制
 COPY --from=builder /build/target/release/review-engine /usr/local/bin/review-engine
 
-# 复制前端构建产物（从本地预构建的 dist）
-COPY frontend/dist /app/frontend/dist
+# 复制前端构建产物（由 frontend 阶段构建，全新 clone 亦可构建）
+COPY --from=frontend /frontend/dist /app/frontend/dist
 
 # 复制启动入口脚本，保留作为容器入口点以便后续扩展
 COPY entrypoint.sh /app/entrypoint.sh

@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.3] - 2026-08-07
+
+### Fixed
+- **`serve` hung silently when the port was already in use**: the `TcpListener::bind` EADDRINUSE error was raised, but `serve` spawned the config-file watcher (`watch_config_file`) early in startup, and that watcher parks a `spawn_blocking` task on a never-ending `mpsc::recv()` loop — so after the main future returned the error, the `#[tokio::main]` runtime's teardown blocked forever waiting for the blocking task, the process hung with zero stdout/stderr output, and the bind error never reached the terminal. The watcher is now spawned only after every fallible startup step has succeeded, and the `serve` error path reports via `eprintln!` and exits with `std::process::exit(1)`, bypassing the runtime teardown; EADDRINUSE is called out specifically as `Address already in use (port N): <addr> is taken by another process — stop it or pass --port`. The "listening" log line also moved from before the bind to after it, so a failed start no longer writes a misleading healthy-looking record into `logs.ndjson`. Two timeout-guarded integration tests cover the fail-fast and startup-banner contracts. (`src/cli/mod.rs`, `src/server/mod.rs`, `tests/cli.rs`)
+
+### Changed
+- **`serve` prints a one-line startup banner on success**: stdout was previously completely silent; a successful start now prints the listen address, the health-check URL, and the log file path (`review-engine listening on http://<addr> (health: http://<addr>/health, logs: <path>)`). The ndjson log stream semantics are unchanged. (`src/server/mod.rs`, `src/server/log_collector.rs`)
+
 ## [0.9.2] - 2026-08-03
 
 ### Fixed

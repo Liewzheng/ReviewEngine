@@ -562,20 +562,6 @@ pub async fn run() -> Result<()> {
             let api_token = api_token.or_else(|| std::env::var("REVIEW_API_TOKEN").ok());
             let auth = Arc::new(review_engine::server::auth::AuthConfig::new(api_token, &bind)?);
 
-            // Config file watching for hot-reload (server only)
-            let config_candidates = [
-                std::env::current_dir().ok().map(|p| p.join(".code-audit-config.toml")),
-                home::home_dir().map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml")),
-            ];
-            for candidate in config_candidates.into_iter().flatten() {
-                if candidate.exists() {
-                    let path = candidate;
-                    tokio::spawn(async move {
-                        handlers::watch_config_file(path).await;
-                    });
-                }
-            }
-
             let mut config = review_engine::config::resolve_config(None).await?;
             // LLM_CONFIG env is a fallback for the provider list only: a
             // non-empty [[llm]] from config files always wins (same
@@ -649,7 +635,35 @@ pub async fn run() -> Result<()> {
                     tok,
                 )));
             }
-            review_engine::server::serve(port, &bind, state, auth, handlers).await?;
+
+            // Config file watching for hot-reload (server only). Spawned last,
+            // right before serving: the watcher parks a `spawn_blocking` task
+            // on a never-ready `mpsc::recv`, which prevents the tokio runtime
+            // from ever dropping — so it must only exist once every fallible
+            // startup step above has already succeeded.
+            let config_candidates = [
+                std::env::current_dir().ok().map(|p| p.join(".code-audit-config.toml")),
+                home::home_dir().map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml")),
+            ];
+            for candidate in config_candidates.into_iter().flatten() {
+                if candidate.exists() {
+                    let path = candidate;
+                    tokio::spawn(async move {
+                        handlers::watch_config_file(path).await;
+                    });
+                }
+            }
+
+            // Fail fast on startup errors (e.g. port already in use):
+            // report on stderr and exit non-zero via `process::exit`, which
+            // skips the tokio runtime teardown. That teardown would
+            // otherwise block forever waiting for the config-file watcher's
+            // spawn_blocking task (parked on a never-ready `mpsc::recv`),
+            // turning a clear bind error into a silent hang with no output.
+            if let Err(e) = review_engine::server::serve(port, &bind, state, auth, handlers).await {
+                eprintln!("error: {e:#}");
+                std::process::exit(1);
+            }
         }
         Commands::GenerateToken => {
             let token = review_engine::server::auth::generate_token();

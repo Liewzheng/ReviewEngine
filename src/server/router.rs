@@ -6,7 +6,7 @@
 
 use axum::{
     extract::Request,
-    http::{header::CACHE_CONTROL, HeaderMap, HeaderValue},
+    http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
     response::{Html, Response},
     routing::{get, post},
@@ -47,14 +47,18 @@ fn cache_control_for_path(path: &str) -> Option<HeaderValue> {
 
 /// Apply [`cache_control_for_path`] to static-file responses. Scoped to the
 /// static fallback only (see `build`), so API/health routes keep their
-/// existing no-Cache-Control behavior. The header is set only on successful
-/// responses: an immutably cached 404 for a missing asset would otherwise keep
-/// the app broken even after the file is deployed.
+/// existing no-Cache-Control behavior. The header is set on 2xx and on 304 —
+/// per RFC 9110 §15.4.5 a 304 must carry any metadata the 200 would have
+/// carried, otherwise a non-conformant intermediary can drop the policy when
+/// refreshing a stored entry. Other statuses stay bare: an immutably cached
+/// 404 for a missing asset would keep the app broken even after the file is
+/// deployed.
 async fn static_cache_control(request: Request, next: Next) -> Response {
     let cache_control = cache_control_for_path(request.uri().path());
     let mut response = next.run(request).await;
     if let Some(value) = cache_control {
-        if response.status().is_success() {
+        let status = response.status();
+        if status.is_success() || status == StatusCode::NOT_MODIFIED {
             response.headers_mut().insert(CACHE_CONTROL, value);
         }
     }

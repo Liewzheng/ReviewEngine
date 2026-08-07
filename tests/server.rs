@@ -285,6 +285,40 @@ async fn static_frontend_cache_control_headers() {
         "404 for a missing asset must not be cached, got {:?}",
         cache_control(&resp)
     );
+
+    // Conditional request: revalidation must answer 304 AND carry the same
+    // Cache-Control as the 200 (RFC 9110 §15.4.5). This pins the contract
+    // that makes `no-cache` cheap — every load revalidates, unchanged deploys
+    // cost a 304 instead of a full download. If a future tower-http upgrade
+    // or a handler swap silently drops 304 support or the header, this fails.
+    let resp = client
+        .get(format!("{base}/"))
+        .send()
+        .await
+        .expect("GET / for Last-Modified");
+    let last_modified = resp
+        .headers()
+        .get("last-modified")
+        .and_then(|v| v.to_str().ok())
+        .expect("GET / must carry a Last-Modified header")
+        .to_owned();
+    let resp = client
+        .get(format!("{base}/"))
+        .header("if-modified-since", &last_modified)
+        .send()
+        .await
+        .expect("GET / with If-Modified-Since");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_MODIFIED,
+        "conditional GET must revalidate to 304, got {}",
+        resp.status()
+    );
+    let cc = cache_control(&resp).unwrap_or_default();
+    assert!(
+        cc.contains("no-cache"),
+        "304 must carry the same Cache-Control as the 200, got {cc:?}"
+    );
 }
 
 // ─── LLM Provider CRUD ────────────────────────────────────────────

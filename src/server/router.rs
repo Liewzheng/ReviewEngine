@@ -212,7 +212,7 @@ mod tests {
     }
 
     /// Path → Cache-Control decision table behind `static_cache_control`.
-    /// The middleware itself is thin (decide, run, stamp on 2xx), so the
+    /// The middleware itself is thin (decide, run, stamp on 2xx and 304), so the
     /// decision function carries the contract and is exercised end-to-end by
     /// the integration test in tests/server.rs.
     mod cache_control {

@@ -48,6 +48,19 @@ fn spawn_server_inner_with_env(port: u16, token: Option<&str>, extra_env: &[(&st
 /// Spawn `serve` from an explicit binary path (used by the symlink-layout
 /// upgrade test, which launches the server through a `reng` symlink).
 fn spawn_server_with_bin(bin: &str, port: u16, token: Option<&str>, extra_env: &[(&str, &str)]) -> ServerGuard {
+    spawn_server_full(bin, port, token, extra_env, None)
+}
+
+/// Spawn `serve` with an optional working directory. The static frontend is
+/// resolved relative to the process CWD (`./frontend/dist`), so tests that
+/// exercise static-file serving point the server at a fixture tree.
+fn spawn_server_full(
+    bin: &str,
+    port: u16,
+    token: Option<&str>,
+    extra_env: &[(&str, &str)],
+    cwd: Option<&std::path::Path>,
+) -> ServerGuard {
     let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
     let mut cmd = Command::new(bin);
     cmd.arg("serve")
@@ -58,6 +71,9 @@ fn spawn_server_with_bin(bin: &str, port: u16, token: Option<&str>, extra_env: &
         .env("HOME", temp_dir.path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
     if let Some(token) = token {
         cmd.env("REVIEW_API_TOKEN", token);
     }
@@ -135,6 +151,139 @@ async fn metrics_endpoint() {
         body.contains("review_engine") || body.contains("process_"),
         "metrics did not contain expected prefix: {}",
         body
+    );
+}
+
+// ─── Static frontend Cache-Control (SPA white-screen defect) ─────
+
+/// Write a minimal bundler-style dist tree (`index.html` + content-hashed
+/// asset + favicon) under `{root}/frontend/dist`. The server resolves
+/// `./frontend/dist` relative to its working directory, so the test points
+/// the spawned server's CWD at `root` — independent of a real frontend build
+/// (frontend/dist is gitignored and absent in CI).
+fn write_fake_frontend_dist(root: &std::path::Path) {
+    let dist = root.join("frontend").join("dist");
+    let assets = dist.join("assets");
+    std::fs::create_dir_all(&assets).expect("failed to create fixture assets dir");
+    std::fs::write(
+        dist.join("index.html"),
+        "<!doctype html><html><body><div id=\"app\">fixture</div></body></html>\n",
+    )
+    .expect("failed to write fixture index.html");
+    std::fs::write(assets.join("app-CqstUsos.js"), "console.log('fixture');\n").expect("failed to write fixture asset");
+    std::fs::write(
+        dist.join("favicon.svg"),
+        "<svg xmlns=\"http://www.w3.org/2000/svg\"/>\n",
+    )
+    .expect("failed to write fixture favicon");
+}
+
+/// Defect regression: the SPA's assets are content-hashed, so `index.html`
+/// must be revalidated on every load — a stale cached copy references chunks
+/// that no longer exist after an upgrade and leaves users on a blank page —
+/// while the hashed assets themselves are safe to cache immutably.
+#[tokio::test]
+async fn static_frontend_cache_control_headers() {
+    let www = tempfile::tempdir().expect("failed to create www temp dir");
+    write_fake_frontend_dist(www.path());
+
+    let port = find_free_port();
+    let _guard = spawn_server_full(&bin_path(), port, None, &[], Some(www.path()));
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}");
+    let cache_control = |resp: &reqwest::Response| {
+        resp.headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+    };
+
+    // `/` serves index.html and must be revalidated on every load.
+    let resp = client.get(format!("{base}/")).send().await.expect("GET /");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "GET / returned {}",
+        resp.status()
+    );
+    let cc = cache_control(&resp).unwrap_or_default();
+    assert!(cc.contains("no-cache"), "GET / must be no-cache, got {cc:?}");
+    assert!(
+        cc.contains("must-revalidate"),
+        "GET / must require revalidation, got {cc:?}"
+    );
+    let body = resp.text().await.expect("GET / body");
+    assert!(
+        body.contains("fixture"),
+        "GET / must serve the fixture index.html, got {body:?}"
+    );
+
+    // Direct `/index.html` — same policy.
+    let resp = client
+        .get(format!("{base}/index.html"))
+        .send()
+        .await
+        .expect("GET /index.html");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let cc = cache_control(&resp).unwrap_or_default();
+    assert!(cc.contains("no-cache"), "GET /index.html must be no-cache, got {cc:?}");
+
+    // Content-hashed asset — cache for a year, never revalidate.
+    let resp = client
+        .get(format!("{base}/assets/app-CqstUsos.js"))
+        .send()
+        .await
+        .expect("GET hashed asset");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "GET asset returned {}",
+        resp.status()
+    );
+    let cc = cache_control(&resp).unwrap_or_default();
+    assert!(cc.contains("immutable"), "hashed asset must be immutable, got {cc:?}");
+    assert!(
+        cc.contains("max-age=31536000"),
+        "hashed asset must cache for a year, got {cc:?}"
+    );
+
+    // API/health routes keep the status quo: no Cache-Control header at all.
+    let resp = client.get(format!("{base}/health")).send().await.expect("GET /health");
+    assert!(resp.status().is_success());
+    assert!(
+        cache_control(&resp).is_none(),
+        "/health must not gain a Cache-Control header, got {:?}",
+        cache_control(&resp)
+    );
+
+    // Non-hashed static files keep browser defaults.
+    let resp = client
+        .get(format!("{base}/favicon.svg"))
+        .send()
+        .await
+        .expect("GET /favicon.svg");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    assert!(
+        cache_control(&resp).is_none(),
+        "favicon.svg must not gain a Cache-Control header, got {:?}",
+        cache_control(&resp)
+    );
+
+    // A missing hashed asset must NOT be cached immutably — an immutably
+    // cached 404 would keep the app broken in browsers even after the file is
+    // deployed.
+    let resp = client
+        .get(format!("{base}/assets/missing-00000000.js"))
+        .send()
+        .await
+        .expect("GET missing asset");
+    assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+    assert!(
+        cache_control(&resp).is_none(),
+        "404 for a missing asset must not be cached, got {:?}",
+        cache_control(&resp)
     );
 }
 

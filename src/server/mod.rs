@@ -359,6 +359,12 @@ mod tests {
 }
 
 /// Start the health check and webhook server on the given port.
+///
+/// Failure contract: bind failures return immediately with the target
+/// address in the error. `AddrInUse` additionally names the port in an
+/// `Address already in use (port N)` message so the CLI can fail fast with
+/// an actionable stderr line. On success a one-line startup banner goes to
+/// stdout (the full log stream stays in `logs.ndjson`).
 pub async fn serve(
     port: u16,
     bind: &str,
@@ -366,12 +372,32 @@ pub async fn serve(
     auth: Arc<AuthConfig>,
     webhook_handlers: Vec<Arc<dyn webhook::WebhookHandler>>,
 ) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+
     let app = router::build(state, auth, webhook_handlers);
 
     let addr = format!("{}:{}", bind, port);
-    tracing::info!("Health & webhook server listening on {}", addr);
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(listener) => listener,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            anyhow::bail!(
+                "Address already in use (port {port}): {addr} is taken by another process — stop it or pass --port"
+            );
+        }
+        Err(e) => return Err(e).with_context(|| format!("failed to bind {addr}")),
+    };
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    // Log/print only after the bind has actually succeeded: previously the
+    // "listening" line was emitted before bind, so a failed start still
+    // looked healthy in logs.ndjson.
+    tracing::info!("Health & webhook server listening on {}", addr);
+    let log_path = log_collector::default_ndjson_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "disabled".to_string());
+    println!("review-engine listening on http://{addr} (health: http://{addr}/health, logs: {log_path})");
+
+    axum::serve(listener, app)
+        .await
+        .with_context(|| format!("server on {addr} terminated unexpectedly"))?;
     Ok(())
 }

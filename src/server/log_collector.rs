@@ -269,7 +269,9 @@ pub fn push_global_entry(level: &str, message: String, metadata: Option<LogMetad
     }
 }
 
-fn default_ndjson_path() -> Option<PathBuf> {
+/// Default NDJSON log file location (`~/.config/review-engine/logs.ndjson`).
+/// `None` when the home directory cannot be determined (file logging off).
+pub fn default_ndjson_path() -> Option<PathBuf> {
     home::home_dir().map(|p| p.join(".config").join("review-engine").join("logs.ndjson"))
 }
 

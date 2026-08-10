@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { Loading } from '@element-plus/icons-vue'
 
 type BadgeStatus = 'success' | 'warning' | 'error' | 'info' | 'offline' | 'running' | 'queued' | 'failed' | 'completed' | 'cancelled' | 'skipped'
@@ -17,21 +18,26 @@ const props = withDefaults(defineProps<Props>(), {
   showText: true,
 })
 
-const statusConfigMap: Record<string, { type: string; text: string; color: string; effect?: string }> = {
-  success:    { type: 'success', text: 'Operational',  color: 'var(--success)' },
-  running:    { type: 'success', text: 'In Progress',  color: 'var(--success)' },
-  completed:  { type: 'success', text: 'Completed',    color: 'var(--success)' },
-  warning:    { type: 'warning', text: 'Degraded',     color: 'var(--warning)' },
-  queued:     { type: 'info',    text: 'Queued',       color: 'var(--info)' },
-  info:       { type: 'info',    text: 'Info',         color: 'var(--info)' },
-  error:      { type: 'danger',  text: 'Error',        color: 'var(--error)' },
-  failed:     { type: 'danger',  text: 'Failed',       color: 'var(--error)' },
-  offline:    { type: 'info',    text: 'Offline',      color: 'var(--offline)' },
-  cancelled:  { type: 'info',    text: 'Cancelled',    color: 'var(--text-secondary)', effect: 'plain' },
-  skipped:    { type: 'info',    text: 'Skipped',      color: 'var(--text-secondary)', effect: 'plain' },
+const { t } = useI18n()
+
+const statusConfigMap: Record<string, { type: string; textKey: string; color: string; effect?: string }> = {
+  success:    { type: 'success', textKey: 'common.status.operational', color: 'var(--success)' },
+  running:    { type: 'success', textKey: 'common.status.inProgress',  color: 'var(--success)' },
+  completed:  { type: 'success', textKey: 'common.status.completed',   color: 'var(--success)' },
+  warning:    { type: 'warning', textKey: 'common.status.degraded',    color: 'var(--warning)' },
+  queued:     { type: 'info',    textKey: 'common.status.queued',      color: 'var(--info)' },
+  info:       { type: 'info',    textKey: 'common.status.info',        color: 'var(--info)' },
+  error:      { type: 'danger',  textKey: 'common.status.error',       color: 'var(--error)' },
+  failed:     { type: 'danger',  textKey: 'common.status.failed',      color: 'var(--error)' },
+  offline:    { type: 'info',    textKey: 'common.status.offline',     color: 'var(--offline)' },
+  cancelled:  { type: 'info',    textKey: 'common.status.cancelled',   color: 'var(--text-secondary)', effect: 'plain' },
+  skipped:    { type: 'info',    textKey: 'common.status.skipped',     color: 'var(--text-secondary)', effect: 'plain' },
 }
 
-const config = computed(() => statusConfigMap[props.status] || { type: 'info', text: props.status, color: 'var(--text-secondary)' })
+const config = computed(() => {
+  const c = statusConfigMap[props.status] || { type: 'info', textKey: '', color: 'var(--text-secondary)' }
+  return { ...c, text: c.textKey ? t(c.textKey) : (props.status as string) }
+})
 
 const dotColor = computed(() => config.value.color)
 const isRunning = computed(() => props.status === 'running')

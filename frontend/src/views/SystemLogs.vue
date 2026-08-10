@@ -3,8 +3,8 @@
     <!-- Page Header -->
     <div class="page-header">
       <div class="header-title">
-        <h2 class="page-title">System Logs</h2>
-        <p class="page-subtitle">Live log stream</p>
+        <h2 class="page-title">{{ $t('logs.title') }}</h2>
+        <p class="page-subtitle">{{ $t('logs.subtitle') }}</p>
       </div>
       <div class="header-actions">
         <el-button
@@ -12,7 +12,7 @@
           :icon="logs.isPaused ? VideoPlay : VideoPause"
           @click="togglePause"
         >
-          {{ logs.isPaused ? 'Resume' : 'Pause' }}
+          {{ logs.isPaused ? $t('logs.resume') : $t('logs.pause') }}
         </el-button>
         <el-button
           type="primary"
@@ -20,14 +20,14 @@
           :loading="downloading"
           @click="downloadLogs"
         >
-          Download
+          {{ $t('logs.download') }}
         </el-button>
         <el-button
           type="danger"
           :icon="Delete"
           @click="confirmClear"
         >
-          Clear
+          {{ $t('logs.clear') }}
         </el-button>
       </div>
     </div>
@@ -37,7 +37,7 @@
       <div class="toolbar-row">
         <!-- Level Filter -->
         <div class="filter-group">
-          <span class="filter-label">Levels:</span>
+          <span class="filter-label">{{ $t('logs.levelsLabel') }}</span>
           <el-checkbox-group v-model="logs.levels" size="small">
             <el-checkbox value="INFO">
               <span class="level-dot" style="background-color: var(--info)"></span>
@@ -62,7 +62,7 @@
         <div class="search-group">
           <el-input
             v-model="searchInput"
-            placeholder="Filter logs..."
+            :placeholder="$t('logs.filterPlaceholder')"
             clearable
             size="small"
             class="search-input"
@@ -79,17 +79,17 @@
           <!-- Auto-scroll Toggle -->
           <el-switch
             v-model="autoScroll"
-            active-text="Auto-scroll"
+            :active-text="$t('logs.autoScroll')"
             class="auto-scroll-switch"
           />
 
           <!-- Timestamp Format -->
           <div class="format-select">
-            <span class="filter-label">Format:</span>
+            <span class="filter-label">{{ $t('logs.formatLabel') }}</span>
             <el-select v-model="timestampFormat" size="small" style="width: 120px">
-              <el-option label="Relative" value="relative" />
-              <el-option label="Absolute" value="absolute" />
-              <el-option label="ISO" value="iso" />
+              <el-option :label="$t('logs.format.relative')" value="relative" />
+              <el-option :label="$t('logs.format.absolute')" value="absolute" />
+              <el-option :label="$t('logs.format.iso')" value="iso" />
             </el-select>
           </div>
         </div>
@@ -97,10 +97,10 @@
         <div class="toolbar-right">
           <span v-if="logs.isPaused" class="pause-indicator">
             <el-icon><VideoPause /></el-icon>
-            Paused
+            {{ $t('common.paused') }}
           </span>
           <span class="filter-count">
-            Showing {{ filteredLogs.length }} of {{ logItems.length }} logs
+            {{ $t('logs.showingCount', { filtered: filteredLogs.length, total: logItems.length }) }}
           </span>
         </div>
       </div>
@@ -115,7 +115,7 @@
     <div v-else ref="terminalRef" class="log-terminal" @scroll="handleScroll">
       <!-- Empty: Cleared -->
       <div v-if="isCleared && logItems.length === 0" class="empty-state">
-        <el-empty description="Logs cleared. New entries will appear here.">
+        <el-empty :description="$t('logs.emptyCleared')">
           <template #image>
             <el-icon size="48" color="#6b7280"><Check /></el-icon>
           </template>
@@ -124,7 +124,7 @@
 
       <!-- Empty: No logs yet -->
       <div v-else-if="logItems.length === 0" class="empty-state">
-        <el-empty description="Waiting for logs...">
+        <el-empty :description="$t('logs.emptyWaiting')">
           <template #image>
             <el-icon size="48" color="#6b7280" class="is-loading"><Loading /></el-icon>
           </template>
@@ -133,7 +133,7 @@
 
       <!-- Empty: All filtered out -->
       <div v-else-if="filteredLogs.length === 0 && logItems.length > 0" class="empty-state">
-        <el-empty description="No logs match current filters">
+        <el-empty :description="$t('logs.emptyFiltered')">
           <template #image>
             <el-icon size="48" color="#6b7280"><InfoFilled /></el-icon>
           </template>
@@ -178,7 +178,7 @@
         :icon="ArrowDown"
         @click="scrollToBottom"
       >
-        {{ logs.isPaused ? 'Resume' : newLogCount + ' new logs' }}
+        {{ logs.isPaused ? $t('logs.resume') : $t('logs.newLogs', { count: newLogCount }) }}
       </el-button>
     </transition>
   </div>
@@ -198,10 +198,12 @@ import {
   ArrowDown,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import type { LogLevel, TimestampFormat } from '../types/logs'
 import { useLogs } from '../composables/useLogs'
 
 // ==================== Composable ====================
+const { t } = useI18n()
 const logs = useLogs()
 
 // ==================== Local State ====================
@@ -240,9 +242,9 @@ function formatTimestamp(iso: string): string {
   // relative
   const diff = Date.now() - d.getTime()
   const sec = Math.floor(diff / 1000)
-  if (sec < 60) return `${sec}s ago`
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
-  return `${Math.floor(sec / 3600)}h ago`
+  if (sec < 60) return t('logs.time.secondsAgo', { n: sec })
+  if (sec < 3600) return t('logs.time.minutesAgo', { n: Math.floor(sec / 60) })
+  return t('logs.time.hoursAgo', { n: Math.floor(sec / 3600) })
 }
 
 function getLevelTagType(level: LogLevel): 'info' | 'warning' | 'danger' | undefined {
@@ -290,9 +292,9 @@ function togglePause() {
 
 function confirmClear() {
   ElMessageBox.confirm(
-    'Clear visible logs? This only affects the display, not stored logs.',
-    'Clear Logs',
-    { confirmButtonText: 'Clear', cancelButtonText: 'Cancel', type: 'warning' }
+    t('logs.clearConfirm'),
+    t('logs.clearTitle'),
+    { confirmButtonText: t('logs.clear'), cancelButtonText: t('common.cancel'), type: 'warning' }
   ).then(() => {
     logs.clearLogs()
     isCleared.value = true
@@ -303,9 +305,9 @@ function confirmClear() {
 async function downloadLogs() {
   try {
     await ElMessageBox.confirm(
-      'The downloaded log file may contain sensitive information such as API keys or tokens. Please handle it carefully and store it securely.',
-      'Sensitive Content Warning',
-      { confirmButtonText: 'Download', cancelButtonText: 'Cancel', type: 'warning' }
+      t('logs.downloadWarning'),
+      t('logs.sensitiveTitle'),
+      { confirmButtonText: t('logs.download'), cancelButtonText: t('common.cancel'), type: 'warning' }
     )
   } catch {
     return
@@ -315,8 +317,8 @@ async function downloadLogs() {
   try {
     await logs.download()
     ElNotification({
-      title: 'Download Started',
-      message: 'Your log file is being downloaded.',
+      title: t('logs.downloadStartedTitle'),
+      message: t('logs.downloadStartedMessage'),
       type: 'success',
       duration: 3000,
     })
@@ -357,7 +359,7 @@ watch(() => logs.error, (err) => {
   if (err) {
     ElNotification({
       type: 'error',
-      title: 'Log Stream Error',
+      title: t('logs.streamErrorTitle'),
       message: err,
       duration: 5000,
     })

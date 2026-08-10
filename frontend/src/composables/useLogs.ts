@@ -1,5 +1,6 @@
 import { ref, computed, onMounted, onUnmounted, reactive } from 'vue';
 import { createLogStream, downloadLogs, fetchLogHistory } from '../services/logs';
+import { i18n } from '../i18n';
 import type { LogEntry } from '../types/logs';
 import type { LogLevel } from '../types/logs';
 
@@ -50,7 +51,7 @@ export function useLogs() {
     } catch (e) {
       // Backfill is best-effort; the live stream still starts below.
       console.warn('Failed to load log history:', e);
-      error.value = 'Failed to load log history';
+      error.value = i18n.global.t('errors.failedToLoadLogHistory');
     } finally {
       loading.value = false;
     }
@@ -63,7 +64,7 @@ export function useLogs() {
         }
       },
       (err) => {
-        error.value = 'SSE connection error';
+        error.value = i18n.global.t('errors.sseConnectionError');
         console.error('SSE error:', err);
       }
     );
@@ -104,7 +105,7 @@ export function useLogs() {
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Download failed';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.downloadFailed');
     }
   }
 

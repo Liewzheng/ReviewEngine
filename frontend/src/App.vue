@@ -16,13 +16,20 @@ import {
 } from '@element-plus/icons-vue'
 import { setApiToken, clearApiToken, getApiToken } from './services/api'
 import UpgradeDialog from './components/Upgrade/UpgradeDialog.vue'
+import LanguageSwitcher from './components/common/LanguageSwitcher.vue'
 import { useUpgrade } from './composables/useUpgrade'
+import { useLocale } from './composables/useLocale'
+import { useI18n } from 'vue-i18n'
 
+const { t } = useI18n()
 const route = useRoute()
 const isDark = ref(true)
 const sidebarCollapsed = ref(false)
 const tokenDialogVisible = ref(false)
 const tokenInput = ref('')
+
+// Locale infra: Element Plus messages follow the app locale via el-config-provider.
+const { elementLocale } = useLocale()
 
 // Upgrade feature: module-scope singleton shared with UpgradeDialog.
 const { dialogVisible, check, open, fetchCheck } = useUpgrade()
@@ -78,29 +85,30 @@ const toggleSidebar = () => {
 }
 
 const navItems = [
-  { path: '/dashboard', name: 'Dashboard', icon: Monitor },
-  { path: '/history', name: 'History', icon: Document },
-  { path: '/config', name: 'Config', icon: Setting },
-  { path: '/queue', name: 'Queue', icon: RefreshRight },
-  { path: '/llm', name: 'LLM', icon: Cpu },
-  { path: '/logs', name: 'Logs', icon: Tickets },
-  { path: '/experts', name: 'Experts', icon: User },
+  { path: '/dashboard', nameKey: 'nav.dashboard', icon: Monitor },
+  { path: '/history', nameKey: 'nav.history', icon: Document },
+  { path: '/config', nameKey: 'nav.config', icon: Setting },
+  { path: '/queue', nameKey: 'nav.queue', icon: RefreshRight },
+  { path: '/llm', nameKey: 'nav.llm', icon: Cpu },
+  { path: '/logs', nameKey: 'nav.logs', icon: Tickets },
+  { path: '/experts', nameKey: 'nav.experts', icon: User },
 ]
 
 const activeRoute = computed(() => route.path)
 const pageTitle = computed(() => {
   const item = navItems.find(i => i.path === route.path)
-  return item?.name || 'Review Engine'
+  return item ? t(item.nameKey) : t('app.name')
 })
 </script>
 
 <template>
-  <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+  <el-config-provider :locale="elementLocale">
+    <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-brand">
         <span class="brand-icon">🔍</span>
-        <span class="brand-text" v-show="!sidebarCollapsed">Review Engine</span>
+        <span class="brand-text" v-show="!sidebarCollapsed">{{ $t('app.name') }}</span>
       </div>
       <nav class="sidebar-nav">
         <router-link
@@ -111,7 +119,7 @@ const pageTitle = computed(() => {
           :class="{ active: activeRoute === item.path }"
         >
           <el-icon class="nav-icon"><component :is="item.icon" /></el-icon>
-          <span class="nav-text" v-show="!sidebarCollapsed">{{ item.name }}</span>
+          <span class="nav-text" v-show="!sidebarCollapsed">{{ $t(item.nameKey) }}</span>
         </router-link>
       </nav>
       <div class="sidebar-footer">
@@ -119,7 +127,7 @@ const pageTitle = computed(() => {
           v-if="check?.currentVersion"
           class="version-chip"
           :class="{ 'has-update': check?.updateAvailable }"
-          :title="check?.updateAvailable ? 'A new version is available' : 'Review Engine ' + check?.currentVersion"
+          :title="check?.updateAvailable ? $t('header.updateAvailableTitle') : $t('app.name') + ' ' + check?.currentVersion"
         >
           <span class="version-dot"></span>
           <span class="version-text" v-show="!sidebarCollapsed">v{{ check?.currentVersion }}</span>
@@ -141,15 +149,16 @@ const pageTitle = computed(() => {
         <div class="header-actions">
           <el-button text size="small" @click="openTokenDialog">
             <el-icon><Key /></el-icon>
-            <span>API Token</span>
+            <span>{{ $t('header.apiToken') }}</span>
           </el-button>
+          <LanguageSwitcher />
           <template v-if="check?.updateAvailable">
-            <span class="update-tag">Update available</span>
-            <el-button type="primary" size="small" @click="open">Upgrade</el-button>
+            <span class="update-tag">{{ $t('header.updateAvailable') }}</span>
+            <el-button type="primary" size="small" @click="open">{{ $t('header.upgrade') }}</el-button>
           </template>
           <span class="status-badge healthy">
             <span class="status-dot"></span>
-            Healthy
+            {{ $t('header.healthy') }}
           </span>
         </div>
       </header>
@@ -164,7 +173,7 @@ const pageTitle = computed(() => {
   <!-- API Token prompt -->
   <el-dialog
     v-model="tokenDialogVisible"
-    title="API Token Required"
+    :title="$t('token.title')"
     width="420px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
@@ -172,27 +181,28 @@ const pageTitle = computed(() => {
     align-center
   >
     <p class="token-hint">
-      Enter the <code>REVIEW_API_TOKEN</code> configured for this ReviewEngine
-      instance. The token is stored in your browser's localStorage under
-      <code>review_engine_api_token</code> and is sent as a Bearer token on API
-      requests.
+      {{ $t('token.hintIntro') }} <code>REVIEW_API_TOKEN</code>
+      {{ $t('token.hintInstance') }}
+      <code>review_engine_api_token</code>
+      {{ $t('token.hintRequest') }}
     </p>
     <el-input
       v-model="tokenInput"
       type="password"
-      placeholder="Paste your API token"
+      :placeholder="$t('token.placeholder')"
       show-password
       clearable
       @keyup.enter="saveApiToken"
     />
     <template #footer>
-      <el-button @click="tokenDialogVisible = false">Cancel</el-button>
-      <el-button type="primary" @click="saveApiToken">Save</el-button>
+      <el-button @click="tokenDialogVisible = false">{{ $t('common.cancel') }}</el-button>
+      <el-button type="primary" @click="saveApiToken">{{ $t('common.save') }}</el-button>
     </template>
   </el-dialog>
 
   <!-- Upgrade dialog -->
   <UpgradeDialog v-model="dialogVisible" />
+  </el-config-provider>
 </template>
 
 <style scoped>

@@ -1,5 +1,6 @@
 import type { LogEntry } from '../types/logs';
 import { getApiToken } from './api';
+import { i18n } from '../i18n';
 
 export type { LogEntry };
 
@@ -34,7 +35,7 @@ export async function downloadLogs(): Promise<Blob> {
   }
 
   const resp = await fetch('/api/v1/logs/download', { headers });
-  if (!resp.ok) throw new Error('Download failed');
+  if (!resp.ok) throw new Error(i18n.global.t('errors.downloadFailed'));
   return resp.blob();
 }
 
@@ -51,7 +52,7 @@ export async function fetchLogHistory(): Promise<LogEntry[]> {
   }
 
   const resp = await fetch('/api/v1/logs/download', { headers });
-  if (!resp.ok) throw new Error('Failed to load log history');
+  if (!resp.ok) throw new Error(i18n.global.t('errors.failedToLoadLogHistory'));
   const text = await resp.text();
 
   const entries: LogEntry[] = [];

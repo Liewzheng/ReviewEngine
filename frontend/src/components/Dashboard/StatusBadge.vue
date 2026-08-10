@@ -7,6 +7,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { HealthState, ReviewStatus } from '../../types/dashboard'
 
 interface Props {
@@ -20,19 +21,24 @@ const props = withDefaults(defineProps<Props>(), {
   size: 'medium',
 })
 
-const statusTextMap: Record<string, string> = {
-  success: 'Operational',
-  warning: 'Degraded',
-  error: 'Error',
-  offline: 'Offline',
-  running: 'In Progress',
-  queued: 'Queued',
-  completed: 'Completed',
-  failed: 'Failed',
-  cancelled: 'Cancelled',
+const { t } = useI18n()
+
+const statusTextKeys: Record<string, string> = {
+  success: 'common.status.operational',
+  warning: 'common.status.degraded',
+  error: 'common.status.error',
+  offline: 'common.status.offline',
+  running: 'common.status.inProgress',
+  queued: 'common.status.queued',
+  completed: 'common.status.completed',
+  failed: 'common.status.failed',
+  cancelled: 'common.status.cancelled',
 }
 
-const displayText = computed(() => statusTextMap[props.status] || props.status)
+const displayText = computed(() => {
+  const key = statusTextKeys[props.status]
+  return key ? t(key) : props.status
+})
 </script>
 
 <style scoped>

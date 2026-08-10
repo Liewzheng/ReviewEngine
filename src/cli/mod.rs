@@ -152,6 +152,19 @@ enum Commands {
         /// GitLab webhook signing secret (HMAC-SHA256 body signature, GitLab 19.0+)
         #[arg(long)]
         gitlab_webhook_signing_secret: Option<String>,
+
+        /// PEM certificate chain path for TLS (HTTPS); requires --tls-key.
+        /// When set, the server also listens on --tls-port with HTTPS.
+        #[arg(long, requires = "tls_key")]
+        tls_cert: Option<String>,
+
+        /// PEM private key path for TLS (HTTPS); requires --tls-cert.
+        #[arg(long, requires = "tls_cert")]
+        tls_key: Option<String>,
+
+        /// TLS (HTTPS) listen port; used only when --tls-cert/--tls-key are set
+        #[arg(long, default_value = "8443")]
+        tls_port: u16,
     },
 
     /// Generate a random API token
@@ -595,7 +608,25 @@ pub async fn run() -> Result<()> {
             gitlab_token,
             gitlab_webhook_secret,
             gitlab_webhook_signing_secret,
+            tls_cert,
+            tls_key,
+            tls_port,
         } => {
+            // clap's `requires` already enforces that --tls-cert and --tls-key
+            // come as a pair; the fall-through arm is defense-in-depth in case
+            // the constraint ever changes, so a half-configured TLS request
+            // fails loudly instead of silently serving plain HTTP.
+            let tls = match (tls_cert, tls_key) {
+                (Some(cert), Some(key)) => Some(review_engine::server::TlsConfig::new(
+                    std::path::PathBuf::from(cert),
+                    std::path::PathBuf::from(key),
+                    tls_port,
+                )),
+                (None, None) => None,
+                _ => {
+                    return Err(anyhow::anyhow!("--tls-cert and --tls-key must be provided together"));
+                }
+            };
             // Resolve API token: CLI arg > env var
             let api_token = api_token.or_else(|| std::env::var("REVIEW_API_TOKEN").ok());
             let auth = Arc::new(review_engine::server::auth::AuthConfig::new(api_token, &bind)?);
@@ -698,7 +729,7 @@ pub async fn run() -> Result<()> {
             // otherwise block forever waiting for the config-file watcher's
             // spawn_blocking task (parked on a never-ready `mpsc::recv`),
             // turning a clear bind error into a silent hang with no output.
-            if let Err(e) = review_engine::server::serve(port, &bind, state, auth, handlers).await {
+            if let Err(e) = review_engine::server::serve(port, &bind, tls, state, auth, handlers).await {
                 eprintln!("error: {e:#}");
                 std::process::exit(1);
             }

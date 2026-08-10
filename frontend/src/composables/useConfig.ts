@@ -1,5 +1,6 @@
 import { ref } from 'vue';
 import { getConfig, updateConfig, testConnection, fetchModels as fetchModelsApi } from '../services/config';
+import { i18n } from '../i18n';
 import type { AppConfig } from '../types/config';
 import type { TestResult } from '../types/llm';
 
@@ -19,7 +20,7 @@ export function useConfig() {
     try {
       config.value = await getConfig();
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       config.value = null;
     } finally {
       loading.value = false;
@@ -34,7 +35,7 @@ export function useConfig() {
       config.value = updated;
       return result;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     } finally {
       saving.value = false;
@@ -48,7 +49,7 @@ export function useConfig() {
     try {
       testResult.value = await testConnection(data);
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       testResult.value = { success: false, error: error.value ?? undefined, timestamp: new Date().toISOString() };
     } finally {
       testing.value = false;
@@ -66,7 +67,7 @@ export function useConfig() {
       }
       return response.models || [];
     } catch (e) {
-      modelsError.value = e instanceof Error ? e.message : 'Failed to fetch models';
+      modelsError.value = e instanceof Error ? e.message : i18n.global.t('errors.failedToFetchModels');
       return [];
     } finally {
       modelsLoading.value = false;

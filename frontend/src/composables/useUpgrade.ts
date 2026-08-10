@@ -1,5 +1,6 @@
 import { ref } from 'vue';
 import { checkUpgrade, startUpgrade, getUpgradeStatus } from '../services/upgrade';
+import { i18n } from '../i18n';
 import type { UpgradeCheckResult, UpgradeStatus } from '../types/upgrade';
 
 // Module-scope singleton: App.vue and UpgradeDialog.vue must share the same
@@ -26,7 +27,7 @@ async function fetchCheck() {
   try {
     check.value = await checkUpgrade();
   } catch (e) {
-    error.value = e instanceof Error ? e.message : 'Unknown error';
+    error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
   } finally {
     checking.value = false;
   }
@@ -36,7 +37,7 @@ async function fetchStatus(silent = false) {
   try {
     status.value = await getUpgradeStatus();
   } catch (e) {
-    if (!silent) error.value = e instanceof Error ? e.message : 'Unknown error';
+    if (!silent) error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
   }
 }
 
@@ -72,7 +73,7 @@ async function start() {
     if (resp.status === 'started') {
       status.value = {
         state: 'checking',
-        message: '正在检查最新版本',
+        message: i18n.global.t('upgrade.checkingLatest'),
         currentVersion: check.value?.currentVersion ?? null,
         targetVersion: resp.targetVersion,
       };
@@ -85,12 +86,12 @@ async function start() {
   } catch (e) {
     const statusCode = (e as { status?: number } | null)?.status;
     if (statusCode === 409) {
-      error.value = '升级任务已在进行中，请稍后再试';
+      error.value = i18n.global.t('upgrade.inProgressError');
       await fetchStatus(true);
       const st = status.value?.state;
       if (st && RUNNING_STATES.includes(st)) startPolling();
     } else {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
     }
   } finally {
     starting.value = false;

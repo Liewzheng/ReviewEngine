@@ -12,10 +12,13 @@ import {
   InfoFilled,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import type { QueueStats, QueueTask } from '../types/queue'
 import StatsCard from '../components/QueueMonitor/StatsCard.vue'
 import TaskCard from '../components/QueueMonitor/TaskCard.vue'
 import { useQueue } from '../composables/useQueue'
+
+const { t } = useI18n()
 
 function notifyError(e: unknown, fallback: string): void {
   ElNotification({
@@ -93,19 +96,19 @@ const togglePause = async () => {
       await queue.resume()
       ElNotification({
         type: 'success',
-        message: 'Queue resumed',
+        message: t('queue.resumed'),
         duration: 3000,
       })
     } else {
       await queue.pause()
       ElNotification({
         type: 'warning',
-        message: 'Queue paused',
+        message: t('queue.paused'),
         duration: 3000,
       })
     }
   } catch (e) {
-    notifyError(e, 'Failed to toggle queue')
+    notifyError(e, t('queue.errors.toggle'))
   }
 }
 
@@ -134,11 +137,11 @@ async function commitMaxConcurrent() {
     await queue.updateMaxConcurrent(value)
     ElNotification({
       type: 'success',
-      message: `Max concurrent set to ${value}`,
+      message: t('queue.maxConcurrentSet', { n: value }),
       duration: 3000,
     })
   } catch (e) {
-    notifyError(e, 'Failed to update max concurrent')
+    notifyError(e, t('queue.errors.maxConcurrent'))
   }
 }
 
@@ -154,20 +157,20 @@ function onMaxConcurrentModelUpdate() {
 // --- Cancel all failed ---
 const handleCancelAllFailed = async () => {
   if (failedTasks.value.length === 0) {
-    ElNotification({ type: 'info', message: 'No failed tasks to cancel', duration: 3000 })
+    ElNotification({ type: 'info', message: t('queue.noFailedToCancel'), duration: 3000 })
     return
   }
   try {
     await ElMessageBox.confirm(
-      `Cancel all ${failedTasks.value.length} failed tasks?`,
-      'Confirm',
+      t('queue.cancelAllConfirm', { count: failedTasks.value.length }),
+      t('queue.confirmTitle'),
       {
-        confirmButtonText: 'Cancel All',
-        cancelButtonText: 'Keep',
+        confirmButtonText: t('queue.cancelAllBtn'),
+        cancelButtonText: t('common.keep'),
         type: 'warning',
       }
     )
-    const results = await Promise.allSettled(failedTasks.value.map(t => queue.cancel(t.id)))
+    const results = await Promise.allSettled(failedTasks.value.map((task) => queue.cancel(task.id)))
     const succeeded: string[] = []
     const failedIds: string[] = []
     results.forEach((result, index) => {
@@ -182,26 +185,26 @@ const handleCancelAllFailed = async () => {
     const type = failedIds.length === 0 ? 'success' : succeeded.length === 0 ? 'error' : 'warning'
     ElNotification({
       type,
-      message: `Cancelled ${succeeded.length} tasks, ${failedIds.length} failed`,
+      message: t('queue.cancelAllResult', { succeeded: succeeded.length, failed: failedIds.length }),
       duration: 5000,
     })
   } catch (e) {
     if (e === 'cancel' || e === 'close') return
-    notifyError(e, 'Failed to cancel all failed tasks')
+    notifyError(e, t('queue.errors.cancelAllFailed'))
   }
 }
 
 // --- Task actions ---
 const handleCancel = async (taskId: string) => {
-  const task = queue.items.value.find((t: QueueTask) => t.id === taskId)
+  const task = queue.items.value.find((item: QueueTask) => item.id === taskId)
   if (!task) return
   try {
     await ElMessageBox.confirm(
-      `Cancel review for "${task.mrTitle}"? This action cannot be undone.`,
-      'Confirm Cancel',
+      t('queue.cancelConfirm', { title: task.mrTitle }),
+      t('queue.cancelTitle'),
       {
-        confirmButtonText: 'Cancel Review',
-        cancelButtonText: 'Keep',
+        confirmButtonText: t('queue.cancelReviewBtn'),
+        cancelButtonText: t('common.keep'),
         type: 'warning',
       }
     )
@@ -210,12 +213,12 @@ const handleCancel = async (taskId: string) => {
     await queue.fetchStats()
     ElNotification({
       type: 'success',
-      message: 'Task cancelled',
+      message: t('queue.taskCancelled'),
       duration: 3000,
     })
   } catch (e) {
     if (e === 'cancel' || e === 'close') return
-    notifyError(e, 'Failed to cancel task')
+    notifyError(e, t('queue.errors.cancel'))
   }
 }
 
@@ -224,18 +227,18 @@ const handleRetry = async (taskId: string) => {
     await queue.retry(taskId)
     ElNotification({
       type: 'success',
-      message: 'Task queued for retry',
+      message: t('queue.taskQueuedForRetry'),
       duration: 3000,
     })
   } catch (e) {
-    notifyError(e, 'Failed to retry task')
+    notifyError(e, t('queue.errors.retry'))
   }
 }
 
 const handleViewLogs = (taskId: string) => {
   ElNotification({
     type: 'info',
-    message: `View logs for task ${taskId}`,
+    message: t('queue.viewLogs', { id: taskId }),
     duration: 3000,
   })
 }
@@ -268,8 +271,8 @@ onUnmounted(() => {
     <!-- Page Header -->
     <div class="page-header">
       <div class="page-header-left">
-        <h2 class="page-title">Queue Monitor</h2>
-        <p class="page-subtitle">Real-time review task queue</p>
+        <h2 class="page-title">{{ $t('queue.title') }}</h2>
+        <p class="page-subtitle">{{ $t('queue.subtitle') }}</p>
       </div>
       <div class="page-header-right">
         <el-button
@@ -279,27 +282,27 @@ onUnmounted(() => {
           <el-icon class="btn-icon">
             <component :is="isPaused ? VideoPlay : VideoPause" />
           </el-icon>
-          <span>{{ isPaused ? 'Resume Queue' : 'Pause Queue' }}</span>
+          <span>{{ isPaused ? $t('queue.resumeQueue') : $t('queue.pauseQueue') }}</span>
         </el-button>
-        <span class="toolbar-label" title="Max Concurrent">Max Concurrent</span>
+        <span class="toolbar-label" :title="$t('queue.maxConcurrentTitle')">{{ $t('queue.maxConcurrent') }}</span>
         <el-input-number
           v-model="maxConcurrentInput"
           :min="1"
           :max="64"
           size="default"
           style="width: 120px"
-          aria-label="Max Concurrent"
-          title="Set the maximum number of concurrent tasks"
+          :aria-label="$t('queue.maxConcurrent')"
+          :title="$t('queue.maxConcurrentTitle')"
           @change="handleMaxConcurrentChange"
           @update:model-value="onMaxConcurrentModelUpdate"
         />
         <el-button type="danger" @click="handleCancelAllFailed">
           <el-icon class="btn-icon"><Delete /></el-icon>
-          <span>Cancel All Failed</span>
+          <span>{{ $t('queue.cancelAllFailed') }}</span>
         </el-button>
         <el-button @click="loadQueueData">
           <el-icon class="btn-icon"><Refresh /></el-icon>
-          <span>Refresh</span>
+          <span>{{ $t('common.refresh') }}</span>
         </el-button>
       </div>
     </div>
@@ -323,28 +326,28 @@ onUnmounted(() => {
       <!-- Stats Row -->
       <div class="stats-row">
         <StatsCard
-          label="Active Tasks"
+          :label="$t('queue.stats.active')"
           :value="stats.active"
           :icon="Loading"
           color="var(--brand)"
           :max="stats.maxConcurrent"
         />
         <StatsCard
-          label="Queued Tasks"
+          :label="$t('queue.stats.queued')"
           :value="stats.queued"
           :icon="Collection"
           color="var(--info)"
           :max="stats.queueCapacity"
         />
         <StatsCard
-          label="Failed Tasks"
+          :label="$t('queue.stats.failed')"
           :value="stats.failed"
           :icon="Warning"
           color="var(--error)"
           :max="Math.max(stats.totalLast24h, 1)"
         />
         <StatsCard
-          label="Queue Depth"
+          :label="$t('queue.stats.depth')"
           :value="stats.totalDepth"
           :icon="DataLine"
           color="var(--warning)"
@@ -359,7 +362,7 @@ onUnmounted(() => {
       >
         <div class="section-header">
           <div class="section-title">
-            <span>Active Tasks</span>
+            <span>{{ $t('queue.sections.active') }}</span>
             <el-badge :value="activeTasks.length" type="primary" />
           </div>
         </div>
@@ -384,7 +387,7 @@ onUnmounted(() => {
       >
         <div class="section-header">
           <div class="section-title">
-            <span>Queued Tasks</span>
+            <span>{{ $t('queue.sections.queued') }}</span>
             <el-badge :value="queuedTasks.length" type="info" />
           </div>
         </div>
@@ -409,7 +412,7 @@ onUnmounted(() => {
       >
         <div class="section-header">
           <div class="section-title">
-            <span>Failed Tasks</span>
+            <span>{{ $t('queue.sections.failed') }}</span>
             <el-badge :value="failedTasks.length" type="danger" />
           </div>
         </div>
@@ -434,7 +437,7 @@ onUnmounted(() => {
       >
         <div class="section-header">
           <div class="section-title">
-            <span>Cancelled Tasks</span>
+            <span>{{ $t('queue.sections.cancelled') }}</span>
             <el-badge :value="cancelledTasks.length" type="info" />
           </div>
         </div>
@@ -454,11 +457,11 @@ onUnmounted(() => {
 
       <!-- Global Empty State -->
       <div v-if="allTasks.length === 0" class="global-empty">
-        <el-empty description="No tasks in queue">
+        <el-empty :description="$t('queue.empty')">
           <template #image>
             <el-icon :size="64" color="var(--text-secondary)"><InfoFilled /></el-icon>
           </template>
-          <p class="empty-text">The queue is currently empty. New tasks will appear here.</p>
+          <p class="empty-text">{{ $t('queue.emptyHint') }}</p>
         </el-empty>
       </div>
     </template>

@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue';
 import { getProviders, testProvider } from '../services/llm';
+import { i18n } from '../i18n';
 import type { LlmProvider } from '../types/llm';
 
 export function useLlmStatus() {
@@ -15,7 +16,7 @@ export function useLlmStatus() {
       const response = await getProviders();
       providers.value = response.items;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       providers.value = [];
     } finally {
       loading.value = false;
@@ -38,7 +39,7 @@ export function useLlmStatus() {
       }
       return result;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     } finally {
       testingId.value = null;

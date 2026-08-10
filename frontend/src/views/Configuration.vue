@@ -3,32 +3,32 @@
     <!-- Page Header -->
     <div class="page-header">
       <div class="header-left">
-        <h2 class="page-title">Configuration</h2>
+        <h2 class="page-title">{{ $t('config.title') }}</h2>
         <p class="page-subtitle">
-          {{ isEditing ? 'Edit mode — remember to save your changes' : 'Manage Review-Engine settings' }}
+          {{ isEditing ? $t('config.subtitle.edit') : $t('config.subtitle.view') }}
         </p>
       </div>
       <div class="header-actions">
         <template v-if="!isEditing">
           <el-button type="primary" @click="enterEditMode">
             <el-icon><Edit /></el-icon>
-            <span>Edit Configuration</span>
+            <span>{{ $t('config.editBtn') }}</span>
           </el-button>
           <el-button @click="refreshConfig">
             <el-icon><Refresh /></el-icon>
-            <span>Refresh</span>
+            <span>{{ $t('common.refresh') }}</span>
           </el-button>
         </template>
         <template v-else>
           <el-badge :is-dot="dirty" type="danger">
             <el-button type="primary" :loading="saving" :disabled="!dirty || (!formValid && !providersDirty)" @click="saveChanges">
               <el-icon><Check /></el-icon>
-              <span>Save Changes</span>
+              <span>{{ $t('common.saveChanges') }}</span>
             </el-button>
           </el-badge>
           <el-button @click="cancelEdit">
             <el-icon><Close /></el-icon>
-            <span>Cancel</span>
+            <span>{{ $t('common.cancel') }}</span>
           </el-button>
         </template>
       </div>
@@ -42,7 +42,7 @@
     </div>
 
     <!-- Empty State -->
-    <el-empty v-else-if="loadError" description="Failed to load configuration" />
+    <el-empty v-else-if="loadError" :description="$t('config.loadFailed')" />
 
     <!-- Form -->
     <el-form
@@ -60,80 +60,80 @@
         <template #header>
           <div class="card-header">
             <el-icon><Link /></el-icon>
-            <span>GitLab Integration</span>
+            <span>{{ $t('config.gitlab.title') }}</span>
           </div>
         </template>
         <div class="card-body">
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
-              <el-form-item label="GitLab URL" prop="gitlab.url">
-                <el-input v-model="config.gitlab.url" :disabled="!isEditing" placeholder="https://gitlab.example.com (leave empty to keep)" />
+              <el-form-item :label="$t('config.gitlab.url')" prop="gitlab.url">
+                <el-input v-model="config.gitlab.url" :disabled="!isEditing" :placeholder="$t('config.gitlab.urlPlaceholder')" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="API Token" prop="gitlab.apiToken">
+              <el-form-item :label="$t('header.apiToken')" prop="gitlab.apiToken">
                 <div v-if="!isEditing" class="readonly-field">
                   <template v-if="!config.gitlab.apiToken">
-                    <span class="empty-text">(not set)</span>
+                    <span class="empty-text">{{ $t('config.notSet') }}</span>
                   </template>
                   <template v-else-if="!revealed.apiToken">
                     <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" aria-label="Reveal API Token" @click.stop="revealField('apiToken')">
+                    <el-button size="small" :aria-label="$t('config.gitlab.revealApiTokenAria')" @click.stop="revealField('apiToken')">
                       <el-icon><View /></el-icon>
                     </el-button>
                   </template>
                   <template v-else>
                     <span class="revealed-value">{{ config.gitlab.apiToken }}</span>
-                    <span class="countdown">Visible for {{ revealCountdown.apiToken }}s...</span>
+                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.apiToken }) }}</span>
                   </template>
                 </div>
-                <el-input v-else v-model="config.gitlab.apiToken" :disabled="!isEditing" show-password placeholder="glpat-... (leave empty to keep)" />
+                <el-input v-else v-model="config.gitlab.apiToken" :disabled="!isEditing" show-password :placeholder="$t('config.gitlab.apiTokenPlaceholder')" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Webhook Secret" prop="gitlab.webhookSecret">
+              <el-form-item :label="$t('config.gitlab.webhookSecret')" prop="gitlab.webhookSecret">
                 <div v-if="!isEditing" class="readonly-field">
                   <template v-if="!config.gitlab.webhookSecret">
-                    <span class="empty-text">(not set)</span>
+                    <span class="empty-text">{{ $t('config.notSet') }}</span>
                   </template>
                   <template v-else-if="!revealed.webhookSecret">
                     <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" aria-label="Reveal Webhook Secret" @click.stop="revealField('webhookSecret')">
+                    <el-button size="small" :aria-label="$t('config.gitlab.revealWebhookAria')" @click.stop="revealField('webhookSecret')">
                       <el-icon><View /></el-icon>
                     </el-button>
                   </template>
                   <template v-else>
                     <span class="revealed-value">{{ config.gitlab.webhookSecret }}</span>
-                    <span class="countdown">Visible for {{ revealCountdown.webhookSecret }}s...</span>
+                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.webhookSecret }) }}</span>
                   </template>
                 </div>
-                <el-input v-else v-model="config.gitlab.webhookSecret" :disabled="!isEditing" show-password placeholder="Optional" />
+                <el-input v-else v-model="config.gitlab.webhookSecret" :disabled="!isEditing" show-password :placeholder="$t('common.optional')" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Webhook Signing Secret" prop="gitlab.webhookSigningSecret">
+              <el-form-item :label="$t('config.gitlab.webhookSigningSecret')" prop="gitlab.webhookSigningSecret">
                 <div v-if="!isEditing" class="readonly-field">
                   <template v-if="!config.gitlab.webhookSigningSecret">
-                    <span class="empty-text">(not set)</span>
+                    <span class="empty-text">{{ $t('config.notSet') }}</span>
                   </template>
                   <template v-else-if="!revealed.webhookSigningSecret">
                     <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" aria-label="Reveal Webhook Signing Secret" @click.stop="revealField('webhookSigningSecret')">
+                    <el-button size="small" :aria-label="$t('config.gitlab.revealSigningAria')" @click.stop="revealField('webhookSigningSecret')">
                       <el-icon><View /></el-icon>
                     </el-button>
                   </template>
                   <template v-else>
                     <span class="revealed-value">{{ config.gitlab.webhookSigningSecret }}</span>
-                    <span class="countdown">Visible for {{ revealCountdown.webhookSigningSecret }}s...</span>
+                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.webhookSigningSecret }) }}</span>
                   </template>
                 </div>
-                <el-input v-else v-model="config.gitlab.webhookSigningSecret" :disabled="!isEditing" show-password placeholder="Paste the full GitLab 19.0+ signing token (starts with whsec_...)" />
-                <div v-if="isEditing" class="form-item-help">Include the whsec_ prefix when pasting the token.</div>
+                <el-input v-else v-model="config.gitlab.webhookSigningSecret" :disabled="!isEditing" show-password :placeholder="$t('config.gitlab.signingPlaceholder')" />
+                <div v-if="isEditing" class="form-item-help">{{ $t('config.gitlab.signingHelp') }}</div>
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Default Project" prop="gitlab.defaultProject">
-                <el-select v-model="config.gitlab.defaultProject" :disabled="!isEditing" placeholder="Select a project" clearable style="width: 100%">
+              <el-form-item :label="$t('config.gitlab.defaultProject')" prop="gitlab.defaultProject">
+                <el-select v-model="config.gitlab.defaultProject" :disabled="!isEditing" :placeholder="$t('config.gitlab.selectProjectPlaceholder')" clearable style="width: 100%">
                   <el-option label="my-group/my-project" value="my-group/my-project" />
                   <el-option label="acme/frontend" value="acme/frontend" />
                   <el-option label="acme/backend" value="acme/backend" />
@@ -142,12 +142,12 @@
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Merge Request Label" prop="gitlab.mrLabel">
+              <el-form-item :label="$t('config.gitlab.mrLabel')" prop="gitlab.mrLabel">
                 <el-input v-model="config.gitlab.mrLabel" :disabled="!isEditing" placeholder="needs-review" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Auto-review enabled" prop="gitlab.autoReview">
+              <el-form-item :label="$t('config.gitlab.autoReview')" prop="gitlab.autoReview">
                 <el-switch v-model="config.gitlab.autoReview" :disabled="!isEditing" />
               </el-form-item>
             </el-col>
@@ -160,28 +160,28 @@
         <template #header>
           <div class="card-header">
             <el-icon><Cpu /></el-icon>
-            <span>LLM Settings</span>
+            <span>{{ $t('config.llm.title') }}</span>
           </div>
         </template>
         <div class="card-body">
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
-              <el-form-item label="API Base URL" prop="llm.apiBaseUrl">
-                <el-input v-model="config.llm.apiBaseUrl" :disabled="!isEditing" placeholder="https://api.openai.com/v1 (leave empty to keep)" />
+              <el-form-item :label="$t('config.llm.apiBaseUrl')" prop="llm.apiBaseUrl">
+                <el-input v-model="config.llm.apiBaseUrl" :disabled="!isEditing" :placeholder="$t('config.llm.apiBasePlaceholder')" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="API Key" prop="llm.openaiApiKey">
-                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password placeholder="sk-... (leave empty to keep)" />
+              <el-form-item :label="$t('config.llm.apiKey')" prop="llm.openaiApiKey">
+                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password :placeholder="$t('config.llm.apiKeyPlaceholder')" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Default Model" prop="llm.defaultModel">
+              <el-form-item :label="$t('config.llm.defaultModel')" prop="llm.defaultModel">
                 <el-select
                   v-model="config.llm.defaultModel"
                   :disabled="!isEditing"
                   :loading="modelFetchLoading"
-                  placeholder="Select model"
+                  :placeholder="$t('config.llm.selectModelPlaceholder')"
                   style="width: 100%"
                 >
                   <el-option
@@ -195,12 +195,12 @@
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Max Output Tokens" prop="llm.maxTokens">
+              <el-form-item :label="$t('config.llm.maxTokens')" prop="llm.maxTokens">
                 <el-input-number v-model="config.llm.maxTokens" :disabled="!isEditing" :min="128" :max="8192" :step="128" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Temperature" prop="llm.temperature">
+              <el-form-item :label="$t('config.llm.temperature')" prop="llm.temperature">
                 <div class="slider-with-value">
                   <el-slider v-model="config.llm.temperature" :disabled="!isEditing" :min="0" :max="2" :step="0.1" />
                   <span class="slider-value">{{ config.llm.temperature }}</span>
@@ -208,12 +208,12 @@
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Timeout (seconds)" prop="llm.timeoutSeconds">
+              <el-form-item :label="$t('config.llm.timeout')" prop="llm.timeoutSeconds">
                 <el-input-number v-model="config.llm.timeoutSeconds" :disabled="!isEditing" :min="5" :max="300" :step="5" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Retry Attempts" prop="llm.retryAttempts">
+              <el-form-item :label="$t('config.llm.retryAttempts')" prop="llm.retryAttempts">
                 <el-input-number v-model="config.llm.retryAttempts" :disabled="!isEditing" :min="0" :max="5" style="width: 100%" />
               </el-form-item>
             </el-col>
@@ -221,10 +221,10 @@
           <div class="test-connection">
             <el-button :loading="testingConnection" @click="testConnection">
               <el-icon><Connection /></el-icon>
-              <span>Test Connection</span>
+              <span>{{ $t('common.testConnection') }}</span>
             </el-button>
             <el-tag v-if="testResult" :type="testResult.success ? 'success' : 'danger'" effect="dark">
-              {{ testResult.success ? `Connected — ${testResult.latencyMs}ms` : `Failed — ${testResult.error}` }}
+              {{ testResult.success ? $t('config.llm.connected', { n: testResult.latencyMs }) : $t('config.llm.testFailed', { error: testResult.error }) }}
             </el-tag>
           </div>
         </div>
@@ -235,18 +235,18 @@
         <template #header>
           <div class="card-header">
             <el-icon><Cpu /></el-icon>
-            <span>Additional LLM Providers</span>
+            <span>{{ $t('config.providers.title') }}</span>
             <div v-if="isEditing" style="margin-left: auto;">
               <el-button size="small" type="primary" @click="openAddProviderDialog">
                 <el-icon><Plus /></el-icon>
-                Add Provider
+                {{ $t('config.providers.addBtn') }}
               </el-button>
             </div>
           </div>
         </template>
         <div class="card-body">
           <el-skeleton v-if="providersLoading" :rows="2" animated />
-          <el-empty v-else-if="additionalProviders.length === 0" description="No additional providers configured" :image-size="80" />
+          <el-empty v-else-if="additionalProviders.length === 0" :description="$t('config.providers.empty')" :image-size="80" />
           <div v-else class="providers-list">
             <div
               v-for="(provider, index) in additionalProviders"
@@ -263,7 +263,7 @@
                 <div class="provider-item-actions" @click.stop>
                   <template v-if="isEditing">
                     <el-button size="small" text @click.stop="toggleProvider(index)">
-                      {{ provider._expanded ? 'Collapse' : 'Edit' }}
+                      {{ provider._expanded ? $t('config.providers.collapse') : $t('common.edit') }}
                     </el-button>
                     <el-button size="small" text type="danger" @click.stop="confirmDeleteProvider(index)">
                       <el-icon><Delete /></el-icon>
@@ -279,7 +279,7 @@
                   <el-form :model="provider" label-position="top" size="small">
                     <el-row :gutter="16">
                       <el-col :xs="24" :sm="12">
-                        <el-form-item label="Provider Type">
+                        <el-form-item :label="$t('config.providers.providerType')">
                           <el-select v-model="provider.provider" style="width: 100%">
                             <el-option
                               v-for="pt in PROVIDER_TYPES"
@@ -291,37 +291,37 @@
                         </el-form-item>
                       </el-col>
                       <el-col :xs="24" :sm="12">
-                        <el-form-item label="Default Model">
-                          <el-input v-model="provider.defaultModel" placeholder="gpt-4o, claude-3, ..." />
+                        <el-form-item :label="$t('config.providers.defaultModel')">
+                          <el-input v-model="provider.defaultModel" :placeholder="$t('config.providers.modelPlaceholder')" />
                         </el-form-item>
                       </el-col>
                       <el-col :span="24">
-                        <el-form-item label="API Base URL">
-                          <el-input v-model="provider.apiBaseUrl" placeholder="https://api.openai.com/v1" />
+                        <el-form-item :label="$t('config.providers.apiBaseUrl')">
+                          <el-input v-model="provider.apiBaseUrl" :placeholder="$t('config.providers.apiBasePlaceholder')" />
                         </el-form-item>
                       </el-col>
                       <el-col :span="24">
-                        <el-form-item label="API Key">
-                          <el-input v-model="provider.apiKey" show-password placeholder="sk-..." />
+                        <el-form-item :label="$t('config.providers.apiKey')">
+                          <el-input v-model="provider.apiKey" show-password :placeholder="$t('config.providers.apiKeyPlaceholder')" />
                         </el-form-item>
                       </el-col>
                       <el-col :xs="12" :sm="6">
-                        <el-form-item label="Max Tokens">
+                        <el-form-item :label="$t('config.providers.maxTokens')">
                           <el-input-number v-model="provider.maxTokens" :min="128" :max="8192" :step="128" style="width: 100%" />
                         </el-form-item>
                       </el-col>
                       <el-col :xs="12" :sm="6">
-                        <el-form-item label="Temperature">
+                        <el-form-item :label="$t('config.providers.temperature')">
                           <el-slider v-model="provider.temperature" :min="0" :max="2" :step="0.1" />
                         </el-form-item>
                       </el-col>
                       <el-col :xs="12" :sm="6">
-                        <el-form-item label="Timeout (s)">
+                        <el-form-item :label="$t('config.providers.timeoutShort')">
                           <el-input-number v-model="provider.timeout" :min="5" :max="300" :step="5" style="width: 100%" />
                         </el-form-item>
                       </el-col>
                       <el-col :xs="12" :sm="6">
-                        <el-form-item label="Retry">
+                        <el-form-item :label="$t('config.providers.retry')">
                           <el-input-number v-model="provider.retry" :min="0" :max="5" style="width: 100%" />
                         </el-form-item>
                       </el-col>
@@ -330,18 +330,18 @@
                 </div>
                 <div v-else class="provider-item-body readonly-body">
                   <el-descriptions :column="2" size="small" border>
-                    <el-descriptions-item label="Provider">{{ provider.provider }}</el-descriptions-item>
-                    <el-descriptions-item label="Model">{{ provider.defaultModel || '—' }}</el-descriptions-item>
-                    <el-descriptions-item label="API Base URL" :span="2">{{ provider.apiBaseUrl }}</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.maxTokens != null" label="Max Tokens">{{ provider.maxTokens }}</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.temperature != null" label="Temperature">{{ formatTemperature(provider.temperature) }}</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.timeout != null" label="Timeout">{{ provider.timeout }}s</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.retry != null" label="Retry">{{ provider.retry }}</el-descriptions-item>
+                    <el-descriptions-item :label="$t('config.providers.providerType')">{{ provider.provider }}</el-descriptions-item>
+                    <el-descriptions-item :label="$t('config.providers.defaultModel')">{{ provider.defaultModel || '—' }}</el-descriptions-item>
+                    <el-descriptions-item :label="$t('config.providers.apiBaseUrl')" :span="2">{{ provider.apiBaseUrl }}</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.maxTokens != null" :label="$t('config.providers.maxTokens')">{{ provider.maxTokens }}</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.temperature != null" :label="$t('config.providers.temperature')">{{ formatTemperature(provider.temperature) }}</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.timeout != null" :label="$t('config.providers.timeoutShort')">{{ provider.timeout }}s</el-descriptions-item>
+                    <el-descriptions-item v-if="provider.retry != null" :label="$t('config.providers.retry')">{{ provider.retry }}</el-descriptions-item>
                   </el-descriptions>
                 </div>
               </template>
               <div v-if="provider._isNew && isEditing" class="provider-item-badge">
-                <el-tag size="small" type="warning">Not saved yet</el-tag>
+                <el-tag size="small" type="warning">{{ $t('config.providers.notSaved') }}</el-tag>
               </div>
             </div>
           </div>
@@ -349,11 +349,11 @@
       </el-card>
 
       <!-- Add Provider Dialog -->
-      <el-dialog v-model="showAddProviderDialog" title="Add LLM Provider" width="640px" append-to-body>
+      <el-dialog v-model="showAddProviderDialog" :title="$t('config.providers.addDialogTitle')" width="640px" append-to-body>
         <el-form ref="addProviderFormRef" :model="newProvider" label-position="top" size="default">
           <el-row :gutter="20">
             <el-col :span="12">
-              <el-form-item label="Provider Type" prop="provider">
+              <el-form-item :label="$t('config.providers.providerType')" prop="provider">
                 <el-select v-model="newProvider.provider" style="width: 100%">
                   <el-option
                     v-for="pt in PROVIDER_TYPES"
@@ -365,47 +365,47 @@
               </el-form-item>
             </el-col>
             <el-col :span="12">
-              <el-form-item label="Default Model">
-                <el-input v-model="newProvider.defaultModel" placeholder="gpt-4o, claude-3, ..." />
+              <el-form-item :label="$t('config.providers.defaultModel')">
+                <el-input v-model="newProvider.defaultModel" :placeholder="$t('config.providers.modelPlaceholder')" />
               </el-form-item>
             </el-col>
             <el-col :span="24">
-              <el-form-item label="API Base URL" prop="apiBaseUrl">
-                <el-input v-model="newProvider.apiBaseUrl" placeholder="https://api.openai.com/v1" />
+              <el-form-item :label="$t('config.providers.apiBaseUrl')" prop="apiBaseUrl">
+                <el-input v-model="newProvider.apiBaseUrl" :placeholder="$t('config.providers.apiBasePlaceholder')" />
               </el-form-item>
             </el-col>
             <el-col :span="24">
-              <el-form-item label="API Key" prop="apiKey">
-                <el-input v-model="newProvider.apiKey" show-password placeholder="sk-..." />
+              <el-form-item :label="$t('config.providers.apiKey')" prop="apiKey">
+                <el-input v-model="newProvider.apiKey" show-password :placeholder="$t('config.providers.apiKeyPlaceholder')" />
               </el-form-item>
             </el-col>
             <el-col :span="12">
-              <el-form-item label="Max Tokens">
+              <el-form-item :label="$t('config.providers.maxTokens')">
                 <el-input-number v-model="newProvider.maxTokens" :min="128" :max="8192" :step="128" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :span="12">
-              <el-form-item label="Temperature">
+              <el-form-item :label="$t('config.providers.temperature')">
                 <el-slider v-model="newProvider.temperature" :min="0" :max="2" :step="0.1" />
               </el-form-item>
             </el-col>
             <el-col :span="12">
-              <el-form-item label="Timeout (s)">
+              <el-form-item :label="$t('config.providers.timeoutShort')">
                 <el-input-number v-model="newProvider.timeout" :min="5" :max="300" :step="5" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :span="12">
-              <el-form-item label="Retry Attempts">
+              <el-form-item :label="$t('config.providers.retryAttempts')">
                 <el-input-number v-model="newProvider.retry" :min="0" :max="5" style="width: 100%" />
               </el-form-item>
             </el-col>
           </el-row>
         </el-form>
         <template #footer>
-          <el-button @click="showAddProviderDialog = false">Cancel</el-button>
+          <el-button @click="showAddProviderDialog = false">{{ $t('common.cancel') }}</el-button>
           <el-button type="primary" :loading="addingProvider" @click="confirmAddProvider">
             <el-icon><Plus /></el-icon>
-            Add Provider
+            {{ $t('config.providers.addBtn') }}
           </el-button>
         </template>
       </el-dialog>
@@ -415,13 +415,13 @@
         <template #header>
           <div class="card-header">
             <el-icon><Collection /></el-icon>
-            <span>Review Rules</span>
+            <span>{{ $t('config.rules.title') }}</span>
           </div>
         </template>
         <div class="card-body">
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Minimum review score" prop="rules.minScore">
+              <el-form-item :label="$t('config.rules.minScore')" prop="rules.minScore">
                 <div class="slider-with-value">
                   <el-slider v-model="config.rules.minScore" :disabled="!isEditing" :min="0" :max="100" :step="5" />
                   <span class="slider-value">{{ config.rules.minScore }}</span>
@@ -429,22 +429,22 @@
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Max review duration (seconds)" prop="rules.maxReviewDurationSeconds">
+              <el-form-item :label="$t('config.rules.maxDuration')" prop="rules.maxReviewDurationSeconds">
                 <el-input-number v-model="config.rules.maxReviewDurationSeconds" :disabled="!isEditing" :min="30" :max="3600" :step="30" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Block MR on critical" prop="rules.blockOnCritical">
+              <el-form-item :label="$t('config.rules.blockOnCritical')" prop="rules.blockOnCritical">
                 <el-switch v-model="config.rules.blockOnCritical" :disabled="!isEditing" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Auto-comment on pass" prop="rules.autoCommentOnPass">
+              <el-form-item :label="$t('config.rules.autoCommentOnPass')" prop="rules.autoCommentOnPass">
                 <el-switch v-model="config.rules.autoCommentOnPass" :disabled="!isEditing" />
               </el-form-item>
             </el-col>
             <el-col :xs="24">
-              <el-form-item label="Comment template" prop="rules.commentTemplate">
+              <el-form-item :label="$t('config.rules.commentTemplate')" prop="rules.commentTemplate">
                 <el-input
                   v-model="config.rules.commentTemplate"
                   :disabled="!isEditing"
@@ -452,12 +452,12 @@
                   :rows="4"
                   :maxlength="2000"
                   show-word-limit
-                  placeholder="Code review completed. Overall score: {{score}}/100. {{summary}}"
+                  :placeholder="$t('config.rules.commentTemplatePlaceholder')"
                 />
               </el-form-item>
             </el-col>
             <el-col :xs="24">
-              <el-form-item label="Excluded file patterns" prop="rules.excludedPatterns">
+              <el-form-item :label="$t('config.rules.excludedPatterns')" prop="rules.excludedPatterns">
                 <div class="tag-input">
                   <el-tag
                     v-for="(pattern, index) in config.rules.excludedPatterns"
@@ -478,13 +478,13 @@
                   />
                   <el-button v-else size="small" @click="showPatternInput">
                     <el-icon><Plus /></el-icon>
-                    Add Pattern
+                    {{ $t('config.rules.addPattern') }}
                   </el-button>
                 </div>
               </el-form-item>
             </el-col>
             <el-col :xs="24">
-              <el-form-item label="Required experts" prop="rules.requiredExperts">
+              <el-form-item :label="$t('config.rules.requiredExperts')" prop="rules.requiredExperts">
                 <el-checkbox-group v-model="config.rules.requiredExperts" :disabled="!isEditing">
                   <el-checkbox value="Security" label="Security" />
                   <el-checkbox value="Performance" label="Performance" />
@@ -505,7 +505,7 @@
         <el-button link type="primary" @click="showAdvanced = !showAdvanced">
           <el-icon v-if="showAdvanced"><ArrowUp /></el-icon>
           <el-icon v-else><ArrowDown /></el-icon>
-          {{ showAdvanced ? 'Hide Advanced' : 'Show Advanced' }}
+          {{ showAdvanced ? $t('config.advanced.hide') : $t('config.advanced.show') }}
         </el-button>
       </div>
 
@@ -514,13 +514,13 @@
         <template #header>
           <div class="card-header">
             <el-icon><Tools /></el-icon>
-            <span>Advanced Options</span>
+            <span>{{ $t('config.advanced.title') }}</span>
           </div>
         </template>
         <div class="card-body">
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Log level" prop="advanced.logLevel">
+              <el-form-item :label="$t('config.advanced.logLevel')" prop="advanced.logLevel">
                 <el-select v-model="config.advanced.logLevel" :disabled="!isEditing" style="width: 100%">
                   <el-option label="Debug" value="debug" />
                   <el-option label="Info" value="info" />
@@ -530,32 +530,32 @@
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Log retention (days)" prop="advanced.logRetentionDays">
+              <el-form-item :label="$t('config.advanced.logRetention')" prop="advanced.logRetentionDays">
                 <el-input-number v-model="config.advanced.logRetentionDays" :disabled="!isEditing" :min="1" :max="90" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="SSE heartbeat interval (seconds)" prop="advanced.sseHeartbeatInterval">
+              <el-form-item :label="$t('config.advanced.sseHeartbeat')" prop="advanced.sseHeartbeatInterval">
                 <el-input-number v-model="config.advanced.sseHeartbeatInterval" :disabled="!isEditing" :min="5" :max="60" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Max concurrent reviews" prop="advanced.maxConcurrentReviews">
+              <el-form-item :label="$t('config.advanced.maxConcurrent')" prop="advanced.maxConcurrentReviews">
                 <el-input-number v-model="config.advanced.maxConcurrentReviews" :disabled="!isEditing" :min="1" :max="20" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Request timeout (seconds)" prop="advanced.requestTimeout">
+              <el-form-item :label="$t('config.advanced.requestTimeout')" prop="advanced.requestTimeout">
                 <el-input-number v-model="config.advanced.requestTimeout" :disabled="!isEditing" :min="10" :max="300" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Enable metrics" prop="advanced.enableMetrics">
+              <el-form-item :label="$t('config.advanced.enableMetrics')" prop="advanced.enableMetrics">
                 <el-switch v-model="config.advanced.enableMetrics" :disabled="!isEditing" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
-              <el-form-item label="Debug mode" prop="advanced.debugMode">
+              <el-form-item :label="$t('config.advanced.debugMode')" prop="advanced.debugMode">
                 <el-switch v-model="config.advanced.debugMode" :disabled="!isEditing" />
               </el-form-item>
             </el-col>
@@ -568,10 +568,10 @@
     <div v-if="isEditing" class="mobile-actions">
       <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
         <el-button type="primary" :loading="saving" :disabled="!dirty || (!formValid && !providersDirty)" @click="saveChanges">
-          Save Changes
+          {{ $t('common.saveChanges') }}
         </el-button>
       </el-badge>
-      <el-button @click="cancelEdit">Cancel</el-button>
+      <el-button @click="cancelEdit">{{ $t('common.cancel') }}</el-button>
     </div>
   </div>
 </template>
@@ -596,6 +596,7 @@ import {
   View,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification, type FormInstance, type FormRules } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
 import { type AppConfig } from '../types/config'
 import { addProvider as addProviderApi, deleteProvider as deleteProviderApi, updateProvider as updateProviderApi, getProviders as getProvidersApi } from '../services/llm'
@@ -603,6 +604,7 @@ import { PROVIDER_TYPES } from '../types/llm'
 import type { ProviderEntry, ProviderConfig } from '../types/llm'
 
 // --- Composable ---
+const { t } = useI18n()
 const cfg = useConfig()
 
 // --- State ---
@@ -727,7 +729,7 @@ function validateUrl(_rule: any, value: string, callback: Function) {
     new URL(value)
     callback()
   } catch {
-    callback(new Error('Please enter a valid URL'))
+    callback(new Error(t('config.validation.invalidUrl')))
   }
 }
 
@@ -742,7 +744,7 @@ const rules = computed<FormRules>(() => ({
     // The API token is deliberately never echoed back by GET /config, so an
     // empty field means "keep the stored token" and must not be required.
     // Only when the user types a new token is it length-checked.
-    { min: 10, message: 'API Token must be at least 10 characters', trigger: 'blur' },
+    { min: 10, message: t('config.validation.tokenMinLength'), trigger: 'blur' },
   ],
   'llm.apiBaseUrl': [
     { validator: validateUrl, trigger: 'blur' },
@@ -751,13 +753,13 @@ const rules = computed<FormRules>(() => ({
   // token (never echoed by GET /config), so it has no required rule.
   'llm.openaiApiKey': [],
   'llm.defaultModel': [
-    { required: true, message: 'Default Model is required', trigger: 'change' },
+    { required: true, message: t('config.validation.modelRequired'), trigger: 'change' },
   ],
   'rules.requiredExperts': [
     {
       validator: (_rule: any, value: any, callback: any) => {
         if (!value || value.length === 0) {
-          callback(new Error('At least one expert is required'))
+          callback(new Error(t('config.validation.expertRequired')))
         } else {
           callback()
         }
@@ -868,11 +870,11 @@ async function saveChanges() {
       let saveOnly = false
       try {
         await ElMessageBox.confirm(
-          'The main configuration has validation errors. Save only the provider changes?',
-          'Validation Error',
+          t('config.providers.saveOnlyConfirm'),
+          t('config.validation.title'),
           {
-            confirmButtonText: 'Save Providers Only',
-            cancelButtonText: 'Cancel',
+            confirmButtonText: t('config.providers.saveOnlyBtn'),
+            cancelButtonText: t('common.cancel'),
             type: 'warning',
           }
         )
@@ -892,8 +894,8 @@ async function saveChanges() {
       }
     })
     ElNotification({
-      title: 'Validation Error',
-      message: 'Please fix validation errors before saving',
+      title: t('config.validation.title'),
+      message: t('config.validation.fixBeforeSave'),
       type: 'warning',
       duration: 3000,
     })
@@ -907,8 +909,8 @@ async function saveChanges() {
     isEditing.value = false
 
     ElNotification({
-      title: 'Success',
-      message: 'Configuration saved successfully',
+      title: t('common.success'),
+      message: t('config.saved'),
       type: 'success',
       duration: 3000,
     })
@@ -928,8 +930,8 @@ async function saveChanges() {
     })
   } catch (e) {
     ElNotification({
-      title: 'Error',
-      message: 'Failed to save configuration',
+      title: t('common.error'),
+      message: t('config.saveFailed'),
       type: 'error',
       duration: 5000,
     })
@@ -943,8 +945,8 @@ async function refreshConfig() {
     backfillRequiredExperts()
   }
   ElNotification({
-    title: 'Refreshed',
-    message: 'Configuration refreshed',
+    title: t('config.refreshedTitle'),
+    message: t('config.refreshed'),
     type: 'info',
     duration: 2000,
   })
@@ -1044,8 +1046,8 @@ async function confirmAddProvider() {
     additionalProviders.value.push(entry)
     showAddProviderDialog.value = false
     ElNotification({
-      title: 'Provider Added',
-      message: 'Save changes to persist the new provider.',
+      title: t('config.providers.addedTitle'),
+      message: t('config.providers.addedMessage'),
       type: 'info',
       duration: 3000,
     })
@@ -1061,11 +1063,11 @@ function toggleProvider(index: number) {
 function confirmDeleteProvider(index: number) {
   const provider = additionalProviders.value[index]
   ElMessageBox.confirm(
-    `Remove "${provider.provider}" provider?`,
-    'Remove Provider',
+    t('config.providers.removeConfirm', { name: provider.provider }),
+    t('config.providers.removeTitle'),
     {
-      confirmButtonText: 'Remove',
-      cancelButtonText: 'Cancel',
+      confirmButtonText: t('common.remove'),
+      cancelButtonText: t('common.cancel'),
       type: 'warning',
     }
   ).then(() => {
@@ -1085,15 +1087,15 @@ async function saveProvidersOnly() {
       isEditing.value = false
     }
     ElNotification({
-      title: 'Success',
-      message: 'Providers saved successfully',
+      title: t('common.success'),
+      message: t('config.providers.saved'),
       type: 'success',
       duration: 3000,
     })
   } catch {
     ElNotification({
-      title: 'Error',
-      message: 'Failed to save providers',
+      title: t('common.error'),
+      message: t('config.providers.saveFailed'),
       type: 'error',
       duration: 5000,
     })
@@ -1186,11 +1188,11 @@ onBeforeRouteLeave(async (_to, _from, next) => {
   if (isEditing.value && dirty.value) {
     try {
       await ElMessageBox.confirm(
-        'You have unsaved changes. Discard and leave?',
-        'Unsaved Changes',
+        t('config.unsaved.discardConfirm'),
+        t('config.unsaved.title'),
         {
-          confirmButtonText: 'Discard',
-          cancelButtonText: 'Stay',
+          confirmButtonText: t('config.unsaved.discard'),
+          cancelButtonText: t('config.unsaved.stay'),
           type: 'warning',
         }
       )
@@ -1233,7 +1235,7 @@ onMounted(() => {
 watch(() => cfg.error.value, (err) => {
   if (err) {
     ElNotification({
-      title: 'Error',
+      title: t('common.error'),
       message: err,
       type: 'error',
       duration: 5000,

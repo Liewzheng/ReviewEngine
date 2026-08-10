@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
+import { useI18n } from 'vue-i18n'
 import {
   ArrowRight,
   Connection,
@@ -19,6 +20,7 @@ const emit = defineEmits<{
 }>()
 
 const router = useRouter()
+const { t } = useI18n()
 
 const testResult = ref<TestResult | null>(null)
 const showAlert = ref(false)
@@ -34,15 +36,18 @@ const animatingLatency = ref(false)
 
 const statusConfig: Record<
   LlmProviderStatus,
-  { label: string; type: 'success' | 'warning' | 'danger' | 'info' }
+  { labelKey: string; type: 'success' | 'warning' | 'danger' | 'info' }
 > = {
-  healthy: { label: 'Healthy', type: 'success' },
-  degraded: { label: 'Degraded', type: 'warning' },
-  error: { label: 'Error', type: 'danger' },
-  offline: { label: 'Offline', type: 'info' },
+  healthy: { labelKey: 'llm.status.healthy', type: 'success' },
+  degraded: { labelKey: 'llm.status.degraded', type: 'warning' },
+  error: { labelKey: 'llm.status.error', type: 'danger' },
+  offline: { labelKey: 'llm.status.offline', type: 'info' },
 }
 
-const statusInfo = computed(() => statusConfig[props.provider.status])
+const statusInfo = computed(() => {
+  const c = statusConfig[props.provider.status]
+  return { ...c, label: t(c.labelKey) }
+})
 
 // Watch status changes for flash-border animation
 watch(() => props.provider.status, (newVal, oldVal) => {
@@ -238,17 +243,17 @@ defineExpose({
       <!-- Metrics Row -->
       <div class="metrics-row">
         <div class="metric">
-          <div class="metric-label">Latency</div>
+          <div class="metric-label">{{ $t('llm.metrics.latency') }}</div>
           <div class="metric-value" :style="latencyStyle">
             {{ formattedLatency }}
           </div>
         </div>
         <div class="metric">
-          <div class="metric-label">Requests</div>
+          <div class="metric-label">{{ $t('llm.metrics.requests') }}</div>
           <div class="metric-value">{{ formattedRequestsDisplay }}</div>
         </div>
         <div class="metric">
-          <div class="metric-label">Errors</div>
+          <div class="metric-label">{{ $t('llm.metrics.errors') }}</div>
           <div
             class="metric-value"
             :style="{
@@ -268,7 +273,7 @@ defineExpose({
           :color="'var(--brand)'"
           :show-text="false"
         />
-        <span class="usage-label">{{ usagePercent }}% capacity</span>
+        <span class="usage-label">{{ $t('llm.usage', { percent: usagePercent }) }}</span>
       </div>
 
       <!-- Sparkline -->
@@ -299,14 +304,14 @@ defineExpose({
           @mouseleave="onAlertLeave"
         >
           <el-alert
-            :title="testResult.success ? 'Connected' : 'Connection failed'"
+            :title="testResult.success ? $t('llm.test.connected') : $t('llm.test.failed')"
             :type="testResult.success ? 'success' : 'error'"
             :closable="true"
             @close="showAlert = false"
           >
             <template #default>
               <span v-if="testResult.success && testResult.latencyMs">
-                Latency: {{ testResult.latencyMs }}ms
+                {{ $t('llm.test.latency', { n: testResult.latencyMs }) }}
               </span>
               <span v-else-if="testResult.error">{{ testResult.error }}</span>
             </template>
@@ -323,7 +328,7 @@ defineExpose({
           :disabled="!provider.configured"
           @click="handleTest"
         >
-          Test Connection
+          {{ $t('common.testConnection') }}
         </el-button>
         <el-button
           size="small"
@@ -331,13 +336,13 @@ defineExpose({
           :type="!provider.configured ? 'primary' : 'default'"
           @click="handleConfigure"
         >
-          Configure
+          {{ $t('llm.configure') }}
         </el-button>
       </div>
 
       <!-- Last checked -->
       <div class="last-checked">
-        Last checked: {{ new Date(provider.lastChecked).toLocaleString() }}
+        {{ $t('llm.lastChecked', { date: new Date(provider.lastChecked).toLocaleString() }) }}
       </div>
     </el-card>
   </div>

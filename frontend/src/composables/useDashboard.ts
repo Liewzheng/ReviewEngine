@@ -1,5 +1,6 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { getDashboard } from '../services/dashboard';
+import { i18n } from '../i18n';
 import type { DashboardResponse } from '../services/dashboard';
 
 export function useDashboard() {
@@ -14,7 +15,7 @@ export function useDashboard() {
     try {
       data.value = await getDashboard();
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
     } finally {
       loading.value = false;
     }

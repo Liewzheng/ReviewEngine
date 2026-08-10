@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { Link, DocumentCopy, Download, ArrowRight } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
 import { useUpgrade } from '../../composables/useUpgrade'
@@ -10,18 +11,20 @@ import type { InstallMethod } from '../../types/upgrade'
 // bindings and are auto-unwrapped in the template.
 const { check, checking, status, starting, dockerInfo, error, start, stopPolling } = useUpgrade()
 
+const { t } = useI18n()
+
 const visible = defineModel<boolean>({ required: true })
 
-const INSTALL_SOURCE_LABELS: Record<InstallMethod, string> = {
-  binary: 'prebuilt binary',
-  brew: 'Homebrew',
-  docker: 'Docker container',
-  cargo: 'cargo install',
-  unknown: 'unknown install method',
+const INSTALL_SOURCE_KEYS: Record<InstallMethod, string> = {
+  binary: 'upgrade.source.binary',
+  brew: 'upgrade.source.brew',
+  docker: 'upgrade.source.docker',
+  cargo: 'upgrade.source.cargo',
+  unknown: 'upgrade.source.unknown',
 }
 
 const installSourceLabel = computed(() =>
-  check.value ? (INSTALL_SOURCE_LABELS[check.value.installMethod] ?? 'unknown install method') : ''
+  check.value ? t(INSTALL_SOURCE_KEYS[check.value.installMethod] ?? 'upgrade.source.unknown') : ''
 )
 
 const isBinary = computed(() => check.value?.installMethod === 'binary')
@@ -50,9 +53,9 @@ const inProgress = computed(() => {
 async function copy(text: string) {
   try {
     await navigator.clipboard.writeText(text)
-    ElNotification.success({ title: 'Copied', message: 'Command copied to clipboard.', duration: 2000 })
+    ElNotification.success({ title: t('common.copied'), message: t('common.commandCopied'), duration: 2000 })
   } catch {
-    ElNotification.warning({ title: 'Copy failed', message: 'Could not copy to clipboard.', duration: 2000 })
+    ElNotification.warning({ title: t('common.copyFailed'), message: t('common.copyFailedMessage'), duration: 2000 })
   }
 }
 </script>
@@ -60,7 +63,7 @@ async function copy(text: string) {
 <template>
   <el-dialog
     v-model="visible"
-    title="Upgrade Review Engine"
+    :title="$t('upgrade.title')"
     width="560px"
     align-center
     @closed="stopPolling"
@@ -68,7 +71,7 @@ async function copy(text: string) {
     <!-- Loading: check not resolved yet -->
     <div v-if="!check" class="upgrade-content">
       <el-skeleton v-if="checking" :rows="3" animated />
-      <el-empty v-else :description="error || 'Unable to check for updates'" />
+      <el-empty v-else :description="error || $t('upgrade.checkFailed')" />
     </div>
 
     <div v-else class="upgrade-content">
@@ -84,19 +87,19 @@ async function copy(text: string) {
           rel="noopener"
           class="release-link"
         >
-          Release notes <el-icon><Link /></el-icon>
+          {{ $t('upgrade.releaseNotes') }} <el-icon><Link /></el-icon>
         </a>
       </div>
 
       <!-- kimi-style hint -->
       <div class="kimi-hint">
-        <p>A newer version <b>v{{ check.latestVersion }}</b> is available (current: v{{ check.currentVersion }}).</p>
-        <p>Detected install source: <b>{{ installSourceLabel }}.</b></p>
+        <p>{{ $t('upgrade.newerPrefix') }} <b>v{{ check.latestVersion }}</b> {{ $t('upgrade.newerSuffix', { current: check.currentVersion }) }}</p>
+        <p>{{ $t('upgrade.detectedPrefix') }} <b>{{ installSourceLabel }}.</b></p>
         <template v-if="!isDocker">
-          <p>To update, run:</p>
+          <p>{{ $t('upgrade.runInstruction') }}</p>
           <div class="command-block">
             <code>{{ commandToCopy }}</code>
-            <el-button size="small" text :icon="DocumentCopy" @click="copy(commandToCopy)">Copy</el-button>
+            <el-button size="small" text :icon="DocumentCopy" @click="copy(commandToCopy)">{{ $t('common.copy') }}</el-button>
           </div>
         </template>
       </div>
@@ -115,17 +118,17 @@ async function copy(text: string) {
       <div v-if="isBinary" class="form-section">
         <template v-if="inProgress">
           <el-steps :active="stepIndex" finish-status="success" process-status="process" align-center class="upgrade-steps">
-            <el-step title="Checking" />
-            <el-step title="Downloading" />
-            <el-step title="Verifying" />
-            <el-step title="Installing" />
+            <el-step :title="$t('upgrade.step.checking')" />
+            <el-step :title="$t('upgrade.step.downloading')" />
+            <el-step :title="$t('upgrade.step.verifying')" />
+            <el-step :title="$t('upgrade.step.installing')" />
           </el-steps>
           <p class="step-message">{{ status?.message }}</p>
         </template>
 
         <el-alert
           v-else-if="status?.state === 'done'"
-          :title="status?.message || '升级完成，服务需重启后生效'"
+          :title="status?.message || $t('upgrade.doneFallback')"
           type="success"
           :closable="false"
           show-icon
@@ -134,7 +137,7 @@ async function copy(text: string) {
 
         <el-alert
           v-else-if="status?.state === 'failed'"
-          :title="status?.message || '升级失败'"
+          :title="status?.message || $t('upgrade.failedFallback')"
           type="error"
           :closable="false"
           show-icon
@@ -142,7 +145,7 @@ async function copy(text: string) {
         >
           <template #default>
             <el-button size="small" type="danger" plain :icon="Download" :loading="starting" @click="start">
-              Retry
+              {{ $t('common.retry') }}
             </el-button>
           </template>
         </el-alert>
@@ -150,15 +153,15 @@ async function copy(text: string) {
         <template v-else-if="check.platformAssetAvailable">
           <div class="confirm-row">
             <el-button type="primary" :icon="Download" :loading="starting" @click="start">
-              Upgrade Now
+              {{ $t('upgrade.upgradeNow') }}
             </el-button>
-            <span class="confirm-hint">The server binary will be replaced; a restart is required for it to take effect.</span>
+            <span class="confirm-hint">{{ $t('upgrade.binaryHint') }}</span>
           </div>
         </template>
 
         <el-alert
           v-else
-          title="No release asset is available for this platform, so automatic upgrade is not possible."
+          :title="$t('upgrade.noAsset')"
           type="warning"
           :closable="false"
           show-icon
@@ -168,10 +171,10 @@ async function copy(text: string) {
 
       <!-- docker form: instructions on the host machine + note -->
       <div v-else-if="isDocker" class="form-section">
-        <p class="section-label">On the host machine, run:</p>
+        <p class="section-label">{{ $t('upgrade.dockerRun') }}</p>
         <div class="command-block">
           <code>{{ commandToCopy }}</code>
-          <el-button size="small" text :icon="DocumentCopy" @click="copy(commandToCopy)">Copy</el-button>
+          <el-button size="small" text :icon="DocumentCopy" @click="copy(commandToCopy)">{{ $t('common.copy') }}</el-button>
         </div>
         <el-alert
           v-if="dockerInfo?.note"
@@ -188,7 +191,7 @@ async function copy(text: string) {
     </div>
 
     <template #footer>
-      <el-button @click="visible = false">Close</el-button>
+      <el-button @click="visible = false">{{ $t('common.close') }}</el-button>
     </template>
   </el-dialog>
 </template>

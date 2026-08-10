@@ -95,15 +95,15 @@ const handleEdit = () => {
             </el-tag>
             <el-tag v-if="!expert.enabled" type="info" size="small" effect="plain" class="status-tag">
               <el-icon><WarningFilled /></el-icon>
-              Disabled
+              {{ $t('common.disabled') }}
             </el-tag>
           </div>
         </div>
       </div>
       <div class="header-right">
-        <el-tooltip :content="expert.enabled ? 'Enabled' : 'Disabled'" placement="top">
+        <el-tooltip :content="expert.enabled ? $t('common.enabled') : $t('common.disabled')" placement="top">
           <el-switch
-            :aria-label="expert.enabled ? 'Enabled' : 'Disabled'"
+            :aria-label="expert.enabled ? $t('common.enabled') : $t('common.disabled')"
             :model-value="expert.enabled"
             @update:model-value="handleToggle"
             :active-color="'var(--success)'"
@@ -116,7 +116,7 @@ const handleEdit = () => {
     <!-- Weight Slider -->
     <div class="weight-section">
       <div class="weight-label">
-        <span class="label-text">Weight</span>
+        <span class="label-text">{{ $t('experts.card.weight') }}</span>
         <span class="weight-value">{{ expert.weight }}%</span>
       </div>
       <el-slider
@@ -144,15 +144,15 @@ const handleEdit = () => {
 
     <!-- Actions -->
     <div class="card-actions">
-      <el-button size="small" :aria-label="'View Details for ' + expert.name"
+      <el-button size="small" :aria-label="$t('experts.viewDetailsAria', { name: expert.name })"
         @click="handleViewDetails">
         <el-icon><IconView /></el-icon>
-        View Details
+        {{ $t('experts.card.viewDetails') }}
       </el-button>
-      <el-button size="small" type="primary" :aria-label="'Edit ' + expert.name"
+      <el-button size="small" type="primary" :aria-label="$t('experts.editAria', { name: expert.name })"
         @click="handleEdit">
         <el-icon><Edit /></el-icon>
-        Edit
+        {{ $t('common.edit') }}
       </el-button>
     </div>
   </div>

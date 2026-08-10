@@ -358,16 +358,67 @@ mod tests {
     }
 }
 
-/// Start the health check and webhook server on the given port.
+/// TLS (HTTPS) listener configuration for [`serve`].
+///
+/// Both paths must point to PEM-encoded files: `cert_path` is the leaf
+/// certificate chain (leaf first, then intermediates), `key_path` the
+/// unencrypted PKCS#8 private key. Providing a value makes [`serve`] bind a
+/// second, HTTPS-only listener on `tls_port` in addition to the plain HTTP
+/// listener; both listeners are served concurrently.
+#[derive(Debug, Clone)]
+pub struct TlsConfig {
+    /// Path to the PEM certificate chain.
+    pub cert_path: std::path::PathBuf,
+    /// Path to the PEM private key.
+    pub key_path: std::path::PathBuf,
+    /// Port for the HTTPS listener.
+    pub tls_port: u16,
+}
+
+impl TlsConfig {
+    /// Build a TLS listener configuration from the two PEM paths and the
+    /// HTTPS port.
+    pub fn new(cert_path: std::path::PathBuf, key_path: std::path::PathBuf, tls_port: u16) -> Self {
+        Self {
+            cert_path,
+            key_path,
+            tls_port,
+        }
+    }
+}
+
+/// Bind a TCP listener, failing fast with an actionable message when the
+/// address is already in use. `flag` names the CLI flag that controls the
+/// port so the error hints at the right knob (`--port` vs `--tls-port`).
+async fn bind_listener(addr: &str, port: u16, flag: &str) -> anyhow::Result<tokio::net::TcpListener> {
+    use anyhow::Context as _;
+    match tokio::net::TcpListener::bind(addr).await {
+        Ok(listener) => Ok(listener),
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            anyhow::bail!(
+                "Address already in use (port {port}): {addr} is taken by another process — stop it or pass {flag}"
+            );
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to bind {addr}")),
+    }
+}
+
+/// Start the health check and webhook server.
+///
+/// The plain HTTP listener always binds on `{bind}:{port}`. When `tls` is
+/// `Some`, a second HTTPS listener (axum-server over rustls) binds on
+/// `{bind}:{tls_port}` and both listeners are served concurrently, so HTTP
+/// and HTTPS coexist on different ports.
 ///
 /// Failure contract: bind failures return immediately with the target
 /// address in the error. `AddrInUse` additionally names the port in an
 /// `Address already in use (port N)` message so the CLI can fail fast with
-/// an actionable stderr line. On success a one-line startup banner goes to
-/// stdout (the full log stream stays in `logs.ndjson`).
+/// an actionable stderr line. On success a one-line startup banner per
+/// listener goes to stdout (the full log stream stays in `logs.ndjson`).
 pub async fn serve(
     port: u16,
     bind: &str,
+    tls: Option<TlsConfig>,
     state: Arc<AppState>,
     auth: Arc<AuthConfig>,
     webhook_handlers: Vec<Arc<dyn webhook::WebhookHandler>>,
@@ -376,28 +427,58 @@ pub async fn serve(
 
     let app = router::build(state, auth, webhook_handlers);
 
-    let addr = format!("{}:{}", bind, port);
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(listener) => listener,
-        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            anyhow::bail!(
-                "Address already in use (port {port}): {addr} is taken by another process — stop it or pass --port"
-            );
-        }
-        Err(e) => return Err(e).with_context(|| format!("failed to bind {addr}")),
-    };
+    let http_addr = format!("{}:{}", bind, port);
+    let http_listener = bind_listener(&http_addr, port, "--port").await?;
 
     // Log/print only after the bind has actually succeeded: previously the
     // "listening" line was emitted before bind, so a failed start still
     // looked healthy in logs.ndjson.
-    tracing::info!("Health & webhook server listening on {}", addr);
+    tracing::info!("Health & webhook server listening on {}", http_addr);
     let log_path = log_collector::default_ndjson_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "disabled".to_string());
-    println!("review-engine listening on http://{addr} (health: http://{addr}/health, logs: {log_path})");
+    println!("review-engine listening on http://{http_addr} (health: http://{http_addr}/health, logs: {log_path})");
 
-    axum::serve(listener, app)
-        .await
-        .with_context(|| format!("server on {addr} terminated unexpectedly"))?;
+    let http_app = app.clone();
+    let http_future = async {
+        axum::serve(http_listener, http_app)
+            .await
+            .with_context(|| format!("server on {http_addr} terminated unexpectedly"))
+    };
+
+    match tls {
+        Some(tls_config) => {
+            let tls_addr = format!("{}:{}", bind, tls_config.tls_port);
+            let tls_listener = bind_listener(&tls_addr, tls_config.tls_port, "--tls-port").await?;
+            // rustls 0.23 only auto-selects a CryptoProvider when exactly one
+            // backend is compiled in; here both ring and aws-lc-rs are present
+            // (see the Cargo.toml note), so without an explicit install the
+            // TLS accept loop panics. Prefer ring — the same backend reqwest
+            // already uses for LLM calls. `install_default` only fails when a
+            // provider was already installed, in which case we keep the
+            // caller's choice.
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let rustls_config =
+                axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls_config.cert_path, &tls_config.key_path)
+                    .await
+                    .with_context(|| format!("failed to load TLS certificate/key for {tls_addr}"))?;
+
+            tracing::info!("Health & webhook server listening on https://{tls_addr}");
+            println!("review-engine listening on https://{tls_addr} (health: https://{tls_addr}/health)");
+
+            let tls_future = async {
+                let std_listener = tls_listener
+                    .into_std()
+                    .with_context(|| format!("failed to adopt TLS listener on {tls_addr}"))?;
+                axum_server::tls_rustls::from_tcp_rustls(std_listener, rustls_config)
+                    .serve(app.into_make_service())
+                    .await
+                    .with_context(|| format!("server on {tls_addr} terminated unexpectedly"))
+            };
+
+            tokio::try_join!(http_future, tls_future)?;
+        }
+        None => http_future.await?,
+    }
     Ok(())
 }

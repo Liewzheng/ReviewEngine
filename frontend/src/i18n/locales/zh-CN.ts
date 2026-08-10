@@ -508,11 +508,14 @@ export default {
       '服务器二进制文件将被替换；需要重启才能生效。',
     noAsset:
       '此平台没有可用的发布包，无法自动升级。',
-    dockerRun: '在宿主机上运行：',
+    dockerHint: '更新将在运行的容器内应用，完成后容器会自动重启。',
     doneFallback: '升级完成；需要重启才能生效。',
+    dockerDone: '升级完成，容器即将自动重启。',
     failedFallback: '升级失败。',
     checkingLatest: '正在检查最新版本',
     inProgressError: '升级任务已在进行中，请稍后再试',
+    notSupportedError: '此安装方式不支持自动升级。',
+    restartHint: '容器正在重启以应用更新，页面将自动刷新。',
     source: {
       binary: '预编译二进制',
       brew: 'Homebrew',
@@ -525,6 +528,7 @@ export default {
       downloading: '下载中',
       verifying: '校验中',
       installing: '安装中',
+      restarting: '重启中',
     },
   },
   errors: {

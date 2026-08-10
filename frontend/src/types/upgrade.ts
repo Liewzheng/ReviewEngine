@@ -22,6 +22,10 @@ export type UpgradeJobState =
   | 'done'
   | 'failed'
   | 'notSupported'
+  // Frontend-only synthetic state: emitted while the container is unreachable
+  // during an in-container upgrade restart (the backend is down, so it can
+  // never report this state itself).
+  | 'restarting'
 
 export interface UpgradeStatus {
   state: UpgradeJobState
@@ -30,7 +34,8 @@ export interface UpgradeStatus {
   targetVersion: string | null
 }
 
-/** `POST /system/upgrade` 2xx body: binary starts (202) or docker is unsupported (200). */
+/** `POST /system/upgrade` 2xx body: binary/docker start the automated job (202);
+ *  brew/cargo/unknown may still return `notSupported`. */
 export type UpgradeStartResponse =
   | { status: 'started'; targetVersion: string }
   | { status: 'notSupported'; instructions: string; note: string }

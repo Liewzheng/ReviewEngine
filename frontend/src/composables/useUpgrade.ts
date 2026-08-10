@@ -13,12 +13,53 @@ const error = ref<string | null>(null);
 const status = ref<UpgradeStatus | null>(null);
 const starting = ref(false);
 const dialogVisible = ref(false);
-const dockerInfo = ref<{ instructions: string; note: string } | null>(null);
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
+let restartProbeInterval: ReturnType<typeof setInterval> | null = null;
+let restartProbeBackstop: ReturnType<typeof setTimeout> | null = null;
 
 const RUNNING_STATES = ['checking', 'downloading', 'verifying', 'installing'];
 const TERMINAL_STATES = ['done', 'failed', 'notSupported'];
+
+// Poll cadence while an upgrade job is running.
+const POLL_INTERVAL = 2000;
+// Once "container restarting" is detected, probe every 2s for the server to
+// come back; if it stays unreachable past this window, hard-reload anyway.
+const RESTART_PROBE_INTERVAL = 2000;
+const RESTART_RELOAD_DELAY = 12000;
+
+function isDockerUpgrade(): boolean {
+  return check.value?.installMethod === 'docker';
+}
+
+/** True while the upgrade could still be running inside this container process. */
+function isUpgradeInFlight(): boolean {
+  const st = status.value?.state;
+  if (!st) return false;
+  if (RUNNING_STATES.includes(st)) return true;
+  if (st === 'restarting') return true;
+  // For docker, "done" is followed by an automatic container restart; a
+  // connection loss right after done still means "restarting", never an error.
+  return isDockerUpgrade() && st === 'done';
+}
+
+function stopPolling() {
+  if (pollTimer) {
+    clearInterval(pollTimer);
+    pollTimer = null;
+  }
+}
+
+function clearRestartProbe() {
+  if (restartProbeInterval) {
+    clearInterval(restartProbeInterval);
+    restartProbeInterval = null;
+  }
+  if (restartProbeBackstop) {
+    clearTimeout(restartProbeBackstop);
+    restartProbeBackstop = null;
+  }
+}
 
 /** One-shot startup check; server caches the result for 1h, so no polling. */
 async function fetchCheck() {
@@ -33,41 +74,105 @@ async function fetchCheck() {
   }
 }
 
-async function fetchStatus(silent = false) {
+/**
+ * Fetch the job state. On failure during an in-flight upgrade, the process has
+ * likely exited to replace its own binary (container restart) — enter the
+ * `restarting` state instead of surfacing an error. Otherwise surface the
+ * error only for non-silent callers (e.g. the dialog open probe); the poll
+ * loop itself is silent.
+ */
+async function fetchStatus(silent = false): Promise<UpgradeStatus | null> {
   try {
-    status.value = await getUpgradeStatus();
+    const st = await getUpgradeStatus();
+    status.value = st;
+    return st;
   } catch (e) {
+    if (isUpgradeInFlight()) {
+      enterRestarting();
+      return null;
+    }
     if (!silent) error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+    return null;
   }
 }
 
-function stopPolling() {
-  if (pollTimer) {
-    clearInterval(pollTimer);
-    pollTimer = null;
+/** Poll loop while a job is running. */
+async function pollTick() {
+  const prev = status.value?.state;
+  const st = await fetchStatus(true);
+  if (!st) return;
+  // A fresh idle process right after a docker upgrade means the container
+  // restarted — load the new build.
+  if (
+    isDockerUpgrade() &&
+    st.state === 'idle' &&
+    (prev === 'done' || prev === 'restarting' || RUNNING_STATES.includes(prev ?? ''))
+  ) {
+    location.reload();
+    return;
+  }
+  // For docker "done" we keep polling so the automatic container restart is
+  // caught (it either drops the connection or comes back as a fresh idle
+  // process). Binary stops at the first terminal state.
+  const isDockerDone = isDockerUpgrade() && st.state === 'done';
+  if (!isDockerDone && TERMINAL_STATES.includes(st.state)) {
+    stopPolling();
   }
 }
 
-/** Poll status every 2s; stop once the job reaches a terminal state. */
+/** Poll status every 2s while a job is running. */
 function startPolling() {
   stopPolling();
-  pollTimer = setInterval(async () => {
-    await fetchStatus(true);
-    const st = status.value?.state;
-    if (st && TERMINAL_STATES.includes(st)) stopPolling();
-  }, 2000);
+  pollTimer = setInterval(pollTick, POLL_INTERVAL);
 }
 
 /**
- * Start the upgrade. Binary: 202 → immediately reflect `checking` and poll.
- * Docker: 200 notSupported → capture instructions/note. 409 (already in
- * flight): surface the message and resume polling if a job is running.
+ * Enter the "container restarting" UI state. The process is replacing its own
+ * binary and the container is coming back up, so the status endpoint is
+ * unreachable. Probe for the server to return and reload the page with the new
+ * build; if it stays down past the window, hard-reload anyway.
+ */
+function enterRestarting() {
+  if (status.value?.state === 'restarting') return;
+  status.value = {
+    state: 'restarting',
+    message: i18n.global.t('upgrade.restartHint'),
+    currentVersion: check.value?.currentVersion ?? null,
+    targetVersion: check.value?.latestVersion ?? null,
+  };
+  stopPolling();
+  clearRestartProbe();
+  restartProbeBackstop = setTimeout(() => location.reload(), RESTART_RELOAD_DELAY);
+  restartProbeInterval = setInterval(async () => {
+    try {
+      const st = await getUpgradeStatus();
+      if (st.state === 'idle') {
+        // fresh process → container restarted → load the new build
+        location.reload();
+        return;
+      }
+      // Server is reachable again but the job is still running: the "restart"
+      // was a transient network blip. Exit restarting and resume polling.
+      clearRestartProbe();
+      status.value = st;
+      startPolling();
+    } catch {
+      // still down — keep waiting for the backstop window
+    }
+  }, RESTART_PROBE_INTERVAL);
+}
+
+/**
+ * Start the upgrade. Binary and docker both trigger the automated in-process
+ * flow (202 → start polling). A defensive `notSupported` response (older
+ * backend) is surfaced as an error rather than host commands. 409 (already in
+ * flight) surfaces the message and resumes polling if a job is running.
  */
 async function start() {
   if (starting.value) return;
   starting.value = true;
   error.value = null;
-  dockerInfo.value = null;
+  clearRestartProbe();
   try {
     const resp = await startUpgrade();
     if (resp.status === 'started') {
@@ -79,9 +184,8 @@ async function start() {
       };
       startPolling();
     } else {
-      // docker: 200 notSupported → instructions + note
-      dockerInfo.value = { instructions: resp.instructions, note: resp.note };
-      await fetchStatus(true);
+      // Defensive: pre-docker-automation backend returns notSupported.
+      error.value = i18n.global.t('upgrade.notSupportedError');
     }
   } catch (e) {
     const statusCode = (e as { status?: number } | null)?.status;
@@ -98,18 +202,14 @@ async function start() {
   }
 }
 
-/** Open the dialog and resume any in-flight job / fetch docker instructions. */
+/** Open the dialog and resume any in-flight job (the user confirms the start). */
 async function open() {
   dialogVisible.value = true;
   error.value = null;
-  dockerInfo.value = null;
   stopPolling();
   await fetchStatus(true);
   const st = status.value?.state;
   if (st && RUNNING_STATES.includes(st)) startPolling();
-  if (check.value?.installMethod === 'docker') {
-    await start();
-  }
 }
 
 function close() {
@@ -125,7 +225,6 @@ export function useUpgrade() {
     status,
     starting,
     dialogVisible,
-    dockerInfo,
     fetchCheck,
     fetchStatus,
     start,

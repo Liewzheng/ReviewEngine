@@ -508,11 +508,14 @@ export default {
       'サーバーバイナリが置き換えられます。反映には再起動が必要です。',
     noAsset:
       'このプラットフォーム用のリリースアセットがないため、自動アップグレードはできません。',
-    dockerRun: 'ホストマシン上で実行：',
+    dockerHint: '更新は実行中のコンテナ内で適用され、完了後にコンテナが自動的に再起動します。',
     doneFallback: 'アップグレードが完了しました。反映には再起動が必要です。',
+    dockerDone: 'アップグレードが完了しました。コンテナは自動的に再起動します。',
     failedFallback: 'アップグレードに失敗しました。',
     checkingLatest: '最新バージョンを確認中',
     inProgressError: 'アップグレードタスクはすでに進行中です。しばらくしてから再試行してください。',
+    notSupportedError: 'このインストール方法では自動アップグレードは利用できません。',
+    restartHint: '更新を適用するためコンテナを再起動しています。ページは自動的に更新されます。',
     source: {
       binary: 'プリビルドバイナリ',
       brew: 'Homebrew',
@@ -525,6 +528,7 @@ export default {
       downloading: 'ダウンロード中',
       verifying: '検証中',
       installing: 'インストール中',
+      restarting: '再起動中',
     },
   },
   errors: {

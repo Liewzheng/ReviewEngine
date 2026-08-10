@@ -508,11 +508,14 @@ export default {
       '伺服器二進位檔將被取代；需要重新啟動才能生效。',
     noAsset:
       '此平台沒有可用的發行套件，無法自動升級。',
-    dockerRun: '在主機上執行：',
+    dockerHint: '更新將在執行的容器內套用，完成後容器會自動重新啟動。',
     doneFallback: '升級完成；需要重新啟動才能生效。',
+    dockerDone: '升級完成，容器即將自動重新啟動。',
     failedFallback: '升級失敗。',
     checkingLatest: '正在檢查最新版本',
     inProgressError: '升級任務已在进行中，請稍後再試',
+    notSupportedError: '此安裝方式不支援自動升級。',
+    restartHint: '容器正在重新啟動以套用更新，頁面將自動重新整理。',
     source: {
       binary: '預編譯二進位檔',
       brew: 'Homebrew',
@@ -525,6 +528,7 @@ export default {
       downloading: '下載中',
       verifying: '驗證中',
       installing: '安裝中',
+      restarting: '重新啟動中',
     },
   },
   errors: {

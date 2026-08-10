@@ -31,6 +31,48 @@ cp .env.example .env
 nano .env
 ```
 
+### 1.5 部署配置与代码分离 (Deploy Config vs Code)
+
+`.env`, `config/`, `reports/` and `tls/` are **runtime deploy state**, not
+source code. `.env` is **not tracked** by git (see `.gitignore`), so a plain
+`git pull` on the deploy machine never conflicts with local credentials. Keep
+the code repository pristine — clone once, then `git pull` + rebuild to
+upgrade — and keep all credentials/data in a separate, independently-backed-up
+deploy directory.
+
+**Recommended: put runtime config in a repo-external deploy directory**
+(e.g. `/volume1/docker/reng/` on a Synology NAS):
+
+```text
+/volume1/docker/reng/
+├── .env          # real credentials (copy from .env.example, then edit)
+├── config/       # review-engine config → mounted to /app/config (read-only)
+├── reports/      # review reports     → mounted to /app/reports
+└── tls/          # TLS cert/key for native HTTPS (optional) → mounted to /app/tls
+```
+
+Point the compose volume variables at that directory with **absolute paths**
+inside the deploy `.env`:
+
+```bash
+CONFIG_PATH=/volume1/docker/reng/config
+REPORTS_PATH=/volume1/docker/reng/reports
+SSH_KEY_PATH=/volume1/docker/reng/.ssh   # or keep your existing ~/.ssh
+```
+
+Then start compose from the **code repository** but load the deploy `.env`
+explicitly:
+
+```bash
+cd ReviewEngine
+git pull && docker compose build review-engine
+docker compose --env-file /volume1/docker/reng/.env up -d --force-recreate review-engine
+```
+
+The repo working tree stays clean (`git status` shows no runtime files), and
+the deploy directory holds every credential and data file — back it up
+independently of the code.
+
 ### 2. Required Environment Variables
 
 Edit `.env` and set these **required** variables:

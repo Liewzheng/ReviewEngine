@@ -9,6 +9,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # 零编译:必填,对应 GitHub Release tag(如 v0.9.8);未设置时镜像构建快速失败
+        REVIEW_ENGINE_VERSION: ${REVIEW_ENGINE_VERSION:-}
     restart: unless-stopped
 
     ports:

@@ -1,121 +1,29 @@
-# Multi-stage build for review-engine SaaS deployment
+# Zero-build image for review-engine SaaS deployment
 # Targets: GitLab EE self-hosted integration
-# Uses China mainland mirrors for faster builds
+# 零编译:镜像构建 = 纯下载。运行时二进制与前端 dist 直接下载自 GitHub Release
+# 资产,容器内不再编译 Rust / Vue——NAS 上 10-30 分钟的编译与易挂的 npm 网络
+# 在此消除(原 builder + frontend 两编译阶段已整体移除)。
 
 # ═══════════════════════════════════════════════════════════════════════
-# Stage 1: Rust Builder
+# Stage 1: Runtime(零编译)
 # ═══════════════════════════════════════════════════════════════════════
-FROM ubuntu:22.04 AS builder
+# 基础镜像用 24.04(glibc 2.39)而非 22.04(glibc 2.35):release 二进制在 GitHub
+# Actions ubuntu-latest(= 24.04)上构建,实测需要 GLIBC_2.39,22.04 起不来。
+FROM ubuntu:24.04
 
-WORKDIR /build
-
-# 配置 apt 国内镜像源（阿里云）
+# 配置 apt 国内镜像源(阿里云):x86_64 走 archive.ubuntu.com,aarch64 走
+# ports.ubuntu.com(ubuntu-ports)——两处都替换,否则 ARM 镜像构建会卡在官方源。
 RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list \
-    && sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
+    && sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list \
+    && sed -i 's|ports.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
 
-# 安装构建依赖
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    ca-certificates \
-    build-essential \
-    pkg-config \
-    libssl-dev \
-    git \
-    && rm -rf /var/lib/apt/lists/*
-
-# 安装 Rust（rsproxy.cn 国内镜像；lab 实证 USTC rustup 镜像已 404、
-# cargo 1.97+ 忽略旧 [registries] 写法，必须用下方 [source.*] replace-with 现代写法）
-# 改回官方源：--build-arg RUSTUP_DIST_SERVER=https://static.rust-lang.org \
-#                --build-arg RUSTUP_UPDATE_ROOT=https://static.rust-lang.org/rustup \
-#                --build-arg CARGO_REGISTRY=official
-ARG RUSTUP_DIST_SERVER=https://rsproxy.cn
-ARG RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
-ENV RUSTUP_DIST_SERVER=${RUSTUP_DIST_SERVER}
-ENV RUSTUP_UPDATE_ROOT=${RUSTUP_UPDATE_ROOT}
-RUN rm -rf /root/.rustup /root/.cargo && curl --proto '=https' --tlsv1.2 -sSf ${RUSTUP_UPDATE_ROOT}/rustup-init.sh | sh -s -- -y --default-toolchain stable
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# 配置 Cargo 国内镜像源（rsproxy sparse index；cargo 1.97+ 忽略 [registries] 旧写法）
-ARG CARGO_REGISTRY=rsproxy
-RUN mkdir -p /root/.cargo \
-    && if [ "$CARGO_REGISTRY" = "rsproxy" ]; then \
-         printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n' > /root/.cargo/config.toml; \
-       else \
-         rm -f /root/.cargo/config.toml; \
-       fi
-
-# 复制依赖清单（用于缓存层）
-COPY Cargo.toml Cargo.lock ./
-
-# 复制源代码
-COPY src ./src
-COPY docs ./docs
-
-# 构建 release 二进制（不含 python 特性以最小化依赖）
-RUN cargo build --release --no-default-features --features cli
-
-# ═══════════════════════════════════════════════════════════════════════
-# Stage 1.5: Frontend Builder (Vue SPA)
-# ═══════════════════════════════════════════════════════════════════════
-# 全新 clone 没有 frontend/dist（该目录已 gitignore，不入库），必须由容器
-# 内构建产出，否则 runtime 阶段 COPY dist 会失败。
-# Node 大版本锁定 22 LTS：满足 Vite 8 / vue-tsc 3 的 engines 要求
-# （Node >= 20.19）；仓库无 .nvmrc、package.json 无 engines，取当前 LTS。
-FROM node:22-alpine AS frontend
-
-WORKDIR /frontend
-
-# 依赖清单先行，最大化层缓存
-# npm registry 主备自动切换（scripts/docker/npm-registry.sh），与 builder 阶段
-# apt/cargo 国内镜像策略一致：
-#   - 未指定 NPM_REGISTRY 时按构建机出口 IP 地区选主源（CN → npmmirror，
-#     非 CN → 官方 registry.npmjs.org），主源网络失败自动 fallback 备用源，
-#     两个源都失败才报错；
-#   - 构建参数/环境变量 NPM_REGISTRY 非空时跳过 IP 检测，直接用它做主源
-#     （备源仍为官方），适合内网私有镜像。
-# npm ci 在弱网下可能静默跳过可选原生绑定（@rolldown/binding-*，Vite 8 依赖），
-# 导致 build 期报 "Cannot find native binding"。装完后校验绑定在位，缺失则清空
-# node_modules 换下一 registry 重装一次。
-# （FROM node:22-alpine ⇒ musl libc；若换非 Alpine 基础镜像需同步改为 -gnu）
-COPY frontend/package.json frontend/package-lock.json ./
-COPY scripts/docker/npm-registry.sh /usr/local/bin/npm-registry.sh
-RUN chmod +x /usr/local/bin/npm-registry.sh \
-    && echo ">> npm registry 策略: $(/usr/local/bin/npm-registry.sh)" \
-    && for line in $(/usr/local/bin/npm-registry.sh); do \
-         case "$line" in PRIMARY=*) PRIMARY=${line#PRIMARY=} ;; FALLBACK=*) FALLBACK=${line#FALLBACK=} ;; esac; \
-       done \
-    && echo ">> PRIMARY=${PRIMARY}  FALLBACK=${FALLBACK}" \
-    && for url in "${PRIMARY}" "${FALLBACK}"; do \
-         echo ">> try: npm ci --registry=${url}"; \
-         if npm ci --registry="${url}" --no-audit --no-fund \
-              && node -e "require('@rolldown/binding-' + process.platform + '-' + process.arch + '-musl')"; then \
-           echo ">> npm ci OK via ${url}"; \
-           exit 0; \
-         fi; \
-         echo ">> 失败,清空 node_modules 尝试下一源"; \
-         rm -rf node_modules; \
-       done; \
-    echo "FATAL: npm ci 在全部 registry 上失败" && exit 1
-
-# 复制源码并构建（产出 /frontend/dist）
-COPY frontend/ ./
-RUN npm run build
-
-# ═══════════════════════════════════════════════════════════════════════
-# Stage 2: Runtime
-# ═══════════════════════════════════════════════════════════════════════
-FROM ubuntu:22.04 AS runtime
-
-# 配置 apt 国内镜像源（阿里云）
-RUN sed -i 's|archive.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list \
-    && sed -i 's|security.ubuntu.com|mirrors.aliyun.com|g' /etc/apt/sources.list
-
-# 安装运行时依赖
+# 安装运行时依赖(tar 用于解包下载的 release 资产)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     git \
     openssh-client \
     curl \
+    tar \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
@@ -124,16 +32,66 @@ RUN groupadd -r review-engine && useradd -r -g review-engine -d /app -s /sbin/no
 
 WORKDIR /app
 
-# 从 builder 复制二进制
-COPY --from=builder /build/target/release/review-engine /usr/local/bin/review-engine
+# ── 零编译构建参数 ────────────────────────────────────────────────────────
+# REVIEW_ENGINE_VERSION:必填,对应 GitHub Release 的 tag(如 v0.9.8),决定下载
+#   哪个版本的二进制与前端 dist。留空则构建立即失败(fail-fast),防静默用错版本。
+# REVIEW_ENGINE_BASE_URL:Release 资产下载根地址(含 /download)。默认官方 GitHub;
+#   国内网络不稳时可指向 gh-proxy.com 等镜像或内网资产服务器,便于 NAS 部署与
+#   本地验证(不改默认值即官方发布路径)。
+ARG REVIEW_ENGINE_VERSION=""
+ARG REVIEW_ENGINE_BASE_URL="https://github.com/Liewzheng/ReviewEngine/releases/download"
+
+# 下载并校验运行时二进制(零编译核心步骤,独立成层便于排障)
+# 架构 triple 与 release 资产命名一致(x86_64 / aarch64),其余架构 fail-fast。
+# 校验纪律对齐 src/upgrade:必须下载 .sha256 副件并 sha256sum -c 校验(sidecar
+# 内记录完整资产文件名,故下载到 /app 时保持原名)。sidecar 命名注意:release
+# 实际资产是 <triple>.sha256,不是 <archive>.tar.gz.sha256。
+RUN test -n "$REVIEW_ENGINE_VERSION" \
+      || { echo "ERROR: REVIEW_ENGINE_VERSION build-arg is required (e.g. v0.9.8)"; exit 1; } \
+    && case "$(uname -m)" in \
+         x86_64|amd64)  TRIPLE="x86_64-unknown-linux-gnu" ;; \
+         aarch64|arm64) TRIPLE="aarch64-unknown-linux-gnu" ;; \
+         *) echo "ERROR: unsupported architecture: $(uname -m)"; exit 1 ;; \
+       esac \
+    && echo ">> [1/3] download review-engine-${TRIPLE}.tar.gz (${REVIEW_ENGINE_VERSION})" \
+    && curl -fsSL --retry 3 --connect-timeout 15 \
+         -o "review-engine-${TRIPLE}.tar.gz" \
+         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/review-engine-${TRIPLE}.tar.gz" \
+    && echo ">> [2/3] verify sha256 (${REVIEW_ENGINE_VERSION})" \
+    && curl -fsSL --retry 3 --connect-timeout 15 \
+         -o "review-engine-${TRIPLE}.sha256" \
+         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/review-engine-${TRIPLE}.sha256" \
+    && sha256sum -c "review-engine-${TRIPLE}.sha256" \
+    && tar -xzf "review-engine-${TRIPLE}.tar.gz" -C /usr/local/bin \
+    && rm -f "review-engine-${TRIPLE}.tar.gz" "review-engine-${TRIPLE}.sha256" \
+    && /usr/local/bin/review-engine --version
+
+# 下载前端 dist 并解包到 /app/frontend/dist
+# frontend-dist.tar.gz 由 release.yml 的 upload-frontend-dist job 打包(-C dist .),
+# 包根即 index.html + assets/,直接 -C 解包即可。该资产暂未发布 .sha256 副件,
+# 故前端校验可选:副件存在则校验,404 则告警跳过(与 install.sh 校验策略一致)。
+RUN test -n "$REVIEW_ENGINE_VERSION" \
+      || { echo "ERROR: REVIEW_ENGINE_VERSION build-arg is required (e.g. v0.9.8)"; exit 1; } \
+    && echo ">> [3/3] download frontend-dist.tar.gz (${REVIEW_ENGINE_VERSION})" \
+    && mkdir -p /app/frontend/dist \
+    && curl -fsSL --retry 3 --connect-timeout 15 \
+         -o frontend-dist.tar.gz \
+         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz" \
+    && if curl -fsSL --retry 3 --connect-timeout 15 \
+         -o frontend-dist.tar.gz.sha256 \
+         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz.sha256"; then \
+         sha256sum -c frontend-dist.tar.gz.sha256 || exit 1; \
+       else \
+         echo "WARN: frontend-dist.tar.gz.sha256 不存在,跳过前端资产校验"; \
+       fi \
+    && tar -xzf frontend-dist.tar.gz -C /app/frontend/dist \
+    && rm -f frontend-dist.tar.gz frontend-dist.tar.gz.sha256 \
+    && ls -la /app/frontend/dist
 
 # reng 别名（argv[0] 动态命令名，symlink 调用即可生效）
 RUN ln -s /usr/local/bin/review-engine /usr/local/bin/reng
 
-# 复制前端构建产物（由 frontend 阶段构建，全新 clone 亦可构建）
-COPY --from=frontend /frontend/dist /app/frontend/dist
-
-# 复制启动入口脚本，保留作为容器入口点以便后续扩展
+# 复制启动入口脚本,保留作为容器入口点以便后续扩展
 COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 

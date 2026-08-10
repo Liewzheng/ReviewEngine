@@ -66,14 +66,36 @@ FROM node:22-alpine AS frontend
 WORKDIR /frontend
 
 # 依赖清单先行，最大化层缓存
+# npm registry 主备自动切换（scripts/docker/npm-registry.sh），与 builder 阶段
+# apt/cargo 国内镜像策略一致：
+#   - 未指定 NPM_REGISTRY 时按构建机出口 IP 地区选主源（CN → npmmirror，
+#     非 CN → 官方 registry.npmjs.org），主源网络失败自动 fallback 备用源，
+#     两个源都失败才报错；
+#   - 构建参数/环境变量 NPM_REGISTRY 非空时跳过 IP 检测，直接用它做主源
+#     （备源仍为官方），适合内网私有镜像。
 # npm ci 在弱网下可能静默跳过可选原生绑定（@rolldown/binding-*，Vite 8 依赖），
-# 导致 build 期报 "Cannot find native binding"。装完后校验绑定在位，缺失则清空重装一次。
+# 导致 build 期报 "Cannot find native binding"。装完后校验绑定在位，缺失则清空
+# node_modules 换下一 registry 重装一次。
 # （FROM node:22-alpine ⇒ musl libc；若换非 Alpine 基础镜像需同步改为 -gnu）
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci --no-audit --no-fund \
-    && node -e "require('@rolldown/binding-' + process.platform + '-' + process.arch + '-musl')" \
-    || (rm -rf node_modules && npm ci --no-audit --no-fund \
-        && node -e "require('@rolldown/binding-' + process.platform + '-' + process.arch + '-musl')")
+COPY scripts/docker/npm-registry.sh /usr/local/bin/npm-registry.sh
+RUN chmod +x /usr/local/bin/npm-registry.sh \
+    && echo ">> npm registry 策略: $(/usr/local/bin/npm-registry.sh)" \
+    && for line in $(/usr/local/bin/npm-registry.sh); do \
+         case "$line" in PRIMARY=*) PRIMARY=${line#PRIMARY=} ;; FALLBACK=*) FALLBACK=${line#FALLBACK=} ;; esac; \
+       done \
+    && echo ">> PRIMARY=${PRIMARY}  FALLBACK=${FALLBACK}" \
+    && for url in "${PRIMARY}" "${FALLBACK}"; do \
+         echo ">> try: npm ci --registry=${url}"; \
+         if npm ci --registry="${url}" --no-audit --no-fund \
+              && node -e "require('@rolldown/binding-' + process.platform + '-' + process.arch + '-musl')"; then \
+           echo ">> npm ci OK via ${url}"; \
+           exit 0; \
+         fi; \
+         echo ">> 失败,清空 node_modules 尝试下一源"; \
+         rm -rf node_modules; \
+       done; \
+    echo "FATAL: npm ci 在全部 registry 上失败" && exit 1
 
 # 复制源码并构建（产出 /frontend/dist）
 COPY frontend/ ./

@@ -88,6 +88,17 @@ pub fn build_path_review_diff(repo_path: &str, dir: &str) -> Result<FullPathRevi
     let mut reviewed: Vec<(String, String)> = Vec::new();
     let mut skipped: Vec<String> = Vec::new();
     for rel in raw_files {
+        let full = repo.join(&rel);
+        // Symlinks can escape the reviewed tree; skip them (the non-Git walk
+        // in `walk_files` already does this per-entry, but `git ls-files` lists
+        // committed symlinks too, so re-check before every read — otherwise a
+        // malicious repo could make us read a file outside `repo`).
+        if let Ok(meta) = std::fs::symlink_metadata(&full) {
+            if meta.file_type().is_symlink() {
+                skipped.push(format!("{} (symlink)", rel));
+                continue;
+            }
+        }
         if !is_parser_safe_path(&rel) {
             skipped.push(format!("{} (unsafe path)", rel));
             continue;
@@ -96,10 +107,10 @@ pub fn build_path_review_diff(repo_path: &str, dir: &str) -> Result<FullPathRevi
             skipped.push(format!("{} (ignored file kind)", rel));
             continue;
         }
-        let bytes = match std::fs::read(repo.join(&rel)) {
+        let bytes = match std::fs::read(&full) {
             Ok(b) => b,
             Err(e) => {
-                anyhow::bail!("failed to read {}: {}", repo.join(&rel).display(), e);
+                anyhow::bail!("failed to read {}: {}", full.display(), e);
             }
         };
         match String::from_utf8(bytes) {
@@ -219,7 +230,12 @@ fn is_parser_safe_path(rel: &str) -> bool {
     if rel.is_empty() || rel.starts_with('/') || rel.starts_with('~') {
         return false;
     }
-    if rel.contains("..") || rel.contains('\\') || rel.contains(':') || rel.contains('\0') {
+    // Reject parent-directory traversal by path *segment*, not by substring:
+    // `foo..bar.rs` is a legal filename and must not be dropped from review.
+    if Path::new(rel).components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    if rel.contains('\\') || rel.contains(':') || rel.contains('\0') {
         return false;
     }
     // Whitespace would split the `diff --git` header into more tokens.
@@ -373,6 +389,66 @@ mod tests {
         assert!(review.diff.contains("+fn second() {}"));
         assert!(review.diff.contains("+fn b() {}"));
         assert!(!review.diff.contains("logo.png"));
+    }
+
+    /// Security regression: `git ls-files` lists committed symlinks, and the
+    /// Git branch used to read them via `std::fs::read` — which follows the
+    /// link, so a symlink pointing outside the repo would leak external file
+    /// content into the review. The read path must skip symlinks (mirroring
+    /// the non-Git walk).
+    #[cfg(unix)]
+    #[test]
+    fn git_repo_skips_committed_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        // A secret *outside* the reviewed tree; the committed symlink must not
+        // leak it.
+        std::fs::write(dir.path().join("outside.txt"), "TOP-SECRET-OUTSIDE\n").unwrap();
+        std::os::unix::fs::symlink("../outside.txt", dir.path().join("src/link.rs")).unwrap();
+        std::fs::write(dir.path().join("src/real.rs"), "fn real() {}\n").unwrap();
+        let status = Command::new("git")
+            .current_dir(dir.path())
+            .args(["add", "-A"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let status = Command::new("git")
+            .current_dir(dir.path())
+            .args(["commit", "-m", "add symlink"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        let review = build_path_review_diff(dir.path().to_str().unwrap(), "src").unwrap();
+        assert_eq!(review.files, vec!["src/real.rs".to_string()]);
+        assert!(
+            !review.diff.contains("TOP-SECRET-OUTSIDE"),
+            "symlink target content leaked into the review: {}",
+            review.diff
+        );
+        assert!(
+            !review.diff.contains("link.rs"),
+            "symlink must be excluded: {}",
+            review.diff
+        );
+    }
+
+    /// Coverage regression: a legal filename containing `..` inside a single
+    /// segment (`foo..bar.rs`) must not be dropped by the substring check.
+    #[test]
+    fn git_repo_accepts_double_dot_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        commit(dir.path(), &[("src/foo..bar.rs", "fn foo() {}\n")]);
+
+        let review = build_path_review_diff(dir.path().to_str().unwrap(), "src").unwrap();
+        assert_eq!(review.files, vec!["src/foo..bar.rs".to_string()]);
+        assert!(
+            review.diff.contains("diff --git a/src/foo..bar.rs b/src/foo..bar.rs"),
+            "double-dot filename must be reviewed: {}",
+            review.diff
+        );
     }
 
     #[test]

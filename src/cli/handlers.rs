@@ -877,6 +877,14 @@ pub async fn run_local_path(
     let config = review_engine::config::resolve_config(config_source).await?;
     let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
+    // Validate the review input FIRST: a bad --path (missing directory, empty
+    // tree, traversal) must fail with the path error regardless of LLM
+    // configuration. The LLM check below otherwise masks it with an unrelated
+    // "No LLM configuration found" message in environments that resolve no
+    // provider (e.g. clean CI) — and the actionable error is the path one.
+    let full = review_engine::input::full_path::build_path_review_diff(local_path, path)?;
+    let file_count = full.files.len();
+
     if llm_configs.is_empty() {
         anyhow::bail!(
             "No LLM configuration found. \
@@ -884,9 +892,6 @@ pub async fn run_local_path(
              the project .code-audit-config.toml, --llm-config, or LLM_CONFIG env var."
         );
     }
-
-    let full = review_engine::input::full_path::build_path_review_diff(local_path, path)?;
-    let file_count = full.files.len();
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", "main");
 

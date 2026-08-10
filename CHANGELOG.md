@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.9] - 2026-08-10
+
+### Added
+- **Docker in-container auto upgrade**: a Docker-installed review-engine can now upgrade itself from the Web UI — the server downloads the new release binary and frontend dist, verifies checksums, swaps them into the writable volumes, then exits so `docker compose` restarts the container on the new version; `brew`/`cargo` installs keep the host-command path and the `NotSupported` rejection (400 + hint). The frontend `UpgradeDialog` drives the flow and is translated into all six locales. (`src/server/api/upgrade.rs`, `src/upgrade/install_method.rs`, `tests/server.rs`, `frontend/src/components/Upgrade/UpgradeDialog.vue`, `frontend/src/composables/useUpgrade.ts`)
+- **Zero-build Docker image**: the image build no longer compiles Rust or the Vue frontend — it downloads the release binaries and `frontend-dist.tar.gz` from the matching GitHub release, cutting the first build from 10–30 minutes to a couple of minutes; the dist swap is a content copy rather than a directory rename so it survives the container's volume filesystem (EBUSY/EXDEV fixed with a regression test), and a release lacking the frontend-dist asset is skipped gracefully. (`Dockerfile`, `entrypoint.sh`, `docker-compose.yml`, `.env.example`, `src/server/api/upgrade.rs`)
+- **Writable volumes + first-boot sync**: `/app/config` and `/app/reports` are now writable bind mounts (host paths via `CONFIG_PATH`/`REPORTS_PATH`/`SSH_KEY_PATH`, documented in `.env.example`), and `entrypoint.sh` seeds first-boot defaults so the server can write upgrade state. (`entrypoint.sh`, `docker-compose.yml`, `.gitignore`)
+- **`frontend-dist` release asset**: `release.yml` gains an `upload-frontend-dist` job that builds the frontend and uploads `frontend-dist.tar.gz` to the release, giving zero-build images a single source for backend + frontend. (`.github/workflows/release.yml`)
+- **npm registry IP-based primary/fallback**: the Docker frontend stage selects the npm registry by build-machine egress IP (`CN` → npmmirror primary, otherwise official primary) with automatic fallback to the other source, and `NPM_REGISTRY` overrides detection for private mirrors. (`scripts/docker/npm-registry.sh`, `Dockerfile`)
+
 ## [0.9.8] - 2026-08-10
 
 ### Added

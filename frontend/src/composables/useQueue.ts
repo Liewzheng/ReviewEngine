@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue';
 import { getQueueStats, getQueueTasks, cancelTask, retryTask, pauseQueue, resumeQueue, setMaxConcurrent } from '../services/queue';
+import { i18n } from '../i18n';
 import type { QueueTasksResponse } from '../services/queue';
 import type { QueueStats } from '../types/queue';
 
@@ -17,7 +18,7 @@ export function useQueue() {
     try {
       stats.value = await getQueueStats();
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       stats.value = null;
     } finally {
       loadingCount.value--;
@@ -30,7 +31,7 @@ export function useQueue() {
     try {
       data.value = await getQueueTasks(status, page, perPage);
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       data.value = null;
     } finally {
       loadingCount.value--;
@@ -42,7 +43,7 @@ export function useQueue() {
     try {
       await cancelTask(id);
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     }
   }
@@ -54,7 +55,7 @@ export function useQueue() {
       await fetchTasks();
       await fetchStats();
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     }
   }
@@ -65,7 +66,7 @@ export function useQueue() {
       await pauseQueue();
       await fetchStats();
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     }
   }
@@ -76,7 +77,7 @@ export function useQueue() {
       await resumeQueue();
       await fetchStats();
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     }
   }
@@ -87,7 +88,7 @@ export function useQueue() {
       await setMaxConcurrent(value);
       await fetchStats();
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     }
   }

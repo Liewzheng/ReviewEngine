@@ -122,8 +122,10 @@ RUN mkdir -p /app/config /app/reports /app/.ssh && \
 # 切换到非 root 用户
 USER review-engine
 
-# 暴露默认服务端口
-EXPOSE 8080
+# 暴露端口:
+#   443  = HTTPS(serve 内置 TLS,容器内 8443 → 宿主机 443)
+#   8080 = 纯 HTTP(健康检查与内网直连;无证书时 fail-soft 仍走这里)
+EXPOSE 443 8080
 
 # 健康检查
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \

@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue';
 import { getExperts, updateExpert } from '../services/experts';
+import { i18n } from '../i18n';
 import type { Expert } from '../types/expert';
 
 export function useExperts() {
@@ -14,7 +15,7 @@ export function useExperts() {
       const response = await getExperts();
       experts.value = response.experts;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       experts.value = [];
     } finally {
       loading.value = false;
@@ -31,7 +32,7 @@ export function useExperts() {
       }
       return updated;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     }
   }

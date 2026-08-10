@@ -10,12 +10,14 @@ import {
   WarningFilled,
 } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import type { Expert, ExpertCategory, ExpertReviewSummary } from '../types/expert'
 import { categoryColorMap, categoryLabelMap } from '../types/expert'
 import { useExperts } from '../composables/useExperts'
 import ExpertCard from '../components/ExpertsManagement/ExpertCard.vue'
 
 const router = useRouter()
+const { t } = useI18n()
 
 // ========== Composable ==========
 const expertsStore = useExperts()
@@ -35,7 +37,7 @@ const filterCategory = ref<ExpertCategory | 'all'>('all')
 watch(() => expertsStore.error.value, (err) => {
   if (err) {
     ElNotification({
-      title: 'Error',
+      title: t('common.error'),
       message: err,
       type: 'error',
       duration: 5000,
@@ -45,7 +47,7 @@ watch(() => expertsStore.error.value, (err) => {
 
 // ========== Computed ==========
 const categories = computed(() => [
-  { value: 'all', label: 'All Categories' },
+  { value: 'all', label: t('experts.categories.all') },
   ...Object.entries(categoryLabelMap).map(([value, label]) => ({ value, label })),
 ])
 
@@ -85,9 +87,10 @@ function handleApiError(error: unknown, fallback: string) {
 const handleToggle = async (id: string, enabled: boolean) => {
   try {
     await expertsStore.update(id, { enabled })
+    const name = experts.value.find((e: Expert) => e.id === id)?.name ?? id
     ElNotification({
-      title: enabled ? 'Expert Enabled' : 'Expert Disabled',
-      message: `${experts.value.find((e: Expert) => e.id === id)?.name ?? id} is now ${enabled ? 'enabled' : 'disabled'}`,
+      title: enabled ? t('experts.toggle.enabledTitle') : t('experts.toggle.disabledTitle'),
+      message: enabled ? t('experts.toggle.enabledMessage', { name }) : t('experts.toggle.disabledMessage', { name }),
       type: enabled ? 'success' : 'warning',
       duration: 2000,
     })
@@ -125,8 +128,8 @@ const saveEdit = async () => {
     editModalVisible.value = false
 
     ElNotification({
-      title: 'Changes Saved',
-      message: `${editingExpert.value.name} has been updated`,
+      title: t('experts.savedTitle'),
+      message: t('experts.savedMessage', { name: editingExpert.value.name }),
       type: 'success',
       duration: 2000,
     })
@@ -140,8 +143,8 @@ const saveEdit = async () => {
 const toggleGlobalEdit = () => {
   isEditing.value = !isEditing.value
   ElNotification({
-    title: isEditing.value ? 'Edit Mode On' : 'Edit Mode Off',
-    message: isEditing.value ? 'Weight sliders are now editable' : 'Changes have been saved',
+    title: isEditing.value ? t('experts.editModeOnTitle') : t('experts.editModeOffTitle'),
+    message: isEditing.value ? t('experts.editModeOnMessage') : t('experts.editModeOffMessage'),
     type: 'info',
     duration: 2000,
   })
@@ -170,7 +173,7 @@ const handleBeforeUnload = (e: BeforeUnloadEvent) => {
 
 const unregisterGuard = router.beforeEach((to, from, next) => {
   if (hasUnsavedChanges.value && to.path !== from.path) {
-    const confirm = window.confirm('You have unsaved changes. Leave without saving?')
+    const confirm = window.confirm(t('experts.unsavedConfirm'))
     if (confirm) {
       isEditing.value = false
       next()
@@ -199,22 +202,22 @@ onBeforeUnmount(() => {
     <!-- Page Header -->
     <div class="page-header">
       <div class="header-title-section">
-        <h1 class="page-title">Experts Management</h1>
-        <p class="page-subtitle">Configure LLM review experts</p>
+        <h1 class="page-title">{{ $t('experts.title') }}</h1>
+        <p class="page-subtitle">{{ $t('experts.subtitle') }}</p>
       </div>
       <div class="header-actions">
         <el-button
           :type="isEditing ? 'success' : 'default'"
-:aria-label="isEditing ? 'Done editing' : 'Enter edit mode'"
+          :aria-label="isEditing ? $t('experts.doneEditingAria') : $t('experts.enterEditModeAria')"
           @click="toggleGlobalEdit"
         >
           <el-icon><component :is="isEditing ? Check : IconEdit" /></el-icon>
-          {{ isEditing ? 'Done Editing' : 'Edit Mode' }}
+          {{ isEditing ? $t('experts.doneEditing') : $t('experts.editMode') }}
         </el-button>
-        <el-tooltip content="Coming soon" placement="top">
-          <el-button type="primary" disabled :aria-label="'Add Expert (Coming soon)'">
+        <el-tooltip :content="$t('experts.comingSoon')" placement="top">
+          <el-button type="primary" disabled :aria-label="$t('experts.addExpertComingSoonAria')">
             <el-icon><Plus /></el-icon>
-            Add Expert
+            {{ $t('experts.addExpert') }}
           </el-button>
         </el-tooltip>
       </div>
@@ -224,15 +227,15 @@ onBeforeUnmount(() => {
     <div class="stats-bar">
       <el-card class="stat-card" shadow="never">
         <div class="stat-value">{{ enabledCount }}/{{ totalCount }}</div>
-        <div class="stat-label">Active Experts</div>
+        <div class="stat-label">{{ $t('experts.stats.active') }}</div>
       </el-card>
       <el-card class="stat-card" shadow="never">
         <div class="stat-value">{{ avgWeight }}%</div>
-        <div class="stat-label">Avg Weight</div>
+        <div class="stat-label">{{ $t('experts.stats.avgWeight') }}</div>
       </el-card>
       <el-card class="stat-card" shadow="never">
         <div class="stat-value">{{ totalCount }}</div>
-        <div class="stat-label">Total Experts</div>
+        <div class="stat-label">{{ $t('experts.stats.total') }}</div>
       </el-card>
     </div>
 
@@ -240,7 +243,7 @@ onBeforeUnmount(() => {
     <div class="filters-bar">
       <el-input
         v-model="searchQuery"
-        placeholder="Search experts..."
+        :placeholder="$t('experts.searchPlaceholder')"
         clearable
         class="search-input"
       >
@@ -248,7 +251,7 @@ onBeforeUnmount(() => {
           <el-icon><Search /></el-icon>
         </template>
       </el-input>
-      <el-select v-model="filterCategory" placeholder="Category" class="category-select">
+      <el-select v-model="filterCategory" :placeholder="$t('experts.categoryPlaceholder')" class="category-select">
         <el-option
           v-for="cat in categories"
           :key="cat.value"
@@ -281,14 +284,14 @@ onBeforeUnmount(() => {
     <!-- Empty State -->
     <el-empty
       v-else-if="filteredExperts.length === 0"
-      description="No experts found"
+      :description="$t('experts.empty')"
       :image-size="120"
     >
       <template #description>
-        <p>No experts match your filters</p>
+        <p>{{ $t('experts.emptyFiltered') }}</p>
       </template>
       <el-button type="primary" @click="searchQuery = ''; filterCategory = 'all'">
-        Clear Filters
+        {{ $t('experts.clearFilters') }}
       </el-button>
     </el-empty>
 
@@ -310,10 +313,10 @@ onBeforeUnmount(() => {
     <!-- Detail Modal -->
     <el-dialog
       v-model="detailModalVisible"
-      title="Expert Details"
+      :title="$t('experts.detailsTitle')"
       width="600px"
       class="expert-dialog"
-:aria-label="'Expert details dialog'"
+      :aria-label="$t('experts.detailsAria')"
       destroy-on-close
     >
       <div v-if="selectedExpert" class="detail-content">
@@ -328,7 +331,7 @@ onBeforeUnmount(() => {
           </el-tag>
           <el-tag v-if="!selectedExpert.enabled" type="info" size="small" effect="plain">
             <el-icon><WarningFilled /></el-icon>
-            Disabled
+            {{ $t('common.disabled') }}
           </el-tag>
         </div>
 
@@ -336,9 +339,9 @@ onBeforeUnmount(() => {
 
         <div class="detail-section">
           <div class="detail-row">
-            <span class="detail-label">Enabled:</span>
+            <span class="detail-label">{{ $t('experts.detail.enabled') }}</span>
             <el-switch
-              :aria-label="'Toggle ' + selectedExpert.name"
+              :aria-label="$t('experts.detail.toggleAria', { name: selectedExpert.name })"
               :model-value="selectedExpert.enabled"
               @update:model-value="(val: boolean) => handleToggle(selectedExpert!.id, val)"
               :active-color="'var(--success)'"
@@ -346,7 +349,7 @@ onBeforeUnmount(() => {
             />
           </div>
           <div class="detail-row">
-            <span class="detail-label">Weight:</span>
+            <span class="detail-label">{{ $t('experts.detail.weight') }}</span>
             <div class="detail-value" style="flex: 1;">
               <el-slider
                 :model-value="selectedExpert.weight"
@@ -364,7 +367,7 @@ onBeforeUnmount(() => {
         <el-divider />
 
         <div class="detail-section">
-          <h4 class="section-title">Description</h4>
+          <h4 class="section-title">{{ $t('experts.detail.description') }}</h4>
           <el-input
             type="textarea"
             :model-value="selectedExpert.description"
@@ -375,7 +378,7 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="detail-section">
-          <h4 class="section-title">Prompt Preview</h4>
+          <h4 class="section-title">{{ $t('experts.detail.promptPreview') }}</h4>
           <el-input
             type="textarea"
             :model-value="selectedExpert.promptPreview"
@@ -387,15 +390,15 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="detail-section">
-          <h4 class="section-title">Last 5 Reviews</h4>
+          <h4 class="section-title">{{ $t('experts.detail.lastReviews') }}</h4>
           <el-table
             :data="selectedExpert.lastReviews"
             size="small"
             class="reviews-table"
             @row-click="handleRowClick"
           >
-            <el-table-column prop="mrTitle" label="MR Title" min-width="180" show-overflow-tooltip />
-            <el-table-column prop="score" label="Score" width="90" align="center">
+            <el-table-column prop="mrTitle" :label="$t('history.columns.mrTitle')" min-width="180" show-overflow-tooltip />
+            <el-table-column prop="score" :label="$t('experts.detail.score')" width="90" align="center">
               <template #default="{ row }">
                 <el-tag
                   v-if="row.score !== undefined"
@@ -408,14 +411,14 @@ onBeforeUnmount(() => {
                 <span v-else class="text-muted">—</span>
               </template>
             </el-table-column>
-            <el-table-column prop="date" label="Date" width="100" align="right" />
+            <el-table-column prop="date" :label="$t('experts.detail.date')" width="100" align="right" />
           </el-table>
         </div>
       </div>
       <template #footer>
         <el-button @click="detailModalVisible = false">
           <el-icon><Close /></el-icon>
-          Close
+          {{ $t('common.close') }}
         </el-button>
       </template>
     </el-dialog>
@@ -423,17 +426,17 @@ onBeforeUnmount(() => {
     <!-- Edit Modal -->
     <el-dialog
       v-model="editModalVisible"
-      title="Edit Expert"
+      :title="$t('experts.editTitle')"
       width="500px"
       class="expert-dialog"
-:aria-label="'Expert details dialog'"
+      :aria-label="$t('experts.detailsAria')"
       destroy-on-close
     >
       <el-form v-if="editingExpert" label-position="top">
-        <el-form-item label="Name">
+        <el-form-item :label="$t('experts.edit.name')">
           <el-input v-model="editingExpert.name" readonly />
         </el-form-item>
-        <el-form-item label="Category">
+        <el-form-item :label="$t('experts.edit.category')">
           <el-select v-model="editingExpert.category" disabled style="width: 100%">
             <el-option
               v-for="(label, value) in categoryLabelMap"
@@ -443,14 +446,14 @@ onBeforeUnmount(() => {
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="Enabled">
+        <el-form-item :label="$t('experts.edit.enabled')">
           <el-switch
             v-model="editingExpert.enabled"
             :active-color="'var(--success)'"
             :inactive-color="'var(--offline)'"
           />
         </el-form-item>
-        <el-form-item label="Weight">
+        <el-form-item :label="$t('experts.edit.weight')">
           <el-slider
             v-model="editingExpert.weight"
             :max="100"
@@ -459,7 +462,7 @@ onBeforeUnmount(() => {
             show-input
           />
         </el-form-item>
-        <el-form-item label="Description">
+        <el-form-item :label="$t('experts.edit.description')">
           <el-input
             v-model="editingExpert.description"
             type="textarea"
@@ -471,19 +474,19 @@ onBeforeUnmount(() => {
       </el-form>
       <template #footer>
         <el-button
-          :aria-label="'Cancel editing'"
+          :aria-label="$t('experts.cancelEditAria')"
           @click="editModalVisible = false"
         >
           <el-icon><Close /></el-icon>
-          Cancel
+          {{ $t('common.cancel') }}
         </el-button>
         <el-button
           type="primary"
-          :aria-label="'Save changes'"
+          :aria-label="$t('experts.saveChangesAria')"
           @click="saveEdit"
         >
           <el-icon><Check /></el-icon>
-          Save Changes
+          {{ $t('common.saveChanges') }}
         </el-button>
       </template>
     </el-dialog>

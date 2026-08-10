@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted } from 'vue'
 import { ElNotification } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { RefreshRight, Cpu, CircleCheck, Warning, CircleClose, Remove } from '@element-plus/icons-vue'
 import { useLlmStatus } from '../composables/useLlmStatus'
 import ProviderCard from '../components/LlmStatus/ProviderCard.vue'
@@ -10,6 +11,7 @@ import type { LlmProvider } from '../types/llm'
 /*  Composable                                                        */
 /* ------------------------------------------------------------------ */
 
+const { t } = useI18n()
 const llm = useLlmStatus()
 
 const providers = llm.providers
@@ -43,7 +45,7 @@ const totalRequests = computed(() =>
 watch(() => llm.error.value, (err) => {
   if (err) {
     ElNotification({
-      title: 'Error',
+      title: t('common.error'),
       message: err,
       type: 'error',
       duration: 5000,
@@ -65,8 +67,8 @@ function handleRefreshAll() {
     const issues = degradedCount.value + errorCount.value
 
     ElNotification({
-      title: 'Providers Refreshed',
-      message: `All providers tested — ${healthy} healthy, ${issues} issues`,
+      title: t('llm.refreshedTitle'),
+      message: t('llm.refreshedMessage', { healthy, issues }),
       type: issues === 0 ? 'success' : 'warning',
       duration: issues === 0 ? 3000 : 5000,
     })
@@ -99,8 +101,8 @@ onMounted(() => {
     <!-- Page Header -->
     <div class="page-header">
       <div class="header-text">
-        <h2 class="page-title">LLM Status</h2>
-        <p class="page-subtitle">Provider health and performance</p>
+        <h2 class="page-title">{{ $t('llm.title') }}</h2>
+        <p class="page-subtitle">{{ $t('llm.subtitle') }}</p>
       </div>
       <el-button
         type="primary"
@@ -108,7 +110,7 @@ onMounted(() => {
         :loading="loading"
         @click="handleRefreshAll"
       >
-        Refresh All
+        {{ $t('llm.refreshAll') }}
       </el-button>
     </div>
 
@@ -126,9 +128,9 @@ onMounted(() => {
     <!-- Empty State -->
     <el-empty
       v-else-if="providers.length === 0"
-      description="No providers configured"
+      :description="$t('llm.noProviders')"
     >
-      <el-button type="primary" @click="fetchProviders">Reload</el-button>
+      <el-button type="primary" @click="fetchProviders">{{ $t('llm.reload') }}</el-button>
     </el-empty>
 
     <!-- Content -->
@@ -140,7 +142,7 @@ onMounted(() => {
             <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
             <div class="stat-body">
               <div class="stat-value">{{ providers.length }}</div>
-              <div class="stat-label">Providers</div>
+              <div class="stat-label">{{ $t('llm.stats.providers') }}</div>
             </div>
           </div>
         </el-card>
@@ -149,7 +151,7 @@ onMounted(() => {
             <el-icon class="stat-icon" :size="24" color="var(--success)"><CircleCheck /></el-icon>
             <div class="stat-body">
               <div class="stat-value" style="color: var(--success)">{{ healthyCount }}</div>
-              <div class="stat-label">Healthy</div>
+              <div class="stat-label">{{ $t('llm.status.healthy') }}</div>
             </div>
           </div>
         </el-card>
@@ -158,7 +160,7 @@ onMounted(() => {
             <el-icon class="stat-icon" :size="24" color="var(--warning)"><Warning /></el-icon>
             <div class="stat-body">
               <div class="stat-value" style="color: var(--warning)">{{ degradedCount }}</div>
-              <div class="stat-label">Degraded</div>
+              <div class="stat-label">{{ $t('llm.status.degraded') }}</div>
             </div>
           </div>
         </el-card>
@@ -167,7 +169,7 @@ onMounted(() => {
             <el-icon class="stat-icon" :size="24" color="var(--error)"><CircleClose /></el-icon>
             <div class="stat-body">
               <div class="stat-value" style="color: var(--error)">{{ errorCount }}</div>
-              <div class="stat-label">Error</div>
+              <div class="stat-label">{{ $t('llm.status.error') }}</div>
             </div>
           </div>
         </el-card>
@@ -176,7 +178,7 @@ onMounted(() => {
             <el-icon class="stat-icon" :size="24" color="var(--offline)"><Remove /></el-icon>
             <div class="stat-body">
               <div class="stat-value" style="color: var(--offline)">{{ offlineCount }}</div>
-              <div class="stat-label">Offline</div>
+              <div class="stat-label">{{ $t('llm.status.offline') }}</div>
             </div>
           </div>
         </el-card>
@@ -185,7 +187,7 @@ onMounted(() => {
             <el-icon class="stat-icon" :size="24"><RefreshRight /></el-icon>
             <div class="stat-body">
               <div class="stat-value">{{ avgLatency }} ms</div>
-              <div class="stat-label">Avg Latency</div>
+              <div class="stat-label">{{ $t('llm.stats.avgLatency') }}</div>
             </div>
           </div>
         </el-card>
@@ -194,7 +196,7 @@ onMounted(() => {
             <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
             <div class="stat-body">
               <div class="stat-value">{{ new Intl.NumberFormat('en-US').format(totalRequests) }}</div>
-              <div class="stat-label">Total Requests</div>
+              <div class="stat-label">{{ $t('llm.stats.totalRequests') }}</div>
             </div>
           </div>
         </el-card>

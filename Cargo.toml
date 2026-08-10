@@ -1,6 +1,6 @@
 [package]
 name = "review-engine"
-version = "0.9.6"
+version = "0.9.8"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -22,6 +22,16 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 
 # HTTP server (health check, webhook)
 axum = "0.8"
+# HTTPS (TLS) listener for `serve`; rustls-backed. `tls-rustls` pulls in
+# rustls-pemfile internally to read the PEM certificate chain / key.
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+# rustls CryptoProvider: axum-server's `tls-rustls` feature compiles BOTH the
+# ring backend (via tokio-rustls/hyper-rustls defaults, the backend reqwest
+# already used) and the aws-lc-rs backend (via rustls default features), so
+# rustls cannot auto-select a process-wide provider and panics at startup.
+# Depend on rustls directly and install the ring provider explicitly in
+# `server::serve` — ring matches the pre-existing LLM HTTPS path exactly.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Metrics and monitoring
@@ -126,3 +136,4 @@ module_name_repetitions = { level = "allow", priority = -1 }
 [dev-dependencies]
 tempfile = "3.27.0"
 wiremock = "0.6"
+rcgen = "0.13"

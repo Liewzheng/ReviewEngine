@@ -12,7 +12,16 @@ services:
     restart: unless-stopped
 
     ports:
-      - "${REVIEW_ENGINE_PORT:-18080}:8080"
+      # ── HTTPS(默认启用)──
+      # serve 内置 TLS 在容器内 8443(--tls-port)终结,映射到宿主机
+      # ${REVIEW_TLS_PORT:-443}。需要 .env 中同时设置 REVIEW_TLS_CERT 与
+      # REVIEW_TLS_KEY(见下方环境变量),且 ./tls/cert.pem、./tls/key.pem 存在。
+      - "${REVIEW_TLS_PORT:-443}:8443"
+
+      # ── 可选:纯 HTTP 直连(默认关闭)──
+      # 容器内 8080 始终存在(健康检查用)。如需在内网直连 HTTP,取消下面注释
+      # 并在 .env 设 REVIEW_ENABLE_HTTP=true(仅建议受信内网使用):
+      # - "${REVIEW_ENGINE_PORT:-18080}:8080"
 
     environment:
       # ── API Authentication ──
@@ -36,6 +45,14 @@ services:
       # JSON array of LLM provider configs (OpenAI, Anthropic, etc.)
       # Example: [{"provider":"openai","model":"gpt-4o","api_key":"sk-..."}]
       LLM_CONFIG: ${LLM_CONFIG:?LLM_CONFIG is required}
+
+      # ── Native HTTPS (TLS) ──
+      # serve 内置 TLS 开关:两个都设为非空(如 true)即启用,容器内监听 8443;
+      # 留空 → 纯 HTTP 8080(fail-soft)。它们是开关而非文件路径,证书/私钥
+      # 通过下方 TLS_CERT_PATH/TLS_KEY_PATH 只读卷挂载到固定容器路径:
+      #   /app/tls/cert.pem   /app/tls/key.pem
+      REVIEW_TLS_CERT: ${REVIEW_TLS_CERT:-}
+      REVIEW_TLS_KEY: ${REVIEW_TLS_KEY:-}
 
       # ── Logging ──
       RUST_LOG: ${RUST_LOG:-info}
@@ -64,6 +81,22 @@ services:
         target: /app/.ssh
         read_only: true
 
+      # TLS certificate & private key for native HTTPS (read-only)
+      # 宿主路径默认 ./tls/cert.pem 与 ./tls/key.pem。`docker compose up` 前
+      # 必须先生成(源文件不存在 compose 会报错),生成方式:
+      #   mkdir -p tls
+      #   openssl req -x509 -newkey rsa:2048 -nodes \
+      #     -keyout tls/key.pem -out tls/cert.pem -days 365 \
+      #     -subj "/CN=<your-host>" -addext "subjectAltName=DNS:<your-host>"
+      - type: bind
+        source: ${TLS_CERT_PATH:-./tls/cert.pem}
+        target: /app/tls/cert.pem
+        read_only: true
+      - type: bind
+        source: ${TLS_KEY_PATH:-./tls/key.pem}
+        target: /app/tls/key.pem
+        read_only: true
+
     # Resource limits for SaaS stability
     deploy:
       resources:
@@ -85,23 +118,10 @@ services:
     networks:
       - review-engine-net
 
-  # ─── Optional: Caddy Reverse Proxy (HTTPS) ────────────────────────────
-  # Uncomment this section if you need HTTPS termination
-  # caddy:
-  #   image: caddy:2-alpine
-  #   container_name: review-engine-caddy
-  #   restart: unless-stopped
-  #   ports:
-  #     - "80:80"
-  #     - "443:443"
-  #   volumes:
-  #     - ./Caddyfile:/etc/caddy/Caddyfile:ro
-  #     - caddy-data:/data
-  #     - caddy-config:/config
-  #   depends_on:
-  #     - review-engine
-  #   networks:
-  #     - review-engine-net
+  # ─── HTTPS:由 review-engine serve 内置 TLS 提供(无需 Caddy/nginx 反代) ──
+  # 在 .env 设置 REVIEW_TLS_CERT + REVIEW_TLS_KEY(非空)并生成
+  # ./tls/cert.pem + ./tls/key.pem(见上方卷注释)。TLS 在容器内 8443 终结,
+  # 映射到宿主机 ${REVIEW_TLS_PORT:-443};容器内 8080 仍用于健康检查。
 
   # ─── Optional: Redis for Task Queue (future scaling) ──────────────────
   # redis:

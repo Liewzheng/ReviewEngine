@@ -22,6 +22,7 @@
 
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { ArrowUp, ArrowDown, Minus } from '@element-plus/icons-vue'
 import type { Component } from 'vue'
 
@@ -34,9 +35,10 @@ interface Props {
   trendLabel?: string
 }
 
+const { t } = useI18n()
+
 const props = withDefaults(defineProps<Props>(), {
   format: 'number',
-  trendLabel: 'vs last week',
 })
 
 const formattedValue = computed(() => {
@@ -71,7 +73,7 @@ const trendIcon = computed(() => {
 const trendText = computed(() => {
   if (props.trend === undefined) return '—'
   const sign = props.trend > 0 ? '+' : ''
-  return `${sign}${props.trend}% ${props.trendLabel}`
+  return `${sign}${props.trend}% ${props.trendLabel ?? t('dashboard.kpis.vsLastWeek')}`
 })
 </script>
 

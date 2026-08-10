@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { ReviewStatus, ExpertResultStatus } from '../../types/history'
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { Loading } from '@element-plus/icons-vue'
 
 interface Props {
@@ -14,19 +15,24 @@ const props = withDefaults(defineProps<Props>(), {
   dotOnly: false,
 })
 
-const statusMap: Record<string, { type: any; text: string; effect?: string; customClass?: string }> = {
-  queued: { type: 'info', text: 'Queued' },
-  running: { type: 'success', text: 'In Progress', effect: 'plain' },
-  completed: { type: 'success', text: 'Completed' },
-  failed: { type: 'danger', text: 'Failed' },
-  cancelled: { type: 'info', text: 'Cancelled', effect: 'plain', customClass: 'status-grey' },
-  success: { type: 'success', text: 'Success' },
-  warning: { type: 'warning', text: 'Warning' },
-  error: { type: 'danger', text: 'Error' },
-  skipped: { type: 'info', text: 'Skipped', effect: 'plain', customClass: 'status-grey' },
+const { t } = useI18n()
+
+const statusMap: Record<string, { type: any; textKey: string; effect?: string; customClass?: string }> = {
+  queued: { type: 'info', textKey: 'common.status.queued' },
+  running: { type: 'success', textKey: 'common.status.inProgress', effect: 'plain' },
+  completed: { type: 'success', textKey: 'common.status.completed' },
+  failed: { type: 'danger', textKey: 'common.status.failed' },
+  cancelled: { type: 'info', textKey: 'common.status.cancelled', effect: 'plain', customClass: 'status-grey' },
+  success: { type: 'success', textKey: 'common.status.success' },
+  warning: { type: 'warning', textKey: 'common.status.warning' },
+  error: { type: 'danger', textKey: 'common.status.error' },
+  skipped: { type: 'info', textKey: 'common.status.skipped', effect: 'plain', customClass: 'status-grey' },
 }
 
-const config = computed(() => statusMap[props.status] || { type: 'info', text: props.status })
+const config = computed(() => {
+  const c = statusMap[props.status] || { type: 'info', textKey: '' }
+  return { ...c, text: c.textKey ? t(c.textKey) : (props.status as string) }
+})
 </script>
 
 <template>

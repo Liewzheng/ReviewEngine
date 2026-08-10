@@ -22,7 +22,7 @@
     />
 
     <div v-if="hasExpert || hasElapsed" class="task-meta">
-      <span v-if="hasExpert">Expert: {{ task.expertName }}</span>
+      <span v-if="hasExpert">{{ $t('queue.task.expert', { name: task.expertName }) }}</span>
       <span v-if="hasExpert && hasElapsed" class="meta-sep">·</span>
       <span v-if="hasElapsed">{{ formattedElapsed }}</span>
     </div>
@@ -36,33 +36,33 @@
         <template v-if="task.status === 'running'">
           <el-button type="danger" plain @click="handleCancel">
             <el-icon><Close /></el-icon>
-            <span>Cancel</span>
+            <span>{{ $t('common.cancel') }}</span>
           </el-button>
           <el-button type="primary" plain @click="handleViewLogs">
             <el-icon><List /></el-icon>
-            <span>Logs</span>
+            <span>{{ $t('common.logs') }}</span>
           </el-button>
         </template>
         <template v-else-if="task.status === 'queued'">
           <el-button type="danger" plain @click="handleCancel">
             <el-icon><Close /></el-icon>
-            <span>Cancel</span>
+            <span>{{ $t('common.cancel') }}</span>
           </el-button>
         </template>
         <template v-else-if="task.status === 'failed'">
           <el-button type="warning" plain @click="handleRetry">
             <el-icon><Refresh /></el-icon>
-            <span>Retry</span>
+            <span>{{ $t('common.retry') }}</span>
           </el-button>
           <el-button type="primary" plain @click="handleViewLogs">
             <el-icon><List /></el-icon>
-            <span>Logs</span>
+            <span>{{ $t('common.logs') }}</span>
           </el-button>
         </template>
         <template v-else-if="task.status === 'completed'">
           <el-button type="primary" plain @click="handleViewLogs">
             <el-icon><List /></el-icon>
-            <span>Logs</span>
+            <span>{{ $t('common.logs') }}</span>
           </el-button>
         </template>
       </el-button-group>
@@ -71,7 +71,7 @@
     <div v-if="isPaused && task.status === 'queued'" class="pause-overlay">
       <div class="pause-content">
         <el-icon><VideoPause /></el-icon>
-        <span>Paused</span>
+        <span>{{ $t('common.paused') }}</span>
       </div>
     </div>
   </el-card>

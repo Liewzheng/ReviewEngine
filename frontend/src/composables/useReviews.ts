@@ -1,5 +1,6 @@
 import { ref, computed } from 'vue';
 import { getReviews, getReview, deleteReview, rerunReview } from '../services/reviews';
+import { i18n } from '../i18n';
 import type { ReviewsListResponse } from '../services/reviews';
 import type { ReviewDetail, HistoryFilters } from '../types/history';
 
@@ -15,7 +16,7 @@ export function useReviews() {
     try {
       data.value = await getReviews(filters, page, perPage);
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       data.value = null;
     } finally {
       loading.value = false;
@@ -28,7 +29,7 @@ export function useReviews() {
     try {
       selectedReview.value = await getReview(id);
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       selectedReview.value = null;
     } finally {
       loading.value = false;
@@ -40,7 +41,7 @@ export function useReviews() {
     try {
       await deleteReview(id);
     } catch (e) {
-      error.value = e instanceof Error ? e.message : 'Unknown error';
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
       throw e;
     }
   }
@@ -52,15 +53,15 @@ export function useReviews() {
   function rerunErrorMessage(e: unknown): string {
     const status = (e as { status?: number } | null)?.status;
     if (status === 404) {
-      return 'Review not found. It may have been deleted.';
+      return i18n.global.t('errors.reviewNotFound');
     }
     if (status === 409) {
-      return 'This review is still in progress or its original request is unavailable, so it cannot be re-run right now.';
+      return i18n.global.t('errors.reviewInProgress');
     }
     if (status === 422) {
-      return 'The stored request parameters cannot be replayed, so this review cannot be re-run.';
+      return i18n.global.t('errors.reviewParamsUnavailable');
     }
-    return e instanceof Error ? e.message : 'Unknown error';
+    return e instanceof Error ? e.message : i18n.global.t('errors.unknown');
   }
 
   async function rerun(id: string) {

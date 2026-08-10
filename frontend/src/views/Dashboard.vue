@@ -13,6 +13,7 @@ import {
   RefreshRight,
 } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import { createChart, LineSeries, LineStyle, CrosshairMode, type IChartApi, type ISeriesApi } from 'lightweight-charts'
 import { useDashboard } from '../composables/useDashboard'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
@@ -22,6 +23,7 @@ import PageHeader from '../components/common/PageHeader.vue'
 import type { KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
 
 const router = useRouter()
+const { t } = useI18n()
 const dashboard = useDashboard()
 
 // Loading & refresh state
@@ -48,7 +50,7 @@ let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
 watch(() => dashboard.error.value, (err) => {
   if (err) {
     ElNotification({
-      title: 'Error',
+      title: t('common.error'),
       message: err,
       type: 'error',
       duration: 5000,
@@ -69,15 +71,15 @@ async function onRefresh() {
   try {
     await refreshData()
     ElNotification({
-      title: 'Success',
-      message: 'Dashboard refreshed',
+      title: t('common.success'),
+      message: t('dashboard.refreshed'),
       type: 'success',
       duration: 2000,
     })
   } catch (e) {
     ElNotification({
-      title: 'Error',
-      message: 'Failed to refresh dashboard',
+      title: t('common.error'),
+      message: t('dashboard.refreshFailed'),
       type: 'error',
       duration: 5000,
     })
@@ -97,11 +99,11 @@ function formatDuration(ms: number): string {
 function timeAgo(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
   const mins = Math.floor(diff / 60000)
-  if (mins < 1) return 'just now'
-  if (mins < 60) return `${mins} min ago`
+  if (mins < 1) return t('dashboard.time.justNow')
+  if (mins < 60) return t('dashboard.time.minAgo', { n: mins })
   const hrs = Math.floor(mins / 60)
-  if (hrs < 24) return `${hrs}h ago`
-  return `${Math.floor(hrs / 24)}d ago`
+  if (hrs < 24) return t('dashboard.time.hoursAgo', { n: hrs })
+  return t('dashboard.time.daysAgo', { n: Math.floor(hrs / 24) })
 }
 
 function formatTime(iso: string): string {
@@ -213,12 +215,12 @@ function statusToBadgeStatus(status: RecentReview['status']) {
 
 function statusLabel(status: RecentReview['status']): string {
   switch (status) {
-    case 'success': return 'Completed'
-    case 'failed': return 'Failed'
-    case 'running': return 'In Progress'
-    case 'queued': return 'Queued'
-    case 'completed': return 'Completed'
-    case 'cancelled': return 'Cancelled'
+    case 'success': return t('common.status.completed')
+    case 'failed': return t('common.status.failed')
+    case 'running': return t('common.status.inProgress')
+    case 'queued': return t('common.status.queued')
+    case 'completed': return t('common.status.completed')
+    case 'cancelled': return t('common.status.cancelled')
   }
 }
 
@@ -247,19 +249,19 @@ onUnmounted(() => {
 <template>
   <div class="dashboard-page">
     <!-- Page Header -->
-    <PageHeader title="Dashboard" subtitle="System overview and recent activity">
+    <PageHeader :title="$t('dashboard.title')" :subtitle="$t('dashboard.subtitle')">
       <template #actions>
         <span v-if="lastUpdated" class="last-updated">
-          Updated {{ formatTime(lastUpdated) }}
+          {{ $t('dashboard.updatedAt', { time: formatTime(lastUpdated) }) }}
         </span>
         <el-button
           :icon="Refresh"
           :loading="isRefreshing"
           size="small"
-          aria-label="Refresh dashboard"
+          :aria-label="$t('dashboard.refreshAria')"
           @click="onRefresh"
         >
-          Refresh
+          {{ $t('common.refresh') }}
         </el-button>
       </template>
     </PageHeader>
@@ -277,37 +279,37 @@ onUnmounted(() => {
       </template>
       <template v-else-if="kpis">
         <KpiCard
-          label="Reviews This Week"
+          :label="$t('dashboard.kpis.reviewsThisWeek')"
           :value="kpis.reviewsThisWeek"
           format="number"
           :icon="Document"
           :trend="kpis.reviewsTrend"
-          trend-label="vs last week"
+          :trend-label="$t('dashboard.kpis.vsLastWeek')"
           style="animation-delay: 0ms"
         />
         <KpiCard
-          label="Active Queue"
+          :label="$t('dashboard.kpis.activeQueue')"
           :value="kpis.activeQueue"
           format="number"
           :icon="Refresh"
           style="animation-delay: 50ms"
         />
         <KpiCard
-          label="Success Rate"
+          :label="$t('dashboard.kpis.successRate')"
           :value="kpis.successRate"
           format="percent"
           :icon="Check"
           :trend="kpis.successTrend"
-          trend-label="vs yesterday"
+          :trend-label="$t('dashboard.kpis.vsYesterday')"
           style="animation-delay: 100ms"
         />
         <KpiCard
-          label="Avg Duration"
+          :label="$t('dashboard.kpis.avgDuration')"
           :value="kpis.avgDurationMs"
           format="duration"
           :icon="Timer"
           :trend="kpis.durationTrend"
-          trend-label="vs last week"
+          :trend-label="$t('dashboard.kpis.vsLastWeek')"
           style="animation-delay: 150ms"
         />
       </template>
@@ -321,7 +323,7 @@ onUnmounted(() => {
           <div class="card-header">
             <div class="card-header-left">
               <el-icon :size="18"><TrendCharts /></el-icon>
-              <span>24h Activity Trend</span>
+              <span>{{ $t('dashboard.trend.title') }}</span>
             </div>
           </div>
         </template>
@@ -330,12 +332,12 @@ onUnmounted(() => {
           <template v-else-if="trend.length > 0">
             <div ref="chartContainer" class="chart-container" />
             <div class="trend-summary">
-              <span class="trend-total">Total: {{ trend.reduce((a, b) => a + b.value, 0) }} reviews</span>
+              <span class="trend-total">{{ $t('dashboard.trend.total', { count: trend.reduce((a, b) => a + b.value, 0) }) }}</span>
             </div>
           </template>
           <div v-else class="trend-empty">
             <el-icon :size="32"><InfoFilled /></el-icon>
-            <p>No activity in the last 24 hours</p>
+            <p>{{ $t('dashboard.trend.empty') }}</p>
           </div>
         </div>
       </CardPanel>
@@ -346,13 +348,13 @@ onUnmounted(() => {
           <div class="card-header">
             <div class="card-header-left">
               <el-icon :size="18"><FirstAidKit /></el-icon>
-              <span>System Health</span>
+              <span>{{ $t('dashboard.health.title') }}</span>
             </div>
             <el-button
               :icon="RefreshRight"
               size="small"
               text
-              aria-label="Refresh health data"
+              :aria-label="$t('dashboard.health.refreshAria')"
               @click="onRefresh"
             />
           </div>
@@ -362,7 +364,7 @@ onUnmounted(() => {
           <template v-else-if="health">
             <!-- Integrations -->
             <div class="health-section">
-              <div class="health-section-title">Integration Status</div>
+              <div class="health-section-title">{{ $t('dashboard.health.integrations') }}</div>
               <div
                 v-for="(item, idx) in health.integrations"
                 :key="item.service"
@@ -381,7 +383,7 @@ onUnmounted(() => {
 
             <!-- LLM Providers -->
             <div class="health-section">
-              <div class="health-section-title">LLM Providers</div>
+              <div class="health-section-title">{{ $t('dashboard.health.llmProviders') }}</div>
               <div
                 v-for="(item, idx) in health.llmProviders"
                 :key="item.service"
@@ -403,7 +405,7 @@ onUnmounted(() => {
             <div class="health-overall">
               <StatusBadge :status="health.overall" size="large" />
               <span class="health-overall-text">
-                {{ health.overall === 'success' ? 'All Systems Operational' : health.overall === 'warning' ? 'Some Systems Degraded' : 'System Errors Detected' }}
+                {{ health.overall === 'success' ? $t('dashboard.health.allOperational') : health.overall === 'warning' ? $t('dashboard.health.someDegraded') : $t('dashboard.health.errorsDetected') }}
               </span>
             </div>
           </template>
@@ -417,10 +419,10 @@ onUnmounted(() => {
         <div class="card-header">
           <div class="card-header-left">
             <el-icon :size="18"><Document /></el-icon>
-            <span>Recent Reviews</span>
+            <span>{{ $t('dashboard.recent.title') }}</span>
           </div>
           <router-link to="/history" class="view-all-link">
-            View All <el-icon :size="12"><ArrowRight /></el-icon>
+            {{ $t('dashboard.recent.viewAll') }} <el-icon :size="12"><ArrowRight /></el-icon>
           </router-link>
         </div>
       </template>
@@ -438,7 +440,7 @@ onUnmounted(() => {
               style="width: 100%"
               @row-click="onRowClick"
             >
-              <el-table-column label="MR Title" min-width="200">
+              <el-table-column :label="$t('history.columns.mrTitle')" min-width="200">
                 <template #default="{ row }">
                   <div class="mr-title-cell">
                     <span class="mr-title-text">{{ row.mrTitle }}</span>
@@ -447,29 +449,29 @@ onUnmounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column label="Author" width="140">
+              <el-table-column :label="$t('history.columns.author')" width="140">
                 <template #default="{ row }">
                   <div class="author-cell">
                     <div class="author-avatar">{{ (row.author?.name || '?').charAt(0) }}</div>
-                    <span>{{ row.author?.name || 'Unknown' }}</span>
+                    <span>{{ row.author?.name || $t('common.unknown') }}</span>
                   </div>
                 </template>
               </el-table-column>
 
-              <el-table-column label="Status" width="100">
+              <el-table-column :label="$t('history.columns.status')" width="100">
                 <template #default="{ row }">
                   <StatusBadge :status="statusToBadgeStatus(row.status)" :show-text="false" size="small" />
                   <span style="margin-left: 6px; font-size: 12px; color: var(--text-primary);">{{ statusLabel(row.status) }}</span>
                 </template>
               </el-table-column>
 
-              <el-table-column label="Duration" width="100">
+              <el-table-column :label="$t('history.columns.duration')" width="100">
                 <template #default="{ row }">
                   <span class="mono-text">{{ formatDuration(row.durationMs) }}</span>
                 </template>
               </el-table-column>
 
-              <el-table-column label="Time" width="160">
+              <el-table-column :label="$t('history.columns.time')" width="160">
                 <template #default="{ row }">
                   <el-tooltip :content="formatTime(row.createdAt)" placement="top" effect="dark">
                     <span class="mono-text">{{ timeAgo(row.createdAt) }}</span>
@@ -481,7 +483,7 @@ onUnmounted(() => {
         </template>
         <div v-else class="recent-empty">
           <el-icon :size="32"><InfoFilled /></el-icon>
-          <p>No recent reviews</p>
+          <p>{{ $t('dashboard.recent.empty') }}</p>
         </div>
       </div>
     </CardPanel>

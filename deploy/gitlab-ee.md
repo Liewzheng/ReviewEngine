@@ -101,6 +101,95 @@ curl http://localhost:18080/health
 
 ---
 
+## 🔐 HTTPS Deployment
+
+`review-engine` ships with native TLS support (`reng serve` accepts
+`--tls-cert`, `--tls-key`, and `--tls-port`) — **no reverse proxy needed**.
+HTTPS is the default external transport (port 443). HTTP still works: container
+port 8080 stays reserved for health checks (`http://localhost:8080/health`), and
+external plain HTTP is gated by the `REVIEW_ENABLE_HTTP` switch (default
+**off**, so host port 18080 is not exposed).
+
+> **Port map (quick reference)**
+>
+> | Port | Purpose |
+> |------|---------|
+> | `443` (`REVIEW_TLS_PORT`, default) | External HTTPS entry, maps to container port `8443` |
+> | `18080` (`REVIEW_ENGINE_PORT`, default) | External HTTP direct-connect — only when `REVIEW_ENABLE_HTTP=1`; maps to container port `8080` |
+> | `8080` (container) | Health check, always available, unaffected by TLS |
+
+### Option A: Docker (Recommended)
+
+**1. Generate a certificate**
+
+This creates a self-signed certificate — fine for internal / self-hosted use.
+For public-facing services, use a certificate from a trusted CA instead.
+
+```bash
+mkdir -p tls
+openssl req -x509 -nodes -newkey rsa:2048 \
+  -keyout tls/key.pem \
+  -out tls/cert.pem \
+  -days 365 \
+  -subj "/CN=<your-server-ip-or-domain>"
+```
+
+**2. Configure `.env`**
+
+```bash
+# Host-side paths to the TLS certificate and private key. When set, Compose
+# mounts them into the container at /app/tls/ and enables TLS via the
+# REVIEW_TLS_CERT / REVIEW_TLS_KEY environment variables.
+TLS_CERT_PATH=./tls/cert.pem
+TLS_KEY_PATH=./tls/key.pem
+
+# External HTTPS host port (default 443). Only needed for a non-standard port.
+# REVIEW_TLS_PORT=8443
+
+# Optional: expose plain HTTP on host port 18080 for internal direct access.
+# Default is off — the service is HTTPS-only externally.
+# REVIEW_ENABLE_HTTP=1
+```
+
+**3. Start and verify**
+
+```bash
+docker compose up -d
+curl -k https://<your-server-ip>/health
+# Expected: {"status":"ok"}
+```
+
+> - **Fail-soft:** without `TLS_CERT_PATH` / `TLS_KEY_PATH` (or if the cert
+>   files are missing), the service falls back to plain HTTP, matching older
+>   behavior.
+> - If you set a custom `REVIEW_TLS_PORT`, verify with
+>   `curl -k https://<your-server-ip>:<REVIEW_TLS_PORT>/health`.
+> - `-k` (`--insecure`) skips self-signed cert validation; in production prefer
+>   a trusted certificate and drop `-k`.
+
+### Option B: Bare Binary
+
+```bash
+reng serve \
+  --tls-cert tls/cert.pem \
+  --tls-key tls/key.pem \
+  --tls-port 8443
+```
+
+- Native HTTPS is enabled only when **both** `--tls-cert` and `--tls-key` are
+  provided; the listener binds to `--tls-port` (8443 in the example).
+- Without certificates the server stays on plain HTTP (fail-soft) — no config
+  change needed to fall back.
+
+Verify:
+
+```bash
+curl -k https://localhost:8443/health
+# Expected: {"status":"ok"}
+```
+
+---
+
 ## 🔗 GitLab EE Webhook Configuration
 
 ### Option A: Project-Level Webhook (Recommended)
@@ -117,6 +206,13 @@ curl http://localhost:18080/health
 6. Save and test with "Test → Merge request events"
 
 > **Note:** You can configure both Secret Token and Signing Token for defense-in-depth. When a `webhook-signature` header is present, Review-Engine verifies **only the signature** — a failing signature is rejected without falling back to the legacy token (this prevents downgrade attacks). The legacy `X-Gitlab-Token` check is used only when the `webhook-signature` header is absent.
+
+> **Webhook URL scheme (HTTPS vs HTTP):** With HTTPS enabled (the default), use
+> `https://<your-server-ip>/webhook/gitlab` — port 443, no port suffix. The
+> `http://<your-server-ip>:18080/webhook/gitlab` form (Options A–C above) only
+> works when HTTP direct-connect is enabled: set `REVIEW_ENABLE_HTTP=1` in
+> `.env` and restart with `docker compose up -d`. Option B and C use the same
+> URL scheme as Option A.
 
 ### Option B: Group-Level Webhook (All Projects)
 
@@ -140,8 +236,8 @@ curl http://localhost:18080/health
 | API auth enforced | ☐ | `curl -i http://<server>:18080/api/v1/system/version` without a token should return `401 Unauthorized` |
 | Webhook secret (legacy) set | ☐ | `GITLAB_WEBHOOK_SECRET` in `.env` (optional) |
 | Webhook signing token set | ☐ | `GITLAB_WEBHOOK_SIGNING_SECRET` in `.env` (recommended, GitLab 19.0+) |
-| HTTPS enabled | ☐ | Use Caddy/Nginx reverse proxy |
-| Firewall rules | ☐ | Only expose the host port (default 18080) to GitLab EE |
+| HTTPS enabled | ☐ | Built-in TLS: mount certs in Docker (`TLS_CERT_PATH` / `TLS_KEY_PATH`) or run `reng serve --tls-cert/--tls-key`; a reverse proxy also works |
+| Firewall rules | ☐ | Only expose what GitLab EE needs: 443 (HTTPS, default) and 18080 only if HTTP direct-connect is on (`REVIEW_ENABLE_HTTP=1`) |
 | Token rotation | ☐ | Rotate every 90 days |
 
 ---

@@ -18,6 +18,7 @@ import {
   Folder,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
+import { useI18n } from 'vue-i18n'
 import type { ReviewListItem, HistoryFilters } from '../types/history'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
@@ -25,6 +26,7 @@ import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 /* ─────────────── Router & Composable ─────────────── */
 const route = useRoute()
 const router = useRouter()
+const { t } = useI18n()
 const reviews = useReviews()
 
 const loading = reviews.loading
@@ -63,7 +65,7 @@ const dateRange = computed({
 watch(() => reviews.error.value, (err) => {
   if (err) {
     ElNotification({
-      title: 'Error',
+      title: t('common.error'),
       message: err,
       type: 'error',
       duration: 5000,
@@ -160,20 +162,20 @@ function rerunConfirmMessage(row: { mrTitle: string; gitlabMrUrl?: string }): st
   const hasMrContext = !!row.gitlabMrUrl || (title !== '' && title !== 'Untitled Review')
   if (!hasMrContext) {
     // Static-diff / local-repo tasks have no MR context; use a generic message.
-    return 'Re-run this review? A new task will be created with the same parameters.'
+    return t('history.rerun.confirmNoContext')
   }
-  return `Re-run review for "${title || 'Untitled Review'}"? This will post a new comment to the MR.`
+  return t('history.rerun.confirmWithMr', { title: title || t('history.untitledReview') })
 }
 
 function handleRerun(row: { id: string; mrTitle: string; gitlabMrUrl?: string }) {
   ElMessageBox.confirm(
     rerunConfirmMessage(row),
-    'Re-run Review',
-    { confirmButtonText: 'Re-run', cancelButtonText: 'Cancel', type: 'warning' }
+    t('history.rerun.title'),
+    { confirmButtonText: t('history.rerun.confirmBtn'), cancelButtonText: t('common.cancel'), type: 'warning' }
   ).then(() => {
     reviews.rerun(row.id).then(() => {
-      const title = (row.mrTitle || '').trim() || 'Untitled Review'
-      ElNotification.success({ title: 'Review re-queued', message: `A new review has been queued for ${title}.` })
+      const title = (row.mrTitle || '').trim() || t('history.untitledReview')
+      ElNotification.success({ title: t('history.rerun.requeuedTitle'), message: t('history.rerun.requeuedMessage', { title }) })
       fetchReviewsData()
     })
   }).catch(() => {})
@@ -181,9 +183,9 @@ function handleRerun(row: { id: string; mrTitle: string; gitlabMrUrl?: string })
 
 function copyReviewId(id: string) {
   navigator.clipboard.writeText(id).then(() => {
-    ElNotification.success({ title: 'Copied', message: `Review ID ${id} copied to clipboard.` })
+    ElNotification.success({ title: t('common.copied'), message: t('history.copy.idCopied', { id }) })
   }).catch(() => {
-    ElNotification.warning({ title: 'Copy failed', message: 'Could not copy to clipboard.' })
+    ElNotification.warning({ title: t('common.copyFailed'), message: t('common.copyFailedMessage') })
   })
 }
 
@@ -195,7 +197,7 @@ function viewOriginalComment(row: ReviewListItem) {
   if (row.gitlabMrUrl) {
     window.open(row.gitlabMrUrl, '_blank')
   } else {
-    ElNotification.warning({ title: 'Unavailable', message: 'Original comment URL not available.' })
+    ElNotification.warning({ title: t('common.unavailable'), message: t('history.comment.unavailable') })
   }
 }
 
@@ -222,10 +224,10 @@ function formatRelativeTime(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
   const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
-  if (diffSec < 60) return 'just now'
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)}m ago`
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)}h ago`
-  if (diffSec < 604800) return `${Math.floor(diffSec / 86400)}d ago`
+  if (diffSec < 60) return t('history.time.justNow')
+  if (diffSec < 3600) return t('history.time.minutesAgo', { n: Math.floor(diffSec / 60) })
+  if (diffSec < 86400) return t('history.time.hoursAgo', { n: Math.floor(diffSec / 3600) })
+  if (diffSec < 604800) return t('history.time.daysAgo', { n: Math.floor(diffSec / 86400) })
   return d.toLocaleDateString()
 }
 
@@ -244,10 +246,10 @@ function getInitials(name: string): string {
 
 /* ─────────────── Pagination display ─────────────── */
 const paginationInfo = computed(() => {
-  if (total.value === 0) return 'Showing 0 reviews'
+  if (total.value === 0) return t('history.pagination.empty')
   const start = (page.value - 1) * pageSize.value + 1
   const end = Math.min(page.value * pageSize.value, total.value)
-  return `Showing ${start} to ${end} of ${total.value} reviews`
+  return t('history.pagination.range', { start, end, total: total.value })
 })
 
 /* ─────────────── Init ─────────────── */
@@ -266,9 +268,9 @@ watch(() => route.query, () => {
   <div class="history-page">
     <!-- Header -->
     <div class="page-header">
-      <h2 class="page-title">Review History</h2>
-      <el-button type="primary" :icon="Download" plain aria-label="Export reviews">
-        Export
+      <h2 class="page-title">{{ $t('history.title') }}</h2>
+      <el-button type="primary" :icon="Download" plain :aria-label="$t('history.exportAria')">
+        {{ $t('history.export') }}
       </el-button>
     </div>
 
@@ -276,7 +278,7 @@ watch(() => route.query, () => {
     <div class="filter-bar">
       <el-input
         v-model="filters.q"
-        placeholder="Search MR title, author, branch..."
+        :placeholder="$t('history.searchPlaceholder')"
         :prefix-icon="Search"
         clearable
         @input="onSearchInput"
@@ -285,7 +287,7 @@ watch(() => route.query, () => {
       />
       <el-select
         v-model="filters.project"
-        placeholder="All Projects"
+        :placeholder="$t('history.filters.allProjects')"
         clearable
         @change="onFilterChange"
         class="filter-select"
@@ -299,23 +301,23 @@ watch(() => route.query, () => {
       </el-select>
       <el-select
         v-model="filters.status"
-        placeholder="All Statuses"
+        :placeholder="$t('history.filters.allStatuses')"
         clearable
         @change="onFilterChange"
         class="filter-select"
       >
-        <el-option label="Queued" value="queued" />
-        <el-option label="Running" value="running" />
-        <el-option label="Completed" value="completed" />
-        <el-option label="Failed" value="failed" />
-        <el-option label="Cancelled" value="cancelled" />
+        <el-option :label="$t('common.status.queued')" value="queued" />
+        <el-option :label="$t('common.status.running')" value="running" />
+        <el-option :label="$t('common.status.completed')" value="completed" />
+        <el-option :label="$t('common.status.failed')" value="failed" />
+        <el-option :label="$t('common.status.cancelled')" value="cancelled" />
       </el-select>
       <el-date-picker
         v-model="dateRange"
         type="daterange"
-        range-separator="to"
-        start-placeholder="Start"
-        end-placeholder="End"
+        :range-separator="$t('history.date.rangeSeparator')"
+        :start-placeholder="$t('history.date.start')"
+        :end-placeholder="$t('history.date.end')"
         format="YYYY-MM-DD"
         value-format="YYYY-MM-DD"
         @change="onFilterChange"
@@ -323,7 +325,7 @@ watch(() => route.query, () => {
       />
       <el-select
         v-model="filters.repository"
-        placeholder="All Repositories"
+        :placeholder="$t('history.filters.allRepositories')"
         clearable
         @change="onFilterChange"
         class="filter-select"
@@ -335,8 +337,8 @@ watch(() => route.query, () => {
           :value="r"
         />
       </el-select>
-      <el-button :icon="Close" @click="resetFilters" aria-label="Reset filters">
-        Reset
+      <el-button :icon="Close" @click="resetFilters" :aria-label="$t('history.filters.resetAria')">
+        {{ $t('common.reset') }}
       </el-button>
     </div>
 
@@ -346,7 +348,7 @@ watch(() => route.query, () => {
     </div>
 
     <!-- Empty State -->
-    <el-empty v-else-if="total === 0" description="No reviews found" />
+    <el-empty v-else-if="total === 0" :description="$t('history.empty')" />
 
     <!-- Data Table -->
     <template v-else>
@@ -362,7 +364,7 @@ watch(() => route.query, () => {
           :border="false"
           :highlight-current-row="false"
         >
-          <el-table-column label="MR Title" min-width="240" sortable :sort-by="['mrTitle']">
+          <el-table-column :label="$t('history.columns.mrTitle')" min-width="240" sortable :sort-by="['mrTitle']">
             <template #default="{ row }">
               <div class="title-cell">
                 <el-tag size="small" type="info" class="project-tag">{{ row.project }}</el-tag>
@@ -377,13 +379,13 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column prop="project" label="Project" width="140" sortable class-name="col-project">
+          <el-table-column prop="project" :label="$t('history.columns.project')" width="140" sortable class-name="col-project">
             <template #default="{ row }">
               <el-tag size="small" type="info">{{ row.project }}</el-tag>
             </template>
           </el-table-column>
 
-          <el-table-column label="Author" width="160" sortable :sort-by="['author.name']">
+          <el-table-column :label="$t('history.columns.author')" width="160" sortable :sort-by="['author.name']">
             <template #default="{ row }">
               <div class="author-cell">
                 <div class="author-avatar">
@@ -395,19 +397,19 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column label="Status" width="120" sortable :sort-by="['status']">
+          <el-table-column :label="$t('history.columns.status')" width="120" sortable :sort-by="['status']">
             <template #default="{ row }">
               <StatusBadge :status="row.status" size="small" />
             </template>
           </el-table-column>
 
-          <el-table-column label="Duration" width="100" sortable :sort-by="['durationMs']">
+          <el-table-column :label="$t('history.columns.duration')" width="100" sortable :sort-by="['durationMs']">
             <template #default="{ row }">
               <span class="duration-text">{{ formatDuration(row.durationMs) }}</span>
             </template>
           </el-table-column>
 
-          <el-table-column label="Created" width="150" sortable :sort-by="['createdAt']">
+          <el-table-column :label="$t('history.columns.created')" width="150" sortable :sort-by="['createdAt']">
             <template #default="{ row }">
               <el-tooltip :content="formatDate(row.createdAt)" placement="top">
                 <span class="created-text">{{ formatRelativeTime(row.createdAt) }}</span>
@@ -415,26 +417,26 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column label="Actions" width="140" fixed="right">
+          <el-table-column :label="$t('history.columns.actions')" width="140" fixed="right">
             <template #default="{ row }">
               <el-button-group class="actions-group">
-                <el-tooltip content="Re-run review">
-                  <el-button size="small" :icon="Refresh" @click.stop="handleRerun(row)" aria-label="Re-run review" />
+                <el-tooltip :content="$t('history.actions.rerun')">
+                  <el-button size="small" :icon="Refresh" @click.stop="handleRerun(row)" :aria-label="$t('history.actions.rerun')" />
                 </el-tooltip>
-                <el-tooltip content="View details">
-                  <el-button size="small" :icon="ArrowRight" @click.stop="openDrawer(row)" aria-label="View details" />
+                <el-tooltip :content="$t('history.actions.viewDetails')">
+                  <el-button size="small" :icon="ArrowRight" @click.stop="openDrawer(row)" :aria-label="$t('history.actions.viewDetails')" />
                 </el-tooltip>
                 <el-dropdown trigger="click" @command="(cmd: string) => {
                   if (cmd === 'comment') viewOriginalComment(row)
                   if (cmd === 'copy') copyReviewId(row.id)
                   if (cmd === 'logs') viewLogs(row)
                 }">
-                  <el-button size="small" :icon="More" @click.stop aria-label="More actions" />
+                  <el-button size="small" :icon="More" @click.stop :aria-label="$t('history.actions.more')" />
                   <template #dropdown>
                     <el-dropdown-menu>
-                      <el-dropdown-item command="comment" :icon="Link">View original comment</el-dropdown-item>
-                      <el-dropdown-item command="copy" :icon="DocumentCopy">Copy review ID</el-dropdown-item>
-                      <el-dropdown-item command="logs" :icon="Tickets">View logs</el-dropdown-item>
+                      <el-dropdown-item command="comment" :icon="Link">{{ $t('history.actions.viewComment') }}</el-dropdown-item>
+                      <el-dropdown-item command="copy" :icon="DocumentCopy">{{ $t('history.actions.copyId') }}</el-dropdown-item>
+                      <el-dropdown-item command="logs" :icon="Tickets">{{ $t('history.actions.viewLogs') }}</el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
@@ -449,9 +451,9 @@ watch(() => route.query, () => {
         <span class="pagination-info">{{ paginationInfo }}</span>
         <div class="pagination-controls">
           <el-select v-model="pageSize" @change="() => { page = 1; updateUrl() }" style="width: 100px">
-            <el-option label="25 / page" :value="25" />
-            <el-option label="50 / page" :value="50" />
-            <el-option label="100 / page" :value="100" />
+            <el-option :label="$t('history.pagination.perPage', { n: 25 })" :value="25" />
+            <el-option :label="$t('history.pagination.perPage', { n: 50 })" :value="50" />
+            <el-option :label="$t('history.pagination.perPage', { n: 100 })" :value="100" />
           </el-select>
           <el-pagination
             v-model:current-page="page"
@@ -472,7 +474,7 @@ watch(() => route.query, () => {
     >
       <template #header>
         <div class="drawer-title-row">
-          <h3 class="drawer-title">{{ selectedReview?.mrTitle || 'Review Details' }}</h3>
+          <h3 class="drawer-title">{{ selectedReview?.mrTitle || $t('history.drawer.reviewDetails') }}</h3>
           <StatusBadge v-if="selectedReview" :status="selectedReview.status" />
         </div>
       </template>
@@ -482,42 +484,42 @@ watch(() => route.query, () => {
           <div class="meta-item">
             <el-icon><UserIcon /></el-icon>
             <div>
-              <div class="meta-label">Author</div>
+              <div class="meta-label">{{ $t('history.drawer.author') }}</div>
               <div class="meta-value">{{ selectedReview.author.name }}</div>
             </div>
           </div>
           <div class="meta-item">
             <el-icon><Folder /></el-icon>
             <div>
-              <div class="meta-label">Project</div>
+              <div class="meta-label">{{ $t('history.drawer.project') }}</div>
               <div class="meta-value">{{ selectedReview.project }}</div>
             </div>
           </div>
           <div class="meta-item">
             <el-icon><Link /></el-icon>
             <div>
-              <div class="meta-label">Branch</div>
+              <div class="meta-label">{{ $t('history.drawer.branch') }}</div>
               <div class="meta-value">{{ selectedReview.branch }}</div>
             </div>
           </div>
           <div class="meta-item">
             <el-icon><Clock /></el-icon>
             <div>
-              <div class="meta-label">Created</div>
+              <div class="meta-label">{{ $t('history.drawer.created') }}</div>
               <div class="meta-value">{{ formatDate(selectedReview.createdAt) }}</div>
             </div>
           </div>
           <div class="meta-item">
             <el-icon><Clock /></el-icon>
             <div>
-              <div class="meta-label">Duration</div>
+              <div class="meta-label">{{ $t('history.drawer.duration') }}</div>
               <div class="meta-value">{{ formatDuration(selectedReview.durationMs) }}</div>
             </div>
           </div>
           <div class="meta-item">
             <el-icon><Document /></el-icon>
             <div>
-              <div class="meta-label">Commit</div>
+              <div class="meta-label">{{ $t('history.drawer.commit') }}</div>
               <div class="meta-value mono">{{ selectedReview.commitSha }}</div>
             </div>
           </div>
@@ -526,7 +528,7 @@ watch(() => route.query, () => {
         <el-divider />
 
         <!-- Expert Results -->
-        <h4 class="drawer-section-title">Expert Results</h4>
+        <h4 class="drawer-section-title">{{ $t('history.drawer.expertResults') }}</h4>
         <el-collapse>
           <el-collapse-item
             v-for="exp in selectedReview.experts"
@@ -555,12 +557,12 @@ watch(() => route.query, () => {
 
         <!-- Raw Data Tabs -->
         <el-tabs>
-          <el-tab-pane label="Summary">
+          <el-tab-pane :label="$t('history.drawer.tabs.summary')">
             <div class="raw-panel">
-              <p class="raw-text">Review generated by {{ selectedReview.experts.length }} experts with overall status <StatusBadge :status="selectedReview.status" size="small" />.</p>
+              <p class="raw-text">{{ $t('history.drawer.generatedByPrefix', { count: selectedReview.experts.length }) }} <StatusBadge :status="selectedReview.status" size="small" />.</p>
             </div>
           </el-tab-pane>
-          <el-tab-pane label="Full Comment">
+          <el-tab-pane :label="$t('history.drawer.tabs.fullComment')">
             <div class="raw-panel">
               <el-input
                 v-model="selectedReview.rawComment"
@@ -571,7 +573,7 @@ watch(() => route.query, () => {
               />
             </div>
           </el-tab-pane>
-          <el-tab-pane label="API Response">
+          <el-tab-pane :label="$t('history.drawer.tabs.apiResponse')">
             <div class="raw-panel">
               <pre class="json-block">{{ JSON.stringify(selectedReview.rawApiResponse, null, 2) }}</pre>
             </div>
@@ -581,13 +583,13 @@ watch(() => route.query, () => {
         <!-- Footer Actions -->
         <div class="drawer-footer">
           <el-button type="primary" :icon="Refresh" @click="handleRerun(selectedReview)">
-            Re-run Review
+            {{ $t('history.rerun.title') }}
           </el-button>
           <el-button :icon="Link" @click="viewOriginalComment(selectedReview)">
-            View on GitLab
+            {{ $t('history.drawer.viewOnGitlab') }}
           </el-button>
           <el-button @click="drawerOpen = false">
-            Close
+            {{ $t('common.close') }}
           </el-button>
         </div>
       </div>

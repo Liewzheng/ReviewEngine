@@ -4,9 +4,13 @@
 //! - `POST /api/v1/system/upgrade`        — start a binary upgrade (single-flight)
 //! - `GET  /api/v1/system/upgrade/status` — job state machine
 //!
-//! Reuses the `crate::upgrade` core library (U2). The running process is
-//! **never restarted**: after a successful binary replace the job reports
-//! `done` with the message "服务需重启后生效".
+//! Reuses the `crate::upgrade` core library (U2). For plain installs the
+//! running process is **never restarted**: after a successful binary replace
+//! the job reports `done` with the message "服务需重启后生效". For container
+//! installs the same pipeline also swaps the frontend dist and then **exits
+//! the process** so the compose `restart: unless-stopped` policy pulls the
+//! container back up with the new files (the `done` state is kept readable for
+//! a short dwell first so the frontend can poll it).
 //!
 //! All three endpoints sit behind the `/api/v1` auth middleware (mounted in
 //! `api::routes`), so they inherit whatever auth policy the server was started
@@ -28,7 +32,7 @@ use crate::server::state::{UpgradeCache, UpgradeJobState};
 use crate::server::AppState;
 use crate::upgrade::{
     current_asset_spec, download, find_asset, find_checksum_asset, platform, verify, GitHubReleaseClient,
-    InstallMethod, UpdateCheck, UpgradeError, Version,
+    InstallMethod, Release, UpdateCheck, UpgradeError, Version,
 };
 
 /// GitHub check results are cached server-side for 1h — the unauthenticated
@@ -39,6 +43,11 @@ const SMOKE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Default GitHub API base; overridable via `REVIEW_UPGRADE_API_BASE`
 /// (self-hosted mirror or wiremock in tests).
 const GITHUB_API_BASE: &str = "https://api.github.com";
+/// Frontend dist asset name in every release (produced by release.yml).
+const FRONTEND_DIST_ASSET: &str = "frontend-dist.tar.gz";
+/// How long the `done` state stays readable before the container-restart exit,
+/// so the frontend's status poll can observe it.
+const DONE_DWELL: Duration = Duration::from_millis(500);
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -165,26 +174,12 @@ async fn start_upgrade(State(state): State<Arc<AppState>>, headers: HeaderMap) -
             "无法识别安装方式，请使用官方 install.sh 手动升级",
             InstallMethod::Unknown.upgrade_command(),
         ),
-        // Containers: the binary lives inside the image; self-replacement would
-        // be wiped on the next container start. Delegate to the host.
-        InstallMethod::Docker => {
-            let instructions = InstallMethod::Docker.upgrade_command();
-            set_job(
-                &state,
-                UpgradeJobState::NotSupported,
-                "容器内不支持自替换，请在宿主机执行：git pull && docker compose up -d --build",
-            );
-            (
-                StatusCode::OK,
-                Json(serde_json::json!({
-                    "status": "notSupported",
-                    "instructions": instructions,
-                    "note": "容器内请勿自替换二进制，请在宿主机拉取新镜像并重建容器",
-                })),
-            )
-                .into_response()
-        }
-        InstallMethod::Plain => start_binary_upgrade(state).await,
+        // Containers: the binary (`REVIEW_UPGRADE_INSTALL_DIR`) and the frontend
+        // dist both live on writable volumes, so we can self-upgrade in place
+        // and exit for the compose `restart: unless-stopped` policy to bring the
+        // container back up with the new files.
+        InstallMethod::Docker => start_upgrade_inner(state, UpgradeMode::ContainerWithFrontend).await,
+        InstallMethod::Plain => start_upgrade_inner(state, UpgradeMode::BinaryOnly).await,
     }
 }
 
@@ -227,9 +222,31 @@ fn validate_origin(headers: &HeaderMap) -> Result<(), Box<axum::response::Respon
     }
 }
 
-/// Start a binary upgrade for a plain install. Single-flight: only one upgrade
-/// may be in flight at a time (409 otherwise).
-async fn start_binary_upgrade(state: Arc<AppState>) -> axum::response::Response {
+/// What an upgrade job must replace, and whether a restart follows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradeMode {
+    /// Plain install: replace the binary only. The running process is never
+    /// restarted; `done` means a restart is required to pick the change up.
+    BinaryOnly,
+    /// Container install: replace the binary and, when the release ships one,
+    /// the frontend dist, then exit the process so the compose restart policy
+    /// brings the container back up with the new files.
+    ContainerWithFrontend,
+}
+
+impl UpgradeMode {
+    fn done_message(self) -> &'static str {
+        match self {
+            Self::BinaryOnly => "升级完成，服务需重启后生效",
+            Self::ContainerWithFrontend => "升级完成，容器即将自动重启",
+        }
+    }
+}
+
+/// Claim the single-flight gate, refresh the GitHub check, and spawn the
+/// upgrade pipeline for the given mode. Shared by the Plain (binary-only) and
+/// Docker (binary + frontend dist) install paths.
+async fn start_upgrade_inner(state: Arc<AppState>, mode: UpgradeMode) -> axum::response::Response {
     // Atomic single-flight claim under the job lock. From here on the job is
     // "running" (checking) and any concurrent POST is rejected with 409.
     {
@@ -282,7 +299,7 @@ async fn start_binary_upgrade(state: Arc<AppState>) -> axum::response::Response 
     let install_dir = resolve_install_dir();
     let task_state = state.clone();
     tokio::spawn(async move {
-        run_binary_upgrade_task(task_state, check, install_dir).await;
+        run_upgrade_task(task_state, check, install_dir, mode).await;
     });
 
     (
@@ -306,10 +323,10 @@ async fn upgrade_status(State(state): State<Arc<AppState>>) -> impl IntoResponse
 
 // ─── binary upgrade executor (background task) ───────────────────
 
-/// Runs download → verify → extract → replace → smoke. The running process is
-/// never restarted; `done` means the on-disk binary was replaced and a restart
-/// is required for it to take effect.
-async fn run_binary_upgrade_task(state: Arc<AppState>, check: UpdateCheck, install_dir: PathBuf) {
+/// Runs the upgrade pipeline: download → verify → extract → smoke → replace,
+/// plus (container mode) the frontend dist. On success in container mode the
+/// process exits so the compose restart policy picks up the new files.
+async fn run_upgrade_task(state: Arc<AppState>, check: UpdateCheck, install_dir: PathBuf, mode: UpgradeMode) {
     let format = check.platform.map(|p| p.format).unwrap_or(platform::AssetFormat::TarGz);
     // Unique staging dir under the system temp dir (never reuse a path).
     let staging = std::env::temp_dir().join(format!(
@@ -352,19 +369,33 @@ async fn run_binary_upgrade_task(state: Arc<AppState>, check: UpdateCheck, insta
             return Err(UpgradeError::invalid_data("新二进制冒烟测试失败，未替换"));
         }
 
+        // Stage the frontend dist (container mode) — download/verify/extract
+        // happen BEFORE the binary is touched, so a dist failure leaves the
+        // binary untouched. The actual dist swap runs after the binary replace.
+        let staged_dist = if mode == UpgradeMode::ContainerWithFrontend {
+            stage_frontend_dist(&state, &check.latest_release, &staging).await?
+        } else {
+            None
+        };
+
         let exe_name = current_exe_name();
         replace_binary(&new_binary, &install_dir, &exe_name).await?;
+
+        if let Some(dist_root) = staged_dist {
+            replace_frontend_dist(&dist_root, &resolve_frontend_dir())?;
+        }
 
         Ok::<(), UpgradeError>(())
     }
     .await;
 
+    let succeeded = result.is_ok();
     match result {
         Ok(()) => {
-            set_job(&state, UpgradeJobState::Done, "升级完成，服务需重启后生效");
+            set_job(&state, UpgradeJobState::Done, mode.done_message());
         }
         Err(e) => {
-            tracing::warn!(error = %e, "binary upgrade failed");
+            tracing::warn!(error = %e, "upgrade failed");
             set_job(&state, UpgradeJobState::Failed, format!("升级失败：{e}"));
         }
     }
@@ -372,6 +403,103 @@ async fn run_binary_upgrade_task(state: Arc<AppState>, check: UpdateCheck, insta
     // Best-effort staging cleanup so failed/interrupted upgrades do not leave
     // temp dirs accumulating on disk.
     let _ = std::fs::remove_dir_all(&staging);
+
+    // Container restart trigger: keep the `done` state readable for a short
+    // dwell so the frontend's status poll sees it, then exit so the compose
+    // `restart: unless-stopped` policy brings the container back up. Skippable
+    // via `REVIEW_UPGRADE_EXIT_AFTER=0` (the test seam).
+    if mode == UpgradeMode::ContainerWithFrontend && succeeded && exit_after_upgrade_enabled() {
+        tokio::time::sleep(DONE_DWELL).await;
+        std::process::exit(0);
+    }
+}
+
+/// Download, verify, and extract the frontend dist asset from `release` into
+/// `staging`, returning the extracted directory that directly contains
+/// `index.html`.
+///
+/// Returns `Ok(None)` when the release ships no `frontend-dist.tar.gz` (older
+/// releases) — the caller degrades to a binary-only upgrade with a warning. A
+/// release that *does* advertise the dist asset but fails to download, verify,
+/// or contain `index.html` fails the upgrade.
+async fn stage_frontend_dist(
+    state: &AppState,
+    release: &Release,
+    staging: &Path,
+) -> crate::upgrade::Result<Option<PathBuf>> {
+    let Some(asset) = release.assets.iter().find(|a| a.name == FRONTEND_DIST_ASSET) else {
+        tracing::warn!("release has no {FRONTEND_DIST_ASSET}; skipping frontend dist upgrade (binary-only)");
+        return Ok(None);
+    };
+
+    set_job(state, UpgradeJobState::Downloading, "正在下载 frontend dist");
+    let (dist_temp, _) = download::download_asset(&asset.download_url, staging, &asset.name, Some(asset.size)).await?;
+
+    // The `.sha256` sidecar is optional for the dist: verify when present, warn
+    // and proceed without it when absent (an older release may omit it).
+    if let Some(checksum) = find_checksum_asset(release, &asset.name) {
+        set_job(state, UpgradeJobState::Verifying, "正在校验 frontend dist sha256");
+        let (checksum_temp, _) =
+            download::download_asset(&checksum.download_url, staging, &checksum.name, Some(checksum.size)).await?;
+        let checksum_text = tokio::fs::read_to_string(&checksum_temp).await?;
+        verify::verify_file_with_checksum_text(&dist_temp, &checksum_text)?;
+    } else {
+        tracing::warn!("{FRONTEND_DIST_ASSET} has no .sha256 sidecar; skipping checksum verification");
+    }
+
+    set_job(state, UpgradeJobState::Installing, "正在解压 frontend dist");
+    let extracted = staging.join("frontend-dist-extracted");
+    verify::extract_asset(&dist_temp, platform::AssetFormat::TarGz, &extracted)?;
+    let dist_root = find_dist_root(&extracted)
+        .ok_or_else(|| UpgradeError::invalid_data("frontend dist archive contains no index.html"))?;
+    Ok(Some(dist_root))
+}
+
+/// Locate the subdirectory of `root` that directly contains `index.html`,
+/// handling both a flat dist archive (`index.html` at the top) and a nested one
+/// (`frontend/dist/index.html`).
+fn find_dist_root(root: &Path) -> Option<PathBuf> {
+    let mut queue = vec![root.to_path_buf()];
+    while let Some(dir) = queue.pop() {
+        if dir.join("index.html").is_file() {
+            return Some(dir);
+        }
+        let entries = std::fs::read_dir(&dir).ok()?;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                queue.push(path);
+            }
+        }
+    }
+    None
+}
+
+/// Atomically swap the live frontend dir for the staged one: the old dir is
+/// renamed aside as a backup, the staged dist renamed into place, then the
+/// backup removed. Any failure restores the old dir. Both renames stay under
+/// the same parent, hence on one filesystem, so each step is atomic.
+fn replace_frontend_dist(staged: &Path, frontend_dir: &Path) -> crate::upgrade::Result<()> {
+    let parent = frontend_dir
+        .parent()
+        .ok_or_else(|| UpgradeError::invalid_data(format!("frontend dir {frontend_dir:?} has no parent")))?;
+    std::fs::create_dir_all(parent)?;
+
+    let nonce: u64 = rand::random();
+    let backup = parent.join(format!(".frontend-dist.bak-{nonce:x}"));
+    let had_original = frontend_dir.exists();
+
+    if had_original {
+        std::fs::rename(frontend_dir, &backup)?;
+    }
+    if let Err(e) = std::fs::rename(staged, frontend_dir) {
+        if had_original {
+            let _ = std::fs::rename(&backup, frontend_dir);
+        }
+        return Err(UpgradeError::Io(e));
+    }
+    let _ = std::fs::remove_dir_all(&backup);
+    Ok(())
 }
 
 /// Copy the new binary into `install_dir` atomically, with backup + rollback:
@@ -488,6 +616,28 @@ fn resolve_install_dir() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Directory that receives the replaced frontend dist:
+/// `REVIEW_UPGRADE_FRONTEND_DIR` override (tests), else the container default
+/// `/app/frontend/dist`. The dir need not exist yet — the entrypoint/compose
+/// layer mounts it as a writable volume.
+fn resolve_frontend_dir() -> PathBuf {
+    std::env::var("REVIEW_UPGRADE_FRONTEND_DIR")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/app/frontend/dist"))
+}
+
+/// Whether the upgrade task should exit the process after a successful
+/// container upgrade (so the compose `restart: unless-stopped` policy pulls the
+/// container back up). `REVIEW_UPGRADE_EXIT_AFTER=0` disables it — the test
+/// seam that keeps the spawned server alive to assert on the `done` state.
+fn exit_after_upgrade_enabled() -> bool {
+    std::env::var("REVIEW_UPGRADE_EXIT_AFTER")
+        .map(|v| v != "0")
+        .unwrap_or(true)
+}
+
 /// Name of the *real* binary (canonicalized), e.g. `review-engine` even when
 /// invoked through a `reng` symlink. The symlink keeps pointing at the same
 /// name and stays valid after the replace (B1).
@@ -592,5 +742,130 @@ mod tests {
         }
         // Origin present but no Host at all → rejected (cannot be same-site).
         assert!(validate_origin(&headers_with(Some("http://evil.example"), None)).is_err());
+    }
+
+    // ─── frontend dist (container upgrade) ─────────────────────
+
+    #[test]
+    fn resolve_frontend_dir_override_then_default() {
+        let saved = std::env::var("REVIEW_UPGRADE_FRONTEND_DIR").ok();
+
+        std::env::set_var("REVIEW_UPGRADE_FRONTEND_DIR", "/tmp/reng-frontend-test");
+        assert_eq!(resolve_frontend_dir(), PathBuf::from("/tmp/reng-frontend-test"));
+
+        std::env::remove_var("REVIEW_UPGRADE_FRONTEND_DIR");
+        assert_eq!(resolve_frontend_dir(), PathBuf::from("/app/frontend/dist"));
+
+        match saved {
+            Some(v) => std::env::set_var("REVIEW_UPGRADE_FRONTEND_DIR", v),
+            None => {}
+        }
+    }
+
+    #[test]
+    fn find_dist_root_flat_nested_and_missing() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        // Flat dist archive: index.html at the extraction root.
+        let flat = dir.path().join("flat");
+        std::fs::create_dir_all(&flat).expect("create flat");
+        std::fs::write(flat.join("index.html"), "<html></html>").expect("write index.html");
+        std::fs::write(flat.join("app.js"), "console.log(1)").expect("write app.js");
+        assert_eq!(find_dist_root(&flat), Some(flat.clone()));
+
+        // Nested dist archive: frontend/dist/index.html.
+        let nested = dir.path().join("nested").join("frontend").join("dist");
+        std::fs::create_dir_all(&nested).expect("create nested");
+        std::fs::write(nested.join("index.html"), "<html></html>").expect("write nested index.html");
+        let nested_root = dir.path().join("nested");
+        assert_eq!(find_dist_root(&nested_root), Some(nested));
+
+        // No index.html anywhere → None.
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(empty.join("assets")).expect("create empty");
+        assert!(find_dist_root(&empty).is_none());
+    }
+
+    #[test]
+    fn replace_frontend_dist_happy_path_and_rollback() {
+        // Happy path: old dir renamed aside, staged dist swapped in, backup gone.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let live = dir.path().join("frontend").join("dist");
+        std::fs::create_dir_all(&live).expect("create live");
+        std::fs::write(live.join("old.txt"), "old").expect("write old");
+        let staged = dir.path().join("staged-dist");
+        std::fs::create_dir_all(&staged).expect("create staged");
+        std::fs::write(staged.join("index.html"), "<html>new</html>").expect("write new index.html");
+
+        replace_frontend_dist(&staged, &live).expect("replace must succeed");
+        assert!(live.join("index.html").exists(), "new dist must be live");
+        assert!(!live.join("old.txt").exists(), "old dist must be gone");
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("frontend"))
+            .expect("read frontend dir")
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".frontend-dist.bak-"))
+            .collect();
+        assert!(leftovers.is_empty(), "backup must be cleaned up");
+
+        // Rollback: staged rename fails → old dir restored.
+        let live2 = dir.path().join("frontend2").join("dist");
+        std::fs::create_dir_all(&live2).expect("create live2");
+        std::fs::write(live2.join("old.txt"), "old").expect("write old2");
+        let missing_staged = dir.path().join("does-not-exist-dist");
+        let err = replace_frontend_dist(&missing_staged, &live2).expect_err("missing staged must fail");
+        assert!(matches!(err, UpgradeError::Io(_)), "got {err:?}");
+        assert!(live2.join("old.txt").exists(), "old dist must be restored on failure");
+    }
+
+    #[test]
+    fn stage_frontend_dist_returns_none_when_asset_missing() {
+        // A release without `frontend-dist.tar.gz` degrades to binary-only:
+        // Ok(None), no download attempted, nothing written to staging.
+        let release = Release {
+            tag_name: "v9.9.9".to_string(),
+            html_url: "https://example.com".to_string(),
+            published_at: "2026-01-01T00:00:00Z".to_string(),
+            assets: vec![crate::upgrade::ReleaseAsset {
+                name: "review-engine-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+                download_url: "https://example.com/binary".to_string(),
+                size: 1,
+            }],
+        };
+        let state = AppState::new(vec![]);
+        let staging = tempfile::tempdir().expect("temp dir");
+        let staged = tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(stage_frontend_dist(&state, &release, staging.path()));
+        assert!(
+            matches!(staged, Ok(None)),
+            "no dist asset must degrade to Ok(None), got {staged:?}"
+        );
+        assert_eq!(
+            std::fs::read_dir(staging.path()).expect("read staging").count(),
+            0,
+            "nothing may be downloaded when the dist asset is absent"
+        );
+    }
+
+    #[test]
+    fn exit_after_upgrade_gate_honors_env() {
+        let saved = std::env::var("REVIEW_UPGRADE_EXIT_AFTER").ok();
+
+        std::env::set_var("REVIEW_UPGRADE_EXIT_AFTER", "0");
+        assert!(!exit_after_upgrade_enabled(), "0 must disable the exit");
+
+        std::env::set_var("REVIEW_UPGRADE_EXIT_AFTER", "1");
+        assert!(exit_after_upgrade_enabled(), "1 must keep the exit");
+
+        std::env::remove_var("REVIEW_UPGRADE_EXIT_AFTER");
+        assert!(
+            exit_after_upgrade_enabled(),
+            "unset must default to exiting (production)"
+        );
+
+        match saved {
+            Some(v) => std::env::set_var("REVIEW_UPGRADE_EXIT_AFTER", v),
+            None => {}
+        }
     }
 }

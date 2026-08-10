@@ -1100,9 +1100,25 @@ async function saveProvidersOnly() {
   }
 }
 
+// The backend derives a provider's id from its list position (`{provider}-{index}`),
+// so deleting an entry renumbers every provider after it. Return the trailing
+// index portion of an id so deletes can be applied highest-index-first (each
+// id then stays valid until its own deletion).
+function providerIdIndex(id: string): number {
+  const dash = id.lastIndexOf('-')
+  if (dash === -1) return -1
+  const n = Number.parseInt(id.slice(dash + 1), 10)
+  return Number.isNaN(n) ? -1 : n
+}
+
 async function saveAdditionalProviders() {
-  // Delete removed providers
-  for (const id of deletedProviderIds.value) {
+  const hadDeletes = deletedProviderIds.value.length > 0
+
+  // Delete removed providers. Deleting highest index first keeps the remaining
+  // ids valid — deleting a lower index first would shift the list and make the
+  // higher, still-pending ids 404 (or worse, delete the wrong provider).
+  const orderedDeletes = [...deletedProviderIds.value].sort((a, b) => providerIdIndex(b) - providerIdIndex(a))
+  for (const id of orderedDeletes) {
     try {
       await deleteProviderApi(id)
     } catch (e) {
@@ -1116,6 +1132,25 @@ async function saveAdditionalProviders() {
     }
   }
   deletedProviderIds.value = []
+
+  // After any delete the server renumbers the survivors, so the ids we cached
+  // before the delete would 404 on PUT below. Re-fetch and zip the remaining
+  // (previously persisted, still in server order) providers onto the fresh ids.
+  // Newly-added providers are excluded here — they have no server id yet and
+  // are appended via POST later, so they never shift the survivors' order.
+  if (hadDeletes) {
+    const resp = await getProvidersApi()
+    const freshItems = resp.items || []
+    const remaining = additionalProviders.value.filter((p) => p.id && !p._isNew)
+    if (freshItems.length !== remaining.length) {
+      // A delete failed silently or the server list changed underneath us —
+      // abort rather than zip ids onto the wrong providers.
+      throw new Error('Provider list changed while saving; refresh and try again')
+    }
+    remaining.forEach((p, i) => {
+      p.id = freshItems[i].id
+    })
+  }
 
   // Save (add or update) providers
   for (const provider of additionalProviders.value) {

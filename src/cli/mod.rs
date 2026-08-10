@@ -48,6 +48,18 @@ enum Commands {
         #[arg(long)]
         local_path: Option<String>,
 
+        /// Directory (relative to --local-path) to review in full (every controlled file, not just a diff)
+        ///
+        /// 按目录全量审查：把该目录下所有受控文件的当前内容当作新增代码，逐一完整审查，
+        /// 复用 review 专家团队与 large-PR 覆盖保证。需配合 --local-path 指定仓库根目录；
+        /// 与 --mr-url / --diff / --stdin / --base / --head / --since / --until / --staged 互斥。
+        #[arg(
+            long,
+            requires = "local_path",
+            conflicts_with_all = ["mr_url", "diff", "stdin", "base", "head", "since", "until", "staged"]
+        )]
+        path: Option<String>,
+
         /// Base ref for local diff (default: main)
         #[arg(long)]
         base: Option<String>,
@@ -443,6 +455,21 @@ pub async fn run() -> Result<()> {
 
     match cmd {
         Commands::Review {
+            path: Some(dir),
+            local_path: Some(repo),
+            config,
+            llm_config,
+            format,
+            output,
+            ..
+        } => {
+            let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
+            handlers::run_local_path(&dir, &repo, config, llm_config, &format, &output, pm, &review_id).await?;
+        }
+        Commands::Review { path: Some(_), .. } => {
+            anyhow::bail!("review --path requires --local-path <repo>");
+        }
+        Commands::Review {
             mr_url: Some(url),
             config,
             gitlab_token,
@@ -529,7 +556,7 @@ pub async fn run() -> Result<()> {
             handlers::run_stdin(&format, &output).await?;
         }
         Commands::Review { .. } => {
-            anyhow::bail!("Please specify --mr-url, --diff, --stdin, or --local-path");
+            anyhow::bail!("Please specify --mr-url, --diff, --stdin, --local-path, or --path");
         }
         Commands::Validate { config } => {
             let config = match config {

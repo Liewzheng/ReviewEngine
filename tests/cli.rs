@@ -642,7 +642,11 @@ fn upgrade_check_reports_update_by_install_method() {
             "Cargo (~/.cargo/bin)",
             "cargo install review-engine --locked --features cli",
         ),
-        ("docker", "Docker 容器", "git pull && docker compose up -d --build"),
+        (
+            "docker",
+            "Docker 容器",
+            "Web UI 或 reng upgrade 自动升级（容器将自动重启）",
+        ),
         ("plain", "直接部署的二进制", "reng upgrade"),
         ("unknown", "未知（手动安装）", "使用官方 install.sh 手动升级"),
     ];

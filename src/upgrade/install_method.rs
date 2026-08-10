@@ -12,7 +12,9 @@ pub enum InstallMethod {
     Brew,
     /// `cargo install` (`~/.cargo/bin/...`).
     Cargo,
-    /// Running inside a container (`/.dockerenv` present) — upgrades happen on the host.
+    /// Running inside a container (`/.dockerenv` present) — the binary and
+    /// frontend dist live on writable volumes, so upgrades run in place and
+    /// the container restarts itself.
     Docker,
     /// A plain copy in a bin directory (`~/.local/bin`, `/usr/local/bin`, ...).
     Plain,
@@ -64,8 +66,10 @@ impl InstallMethod {
         match self {
             Self::Brew => "brew upgrade review-engine",
             Self::Cargo => "cargo install review-engine --locked --features cli",
-            // Must run on the host, not inside the container.
-            Self::Docker => "git pull && docker compose up -d --build",
+            // In-container auto-upgrade via the Web UI (`/api/v1/system/upgrade`)
+            // or the `reng upgrade` CLI; the container restarts itself on
+            // completion.
+            Self::Docker => "Web UI 或 reng upgrade 自动升级（容器将自动重启）",
             Self::Plain => "reng upgrade",
             Self::Unknown => "使用官方 install.sh 手动升级",
         }
@@ -76,7 +80,7 @@ impl InstallMethod {
         match self {
             Self::Brew => "检测到 Homebrew 安装：请运行 `brew upgrade review-engine`。",
             Self::Cargo => "检测到 cargo 安装：请重新安装 `cargo install review-engine --locked --features cli`。",
-            Self::Docker => "检测到容器环境：请在宿主机执行 `git pull && docker compose up -d --build` 重建镜像。",
+            Self::Docker => "检测到容器环境：可使用 Web UI 或 `reng upgrade` 在容器内自动升级，完成后容器将自动重启。",
             Self::Plain => "检测到直接部署的二进制：请使用内置命令 `reng upgrade` 完成升级。",
             Self::Unknown => "无法识别安装方式：请使用官方 install.sh 手动升级（见 GitHub Releases 页面）。",
         }
@@ -174,7 +178,11 @@ mod tests {
         );
         assert_eq!(
             InstallMethod::Docker.upgrade_command(),
-            "git pull && docker compose up -d --build"
+            "Web UI 或 reng upgrade 自动升级（容器将自动重启）"
+        );
+        assert_eq!(
+            InstallMethod::Docker.description(),
+            "检测到容器环境：可使用 Web UI 或 `reng upgrade` 在容器内自动升级，完成后容器将自动重启。"
         );
         assert_eq!(InstallMethod::Plain.upgrade_command(), "reng upgrade");
         for m in [

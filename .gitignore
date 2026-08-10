@@ -18,6 +18,7 @@ ux-review-*.xlsx
 generate*.py
 plan*.md
 AGENTS.md
+.env
 
 # Directories
 /config/

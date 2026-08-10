@@ -66,6 +66,14 @@ services:
       REVIEW_ENGINE_CONFIG_DIR: /app/config
       REVIEW_ENGINE_REPORT_DIR: /app/reports
 
+      # ── In-container Auto Upgrade (容器内自动升级) ──
+      # 升级由容器内 POST /upgrade 触发:新二进制替换到 REVIEW_UPGRADE_INSTALL_DIR
+      # (卷 /app/bin)、新前端 dist 替换到 REVIEW_UPGRADE_FRONTEND_DIR(卷
+      # /app/frontend/dist),完成后进程 exit(0),由 restart: unless-stopped 自动
+      # 重启容器拉起新版本(无需重新 build/拉镜像)。
+      REVIEW_UPGRADE_INSTALL_DIR: /app/bin
+      REVIEW_UPGRADE_FRONTEND_DIR: /app/frontend/dist
+
     volumes:
       # Persist config file (mounted from host or created via init)
       - type: bind
@@ -99,6 +107,23 @@ services:
         source: ${TLS_KEY_PATH:-./tls/key.pem}
         target: /app/tls/key.pem
         read_only: true
+
+      # ── Writable deploy volumes(容器内自动升级用,非 read_only)──
+      # ./bin  → /app/bin:后端升级时替换的二进制就写在这里,entrypoint 从卷运行
+      # ./frontend-dist → /app/frontend/dist:升级时替换的前端 dist 写在这里,
+      #   serve 直接读它(/app/frontend/dist 或 ./frontend/dist)。
+      # 首次启动 entrypoint 会把镜像内内容(二进制 /usr/local/bin/review-engine、
+      # dist 备份 /app/frontend-dist-image)同步进卷;卷已有内容则不覆盖。
+      # 注意:Linux NAS 上 bind 卷属主继承宿主,若容器内 review-engine 写卷失败,
+      #   需先把这两个目录 chown 到容器 UID(如 `chown -R 999:999 bin frontend-dist`,
+      #   实际 UID 以 `docker exec <c> id review-engine` 为准)。
+      # 两个目录是独立可写部署卷,可单独备份/回滚(如保留升级前的 bin/review-engine)。
+      - type: bind
+        source: ./bin
+        target: /app/bin
+      - type: bind
+        source: ./frontend-dist
+        target: /app/frontend/dist
 
     # Resource limits for SaaS stability
     deploy:

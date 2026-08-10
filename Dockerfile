@@ -66,8 +66,11 @@ RUN test -n "$REVIEW_ENGINE_VERSION" \
     && rm -f "review-engine-${TRIPLE}.tar.gz" "review-engine-${TRIPLE}.sha256" \
     && /usr/local/bin/review-engine --version
 
-# 下载前端 dist 并解包到 /app/frontend/dist(frontend-dist.tar.gz 由 release.yml
-# 的 upload-frontend-dist job 打包,-C dist . 使包根即 index.html + assets/)。
+# 下载前端 dist 并解包到镜像内备份位置 /app/frontend-dist/image(frontend-dist.tar.gz
+# 由 release.yml 的 upload-frontend-dist job 打包,-C dist . 使包根即 index.html +
+# assets/)。注意:解包目标不是 /app/frontend/dist——compose 会把 ./frontend-dist 卷
+# 挂到 /app/frontend/dist(可写部署卷,遮住镜像路径),entrypoint 首次启动时从这里
+# 把内容同步进卷;镜像内留副本作为同步源。
 # 优雅降级:frontend-dist.tar.gz 是后续 release 才引入的资产,旧 release(如
 # v0.9.8)没有它——下载 404 或 base URL 不可达时 WARN 并跳过,镜像仅含二进制、
 # 仍能构建成功;/app/frontend/dist 为空时 serve 会 fallback 到 coming soon
@@ -76,7 +79,7 @@ RUN test -n "$REVIEW_ENGINE_VERSION" \
 # 副件存在则校验,404 则告警跳过(与 install.sh 校验策略一致)。
 RUN test -n "$REVIEW_ENGINE_VERSION" \
       || { echo "ERROR: REVIEW_ENGINE_VERSION build-arg is required (e.g. v0.9.8)"; exit 1; } \
-    && mkdir -p /app/frontend/dist \
+    && mkdir -p /app/frontend-dist-image \
     && echo ">> [3/3] download frontend-dist.tar.gz (${REVIEW_ENGINE_VERSION})" \
     && if curl -fsSL --retry 3 --connect-timeout 15 \
          -o frontend-dist.tar.gz \
@@ -89,9 +92,9 @@ RUN test -n "$REVIEW_ENGINE_VERSION" \
          else \
            echo "WARN: frontend-dist.tar.gz.sha256 不存在,跳过前端资产校验"; \
          fi \
-         && tar -xzf frontend-dist.tar.gz -C /app/frontend/dist \
+         && tar -xzf frontend-dist.tar.gz -C /app/frontend-dist-image \
          && rm -f frontend-dist.tar.gz frontend-dist.tar.gz.sha256 \
-         && ls -la /app/frontend/dist; \
+         && ls -la /app/frontend-dist-image; \
        else \
          echo "WARN: frontend-dist.tar.gz 不存在(${REVIEW_ENGINE_VERSION} release 未含该资产),跳过前端部署,镜像仅含二进制"; \
          echo "      serve 对空 /app/frontend/dist 会 fallback 到 coming soon 占位页(可接受;待含 dist 资产的 release 重建即有前端)"; \
@@ -105,7 +108,7 @@ COPY entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
 
 # 创建配置和报告目录
-RUN mkdir -p /app/config /app/reports /app/.ssh && \
+RUN mkdir -p /app/config /app/reports /app/.ssh /app/bin /app/frontend/dist && \
     chown -R review-engine:review-engine /app
 
 # 切换到非 root 用户

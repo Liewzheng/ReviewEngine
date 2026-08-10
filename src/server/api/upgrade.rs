@@ -475,31 +475,129 @@ fn find_dist_root(root: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Atomically swap the live frontend dir for the staged one: the old dir is
-/// renamed aside as a backup, the staged dist renamed into place, then the
-/// backup removed. Any failure restores the old dir. Both renames stay under
-/// the same parent, hence on one filesystem, so each step is atomic.
+/// Replace the *contents* of the live frontend dir with the staged dist —
+/// never the directory itself.
+///
+/// The live dir (`/app/frontend/dist`) is a writable bind mount in production:
+/// renaming a mount point fails with `EBUSY`, and the staged dist (extracted
+/// under the system temp dir, usually `/tmp`) can live on a different
+/// filesystem than `/app`, so a cross-directory `rename` would fail with
+/// `EXDEV`. Both are avoided by copying the staged contents into a hidden
+/// staging subdir *inside* the live dir and then swapping entries within it
+/// (same filesystem, so each rename is atomic):
+///
+/// 1. copy staged contents → `<live>/.new-<nonce>/` (copy, so cross-device is fine)
+/// 2. move every existing live entry → `<live>/.old-<nonce>/`
+/// 3. move `.new-<nonce>/*` → `<live>/` (live is empty now, no collisions)
+/// 4. remove `.old-<nonce>/` and `.new-<nonce>/`
+///
+/// Any failure after step 2 restores the parked old entries and removes the
+/// partial new dir, so the live dir is never left half-swapped.
 fn replace_frontend_dist(staged: &Path, frontend_dir: &Path) -> crate::upgrade::Result<()> {
-    let parent = frontend_dir
-        .parent()
-        .ok_or_else(|| UpgradeError::invalid_data(format!("frontend dir {frontend_dir:?} has no parent")))?;
-    std::fs::create_dir_all(parent)?;
+    std::fs::create_dir_all(frontend_dir)?;
 
     let nonce: u64 = rand::random();
-    let backup = parent.join(format!(".frontend-dist.bak-{nonce:x}"));
-    let had_original = frontend_dir.exists();
+    let new_dir = frontend_dir.join(format!(".new-{nonce:x}"));
+    let backup_dir = frontend_dir.join(format!(".old-{nonce:x}"));
 
-    if had_original {
-        std::fs::rename(frontend_dir, &backup)?;
+    // Stage the new contents inside the live dir (same filesystem as the swap
+    // targets below). Copy, never rename: the staged dist may be on /tmp.
+    if let Err(e) = copy_dir_contents(staged, &new_dir) {
+        let _ = std::fs::remove_dir_all(&new_dir);
+        return Err(e);
     }
-    if let Err(e) = std::fs::rename(staged, frontend_dir) {
-        if had_original {
-            let _ = std::fs::rename(&backup, frontend_dir);
-        }
-        return Err(UpgradeError::Io(e));
+
+    // Park the old contents aside.
+    if let Err(e) = park_old_contents(frontend_dir, &backup_dir, &new_dir) {
+        let _ = std::fs::remove_dir_all(&new_dir);
+        restore_old_contents(frontend_dir, &backup_dir);
+        return Err(e);
     }
-    let _ = std::fs::remove_dir_all(&backup);
+
+    // Bring the new contents into place (live is empty now, so these renames
+    // cannot collide).
+    if let Err(e) = bring_new_contents_in(frontend_dir, &new_dir) {
+        clear_live_contents(frontend_dir, &new_dir, &backup_dir);
+        let _ = std::fs::remove_dir_all(&new_dir);
+        restore_old_contents(frontend_dir, &backup_dir);
+        return Err(e);
+    }
+
+    let _ = std::fs::remove_dir_all(&backup_dir);
+    let _ = std::fs::remove_dir_all(&new_dir);
     Ok(())
+}
+
+/// Recursively copy `src`'s contents into `dst` (permission bits included).
+/// Cross-device safe: this is a plain copy, not a rename.
+fn copy_dir_contents(src: &Path, dst: &Path) -> crate::upgrade::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        if from.is_dir() {
+            copy_dir_contents(&from, &to)?;
+        } else {
+            std::fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Move every entry of `live` except the two temp dirs into `backup_dir`.
+fn park_old_contents(live: &Path, backup_dir: &Path, new_dir: &Path) -> crate::upgrade::Result<()> {
+    let new_name = new_dir.file_name().unwrap_or_default();
+    let backup_name = backup_dir.file_name().unwrap_or_default();
+    std::fs::create_dir_all(backup_dir)?;
+    for entry in std::fs::read_dir(live)? {
+        let entry = entry?;
+        if entry.file_name() == new_name || entry.file_name() == backup_name {
+            continue;
+        }
+        std::fs::rename(entry.path(), backup_dir.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+/// Move the staged `.new-*` entries into `live` (expected to be empty).
+fn bring_new_contents_in(live: &Path, new_dir: &Path) -> crate::upgrade::Result<()> {
+    for entry in std::fs::read_dir(new_dir)? {
+        let entry = entry?;
+        std::fs::rename(entry.path(), live.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+/// Move the parked old entries back into `live` and drop the backup dir
+/// (rollback path; best-effort).
+fn restore_old_contents(live: &Path, backup_dir: &Path) {
+    if let Ok(entries) = std::fs::read_dir(backup_dir) {
+        for entry in entries.flatten() {
+            let _ = std::fs::rename(entry.path(), live.join(entry.file_name()));
+        }
+    }
+    let _ = std::fs::remove_dir_all(backup_dir);
+}
+
+/// Remove every non-temp entry of `live` — cleans up a half-done swap before
+/// restoring the old contents (rollback path; best-effort).
+fn clear_live_contents(live: &Path, new_dir: &Path, backup_dir: &Path) {
+    let new_name = new_dir.file_name().unwrap_or_default();
+    let backup_name = backup_dir.file_name().unwrap_or_default();
+    if let Ok(entries) = std::fs::read_dir(live) {
+        for entry in entries.flatten() {
+            if entry.file_name() == new_name || entry.file_name() == backup_name {
+                continue;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                let _ = std::fs::remove_dir_all(&path);
+            } else {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
 }
 
 /// Copy the new binary into `install_dir` atomically, with backup + rollback:
@@ -788,7 +886,8 @@ mod tests {
 
     #[test]
     fn replace_frontend_dist_happy_path_and_rollback() {
-        // Happy path: old dir renamed aside, staged dist swapped in, backup gone.
+        // Happy path: old content parked, staged contents (incl. nested dirs)
+        // swapped in, temp dirs cleaned up.
         let dir = tempfile::tempdir().expect("temp dir");
         let live = dir.path().join("frontend").join("dist");
         std::fs::create_dir_all(&live).expect("create live");
@@ -796,18 +895,25 @@ mod tests {
         let staged = dir.path().join("staged-dist");
         std::fs::create_dir_all(&staged).expect("create staged");
         std::fs::write(staged.join("index.html"), "<html>new</html>").expect("write new index.html");
+        std::fs::create_dir_all(staged.join("assets")).expect("create staged assets");
+        std::fs::write(staged.join("assets/app.js"), "console.log(1)").expect("write staged asset");
 
         replace_frontend_dist(&staged, &live).expect("replace must succeed");
         assert!(live.join("index.html").exists(), "new dist must be live");
+        assert!(live.join("assets/app.js").exists(), "nested asset must be live");
         assert!(!live.join("old.txt").exists(), "old dist must be gone");
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path().join("frontend"))
-            .expect("read frontend dir")
+        let leftovers: Vec<_> = std::fs::read_dir(&live)
+            .expect("read live dir")
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with(".frontend-dist.bak-"))
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with(".new-") || n.starts_with(".old-")
+            })
             .collect();
-        assert!(leftovers.is_empty(), "backup must be cleaned up");
+        assert!(leftovers.is_empty(), "temp dirs must be cleaned up, got {leftovers:?}");
 
-        // Rollback: staged rename fails → old dir restored.
+        // Rollback: copy of a missing staged dir fails before any swap → live
+        // dir untouched.
         let live2 = dir.path().join("frontend2").join("dist");
         std::fs::create_dir_all(&live2).expect("create live2");
         std::fs::write(live2.join("old.txt"), "old").expect("write old2");
@@ -815,6 +921,72 @@ mod tests {
         let err = replace_frontend_dist(&missing_staged, &live2).expect_err("missing staged must fail");
         assert!(matches!(err, UpgradeError::Io(_)), "got {err:?}");
         assert!(live2.join("old.txt").exists(), "old dist must be restored on failure");
+    }
+
+    /// Regression for the container **EBUSY** bug: `/app/frontend/dist` is a
+    /// bind mount in production, and a mount point cannot be `rename(2)`d.
+    /// `replace_frontend_dist` must never rename the live directory itself —
+    /// only its contents. A real mount point cannot be created in a unit test,
+    /// so we assert the mount-point semantics directly: the live dir keeps the
+    /// same `dev`/`ino` across the replace, i.e. the directory (and the mount)
+    /// stays in place while its contents are swapped.
+    #[cfg(unix)]
+    #[test]
+    fn replace_frontend_dist_keeps_live_dir_on_mount_point_semantics() {
+        use std::os::unix::fs::MetadataExt;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let live = dir.path().join("dist");
+        std::fs::create_dir_all(&live).expect("create live");
+        std::fs::write(live.join("old.txt"), "old").expect("write old");
+        let staged = dir.path().join("staged");
+        std::fs::create_dir_all(&staged).expect("create staged");
+        std::fs::write(staged.join("index.html"), "<html>new</html>").expect("write index.html");
+
+        let before = std::fs::metadata(&live).expect("metadata before");
+        replace_frontend_dist(&staged, &live).expect("replace must succeed");
+        let after = std::fs::metadata(&live).expect("metadata after");
+
+        assert_eq!(before.dev(), after.dev(), "live dir device must not change");
+        assert_eq!(
+            before.ino(), after.ino(),
+            "live dir inode must not change — the directory itself must never be renamed/replaced (EBUSY on a mount point)"
+        );
+        assert!(live.join("index.html").exists());
+        assert!(!live.join("old.txt").exists());
+    }
+
+    /// Regression for the container **EXDEV** bug: the staged dist is extracted
+    /// under the system temp dir (typically `/tmp`), while the live dir lives
+    /// under `/app` — a different filesystem. `replace_frontend_dist` must COPY
+    /// the staged contents across, never `rename` a directory across devices. A
+    /// true cross-device rename cannot be reproduced in a unit test (both
+    /// tempdirs usually share `/tmp`), but the implementation performs no
+    /// cross-directory rename at all, and this test pins the independent-
+    /// location contract: staged and live live in unrelated temp trees, the
+    /// replace succeeds, and the staged source is left intact (copied, not
+    /// moved).
+    #[test]
+    fn replace_frontend_dist_accepts_staged_in_independent_location() {
+        let staged_root = tempfile::tempdir().expect("staged root");
+        let staged = staged_root.path().join("dist");
+        std::fs::create_dir_all(staged.join("assets")).expect("create staged");
+        std::fs::write(staged.join("index.html"), "<html>new</html>").expect("write index.html");
+        std::fs::write(staged.join("assets/app.js"), "console.log(1)").expect("write asset");
+
+        let live_root = tempfile::tempdir().expect("live root");
+        let live = live_root.path().join("dist");
+        std::fs::create_dir_all(&live).expect("create live");
+        std::fs::write(live.join("old.txt"), "old").expect("write old");
+
+        replace_frontend_dist(&staged, &live).expect("replace across independent locations must succeed");
+        assert!(live.join("index.html").exists());
+        assert!(live.join("assets/app.js").exists());
+        assert!(!live.join("old.txt").exists());
+        assert!(
+            staged.join("index.html").exists(),
+            "staged source must not be consumed by the replace (copy, not move)"
+        );
     }
 
     #[test]

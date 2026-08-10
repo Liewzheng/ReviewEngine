@@ -507,15 +507,21 @@ pub async fn run_ask(
     Ok(())
 }
 
-pub async fn run_ask_local_diff(
+/// Run `ask` against an in-memory diff string.
+///
+/// Shared by the `--diff` (file-backed) and `--stdin` (in-memory) paths so
+/// neither ever passes the other's arguments through a file read.
+/// AK-05 regression: `run_ask_stdin` passed the stdin diff as `question` and
+/// the question string as `diff_path`, so every non-empty stdin + `--question`
+/// failed with `No such file or directory (os error 2)`.
+async fn run_ask_with_diff(
     question: &str,
-    diff_path: &str,
+    diff: &str,
     config_path: Option<String>,
     llm_configs: Vec<String>,
     format: &str,
     output: &Option<String>,
 ) -> Result<()> {
-    let diff = tokio::fs::read_to_string(diff_path).await?;
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
     let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
@@ -528,7 +534,7 @@ pub async fn run_ask_local_diff(
     );
 
     let llm_client = review_engine::llm::client::LLMClient::new();
-    let result = review_engine::actions::ask::run_ask(&llm_client, &configs, question, &diff, &mr_info, None).await?;
+    let result = review_engine::actions::ask::run_ask(&llm_client, &configs, question, diff, &mr_info, None).await?;
 
     let md = format!(
         "## Ask\n\n**Question**: {}\n\n**Answer**: {}\n",
@@ -549,6 +555,18 @@ pub async fn run_ask_local_diff(
     write_output(&review_out, format, output, None, None, false)?;
 
     Ok(())
+}
+
+pub async fn run_ask_local_diff(
+    question: &str,
+    diff_path: &str,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+) -> Result<()> {
+    let diff = tokio::fs::read_to_string(diff_path).await?;
+    run_ask_with_diff(question, &diff, config_path, llm_configs, format, output).await
 }
 
 pub async fn run_ask_local_repo(
@@ -689,11 +707,12 @@ pub async fn run_ask_stdin(
         return Ok(());
     }
 
-    run_ask_local_diff(&diff, question, config_path, llm_configs, format, output).await
+    run_ask_with_diff(question, &diff, config_path, llm_configs, format, output).await
 }
 
 pub async fn run_local(
     diff_path: &str,
+    local_path: Option<&str>,
     config_path: Option<String>,
     llm_configs: Vec<String>,
     format: &str,
@@ -706,7 +725,14 @@ pub async fn run_local(
     let config = review_engine::config::resolve_config(config_source).await?;
     let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
-    let (experts, mr_info) = prepare_review(&config, "local", "local", "main");
+    // Root cause C: propagate the real `--local-path` (defaulting to the
+    // current directory) instead of the placeholder "local", so the "Full
+    // File Contents" injection and the verification pass read from the actual
+    // checkout — restoring full-file context for chunked large-PR reviews.
+    // When the path is wrong/unreadable the injection fails open (empty
+    // section), as for remote reviews.
+    let project_path = local_path.unwrap_or(".");
+    let (experts, mr_info) = prepare_review(&config, project_path, "local", "main");
 
     let (reports, _, dropped_findings, consolidated) = review_engine::team::orchestrator::run_experts(
         &experts,
@@ -1739,6 +1765,9 @@ mod tests {
                 tl_dr: "Risk Level: Medium. 1 high found by 2 reviewers.".to_string(),
             },
             consensus_reached: true,
+            total_files: 0,
+            reviewed_files: 0,
+            unreviewed_files: vec![],
         }
     }
 
@@ -1756,6 +1785,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_prepare_review_carries_real_local_path() {
+        // Root cause C: `prepare_review` must carry the real `--local-path`
+        // into MRInfo.project_path (not the "local" placeholder), so the
+        // full-file contents injection reads from the actual checkout.
+        let config = AppConfig {
+            project: None,
+            report: Default::default(),
+            review_experts: Default::default(),
+            commands: Default::default(),
+            scoring: Default::default(),
+            llm: vec![],
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            output_dir: String::new(),
+            diff: Default::default(),
+            rate_limit: Default::default(),
+            languages: Default::default(),
+        };
+        let (_, mr_info) = prepare_review(&config, "/real/repo", "local", "main");
+        assert_eq!(mr_info.project_path, "/real/repo");
+    }
     fn render(result: &ReviewOutput, format: &str, verification_enabled: bool) -> String {
         match format_output(result, format, verification_enabled) {
             Ok(s) => s,

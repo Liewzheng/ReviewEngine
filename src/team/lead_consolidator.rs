@@ -29,6 +29,34 @@ impl Default for ConsolidatorConfig {
     }
 }
 
+/// Diff file coverage accounting for a review.
+///
+/// A file counts as *reviewed* only when it was assigned to at least one
+/// expert task that produced a report. Under-coverage (files assigned to no
+/// task, or only to failed tasks) is surfaced in the report and **caps the
+/// score**, so a run that silently skipped files can never score higher than
+/// an honest full-coverage run — the 4-of-29-files / fake-85 regression.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileCoverage {
+    /// Number of files in the reviewed diff.
+    pub total_files: usize,
+    /// Number of files reviewed by at least one successful expert task.
+    pub reviewed_files: usize,
+    /// Files no expert reviewed.
+    pub unreviewed_files: Vec<String>,
+}
+
+impl FileCoverage {
+    /// Full coverage: every one of `total` files was reviewed.
+    pub fn full(total: usize) -> Self {
+        Self {
+            total_files: total,
+            reviewed_files: total,
+            unreviewed_files: Vec::new(),
+        }
+    }
+}
+
 /// Result of the consolidation process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidatedReport {
@@ -47,6 +75,15 @@ pub struct ConsolidatedReport {
     /// is not modified.
     #[serde(default)]
     pub consensus_reached: bool,
+    /// Number of files in the reviewed diff (coverage accounting).
+    #[serde(default)]
+    pub total_files: usize,
+    /// Number of files reviewed by at least one expert.
+    #[serde(default)]
+    pub reviewed_files: usize,
+    /// Files no expert reviewed; their presence caps the score (anti-cheat).
+    #[serde(default)]
+    pub unreviewed_files: Vec<String>,
 }
 
 /// A conflict between two or more experts on the same issue.
@@ -61,7 +98,27 @@ pub struct ExpertConflict {
 
 impl ConsolidatorConfig {
     /// Run the full consolidation pipeline.
+    ///
+    /// Backward-compatible wrapper assuming full diff-file coverage (no score
+    /// cap). Prefer [`ConsolidatorConfig::consolidate_with_coverage`] so
+    /// under-covered runs are scored honestly.
     pub fn consolidate(&self, reports: &[ExpertReport], total_score: Option<u8>) -> ConsolidatedReport {
+        self.consolidate_with_coverage(reports, total_score, &FileCoverage::default())
+    }
+
+    /// Run the full consolidation pipeline with diff-file coverage accounting.
+    ///
+    /// When `coverage` reports files that were not reviewed (`reviewed_files <
+    /// total_files`), the final score is capped proportionally
+    /// (`score × reviewed / total`) and the shortfall is called out in the
+    /// TL;DR. This makes under-coverage impossible to hide behind a high
+    /// score: a run that skipped files cannot outscore a full-coverage run.
+    pub fn consolidate_with_coverage(
+        &self,
+        reports: &[ExpertReport],
+        total_score: Option<u8>,
+        coverage: &FileCoverage,
+    ) -> ConsolidatedReport {
         let mut all_findings: Vec<Finding> = reports.iter().flat_map(|r| r.findings.clone()).collect();
 
         // Step 1: Filter by confidence
@@ -83,7 +140,15 @@ impl ConsolidatorConfig {
         let conflicts = self.detect_conflicts(&all_findings);
 
         // Step 4: Generate overall assessment
-        let score = total_score.unwrap_or_else(|| self.compute_score(reports));
+        let mut score = total_score.unwrap_or_else(|| self.compute_score(reports));
+        // Anti-cheat: cap the score by the reviewed-file fraction. A diff with
+        // files no expert reviewed cannot honestly score higher than its
+        // covered fraction allows.
+        let coverage_capped = coverage.total_files > 0 && coverage.reviewed_files < coverage.total_files;
+        if coverage_capped {
+            let ratio = coverage.reviewed_files as f64 / coverage.total_files as f64;
+            score = (score as f64 * ratio).round().clamp(0.0, 100.0) as u8;
+        }
         let risk_level = match &self.scoring {
             Some(s) => review::score_to_risk_level_with_config(score, &s.risk_thresholds),
             None => review::score_to_risk_level(score),
@@ -93,7 +158,15 @@ impl ConsolidatorConfig {
             |s| s.consensus_threshold,
         );
         let consensus_reached = score >= consensus_threshold;
-        let tl_dr = self.generate_tldr(reports, &risk_level, all_findings.len());
+        let mut tl_dr = self.generate_tldr(reports, &risk_level, all_findings.len());
+        if coverage_capped {
+            tl_dr.push_str(&format!(
+                "\n\n⚠️ Coverage: {}/{} files reviewed; {} file(s) not covered by any expert — score capped.",
+                coverage.reviewed_files,
+                coverage.total_files,
+                coverage.unreviewed_files.len()
+            ));
+        }
 
         let assessment = OverallAssessment {
             score,
@@ -109,6 +182,9 @@ impl ConsolidatorConfig {
             conflicts,
             assessment,
             consensus_reached,
+            total_files: coverage.total_files,
+            reviewed_files: coverage.reviewed_files,
+            unreviewed_files: coverage.unreviewed_files.clone(),
         }
     }
 
@@ -541,5 +617,49 @@ mod tests {
         assert_eq!(result.assessment.score, 69);
         // Default thresholds: score 69 => LowMedium
         assert_eq!(result.assessment.risk_level, RiskLevel::LowMedium);
+    }
+
+    #[test]
+    fn test_consolidate_full_coverage_no_cap() {
+        let config = ConsolidatorConfig::default();
+        let reports = vec![make_report("security", vec![])];
+        let coverage = FileCoverage {
+            total_files: 10,
+            reviewed_files: 10,
+            unreviewed_files: vec![],
+        };
+        let result = config.consolidate_with_coverage(&reports, Some(85), &coverage);
+        assert_eq!(result.assessment.score, 85);
+        assert!(result.unreviewed_files.is_empty());
+        assert!(!result.assessment.tl_dr.contains("Coverage"));
+    }
+
+    #[test]
+    fn test_consolidate_coverage_shortfall_caps_score() {
+        // Anti-cheat: 10 files, only 4 reviewed → the fake 85 must be capped.
+        let config = ConsolidatorConfig::default();
+        let reports = vec![make_report("security", vec![])];
+        let coverage = FileCoverage {
+            total_files: 10,
+            reviewed_files: 4,
+            unreviewed_files: vec!["f5.rs".into()],
+        };
+        let result = config.consolidate_with_coverage(&reports, Some(85), &coverage);
+        // 85 × 4/10 = 34
+        assert_eq!(result.assessment.score, 34);
+        assert_eq!(result.unreviewed_files, vec!["f5.rs".to_string()]);
+        assert!(result.consensus_reached == (34 >= 70));
+        assert!(result.assessment.tl_dr.contains("4/10 files reviewed"));
+    }
+
+    #[test]
+    fn test_consolidate_backward_compatible_default_full_coverage() {
+        // `consolidate` (no coverage) must behave exactly as before: no cap.
+        let config = ConsolidatorConfig::default();
+        let reports = vec![make_report("security", vec![])];
+        let result = config.consolidate(&reports, Some(85));
+        assert_eq!(result.assessment.score, 85);
+        assert_eq!(result.total_files, 0);
+        assert!(result.unreviewed_files.is_empty());
     }
 }

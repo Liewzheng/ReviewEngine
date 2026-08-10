@@ -28,7 +28,7 @@ struct Cli {
     command: Option<Commands>,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Debug)]
 enum Commands {
     /// Run a single review
     Review {
@@ -470,6 +470,7 @@ pub async fn run() -> Result<()> {
         }
         Commands::Review {
             diff: Some(diff_path),
+            local_path,
             config,
             llm_config,
             format,
@@ -477,7 +478,17 @@ pub async fn run() -> Result<()> {
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
-            handlers::run_local(&diff_path, config, llm_config, &format, &output, pm, &review_id).await?;
+            handlers::run_local(
+                &diff_path,
+                local_path.as_deref(),
+                config,
+                llm_config,
+                &format,
+                &output,
+                pm,
+                &review_id,
+            )
+            .await?;
         }
         Commands::Review {
             local_path: Some(path),
@@ -978,6 +989,54 @@ async fn display_progress_bar(map: ProgressMap, review_id: String) {
                 println!();
                 break;
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Root cause C: the `review --diff` branch must thread `--local-path`
+    /// through instead of dropping it in the `..` catch-all, otherwise the
+    /// full-file contents injection reads from a non-existent "local" path.
+    #[test]
+    fn test_review_diff_branch_captures_local_path() {
+        let matches = cli_command().get_matches_from([
+            "review-engine",
+            "review",
+            "--diff",
+            "/tmp/x.diff",
+            "--local-path",
+            "/repo",
+            "--format",
+            "json",
+        ]);
+        let cli = match Cli::from_arg_matches(&matches) {
+            Ok(cli) => cli,
+            Err(e) => panic!("cli args should parse: {e}"),
+        };
+        match cli.command {
+            Some(Commands::Review { diff, local_path, .. }) => {
+                assert_eq!(diff.as_deref(), Some("/tmp/x.diff"));
+                assert_eq!(local_path.as_deref(), Some("/repo"));
+            }
+            other => panic!("expected Review command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_review_diff_branch_local_path_optional() {
+        let matches = cli_command().get_matches_from(["review-engine", "review", "--diff", "/tmp/x.diff"]);
+        let cli = match Cli::from_arg_matches(&matches) {
+            Ok(cli) => cli,
+            Err(e) => panic!("cli args should parse: {e}"),
+        };
+        match cli.command {
+            Some(Commands::Review { local_path, .. }) => {
+                assert_eq!(local_path, None);
+            }
+            other => panic!("expected Review command, got {other:?}"),
         }
     }
 }

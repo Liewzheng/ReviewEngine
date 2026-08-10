@@ -26,5 +26,9 @@ AGENTS.md
 screenshots/
 reports/
 
+# Writable deploy volumes (in-container auto upgrade host dirs)
+/bin/
+/frontend-dist/
+
 # git worktree isolation for parallel subagent dispatch (pipeline.md)
 .worktrees/

@@ -66,27 +66,36 @@ RUN test -n "$REVIEW_ENGINE_VERSION" \
     && rm -f "review-engine-${TRIPLE}.tar.gz" "review-engine-${TRIPLE}.sha256" \
     && /usr/local/bin/review-engine --version
 
-# 下载前端 dist 并解包到 /app/frontend/dist
-# frontend-dist.tar.gz 由 release.yml 的 upload-frontend-dist job 打包(-C dist .),
-# 包根即 index.html + assets/,直接 -C 解包即可。该资产暂未发布 .sha256 副件,
-# 故前端校验可选:副件存在则校验,404 则告警跳过(与 install.sh 校验策略一致)。
+# 下载前端 dist 并解包到 /app/frontend/dist(frontend-dist.tar.gz 由 release.yml
+# 的 upload-frontend-dist job 打包,-C dist . 使包根即 index.html + assets/)。
+# 优雅降级:frontend-dist.tar.gz 是后续 release 才引入的资产,旧 release(如
+# v0.9.8)没有它——下载 404 或 base URL 不可达时 WARN 并跳过,镜像仅含二进制、
+# 仍能构建成功;/app/frontend/dist 为空时 serve 会 fallback 到 coming soon
+# 占位页(可接受),待含 dist 资产的 release 重建镜像即有前端。二进制下载与
+# sha256 校验保持硬失败;frontend-dist 的 sha256 副件暂未发布,其校验可选:
+# 副件存在则校验,404 则告警跳过(与 install.sh 校验策略一致)。
 RUN test -n "$REVIEW_ENGINE_VERSION" \
       || { echo "ERROR: REVIEW_ENGINE_VERSION build-arg is required (e.g. v0.9.8)"; exit 1; } \
-    && echo ">> [3/3] download frontend-dist.tar.gz (${REVIEW_ENGINE_VERSION})" \
     && mkdir -p /app/frontend/dist \
-    && curl -fsSL --retry 3 --connect-timeout 15 \
-         -o frontend-dist.tar.gz \
-         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz" \
+    && echo ">> [3/3] download frontend-dist.tar.gz (${REVIEW_ENGINE_VERSION})" \
     && if curl -fsSL --retry 3 --connect-timeout 15 \
-         -o frontend-dist.tar.gz.sha256 \
-         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz.sha256"; then \
-         sha256sum -c frontend-dist.tar.gz.sha256 || exit 1; \
+         -o frontend-dist.tar.gz \
+         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz"; then \
+         echo "   frontend-dist.tar.gz 下载成功,校验并解包"; \
+         if curl -fsSL --retry 3 --connect-timeout 15 \
+              -o frontend-dist.tar.gz.sha256 \
+              "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz.sha256"; then \
+           sha256sum -c frontend-dist.tar.gz.sha256 || exit 1; \
+         else \
+           echo "WARN: frontend-dist.tar.gz.sha256 不存在,跳过前端资产校验"; \
+         fi \
+         && tar -xzf frontend-dist.tar.gz -C /app/frontend/dist \
+         && rm -f frontend-dist.tar.gz frontend-dist.tar.gz.sha256 \
+         && ls -la /app/frontend/dist; \
        else \
-         echo "WARN: frontend-dist.tar.gz.sha256 不存在,跳过前端资产校验"; \
-       fi \
-    && tar -xzf frontend-dist.tar.gz -C /app/frontend/dist \
-    && rm -f frontend-dist.tar.gz frontend-dist.tar.gz.sha256 \
-    && ls -la /app/frontend/dist
+         echo "WARN: frontend-dist.tar.gz 不存在(${REVIEW_ENGINE_VERSION} release 未含该资产),跳过前端部署,镜像仅含二进制"; \
+         echo "      serve 对空 /app/frontend/dist 会 fallback 到 coming soon 占位页(可接受;待含 dist 资产的 release 重建即有前端)"; \
+       fi
 
 # reng 别名（argv[0] 动态命令名，symlink 调用即可生效）
 RUN ln -s /usr/local/bin/review-engine /usr/local/bin/reng

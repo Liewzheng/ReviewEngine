@@ -8,6 +8,11 @@
 //! the `GITLAB_TOKEN` / `GITHUB_TOKEN` environment variables (the same
 //! fallback the CLI uses). Diff resolution remains local-only; remote
 //! diffs are fetched by the provider clients directly.
+//!
+//! [`full_path`] builds the synthetic "empty tree → current" diff that backs
+//! the `review --path <dir>` full-content review entry point.
+
+pub mod full_path;
 
 use crate::git::local::LocalGitBrowser;
 use crate::models::*;

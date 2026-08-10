@@ -828,6 +828,86 @@ pub async fn run_local_repo(
     Ok(())
 }
 
+/// Run a full-content review of every controlled file under `path` inside
+/// `local_path` (P0: `review --path <dir> --local-path <repo>`).
+///
+/// Unlike `--diff`/`--base` (which review changes) and `audit` (which runs
+/// the whole-repository static+LLM pipeline), this entry point builds a
+/// synthetic "empty tree → current" diff for the subdirectory and reviews
+/// every line of every file through the standard expert team, so the
+/// large-PR coverage guarantee applies. A zero-finding result appends an
+/// explicit credibility note (P1) instead of reading as "the code is clean".
+pub async fn run_local_path(
+    path: &str,
+    local_path: &str,
+    config_path: Option<String>,
+    llm_configs: Vec<String>,
+    format: &str,
+    output: &Option<String>,
+    progress_map: Option<ProgressMap>,
+    review_id: &str,
+) -> Result<()> {
+    let config_source = config_path.map(ConfigSource::Path);
+    let config = review_engine::config::resolve_config(config_source).await?;
+    let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+
+    if llm_configs.is_empty() {
+        anyhow::bail!(
+            "No LLM configuration found. \
+             Provide [[llm]] in ~/.config/review-engine/.code-audit-config.toml, \
+             the project .code-audit-config.toml, --llm-config, or LLM_CONFIG env var."
+        );
+    }
+
+    let full = review_engine::input::full_path::build_path_review_diff(local_path, path)?;
+    let file_count = full.files.len();
+
+    let (experts, mr_info) = prepare_review(&config, local_path, "local", "main");
+
+    let (reports, _, dropped_findings, consolidated) = review_engine::team::orchestrator::run_experts(
+        &experts,
+        &mr_info,
+        &full.diff,
+        &llm_configs,
+        &config,
+        progress_map.clone(),
+        review_id,
+    )
+    .await?;
+
+    let mut out = ReviewOutput::new(reports)
+        .with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated);
+
+    // P1: a full-content review that finds nothing must not read as "the
+    // code is clean". Surface the coverage claim explicitly.
+    if out.reports.iter().map(|r| r.findings.len()).sum::<usize>() == 0 {
+        out.reports.push(ExpertReport {
+            expert_name: "path_review".to_string(),
+            findings: vec![],
+            markdown: format!(
+                "## Full-Content Path Review\n\n\
+                 This review covered **{} file(s)** under `{}` in full (synthetic empty-tree diff).\n\n\
+                 **Zero findings does not mean the code is problem-free** — 本次为 {} 个文件的全量内容审查，零发现不代表代码无问题。\
+                 Coverage is bounded by the model context window and the configured token budget.\n",
+                file_count, path, file_count
+            ),
+            raw_llm_response: String::new(),
+        });
+    }
+
+    write_output(
+        &out,
+        format,
+        output,
+        None,
+        Some(&config.output_dir),
+        config.report.verification_pass,
+    )?;
+    review_engine::progress::complete_progress(progress_map.as_ref(), review_id);
+    Ok(())
+}
+
 pub async fn run_repo_review_local_or_enhanced(
     local_path: &str,
     llm_configs: &[LLMConfig],

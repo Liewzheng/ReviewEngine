@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.6] - 2026-08-10
+
+### Added
+- **`reng review --path <dir>` full-content directory review entry (P0, user request)**: reviews every controlled file under a directory in full — the current content of each file is treated as newly added (a synthetic "empty tree → current" unified diff), so the review reuses the standard expert team and inherits the large-PR coverage guarantee, with every line of every file reviewed. `--path` is relative to `--local-path` and requires it (`requires = "local_path"`), and it conflicts with `--mr-url` / `--diff` / `--stdin` / `--base` / `--head` / `--since` / `--until` / `--staged` (`conflicts_with_all`, rejected at parse time). Boundaries fail closed: a missing repository, an empty `--path`, a directory that does not exist, and a directory with no reviewable files all produce a clear error instead of a silently empty review. Controlled-file enumeration lives in a new `src/input/full_path.rs`: Git repositories are listed with `git ls-files --cached --others --exclude-standard` (tracked + untracked-not-ignored, `.gitignore`-aware), non-Git trees are walked with a small ignore set, and symlinks are skipped so the walk cannot escape the reviewed tree; non-UTF-8 files and unrepresentable file kinds are skipped with a warning. When a full-content review finds zero findings, the report appends an explicit bilingual credibility note ("Zero findings does not mean the code is problem-free / 零发现不代表代码无问题", coverage bounded by the model context window and the configured token budget) instead of reading as "the code is clean". (`src/input/full_path.rs`, `src/cli/handlers.rs`, `src/cli/mod.rs`)
+
+### Changed
+- **UI test-case CSV verdicts backfilled from a live traversal**: `tests/cases/ui-test-cases-v0.9.4.csv` now records the verdict from the visual agent's page-by-page walk for 136 of its 146 cases (89 是 / 13 否 / 34 未执行), with the observed result captured in the 实际结果 column; 10 rows remain unjudged. Several of the 13 failing verdicts were recorded against an older binary (v0.9.2) and line up with defects already fixed in 0.9.5 (SSE 401, configuration save deadlock, provider Test Connection 400, queue max-concurrent stepper), so they are pending re-verification against the current build. (`tests/cases/ui-test-cases-v0.9.4.csv`)
+
 ## [0.9.5] - 2026-08-10
 
 ### Fixed

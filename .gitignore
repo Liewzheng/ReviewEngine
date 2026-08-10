@@ -23,3 +23,6 @@ AGENTS.md
 /config/
 screenshots/
 reports/
+
+# git worktree isolation for parallel subagent dispatch (pipeline.md)
+.worktrees/

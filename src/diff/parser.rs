@@ -4,6 +4,7 @@
 //! used by the review engine's diff filtering and chunking pipeline.
 
 use crate::models::*;
+use std::path::{Component, Path};
 
 /// Maximum allowed diff text size in bytes (10 MiB) to prevent memory DoS.
 const MAX_DIFF_SIZE: usize = 10 * 1024 * 1024;
@@ -90,7 +91,12 @@ fn is_safe_diff_path(path: &str) -> bool {
     if path.is_empty() || path.starts_with('/') || path.starts_with('~') {
         return false;
     }
-    if path.contains("..") || path.contains("\\") || path.contains(':') || path.contains('\0') {
+    // Reject parent-directory traversal by path *segment*, not by substring:
+    // `foo..bar.rs` is a legal filename and must not be dropped from review.
+    if Path::new(path).components().any(|c| matches!(c, Component::ParentDir)) {
+        return false;
+    }
+    if path.contains('\\') || path.contains(':') || path.contains('\0') {
         return false;
     }
     true
@@ -103,8 +109,9 @@ fn parse_path_from_diff_header(line: &str) -> String {
         let b_path = parts[3].trim_start_matches("b/");
         let path = if b_path == "/dev/null" { a_path } else { b_path };
         let path = path.to_string();
-        // Defensive: reject paths that could be used for traversal
-        if path.contains("..") || path.starts_with('/') {
+        // Defensive: reject paths that could be used for traversal (by path
+        // segment, so a legal filename like `foo..bar.rs` still parses).
+        if Path::new(&path).components().any(|c| matches!(c, Component::ParentDir)) || path.starts_with('/') {
             return String::new();
         }
         path
@@ -290,6 +297,26 @@ mod tests {
         assert!(is_safe_diff_path("src/main.rs"));
         assert!(is_safe_diff_path("a/b/c.txt"));
         assert!(is_safe_diff_path(".gitignore"));
+    }
+
+    #[test]
+    fn test_is_safe_diff_path_accepts_double_dot_filename() {
+        // `..` inside a single path segment is a legal filename, not traversal.
+        assert!(is_safe_diff_path("foo..bar.rs"));
+        assert!(is_safe_diff_path("src/range..rs"));
+        assert!(is_safe_diff_path("version..1.txt"));
+    }
+
+    #[test]
+    fn test_parse_unified_diff_accepts_double_dot_filename() {
+        let diff = "diff --git a/foo..bar.rs b/foo..bar.rs\n\
+                    --- a/foo..bar.rs\n\
+                    +++ b/foo..bar.rs\n\
+                    @@ -0,0 +1,1 @@\n\
+                    +fn foo() {}\n";
+        let files = parse_unified_diff(diff);
+        assert_eq!(files.len(), 1, "double-dot filename must not be dropped: {files:?}");
+        assert_eq!(files[0].path, "foo..bar.rs");
     }
 
     #[test]

@@ -509,11 +509,14 @@ export default {
       'Le binaire du serveur sera remplacé ; un redémarrage est nécessaire pour que la modification prenne effet.',
     noAsset:
       "Aucun artefact de version n'est disponible pour cette plateforme, la mise à niveau automatique est donc impossible.",
-    dockerRun: 'Sur la machine hôte, exécutez :',
+    dockerHint: 'La mise à jour est appliquée dans le conteneur en cours d’exécution ; il redémarre automatiquement pour terminer la mise à niveau.',
     doneFallback: 'Mise à niveau terminée ; redémarrage nécessaire pour prendre effet.',
+    dockerDone: 'Mise à niveau terminée — le conteneur va redémarrer automatiquement.',
     failedFallback: 'Échec de la mise à niveau.',
     checkingLatest: 'Vérification de la dernière version',
     inProgressError: 'Une tâche de mise à niveau est déjà en cours. Veuillez réessayer plus tard.',
+    notSupportedError: 'La mise à niveau automatique n’est pas disponible pour cette installation.',
+    restartHint: 'Le conteneur redémarre pour appliquer la mise à jour. La page se rafraîchira automatiquement.',
     source: {
       binary: 'binaire précompilé',
       brew: 'Homebrew',
@@ -526,6 +529,7 @@ export default {
       downloading: 'Téléchargement',
       verifying: 'Validation',
       installing: 'Installation',
+      restarting: 'Redémarrage',
     },
   },
   errors: {

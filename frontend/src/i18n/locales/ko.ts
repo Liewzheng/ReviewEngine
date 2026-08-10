@@ -508,11 +508,14 @@ export default {
       '서버 바이너리가 교체되며, 적용하려면 재시작이 필요합니다.',
     noAsset:
       '이 플랫폼에 사용할 수 있는 릴리스 자산이 없어 자동 업그레이드를 할 수 없습니다.',
-    dockerRun: '호스트 머신에서 실행:',
+    dockerHint: '업데이트는 실행 중인 컨테이너 내부에서 적용되며 완료 후 컨테이너가 자동으로 다시 시작됩니다.',
     doneFallback: '업그레이드가 완료되었습니다. 적용하려면 재시작이 필요합니다.',
+    dockerDone: '업그레이드가 완료되었습니다. 컨테이너가 자동으로 다시 시작됩니다.',
     failedFallback: '업그레이드에 실패했습니다.',
     checkingLatest: '최신 버전을 확인하는 중',
     inProgressError: '업그레이드 작업이 이미 진행 중입니다. 나중에 다시 시도해 주세요.',
+    notSupportedError: '이 설치 방식에서는 자동 업그레이드를 사용할 수 없습니다.',
+    restartHint: '업데이트를 적용하기 위해 컨테이너가 다시 시작되고 있습니다. 페이지가 자동으로 새로고침됩니다.',
     source: {
       binary: '사전 빌드 바이너리',
       brew: 'Homebrew',
@@ -525,6 +528,7 @@ export default {
       downloading: '다운로드 중',
       verifying: '검증 중',
       installing: '설치 중',
+      restarting: '다시 시작 중',
     },
   },
   errors: {

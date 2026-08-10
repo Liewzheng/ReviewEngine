@@ -9,7 +9,7 @@ import type { InstallMethod } from '../../types/upgrade'
 // The composable is a module-scope singleton, so App.vue and this dialog share
 // the same check/status/polling state. Destructured refs stay top-level
 // bindings and are auto-unwrapped in the template.
-const { check, checking, status, starting, dockerInfo, error, start, stopPolling } = useUpgrade()
+const { check, checking, status, starting, error, start, stopPolling } = useUpgrade()
 
 const { t } = useI18n()
 
@@ -29,26 +29,38 @@ const installSourceLabel = computed(() =>
 
 const isBinary = computed(() => check.value?.installMethod === 'binary')
 const isDocker = computed(() => check.value?.installMethod === 'docker')
+// Binary and docker both run the automated in-process upgrade; brew/cargo/
+// unknown only get a copyable hint command.
+const isAutomated = computed(() => isBinary.value || isDocker.value)
 
-// Command shown in the docker form comes from the POST response; everywhere
-// else it is the check response's `upgradeHint`.
-const commandToCopy = computed(() => {
-  if (!check.value) return ''
-  if (isDocker.value) return dockerInfo.value?.instructions || check.value.upgradeHint
-  return check.value.upgradeHint
-})
+// Hint command shown for non-automated methods (and binary as a manual
+// fallback). Docker never shows a host command.
+const commandToCopy = computed(() => check.value?.upgradeHint ?? '')
 
-const STEP_ORDER = ['checking', 'downloading', 'verifying', 'installing']
+// Progress steps: docker adds a final "Restarting" step after installing.
+const DOCKER_STEP_KEYS = ['checking', 'downloading', 'verifying', 'installing', 'restarting']
+const BINARY_STEP_KEYS = ['checking', 'downloading', 'verifying', 'installing']
+const stepKeys = computed(() => (isDocker.value ? DOCKER_STEP_KEYS : BINARY_STEP_KEYS))
+const stepTitles = computed(() => stepKeys.value.map((k) => t(`upgrade.step.${k}`)))
 const stepIndex = computed(() => {
   const st = status.value?.state
   if (!st) return -1
-  const idx = STEP_ORDER.indexOf(st)
+  const idx = stepKeys.value.indexOf(st)
   return idx >= 0 ? idx : -1
 })
 const inProgress = computed(() => {
   const st = status.value?.state
-  return !!st && STEP_ORDER.includes(st)
+  return !!st && (st === 'checking' || st === 'downloading' || st === 'verifying' || st === 'installing')
 })
+const isRestarting = computed(() => status.value?.state === 'restarting')
+
+// Done / confirm copy differs between binary and docker (docker restarts itself).
+const doneTitle = computed(() => {
+  const msg = status.value?.message
+  if (msg) return msg
+  return isDocker.value ? t('upgrade.dockerDone') : t('upgrade.doneFallback')
+})
+const upgradeHint = computed(() => (isDocker.value ? t('upgrade.dockerHint') : t('upgrade.binaryHint')))
 
 async function copy(text: string) {
   try {
@@ -114,21 +126,32 @@ async function copy(text: string) {
         class="upgrade-alert"
       />
 
-      <!-- binary form: automated upgrade -->
-      <div v-if="isBinary" class="form-section">
-        <template v-if="inProgress">
-          <el-steps :active="stepIndex" finish-status="success" process-status="process" align-center class="upgrade-steps">
-            <el-step :title="$t('upgrade.step.checking')" />
-            <el-step :title="$t('upgrade.step.downloading')" />
-            <el-step :title="$t('upgrade.step.verifying')" />
-            <el-step :title="$t('upgrade.step.installing')" />
-          </el-steps>
-          <p class="step-message">{{ status?.message }}</p>
-        </template>
+      <!-- automated upgrade form (binary + docker) -->
+      <div v-if="isAutomated" class="form-section">
+        <el-steps
+          v-if="inProgress || isRestarting"
+          :active="isRestarting ? stepKeys.length - 1 : stepIndex"
+          finish-status="success"
+          process-status="process"
+          align-center
+          class="upgrade-steps"
+        >
+          <el-step v-for="(title, i) in stepTitles" :key="i" :title="title" />
+        </el-steps>
+        <p v-if="inProgress" class="step-message">{{ status?.message }}</p>
+
+        <el-alert
+          v-if="isRestarting"
+          :title="status?.message || $t('upgrade.restartHint')"
+          type="warning"
+          :closable="false"
+          show-icon
+          class="upgrade-alert"
+        />
 
         <el-alert
           v-else-if="status?.state === 'done'"
-          :title="status?.message || $t('upgrade.doneFallback')"
+          :title="doneTitle"
           type="success"
           :closable="false"
           show-icon
@@ -150,12 +173,12 @@ async function copy(text: string) {
           </template>
         </el-alert>
 
-        <template v-else-if="check.platformAssetAvailable">
+        <template v-else-if="isDocker || check.platformAssetAvailable">
           <div class="confirm-row">
             <el-button type="primary" :icon="Download" :loading="starting" @click="start">
               {{ $t('upgrade.upgradeNow') }}
             </el-button>
-            <span class="confirm-hint">{{ $t('upgrade.binaryHint') }}</span>
+            <span class="confirm-hint">{{ upgradeHint }}</span>
           </div>
         </template>
 
@@ -167,24 +190,6 @@ async function copy(text: string) {
           show-icon
           class="upgrade-alert"
         />
-      </div>
-
-      <!-- docker form: instructions on the host machine + note -->
-      <div v-else-if="isDocker" class="form-section">
-        <p class="section-label">{{ $t('upgrade.dockerRun') }}</p>
-        <div class="command-block">
-          <code>{{ commandToCopy }}</code>
-          <el-button size="small" text :icon="DocumentCopy" @click="copy(commandToCopy)">{{ $t('common.copy') }}</el-button>
-        </div>
-        <el-alert
-          v-if="dockerInfo?.note"
-          :title="dockerInfo.note"
-          type="warning"
-          :closable="false"
-          show-icon
-          class="upgrade-alert"
-        />
-        <el-skeleton v-else :rows="2" animated />
       </div>
 
       <!-- brew / cargo / unknown: hint command already shown above with copy -->

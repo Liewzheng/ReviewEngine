@@ -518,11 +518,16 @@ export default {
       'The server binary will be replaced; a restart is required for it to take effect.',
     noAsset:
       'No release asset is available for this platform, so automatic upgrade is not possible.',
-    dockerRun: 'On the host machine, run:',
+    dockerHint:
+      'The update is applied inside the running container; it restarts automatically to finish the upgrade.',
     doneFallback: 'Upgrade complete; restart required to take effect.',
+    dockerDone: 'Upgrade complete — the container will restart automatically.',
     failedFallback: 'Upgrade failed.',
     checkingLatest: 'Checking for the latest version',
     inProgressError: 'An upgrade task is already in progress. Please try again later.',
+    notSupportedError: 'Automatic upgrade is not available for this installation.',
+    restartHint:
+      'The container is restarting to apply the update. The page will refresh automatically.',
     source: {
       binary: 'prebuilt binary',
       brew: 'Homebrew',
@@ -535,6 +540,7 @@ export default {
       downloading: 'Downloading',
       verifying: 'Verifying',
       installing: 'Installing',
+      restarting: 'Restarting',
     },
   },
   // Frontend-generated fallback messages surfaced via error toasts. These

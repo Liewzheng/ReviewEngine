@@ -62,3 +62,33 @@ jobs:
           target: ${{ matrix.target }}
           token: ${{ secrets.GITHUB_TOKEN }}
           checksum: sha256
+
+  upload-frontend-dist:
+    name: Upload Frontend Dist
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      # 在 frontend/ 内打包:tar 包根即为 index.html + assets/(Docker 零编译
+      # 镜像可直接 COPY frontend-dist.tar.gz 解包到 /app/frontend/dist)
+      - name: Package frontend dist
+        working-directory: frontend
+        run: tar -czf frontend-dist.tar.gz -C dist .
+
+      - uses: taiki-e/upload-release-assets-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          files: frontend/frontend-dist.tar.gz

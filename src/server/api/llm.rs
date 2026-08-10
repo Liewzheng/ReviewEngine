@@ -340,11 +340,7 @@ async fn update_provider(
 
 // ─── Test Provider ────────────────────────────────────────────────
 
-async fn test_provider(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-    Json(_): Json<serde_json::Value>,
-) -> Json<serde_json::Value> {
+async fn test_provider(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> Json<serde_json::Value> {
     let cfg = {
         let guard = state.llm_configs.read().unwrap();
         guard

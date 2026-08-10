@@ -17,6 +17,31 @@ use crate::server::AppState;
 
 use super::types::{ConfigValidateRequest, ConfigValidateResponse};
 
+/// Sentinel masking a configured API key in `GET /config`. The frontend
+/// renders it as "configured" and treats `""` or this sentinel as "leave
+/// unchanged" on save (see `put_config`), so masking never destroys state.
+const API_KEY_MASK: &str = "***";
+
+/// A UI-supplied key means "keep the existing one" when it is empty (frontend
+/// "leave blank = unchanged") or carries the mask sentinel `GET /config`
+/// returned for a configured key.
+fn is_blank_or_masked(key: &str) -> bool {
+    key.is_empty() || key == API_KEY_MASK
+}
+
+/// Replace live API keys with the mask sentinel before serializing to the UI.
+/// `GET /config` must never return a real LLM key.
+fn mask_secrets(ui: &mut UiConfig) {
+    if !ui.llm.openai_api_key.is_empty() {
+        ui.llm.openai_api_key = API_KEY_MASK.to_string();
+    }
+    for provider in &mut ui.llm.providers {
+        if !provider.api_key.is_empty() {
+            provider.api_key = API_KEY_MASK.to_string();
+        }
+    }
+}
+
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/", get(get_config).put(put_config))
@@ -27,8 +52,11 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let ui = state.ui_config.read().unwrap();
-    Json(ui.clone()).into_response()
+    let mut ui = state.ui_config.read().unwrap().clone();
+    // Never leak a live LLM API key to the UI: a configured key comes back as
+    // the `***` mask, which the frontend treats as "leave unchanged" on save.
+    mask_secrets(&mut ui);
+    Json(ui).into_response()
 }
 
 async fn get_schema() -> Json<serde_json::Value> {
@@ -333,17 +361,38 @@ impl UiConfig {
     }
 }
 
-async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfig>) -> impl IntoResponse {
+async fn put_config(State(state): State<Arc<AppState>>, Json(mut body): Json<UiConfig>) -> impl IntoResponse {
+    // Snapshot of currently-stored LLM configs, used to resolve "keep
+    // unchanged" when the UI submits an empty or masked key (frontend "leave
+    // blank = unchanged"; `GET /config` returns `***` for a configured key).
+    let existing_llm = {
+        let cfg_opt = state.app_config.read().unwrap();
+        cfg_opt.as_ref().map(|arc| arc.llm.clone()).unwrap_or_default()
+    };
+    let existing_key_for = |provider: &str| -> String {
+        existing_llm
+            .iter()
+            .find(|c| c.provider == provider)
+            .map(|c| c.api_key.clone())
+            .unwrap_or_default()
+    };
+
     let mut new_llm_configs = Vec::new();
 
-    // Build LLM configs from UI fields (all non-empty keys are kept)
+    // Legacy primary (openai): an empty or masked key means "keep the stored
+    // key"; a real key replaces it.
     let mut primary_provider: Option<&str> = None;
-    if !body.llm.openai_api_key.is_empty() {
+    let openai_key = if is_blank_or_masked(&body.llm.openai_api_key) {
+        existing_key_for("openai")
+    } else {
+        body.llm.openai_api_key.clone()
+    };
+    if !openai_key.is_empty() {
         primary_provider = Some("openai");
         new_llm_configs.push(crate::models::LLMConfig {
             provider: "openai".to_string(),
             model: body.llm.default_model.clone(),
-            api_key: body.llm.openai_api_key.clone(),
+            api_key: openai_key,
             api_base: body.llm.api_base_url.clone(),
             max_tokens: body.llm.max_tokens,
             temperature: body.llm.temperature,
@@ -358,20 +407,53 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(body): Json<UiConfi
     // entries with the same provider name or every save would add one more
     // duplicate (the `{provider}-{i}` id scheme cannot tell them apart anyway).
     for p in &body.llm.providers {
-        if !p.provider.is_empty() && !p.api_key.is_empty() {
-            if primary_provider == Some(p.provider.as_str()) {
-                continue;
-            }
-            new_llm_configs.push(crate::models::LLMConfig {
-                provider: p.provider.clone(),
-                model: p.default_model.clone(),
-                api_key: p.api_key.clone(),
-                api_base: p.api_base_url.clone(),
-                max_tokens: p.max_tokens,
-                temperature: p.temperature,
-                disable_thinking: None,
-            });
+        if p.provider.is_empty() {
+            continue;
         }
+        if primary_provider == Some(p.provider.as_str()) {
+            continue;
+        }
+        // Same "keep unchanged" semantics as the legacy field: a masked key
+        // must never overwrite the stored secret with the `***` sentinel.
+        let key = if is_blank_or_masked(&p.api_key) {
+            existing_key_for(&p.provider)
+        } else {
+            p.api_key.clone()
+        };
+        if key.is_empty() {
+            continue;
+        }
+        new_llm_configs.push(crate::models::LLMConfig {
+            provider: p.provider.clone(),
+            model: p.default_model.clone(),
+            api_key: key,
+            api_base: p.api_base_url.clone(),
+            max_tokens: p.max_tokens,
+            temperature: p.temperature,
+            disable_thinking: None,
+        });
+    }
+
+    // Sync the persisted UI config's key fields with what was actually stored:
+    // a configured provider is recorded as the mask sentinel (never a live
+    // key, never a blank that would read as "unconfigured"), so GET /config
+    // stays self-consistent across "leave blank = unchanged" saves.
+    let has_stored_key = |provider: &str| -> bool {
+        new_llm_configs
+            .iter()
+            .any(|c| c.provider == provider && !c.api_key.is_empty())
+    };
+    body.llm.openai_api_key = if has_stored_key("openai") {
+        API_KEY_MASK.to_string()
+    } else {
+        String::new()
+    };
+    for p in &mut body.llm.providers {
+        p.api_key = if has_stored_key(&p.provider) {
+            API_KEY_MASK.to_string()
+        } else {
+            String::new()
+        };
     }
 
     let mut cfg_opt = state.app_config.write().unwrap();
@@ -555,4 +637,114 @@ async fn test_llm_connectivity(cfg: &crate::models::LLMConfig) -> anyhow::Result
         anyhow::bail!("HTTP {}", resp.status());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::State;
+    use axum::response::IntoResponse;
+
+    /// Seed an `AppState` with one openai provider carrying `key`, wired the
+    /// same way `serve` does: `app_config.llm` + `ui_config` built from it.
+    fn state_with_openai(key: &str) -> Arc<AppState> {
+        let app: crate::models::AppConfig = serde_json::from_value(serde_json::json!({
+            "llm": [{
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": key,
+                "api_base": "https://api.openai.com/v1",
+                "max_tokens": 4096,
+                "temperature": 0.7
+            }]
+        }))
+        .expect("minimal AppConfig must deserialize");
+        let state = Arc::new(AppState::new(app.llm.clone()));
+        *state.app_config.write().unwrap() = Some(Arc::new(app.clone()));
+        *state.ui_config.write().unwrap() = UiConfig::from_app_config(&app);
+        state
+    }
+
+    fn stored_openai_key(state: &Arc<AppState>) -> String {
+        state
+            .app_config
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("app_config seeded")
+            .llm
+            .iter()
+            .find(|c| c.provider == "openai")
+            .map(|c| c.api_key.clone())
+            .unwrap_or_default()
+    }
+
+    /// Security regression: `GET /config` must never return a live LLM key.
+    #[tokio::test]
+    async fn get_config_never_leaks_llm_api_key() {
+        let state = state_with_openai("sk-super-secret");
+        let resp = get_config(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+        assert_eq!(body["llm"]["openaiApiKey"], API_KEY_MASK);
+        assert_ne!(body["llm"]["openaiApiKey"], "sk-super-secret");
+        let providers = body["llm"]["providers"].as_array().expect("providers array");
+        assert_eq!(providers[0]["apiKey"], API_KEY_MASK);
+        assert_ne!(providers[0]["apiKey"], "sk-super-secret");
+        // No field anywhere in the response may carry the secret.
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(!serialized.contains("sk-super-secret"), "secret leaked in {serialized}");
+    }
+
+    /// A GET → PUT round trip with masked keys (`***`) must keep the real key
+    /// server-side — never replace it with the mask.
+    #[tokio::test]
+    async fn put_config_masked_round_trip_preserves_key() {
+        let state = state_with_openai("sk-primary");
+        let mut ui = state.ui_config.read().unwrap().clone();
+        mask_secrets(&mut ui);
+
+        let resp = put_config(State(state.clone()), Json(ui)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(stored_openai_key(&state), "sk-primary");
+        // And the persisted UI config still surfaces the mask, not the secret.
+        assert_eq!(state.ui_config.read().unwrap().llm.openai_api_key, API_KEY_MASK);
+    }
+
+    /// "Leave blank = unchanged": a PUT with an empty key keeps the stored key.
+    #[tokio::test]
+    async fn put_config_blank_key_keeps_existing() {
+        let state = state_with_openai("sk-primary");
+        let mut ui = state.ui_config.read().unwrap().clone();
+        ui.llm.openai_api_key = String::new();
+        for p in &mut ui.llm.providers {
+            p.api_key = String::new();
+        }
+
+        let resp = put_config(State(state.clone()), Json(ui)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(stored_openai_key(&state), "sk-primary");
+    }
+
+    /// A real new key in a PUT replaces the stored one.
+    #[tokio::test]
+    async fn put_config_new_key_replaces_stored() {
+        let state = state_with_openai("sk-old");
+        let mut ui = state.ui_config.read().unwrap().clone();
+        ui.llm.openai_api_key = "sk-new".to_string();
+        ui.llm.providers[0].api_key = "sk-new".to_string();
+
+        let resp = put_config(State(state.clone()), Json(ui)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(stored_openai_key(&state), "sk-new");
+    }
+
+    #[test]
+    fn is_blank_or_masked_treats_empty_and_mask_as_keep() {
+        assert!(is_blank_or_masked(""));
+        assert!(is_blank_or_masked(API_KEY_MASK));
+        assert!(!is_blank_or_masked("sk-real"));
+    }
 }

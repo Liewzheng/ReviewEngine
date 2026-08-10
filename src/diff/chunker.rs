@@ -16,21 +16,29 @@ pub struct DiffChunk {
 
 /// Chunk by files: each chunk contains a group of complete files.
 pub fn chunk_by_files(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<DiffChunk> {
+    chunk_by_files_inner(files, max_tokens_per_chunk).0
+}
+
+/// Chunk by files, also reporting whether any single file exceeds the
+/// per-chunk budget on its own (such a file cannot be split by file-level
+/// chunking and must fall back to hunk-level chunking).
+///
+/// Returns `(chunks, any_oversized_file)`. Token accumulation uses
+/// saturating arithmetic so a pathological giant diff can never overflow the
+/// `usize` accumulator (MEDIUM: integer overflow on `a + b`).
+fn chunk_by_files_inner(files: &[DiffFile], max_tokens_per_chunk: usize) -> (Vec<DiffChunk>, bool) {
     let mut chunks = Vec::new();
     let mut current_files = Vec::new();
     let mut current_tokens = 0usize;
+    let mut any_oversized_file = false;
 
     for file in files {
-        let file_text = render_file_diff(file);
-        let file_tokens = match count_tokens(&file_text, DEFAULT_TOKEN_MODEL) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to count tokens for file diff; assuming 0");
-                0
-            }
-        };
+        let file_tokens = compute_file_tokens(file);
+        if file_tokens > max_tokens_per_chunk {
+            any_oversized_file = true;
+        }
 
-        if current_tokens + file_tokens > max_tokens_per_chunk && !current_files.is_empty() {
+        if current_tokens.saturating_add(file_tokens) > max_tokens_per_chunk && !current_files.is_empty() {
             chunks.push(DiffChunk {
                 files: std::mem::take(&mut current_files),
                 chunk_index: chunks.len(),
@@ -40,7 +48,7 @@ pub fn chunk_by_files(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
         }
 
         current_files.push(file.clone());
-        current_tokens += file_tokens;
+        current_tokens = current_tokens.saturating_add(file_tokens);
     }
 
     if !current_files.is_empty() {
@@ -57,7 +65,7 @@ pub fn chunk_by_files(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
         chunk.total_chunks = total;
     }
 
-    chunks
+    (chunks, any_oversized_file)
 }
 
 /// Chunk by hunks: split individual files across chunks if they're too large.
@@ -79,7 +87,7 @@ pub fn chunk_by_hunks(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<Di
                 max_tokens_per_chunk,
             );
             current.push(file.clone());
-            current_tokens += file_tokens;
+            current_tokens = current_tokens.saturating_add(file_tokens);
         } else {
             // File too large — split by hunks
             flush_current_chunk(&mut chunks, &mut current, &mut current_tokens);
@@ -120,6 +128,7 @@ fn compute_hunk_tokens(hunk: &DiffHunk) -> usize {
 }
 
 /// If adding `file_tokens` would exceed the budget, flush the current chunk first.
+/// Uses saturating arithmetic so the accumulator can never overflow.
 fn try_flush_current(
     chunks: &mut Vec<DiffChunk>,
     current: &mut Vec<DiffFile>,
@@ -127,7 +136,7 @@ fn try_flush_current(
     file_tokens: usize,
     max_tokens_per_chunk: usize,
 ) {
-    if *current_tokens + file_tokens > max_tokens_per_chunk && !current.is_empty() {
+    if current_tokens.saturating_add(file_tokens) > max_tokens_per_chunk && !current.is_empty() {
         finish_chunk(chunks, current);
         *current_tokens = 0;
     }
@@ -187,13 +196,13 @@ fn split_file_by_hunks(
         }
 
         // Accumulating this hunk would overflow — flush the current group.
-        if hunk_tokens + tokens > max_tokens_per_chunk && !hunk_group.is_empty() {
+        if hunk_tokens.saturating_add(tokens) > max_tokens_per_chunk && !hunk_group.is_empty() {
             flush_hunk_group(file, &mut hunk_group, chunks, current);
             hunk_tokens = 0;
         }
 
         hunk_group.push(hunk.clone());
-        hunk_tokens += tokens;
+        hunk_tokens = hunk_tokens.saturating_add(tokens);
     }
 
     // Flush any remaining hunks as the last partial file.
@@ -221,23 +230,19 @@ fn finish_chunk(chunks: &mut Vec<DiffChunk>, current: &mut Vec<DiffFile>) {
     }
 }
 
-/// Adaptive chunking: try files first, fall back to hunks if files exceed budget.
+/// Adaptive chunking: try files first, fall back to hunks if a file exceeds
+/// the per-chunk budget.
+///
+/// The fallback decision reuses the per-file token counts computed while
+/// building the file chunks, so no second tokenization pass is needed
+/// (LOW: the old code re-counted the whole chunk text, double-counting every
+/// file's tokens). A chunk produced by [`chunk_by_files`] only ever exceeds
+/// the budget when it holds a single oversized file, so
+/// `any_oversized_file` is exactly "some chunk would be too large".
 pub fn adaptive_chunk(files: &[DiffFile], max_tokens_per_chunk: usize) -> Vec<DiffChunk> {
-    let file_chunks = chunk_by_files(files, max_tokens_per_chunk);
+    let (file_chunks, any_oversized_file) = chunk_by_files_inner(files, max_tokens_per_chunk);
 
-    // Check if any chunk is too large
-    let too_large = file_chunks.iter().any(|c| {
-        let text: String = c.files.iter().map(render_file_diff).collect();
-        match count_tokens(&text, DEFAULT_TOKEN_MODEL) {
-            Ok(n) => n > max_tokens_per_chunk,
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to count tokens for chunk; treating as too large");
-                true
-            }
-        }
-    });
-
-    if too_large {
+    if any_oversized_file {
         chunk_by_hunks(files, max_tokens_per_chunk)
     } else {
         file_chunks
@@ -336,6 +341,27 @@ mod tests {
         let files = vec![make_simple_file("large.rs", vec!["+x"; 100])];
         let chunks = adaptive_chunk(&files, 100);
         assert!(chunks.len() >= 1);
+    }
+
+    #[test]
+    fn test_chunk_by_files_inner_reports_oversized() {
+        // The oversized-file flag drives adaptive_chunk's fallback; it is
+        // computed during file-level token counting, so no second pass is
+        // needed (LOW: adaptive_chunk used to re-tokenize the whole chunk).
+        let small = make_simple_file("small.rs", vec!["+a"]);
+        let large = make_simple_file("large.rs", vec!["+y"; 500]);
+        // Budget 1000: the small file fits, the 500-line file does not.
+        let (chunks, oversized) = chunk_by_files_inner(&[small.clone(), large], 1000);
+        assert!(oversized, "large file exceeds the 1000-token budget");
+        // The oversized file lands alone in its own chunk.
+        let large_chunk = chunks
+            .iter()
+            .find(|c| c.files.iter().any(|f| f.new_path == "large.rs"))
+            .expect("large.rs must be chunked");
+        assert_eq!(large_chunk.files.len(), 1);
+
+        let (_, not_oversized) = chunk_by_files_inner(&[small], 1000);
+        assert!(!not_oversized);
     }
 
     // ─── semantic_chunk ───

@@ -7,7 +7,13 @@ export function createLogStream(
   onMessage: (entry: LogEntry) => void,
   onError?: (err: Event) => void
 ): EventSource {
-  const es = new EventSource('/api/v1/logs');
+  // EventSource cannot set Authorization headers, so a configured API token
+  // must ride in the query string (`?token=` — the backend allowlists this
+  // only for the SSE log stream; every other endpoint still needs the header).
+  // With no token (loopback, no-auth) keep the bare path.
+  const token = getApiToken();
+  const url = token ? `/api/v1/logs?token=${encodeURIComponent(token)}` : '/api/v1/logs';
+  const es = new EventSource(url);
   es.onmessage = (event) => {
     try {
       const data = JSON.parse(event.data);

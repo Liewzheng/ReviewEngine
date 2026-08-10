@@ -67,7 +67,7 @@
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
               <el-form-item label="GitLab URL" prop="gitlab.url">
-                <el-input v-model="config.gitlab.url" :disabled="!isEditing" placeholder="https://gitlab.example.com" />
+                <el-input v-model="config.gitlab.url" :disabled="!isEditing" placeholder="https://gitlab.example.com (leave empty to keep)" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
@@ -87,7 +87,7 @@
                     <span class="countdown">Visible for {{ revealCountdown.apiToken }}s...</span>
                   </template>
                 </div>
-                <el-input v-else v-model="config.gitlab.apiToken" :disabled="!isEditing" show-password placeholder="glpat-xxxxxxxxxxxxxxxxxxxx" />
+                <el-input v-else v-model="config.gitlab.apiToken" :disabled="!isEditing" show-password placeholder="glpat-... (leave empty to keep)" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
@@ -167,12 +167,12 @@
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
               <el-form-item label="API Base URL" prop="llm.apiBaseUrl">
-                <el-input v-model="config.llm.apiBaseUrl" :disabled="!isEditing" placeholder="https://api.openai.com/v1" />
+                <el-input v-model="config.llm.apiBaseUrl" :disabled="!isEditing" placeholder="https://api.openai.com/v1 (leave empty to keep)" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item label="API Key" prop="llm.openaiApiKey">
-                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password placeholder="sk-..." />
+                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password placeholder="sk-... (leave empty to keep)" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
@@ -715,7 +715,14 @@ const providersDirty = computed(() => {
 const dirty = computed(() => configDirty.value || providersDirty.value)
 
 // --- Validation ---
+// URL fields are only validated when a value is present: GET /config does not
+// echo every value (e.g. the GitLab URL is never mapped by the backend), so an
+// empty field means "keep the stored value", never a validation error.
 function validateUrl(_rule: any, value: string, callback: Function) {
+  if (!value || !value.trim()) {
+    callback()
+    return
+  }
   try {
     new URL(value)
     callback()
@@ -726,20 +733,23 @@ function validateUrl(_rule: any, value: string, callback: Function) {
 
 const rules = computed<FormRules>(() => ({
   'gitlab.url': [
-    { required: true, message: 'GitLab URL is required', trigger: 'blur' },
+    // GitLab URL may not be echoed by GET /config (not yet configured, or the
+    // backend does not map it); empty = "keep the stored value", never a
+    // validation error.
     { validator: validateUrl, trigger: 'blur' },
   ],
   'gitlab.apiToken': [
-    { required: true, message: 'API Token is required', trigger: 'blur' },
+    // The API token is deliberately never echoed back by GET /config, so an
+    // empty field means "keep the stored token" and must not be required.
+    // Only when the user types a new token is it length-checked.
     { min: 10, message: 'API Token must be at least 10 characters', trigger: 'blur' },
   ],
   'llm.apiBaseUrl': [
-    { required: true, message: 'API Base URL is required', trigger: 'blur' },
     { validator: validateUrl, trigger: 'blur' },
   ],
-  'llm.openaiApiKey': [
-    { required: true, message: 'API Key is required', trigger: 'blur' },
-  ],
+  // The LLM API key shares the same keep-existing semantics as the GitLab
+  // token (never echoed by GET /config), so it has no required rule.
+  'llm.openaiApiKey': [],
   'llm.defaultModel': [
     { required: true, message: 'Default Model is required', trigger: 'change' },
   ],
@@ -758,6 +768,18 @@ const rules = computed<FormRules>(() => ({
 }))
 
 // --- Watchers ---
+
+// Backend's documented default trio; used when GET /config returns an empty
+// `requiredExperts` list so the form never starts permanently invalid (the
+// validation rule requires at least one expert). Prefers the currently-enabled
+// experts from the loaded config when the backend provides them.
+const DEFAULT_REQUIRED_EXPERTS = ['Security', 'Performance', 'Quality']
+
+function backfillRequiredExperts() {
+  if (config.rules.requiredExperts.length > 0) return
+  const enabled = (config.experts ?? []).filter((e) => e.enabled).map((e) => e.name)
+  config.rules.requiredExperts = enabled.length > 0 ? enabled : [...DEFAULT_REQUIRED_EXPERTS]
+}
 watch(config, () => {
   if (isEditing.value && formRef.value) {
     formRef.value.validate((valid: boolean) => {
@@ -918,6 +940,7 @@ async function refreshConfig() {
   await cfg.fetch()
   if (cfg.config.value) {
     Object.assign(config, cfg.config.value)
+    backfillRequiredExperts()
   }
   ElNotification({
     title: 'Refreshed',
@@ -1077,9 +1100,25 @@ async function saveProvidersOnly() {
   }
 }
 
+// The backend derives a provider's id from its list position (`{provider}-{index}`),
+// so deleting an entry renumbers every provider after it. Return the trailing
+// index portion of an id so deletes can be applied highest-index-first (each
+// id then stays valid until its own deletion).
+function providerIdIndex(id: string): number {
+  const dash = id.lastIndexOf('-')
+  if (dash === -1) return -1
+  const n = Number.parseInt(id.slice(dash + 1), 10)
+  return Number.isNaN(n) ? -1 : n
+}
+
 async function saveAdditionalProviders() {
-  // Delete removed providers
-  for (const id of deletedProviderIds.value) {
+  const hadDeletes = deletedProviderIds.value.length > 0
+
+  // Delete removed providers. Deleting highest index first keeps the remaining
+  // ids valid — deleting a lower index first would shift the list and make the
+  // higher, still-pending ids 404 (or worse, delete the wrong provider).
+  const orderedDeletes = [...deletedProviderIds.value].sort((a, b) => providerIdIndex(b) - providerIdIndex(a))
+  for (const id of orderedDeletes) {
     try {
       await deleteProviderApi(id)
     } catch (e) {
@@ -1093,6 +1132,25 @@ async function saveAdditionalProviders() {
     }
   }
   deletedProviderIds.value = []
+
+  // After any delete the server renumbers the survivors, so the ids we cached
+  // before the delete would 404 on PUT below. Re-fetch and zip the remaining
+  // (previously persisted, still in server order) providers onto the fresh ids.
+  // Newly-added providers are excluded here — they have no server id yet and
+  // are appended via POST later, so they never shift the survivors' order.
+  if (hadDeletes) {
+    const resp = await getProvidersApi()
+    const freshItems = resp.items || []
+    const remaining = additionalProviders.value.filter((p) => p.id && !p._isNew)
+    if (freshItems.length !== remaining.length) {
+      // A delete failed silently or the server list changed underneath us —
+      // abort rather than zip ids onto the wrong providers.
+      throw new Error('Provider list changed while saving; refresh and try again')
+    }
+    remaining.forEach((p, i) => {
+      p.id = freshItems[i].id
+    })
+  }
 
   // Save (add or update) providers
   for (const provider of additionalProviders.value) {
@@ -1165,6 +1223,7 @@ onMounted(() => {
   cfg.fetch().then(() => {
     if (cfg.config.value) {
       Object.assign(config, cfg.config.value)
+      backfillRequiredExperts()
     }
   })
   loadProviders()

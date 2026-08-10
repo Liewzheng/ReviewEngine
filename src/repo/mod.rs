@@ -220,8 +220,11 @@ impl RepoScanner {
 
     /// Scan a directory recursively and collect file entries.
     fn scan_dir(&self, dir: &Path, entries: &mut Vec<FileEntry>) -> Result<()> {
+        // RR-03: a missing root previously failed open (empty entries → a
+        // 53/100 report for a path that does not exist). Fail closed with a
+        // clear error instead.
         if !dir.exists() {
-            return Ok(());
+            anyhow::bail!("Repository path does not exist: {}", dir.display());
         }
 
         let read_dir = match dir.read_dir() {
@@ -622,5 +625,18 @@ mod tests {
         assert!(path_matches_prefix("sub/foo.rs", "sub"));
         assert!(!path_matches_prefix("subfoo.rs", "sub"));
         assert!(!path_matches_prefix("other/foo.rs", "sub"));
+    }
+
+    #[test]
+    fn test_scan_nonexistent_path_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist");
+        let scanner = RepoScanner::new(missing.to_str().unwrap());
+
+        let err = scanner.scan().expect_err("scan of a missing path must fail");
+        assert!(
+            err.to_string().contains("Repository path does not exist"),
+            "unexpected error: {err:?}"
+        );
     }
 }

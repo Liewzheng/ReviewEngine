@@ -111,12 +111,23 @@ const togglePause = async () => {
 
 // --- Max concurrent ---
 const maxConcurrentInput = ref(8)
+let maxConcurrentTimer: ReturnType<typeof setTimeout> | null = null
 
 watch(() => stats.value.maxConcurrent, (val) => {
   maxConcurrentInput.value = val
 }, { immediate: true })
 
-const handleMaxConcurrentChange = async () => {
+// Element Plus emits `change` only when the value is committed via Enter or
+// blur — the +/- stepper buttons only emit `update:model-value`, so a
+// `@change`-only binding leaves the stepper dead (value looks unchanged, no
+// request). Commit on any model update through a short debounce, and let
+// Enter/blur commit immediately (cancelling any pending debounce so each
+// logical action sends exactly one request).
+async function commitMaxConcurrent() {
+  if (maxConcurrentTimer) {
+    clearTimeout(maxConcurrentTimer)
+    maxConcurrentTimer = null
+  }
   const value = Math.max(1, Math.min(64, maxConcurrentInput.value))
   maxConcurrentInput.value = value
   try {
@@ -129,6 +140,15 @@ const handleMaxConcurrentChange = async () => {
   } catch (e) {
     notifyError(e, 'Failed to update max concurrent')
   }
+}
+
+const handleMaxConcurrentChange = () => {
+  commitMaxConcurrent()
+}
+
+function onMaxConcurrentModelUpdate() {
+  if (maxConcurrentTimer) clearTimeout(maxConcurrentTimer)
+  maxConcurrentTimer = setTimeout(commitMaxConcurrent, 400)
 }
 
 // --- Cancel all failed ---
@@ -271,6 +291,7 @@ onUnmounted(() => {
           aria-label="Max Concurrent"
           title="Set the maximum number of concurrent tasks"
           @change="handleMaxConcurrentChange"
+          @update:model-value="onMaxConcurrentModelUpdate"
         />
         <el-button type="danger" @click="handleCancelAllFailed">
           <el-icon class="btn-icon"><Delete /></el-icon>

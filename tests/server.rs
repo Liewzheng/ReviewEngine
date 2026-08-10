@@ -496,6 +496,90 @@ async fn update_provider_accepts_frontend_field_names() {
     assert_eq!(body["model"], "gpt-4o-updated");
 }
 
+/// Defect regression: `POST /api/v1/llm/providers/{id}/test` declared a
+/// required `Json<serde_json::Value>` body that the handler never reads, so an
+/// empty `application/json` body returned 400 "EOF while parsing" and a
+/// bodyless request returned 415. Test Connection semantics need no body, so
+/// the handler extracts none: an absent/empty/arbitrary body must reach the
+/// handler and complete the connectivity check. (Note: `Option<Json<Value>>`
+/// is NOT sufficient here — axum's `Json: OptionalFromRequest` only treats a
+/// *missing* Content-Type as `None` and still errors on a present-but-empty
+/// JSON body.)
+#[tokio::test]
+async fn test_provider_accepts_empty_body_and_no_content_type() {
+    let mock = MockServer::start().await;
+    // `test_llm_connectivity` GETs `{api_base}/models`; mount it so the happy
+    // path succeeds without touching the real network.
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "object": "list",
+            "data": [{"id": "gpt-4o", "object": "model"}]
+        })))
+        .mount(&mock)
+        .await;
+    // Seed exactly one provider via `LLM_CONFIG`; its id derives as `openai-0`
+    // (same `{provider}-{index}` scheme used by `GET /providers`).
+    let llm_config_env = serde_json::json!([mock_llm_provider(&mock.uri())]).to_string();
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let url = format!("http://127.0.0.1:{}/api/v1/llm/providers/openai-0/test", port);
+
+    // 1) Empty body WITH `Content-Type: application/json` — the exact reported
+    //    repro that used to 400 with "EOF while parsing".
+    let resp = client
+        .post(&url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body("")
+        .send()
+        .await
+        .expect("failed to POST /test with empty JSON body");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "empty body with application/json must not 400, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("test response body is not JSON");
+    assert_eq!(body["success"], true, "connectivity check must succeed, got {:?}", body);
+
+    // 2) Empty body WITHOUT a Content-Type header — used to 415.
+    let resp = client
+        .post(&url)
+        .body("")
+        .send()
+        .await
+        .expect("failed to POST /test without content-type");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "empty body without content-type must not 415, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("test response body is not JSON");
+    assert_eq!(body["success"], true, "connectivity check must succeed, got {:?}", body);
+
+    // 3) A `{}` JSON body — previously the only passing shape — keeps working.
+    let resp = client
+        .post(&url)
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .expect("failed to POST /test with {} body");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "{{}} body must keep passing, got {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("test response body is not JSON");
+    assert_eq!(body["success"], true, "connectivity check must succeed, got {:?}", body);
+}
+
 /// Regression test: `GET /config` maps the primary provider into BOTH the
 /// legacy `llm.*` fields and `llm.providers`, so when the UI saves the config
 /// back unchanged, `PUT /config` used to rebuild `llm_configs` from both
@@ -544,12 +628,14 @@ async fn put_config_round_trip_does_not_duplicate_primary_provider() {
     let items = body["items"].as_array().expect("items is not an array");
     assert_eq!(items.len(), 1, "expected exactly one seeded provider, got {:?}", items);
 
-    // GET /config exposes the primary in both the legacy fields and providers.
+    // GET /config exposes the primary in both the legacy fields and providers —
+    // but never the live key: it must come back masked.
     let resp = reqwest::get(format!("{}/api/v1/config", base))
         .await
         .expect("failed to GET /api/v1/config");
     let config: serde_json::Value = resp.json().await.expect("GET /config body is not JSON");
-    assert_eq!(config["llm"]["openaiApiKey"], "sk-primary");
+    assert_eq!(config["llm"]["openaiApiKey"], "***");
+    assert_ne!(config["llm"]["openaiApiKey"], "sk-primary");
     let providers = config["llm"]["providers"]
         .as_array()
         .expect("llm.providers is not an array");
@@ -559,6 +645,8 @@ async fn put_config_round_trip_does_not_duplicate_primary_provider() {
         "GET /config should map the primary into llm.providers"
     );
     assert_eq!(providers[0]["provider"], "openai");
+    assert_eq!(providers[0]["apiKey"], "***");
+    assert_ne!(providers[0]["apiKey"], "sk-primary");
 
     // Save the config back unchanged, twice — each save must keep the provider
     // list at exactly one entry (no duplication, idempotent).
@@ -592,6 +680,122 @@ async fn put_config_round_trip_does_not_duplicate_primary_provider() {
         assert_eq!(items[0]["id"], "openai-0");
         assert_eq!(items[0]["name"], "openai");
     }
+}
+
+/// Security regression (P2): `GET /config` must never leak a live LLM key, and
+/// a masked GET→PUT round trip must preserve the real key server-side. The
+/// mock `/models` only answers when the `Authorization` header carries the
+/// original key, so a round trip that corrupted the stored key to `***` (or a
+/// blank key that overwrote it) would fail the connectivity check at the end.
+#[tokio::test]
+async fn get_config_masks_keys_and_round_trip_preserves_them() {
+    let mock = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(wiremock::matchers::header(
+            "Authorization",
+            "Bearer sk-roundtrip-secret",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&mock)
+        .await;
+
+    let llm_config_env = serde_json::json!([{
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_key": "sk-roundtrip-secret",
+        "api_base": mock.uri(),
+        "max_tokens": 4096,
+        "temperature": 0.7,
+    }])
+    .to_string();
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}");
+
+    // GET /config must mask the key in both the legacy field and the providers.
+    let resp = client
+        .get(format!("{base}/api/v1/config"))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/config");
+    assert!(resp.status().is_success(), "GET /config returned {}", resp.status());
+    let config: serde_json::Value = resp.json().await.expect("GET /config body is not JSON");
+    assert_eq!(config["llm"]["openaiApiKey"], "***");
+    assert_ne!(config["llm"]["openaiApiKey"], "sk-roundtrip-secret");
+    assert_eq!(config["llm"]["providers"][0]["apiKey"], "***");
+
+    // Round-trip the masked config through PUT, twice (idempotent).
+    for round in 1..=2 {
+        let resp = client
+            .put(format!("{base}/api/v1/config"))
+            .json(&config)
+            .send()
+            .await
+            .expect("failed to PUT /api/v1/config");
+        assert!(
+            resp.status().is_success(),
+            "masked PUT round {round} returned {}",
+            resp.status()
+        );
+    }
+
+    // The real key must have survived: the connectivity check reaches the mock
+    // only when the Authorization header still carries the original key.
+    let resp = client
+        .post(format!("{base}/api/v1/llm/providers/openai-0/test"))
+        .body("")
+        .send()
+        .await
+        .expect("failed to POST /test");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("test body is not JSON");
+    assert_eq!(
+        body["success"], true,
+        "stored key must survive the masked round trip, got {:?}",
+        body
+    );
+
+    // "Leave blank = unchanged": a PUT with empty keys must also preserve.
+    let mut blank = config.clone();
+    blank["llm"]["openaiApiKey"] = serde_json::Value::String(String::new());
+    if let Some(providers) = blank["llm"]["providers"].as_array_mut() {
+        for p in providers {
+            p["apiKey"] = serde_json::Value::String(String::new());
+        }
+    }
+    let resp = client
+        .put(format!("{base}/api/v1/config"))
+        .json(&blank)
+        .send()
+        .await
+        .expect("failed to PUT /api/v1/config (blank)");
+    assert!(resp.status().is_success(), "blank-key PUT returned {}", resp.status());
+    let resp = client
+        .post(format!("{base}/api/v1/llm/providers/openai-0/test"))
+        .body("")
+        .send()
+        .await
+        .expect("failed to POST /test after blank PUT");
+    let body: serde_json::Value = resp.json().await.expect("test body is not JSON");
+    assert_eq!(
+        body["success"], true,
+        "blank-key PUT must keep the stored key, got {:?}",
+        body
+    );
+
+    // GET /config still masks after the round trips — never blank, never the secret.
+    let resp = client
+        .get(format!("{base}/api/v1/config"))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/config (after)");
+    let config: serde_json::Value = resp.json().await.expect("GET /config body is not JSON");
+    assert_eq!(config["llm"]["openaiApiKey"], "***");
 }
 
 // ─── Repo Scan ────────────────────────────────────────────────────
@@ -1189,6 +1393,102 @@ async fn api_auth_disabled_allows_without_token() {
         reqwest::StatusCode::OK,
         "auth-disabled server returned {} for an unauthenticated request",
         resp.status()
+    );
+}
+
+/// Auth enabled: the SSE log stream is reachable via `?token=` because
+/// `EventSource` cannot send an `Authorization` header. A missing or wrong
+/// query token is rejected with 401, and the query token must NOT be honored
+/// on non-SSE endpoints — a query token leaks into access logs and browser
+/// history, so the capability is deliberately scoped to the SSE stream only.
+#[tokio::test]
+async fn api_auth_sse_logs_accepts_query_token() {
+    let port = find_free_port();
+    let _guard = spawn_server_with_token(port, API_TOKEN);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}/api/v1/logs");
+
+    // Correct ?token= passes the auth gate and reaches the SSE stream.
+    let resp = client
+        .get(format!("{base}?token={API_TOKEN}"))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/logs?token=…");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "SSE logs with correct query token returned {}",
+        resp.status()
+    );
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Drop without draining: the SSE stream never ends on its own.
+    drop(resp);
+    assert!(
+        content_type.contains("text/event-stream"),
+        "expected an SSE stream, got content-type {content_type}"
+    );
+
+    // The same mechanism covers the other SSE stream, /api/v1/events.
+    let resp = client
+        .get(format!("http://127.0.0.1:{port}/api/v1/events?token={API_TOKEN}"))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/events?token=…");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "SSE events with correct query token returned {}",
+        resp.status()
+    );
+    drop(resp);
+
+    // Wrong query token → 401 JSON.
+    let resp = client
+        .get(format!("{base}?token=wrong-token"))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/logs?token=wrong");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "wrong query token must be rejected"
+    );
+    let body: serde_json::Value = resp.json().await.expect("401 body must be JSON");
+    assert_eq!(body, serde_json::json!({"error": "unauthorized"}));
+
+    // No token → 401 JSON.
+    let resp = client
+        .get(&base)
+        .send()
+        .await
+        .expect("failed to GET /api/v1/logs without token");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "missing query token must be rejected"
+    );
+    let body: serde_json::Value = resp.json().await.expect("401 body must be JSON");
+    assert_eq!(body, serde_json::json!({"error": "unauthorized"}));
+
+    // Query token must not authenticate non-SSE endpoints.
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{port}/api/v1/system/version?token={API_TOKEN}"
+        ))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/system/version?token=…");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "query token must not authenticate non-SSE endpoints"
     );
 }
 

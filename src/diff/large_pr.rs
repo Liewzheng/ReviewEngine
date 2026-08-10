@@ -242,60 +242,161 @@ pub fn sort_by_priority(files: &mut [DiffFile]) {
     files.sort_by_key(|f| std::cmp::Reverse(file_priority(f)));
 }
 
-/// Route files to appropriate experts.
+/// Route chunks to experts.
 ///
-/// Routing is per file, in two tiers:
-/// 1. **Content-pattern routing (priority).** If the file's rendered diff text
-///    contains any of an expert's `content_patterns` substrings, the file is
-///    routed to that expert. When at least one expert matches on content, the
-///    file goes only to the content-matching experts.
-/// 2. **Fallback routing.** Files that match no expert's `content_patterns`
-///    follow the previous rules: experts with an [`ExpertTrigger::FilePatterns`]
-///    trigger only receive files matching their glob patterns; every other
-///    review expert receives all files.
+/// The chunk is the atomic unit of routing: a chunk is never split across
+/// experts, so `max_chunks_per_expert` is a *chunk* budget (root cause A —
+/// the old code truncated per expert by **file** count, silently dropping
+/// whole chunks and with them entire files).
 ///
+/// Allocation strategy (designed for **coverage, not duplication**):
+///
+/// 1. **Mandatory coverage pass (round-robin).** Every chunk gets exactly one
+///    primary owner: chunk `i` → expert `i % N` (round-robin over the experts
+///    whose trigger accepts the chunk). This is what guarantees the union of
+///    all experts' assignments covers every file in the diff. Experts with an
+///    [`ExpertTrigger::FilePatterns`] trigger only accept chunks containing at
+///    least one matching file; a chunk no expert accepts stays uncovered and
+///    is reported by the coverage accounting downstream.
+/// 2. **Content-pattern additive pass.** A chunk whose files contain any of an
+///    expert's `content_patterns` is *additionally* routed to that expert
+///    (bounded by `max_chunks_per_expert`, deduplicated). This is **additive,
+///    not exclusive** (root cause B): a content-matched file is never removed
+///    from the global coverage pool — it still has its round-robin owner and
+///    is additionally reviewed by the specialized expert.
+/// 3. **Balance pass (activate the team within quota).** The fair share is
+///    `ceil(C / N)` chunks per expert, capped by `max_chunks_per_expert`. Idle
+///    experts are given chunks they do not already hold (round-robin over
+///    chunk index), so every expert has files to review while **no expert
+///    receives more than its fair share** — the diff is spread across the
+///    team instead of being route-to-all'd (which would blow the token
+///    budget on large PRs).
+/// 4. **Quota truncation (by chunk count).** Each expert keeps at most
+///    `max_chunks_per_expert` chunks, preserving chunk boundaries. When the
+///    quota is smaller than the per-expert coverage share
+///    (`C > N × max_chunks_per_expert`) some chunks lose their only reviewer;
+///    the coverage accounting downstream reports them and caps the score, so
+///    under-coverage can never inflate the result.
+///
+/// Returns per-expert chunk-grouped file lists (one inner `Vec` per chunk).
 /// Only experts whose `commands` include `review` participate.
-pub fn route_chunks<'a>(chunks: &[DiffChunk], experts: &'a [ExpertDef]) -> Vec<(&'a ExpertDef, Vec<DiffFile>)> {
+pub fn route_chunks<'a>(
+    chunks: &[DiffChunk],
+    experts: &'a [ExpertDef],
+    max_chunks_per_expert: usize,
+) -> Vec<(&'a ExpertDef, Vec<Vec<DiffFile>>)> {
     let review_experts: Vec<&ExpertDef> = experts
         .iter()
         .filter(|e| e.config.commands.iter().any(|c| c == "review"))
         .collect();
-    let mut buckets: Vec<Vec<DiffFile>> = review_experts.iter().map(|_| Vec::new()).collect();
+    if review_experts.is_empty() {
+        return Vec::new();
+    }
+
+    let n = review_experts.len();
+    // chunk indices assigned to each expert
+    let mut assigned: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+    // Does the expert accept this chunk given its trigger?
+    let accepts = |expert: &ExpertDef, chunk: &DiffChunk| -> bool {
+        match &expert.trigger {
+            ExpertTrigger::FilePatterns { patterns } => {
+                chunk.files.iter().any(|f| matches_file_patterns(patterns, &f.new_path))
+            }
+            _ => true,
+        }
+    };
+
+    // Phase 1 — mandatory coverage: round-robin primary ownership. Every chunk
+    // gets exactly one owner, so the union of all assignments covers every
+    // file (unless no expert's trigger accepts the chunk at all).
+    for (ci, chunk) in chunks.iter().enumerate() {
+        let candidates: Vec<usize> = (0..n).filter(|&e| accepts(review_experts[e], chunk)).collect();
+        if candidates.is_empty() {
+            tracing::warn!(
+                "route_chunks: chunk {} matches no expert trigger; it cannot be covered",
+                ci
+            );
+            continue;
+        }
+        let owner = candidates[ci % candidates.len()];
+        assigned[owner].push(ci);
+    }
+
+    // Phase 2 — content-pattern additive routing (bounded by quota,
+    // deduplicated against the coverage pass). Never exclusive.
     let any_content_patterns = review_experts.iter().any(|e| !e.config.content_patterns.is_empty());
-
-    for chunk in chunks {
-        for file in &chunk.files {
-            // Tier 1: content-pattern routing takes priority when it matches.
-            let mut content_matched = false;
-            if any_content_patterns {
-                let text = render_file_diff(file);
-                for (i, expert) in review_experts.iter().enumerate() {
-                    if expert.config.content_patterns.iter().any(|p| text.contains(p.as_str())) {
-                        buckets[i].push(file.clone());
-                        content_matched = true;
-                    }
+    if any_content_patterns {
+        for (ci, chunk) in chunks.iter().enumerate() {
+            for (e, expert) in review_experts.iter().enumerate() {
+                if expert.config.content_patterns.is_empty() || assigned[e].contains(&ci) {
+                    continue;
                 }
-            }
-            if content_matched {
-                continue;
-            }
-
-            // Tier 2: existing file-pattern / route-to-all fallback.
-            for (i, expert) in review_experts.iter().enumerate() {
-                if let ExpertTrigger::FilePatterns { ref patterns } = expert.trigger {
-                    if !matches_file_patterns(patterns, &file.new_path) {
-                        continue;
-                    }
+                let matched = chunk.files.iter().any(|f| {
+                    let text = render_file_diff(f);
+                    expert.config.content_patterns.iter().any(|p| text.contains(p.as_str()))
+                });
+                if matched && (max_chunks_per_expert == 0 || assigned[e].len() < max_chunks_per_expert) {
+                    assigned[e].push(ci);
                 }
-                buckets[i].push(file.clone());
             }
         }
     }
 
+    // Phase 3 — balance: activate idle experts within their fair share so the
+    // whole team reviews, without route-to-all. Fair share = ceil(C / N)
+    // chunks per expert, capped by the quota. Only adds chunks the expert does
+    // not already hold and that its trigger accepts; coverage from Phase 1 is
+    // never reduced.
+    if max_chunks_per_expert > 0 {
+        let fair_share = chunks.len().div_ceil(n).min(max_chunks_per_expert);
+        for e in 0..n {
+            while assigned[e].len() < fair_share {
+                let next =
+                    (0..chunks.len()).find(|&ci| !assigned[e].contains(&ci) && accepts(review_experts[e], &chunks[ci]));
+                match next {
+                    Some(ci) => assigned[e].push(ci),
+                    None => break,
+                }
+            }
+        }
+    }
+
+    // Phase 4 — quota truncation by chunk count. Coverage was established in
+    // Phase 1; dropping an expert's tail chunks only loses coverage when the
+    // quota is smaller than the coverage share — that shortfall is surfaced
+    // honestly by the coverage accounting downstream (unreviewed files list +
+    // score cap), never silently.
+    let mut quota_shortfall = false;
+    if max_chunks_per_expert > 0 {
+        for list in &mut assigned {
+            if list.len() > max_chunks_per_expert {
+                quota_shortfall = true;
+                list.truncate(max_chunks_per_expert);
+            }
+        }
+    }
+    if quota_shortfall {
+        tracing::warn!(
+            "route_chunks: max_chunks_per_expert={} below coverage share ({} chunks across {} experts); \
+             some files may be unreviewed and will be reported by coverage accounting",
+            max_chunks_per_expert,
+            chunks.len(),
+            n
+        );
+    }
+
     review_experts
         .into_iter()
-        .zip(buckets)
-        .filter(|(_, files)| !files.is_empty())
+        .zip(assigned)
+        .filter(|(_, list)| !list.is_empty())
+        .map(|(expert, list)| {
+            let groups = list
+                .iter()
+                .map(|&ci| chunks[ci].files.clone())
+                .collect::<Vec<Vec<DiffFile>>>();
+            (expert, groups)
+        })
         .collect()
 }
 
@@ -447,39 +548,56 @@ mod tests {
         }
     }
 
-    fn assigned_paths(assignments: &[(&ExpertDef, Vec<DiffFile>)], name: &str) -> Vec<String> {
+    fn assigned_paths(assignments: &[(&ExpertDef, Vec<Vec<DiffFile>>)], name: &str) -> Vec<String> {
         assignments
             .iter()
             .find(|(e, _)| e.name == name)
-            .map(|(_, files)| files.iter().map(|f| f.new_path.clone()).collect())
+            .map(|(_, groups)| groups.iter().flatten().map(|f| f.new_path.clone()).collect())
             .unwrap_or_default()
     }
 
-    // ─── content-pattern routing ───
+    // ─── content-pattern routing (additive, not exclusive) ───
 
     #[test]
-    fn test_route_chunks_content_patterns_priority() {
+    fn test_route_chunks_content_patterns_additive_not_exclusive() {
+        // Root cause B: a content-matched file must still be visible to the
+        // rest of the team. With chunk 1 (`auth.rs` containing "token") owned
+        // by `quality` via the coverage pass, `security` additionally receives
+        // it through the content-pattern pass — and `quality` keeps it too.
         let security = make_expert("security", ExpertTrigger::Always, vec!["token"]);
         let quality = make_expert("quality", ExpertTrigger::Always, vec![]);
         let experts = vec![security, quality];
 
-        let auth = make_file_with_lines("src/auth.rs", vec!["+let token = fetch();"]);
-        let plain = make_file_with_lines("src/plain.rs", vec!["+hello"]);
-        let chunks = vec![make_chunk(vec![auth, plain])];
+        let chunks = vec![
+            make_chunk(vec![make_file_with_lines("src/plain.rs", vec!["+hello"])]),
+            make_chunk(vec![make_file_with_lines("src/auth.rs", vec!["+let token = fetch();"])]),
+        ];
 
-        let assignments = route_chunks(&chunks, &experts);
+        // quota 0 = unlimited: pure coverage + additive content routing.
+        let assignments = route_chunks(&chunks, &experts, 0);
 
-        // Content-matched file goes only to the content-matching expert.
-        assert_eq!(
-            assigned_paths(&assignments, "security"),
-            vec!["src/auth.rs", "src/plain.rs"]
-        );
-        // Unmatched file still falls back to route-to-all.
-        assert_eq!(assigned_paths(&assignments, "quality"), vec!["src/plain.rs"]);
+        // security sees the content-matched file (additive route) ...
+        assert!(assigned_paths(&assignments, "security").contains(&"src/auth.rs".to_string()));
+        // ... and quality (the round-robin owner) still sees it: not exclusive.
+        assert!(assigned_paths(&assignments, "quality").contains(&"src/auth.rs".to_string()));
+        // plain.rs is owned by security (chunk 0 → expert 0).
+        assert!(assigned_paths(&assignments, "security").contains(&"src/plain.rs".to_string()));
+
+        // Union of all experts' assignments covers every file.
+        let union: std::collections::HashSet<&str> = assignments
+            .iter()
+            .flat_map(|(_, groups)| groups.iter().flatten())
+            .map(|f| f.new_path.as_str())
+            .collect();
+        assert_eq!(union.len(), 2);
+        assert!(union.contains("src/auth.rs") && union.contains("src/plain.rs"));
     }
 
     #[test]
-    fn test_route_chunks_content_patterns_override_file_patterns() {
+    fn test_route_chunks_file_patterns_still_covered() {
+        // Even with FilePatterns triggers, the union of all experts'
+        // assignments still covers every file: chunk-atomic routing never
+        // drops a file from the team's review pool.
         let security = make_expert(
             "security",
             ExpertTrigger::FilePatterns {
@@ -496,17 +614,21 @@ mod tests {
         );
         let experts = vec![security, frontend];
 
-        let rust = make_file_with_lines("src/a.rs", vec!["+fn a() {}"]);
-        let ts = make_file_with_lines("web/b.ts", vec!["+const b = 1;"]);
-        let py = make_file_with_lines("app/c.py", vec!["+secret = 'x'"]);
-        let chunks = vec![make_chunk(vec![rust, ts, py])];
+        // One chunk holding a rust + ts file: owned by security (first
+        // candidate); the ts file is still routed to frontend through the
+        // coverage pass because frontend accepts chunks with a *.ts file.
+        let mixed = make_chunk(vec![
+            make_file_with_lines("src/a.rs", vec!["+fn a() {}"]),
+            make_file_with_lines("web/b.ts", vec!["+const b = 1;"]),
+        ]);
+        let assignments = route_chunks(&[mixed], &experts, 0);
 
-        let assignments = route_chunks(&chunks, &experts);
-
-        // c.py matches security's content_patterns, so content routing wins
-        // even though "*.rs" does not match it.
-        assert_eq!(assigned_paths(&assignments, "security"), vec!["src/a.rs", "app/c.py"]);
-        assert_eq!(assigned_paths(&assignments, "frontend"), vec!["web/b.ts"]);
+        let union: std::collections::HashSet<&str> = assignments
+            .iter()
+            .flat_map(|(_, groups)| groups.iter().flatten())
+            .map(|f| f.new_path.as_str())
+            .collect();
+        assert_eq!(union.len(), 2, "every file keeps at least one reviewer");
     }
 
     #[test]
@@ -521,14 +643,112 @@ mod tests {
         let all = make_expert("all", ExpertTrigger::Always, vec![]);
         let experts = vec![rust_only, all];
 
-        let chunks = vec![make_chunk(vec![
-            make_file("src/a.rs", 1, 0),
-            make_file("web/b.ts", 1, 0),
-        ])];
-        let assignments = route_chunks(&chunks, &experts);
+        let chunks = vec![
+            make_chunk(vec![make_file("src/a.rs", 1, 0)]),
+            make_chunk(vec![make_file("web/b.ts", 1, 0)]),
+        ];
+        // quota 0 = unlimited: coverage round-robin assigns chunk 0 to rust
+        // and chunk 1 to all; both accept both chunks here.
+        let assignments = route_chunks(&chunks, &experts, 0);
 
         assert_eq!(assigned_paths(&assignments, "rust"), vec!["src/a.rs"]);
-        assert_eq!(assigned_paths(&assignments, "all"), vec!["src/a.rs", "web/b.ts"]);
+        assert_eq!(assigned_paths(&assignments, "all"), vec!["web/b.ts"]);
+    }
+
+    // ─── coverage guarantee + chunk-quota semantics (root cause A) ───
+
+    #[test]
+    fn test_route_chunks_covers_all_files() {
+        // Core acceptance: for a >21-file diff the union of every expert's
+        // assignment must cover every file.
+        let experts = vec![
+            make_expert("e1", ExpertTrigger::Always, vec![]),
+            make_expert("e2", ExpertTrigger::Always, vec![]),
+            make_expert("e3", ExpertTrigger::Always, vec![]),
+        ];
+        let files: Vec<DiffFile> = (0..24)
+            .map(|i| make_file(&format!("src/file{:02}.rs", i), 5, 0))
+            .collect();
+        let chunks: Vec<DiffChunk> = files.chunks(4).map(|c| make_chunk(c.to_vec())).collect();
+        assert_eq!(chunks.len(), 6);
+
+        let assignments = route_chunks(&chunks, &experts, 3);
+        assert!(!assignments.is_empty());
+
+        let covered: std::collections::HashSet<&str> = assignments
+            .iter()
+            .flat_map(|(_, groups)| groups.iter().flatten())
+            .map(|f| f.new_path.as_str())
+            .collect();
+        assert_eq!(covered.len(), 24);
+        assert!(files.iter().all(|f| covered.contains(f.new_path.as_str())));
+    }
+
+    #[test]
+    fn test_route_chunks_quota_counts_chunks_not_files() {
+        // Root cause A: `max_chunks_per_expert = 2` must keep 2 CHUNKS
+        // (4 files in 2 groups of 2), not 2 files.
+        let experts = vec![make_expert("only", ExpertTrigger::Always, vec![])];
+        let files: Vec<DiffFile> = (0..6).map(|i| make_file(&format!("f{}.rs", i), 1, 0)).collect();
+        let chunks: Vec<DiffChunk> = files.chunks(2).map(|c| make_chunk(c.to_vec())).collect();
+
+        let assignments = route_chunks(&chunks, &experts, 2);
+        assert_eq!(assignments.len(), 1);
+        let (_, groups) = &assignments[0];
+        assert_eq!(groups.len(), 2, "quota bounds by chunk count, not file count");
+        let total_files: usize = groups.iter().map(|g| g.len()).sum();
+        assert_eq!(total_files, 4, "2 chunks × 2 files each");
+    }
+
+    #[test]
+    fn test_route_chunks_balance_activates_all_experts_without_route_to_all() {
+        // 3 chunks across 5 experts with quota 3: fair share = ceil(3/5) = 1
+        // chunk per expert, so every expert gets work but no expert sees the
+        // whole diff (no route-to-all), and the union still covers every file.
+        let experts = vec![
+            make_expert("e0", ExpertTrigger::Always, vec![]),
+            make_expert("e1", ExpertTrigger::Always, vec![]),
+            make_expert("e2", ExpertTrigger::Always, vec![]),
+            make_expert("e3", ExpertTrigger::Always, vec![]),
+            make_expert("e4", ExpertTrigger::Always, vec![]),
+        ];
+        let chunks: Vec<DiffChunk> = vec![
+            make_chunk(vec![make_file("a.rs", 1, 0), make_file("b.rs", 1, 0)]),
+            make_chunk(vec![make_file("c.rs", 1, 0), make_file("d.rs", 1, 0)]),
+            make_chunk(vec![make_file("e.rs", 1, 0), make_file("f.rs", 1, 0)]),
+        ];
+
+        let assignments = route_chunks(&chunks, &experts, 3);
+        assert_eq!(assignments.len(), 5, "every expert gets at least one chunk");
+        for (_, groups) in &assignments {
+            assert!(!groups.is_empty());
+            assert!(groups.len() <= 3, "no expert exceeds its quota");
+        }
+        // No expert received the full diff (no route-to-all).
+        assert!(assignments.iter().all(|(_, groups)| groups.len() < 3));
+        // Union covers every file.
+        let union: std::collections::HashSet<&str> = assignments
+            .iter()
+            .flat_map(|(_, groups)| groups.iter().flatten())
+            .map(|f| f.new_path.as_str())
+            .collect();
+        assert_eq!(union.len(), 6);
+    }
+
+    #[test]
+    fn test_route_chunks_respects_chunk_boundaries() {
+        // Each expert's output is grouped by source chunk; a chunk is never
+        // split across groups.
+        let experts = vec![make_expert("e1", ExpertTrigger::Always, vec![])];
+        let chunks: Vec<DiffChunk> = vec![
+            make_chunk(vec![make_file("a.rs", 1, 0), make_file("b.rs", 1, 0)]),
+            make_chunk(vec![make_file("c.rs", 1, 0), make_file("d.rs", 1, 0)]),
+        ];
+        let assignments = route_chunks(&chunks, &experts, 0);
+        let (_, groups) = &assignments[0];
+        assert_eq!(groups.len(), 2);
+        assert!(groups[0].iter().all(|f| f.new_path == "a.rs" || f.new_path == "b.rs"));
+        assert!(groups[1].iter().all(|f| f.new_path == "c.rs" || f.new_path == "d.rs"));
     }
 
     // ─── configured compression levels ───

@@ -23,7 +23,7 @@ use crate::progress::{ProgressMap, ReviewProgress, StageWeight};
 use crate::prompt::PromptEngine;
 
 use crate::output::parser::validate_findings;
-use crate::team::lead_consolidator::{ConsolidatedReport, ConsolidatorConfig};
+use crate::team::lead_consolidator::{ConsolidatedReport, ConsolidatorConfig, FileCoverage};
 use crate::team::verifier::{self, DroppedFinding};
 
 use super::{ExpertMetrics, TeamOrchestrator, TeamReport};
@@ -223,6 +223,11 @@ fn parse_and_filter_diff(diff_raw: &str) -> Vec<DiffFile> {
 
 /// Assess whether the diff constitutes a large PR and, if so, apply compression
 /// and build chunk assignments for the expert team.
+///
+/// `chunked_mode` carries per-expert **chunk-grouped** file lists
+/// (`Vec<Vec<DiffFile>>`): each inner `Vec` is one chunk, preserving chunk
+/// boundaries so the per-expert chunk quota is enforced by chunk count, not
+/// file count (root cause A).
 #[allow(clippy::type_complexity)]
 fn assess_and_chunk_diff(
     files: &mut Vec<DiffFile>,
@@ -230,7 +235,7 @@ fn assess_and_chunk_diff(
     config: &AppConfig,
 ) -> (
     Vec<ExpertDef>,
-    Option<(Vec<chunker::DiffChunk>, Vec<(ExpertDef, Vec<DiffFile>)>)>,
+    Option<(Vec<chunker::DiffChunk>, Vec<(ExpertDef, Vec<Vec<DiffFile>>)>)>,
 ) {
     let non_aggregators: Vec<ExpertDef> = experts.iter().filter(|e| e.name != "aggregator").cloned().collect();
 
@@ -264,10 +269,11 @@ fn assess_and_chunk_diff(
 
         info!("Split into {} chunks", chunks.len());
 
-        let assignments: Vec<(ExpertDef, Vec<DiffFile>)> = large_pr::route_chunks(&chunks, &non_aggregators)
-            .into_iter()
-            .map(|(e, files)| (e.clone(), files))
-            .collect();
+        let assignments: Vec<(ExpertDef, Vec<Vec<DiffFile>>)> =
+            large_pr::route_chunks(&chunks, &non_aggregators, config.diff.max_chunks_per_expert)
+                .into_iter()
+                .map(|(e, groups)| (e.clone(), groups))
+                .collect();
         Some((chunks, assignments))
     } else {
         None
@@ -456,15 +462,22 @@ fn collect_expert_results(
 ///
 /// Pure computation (no LLM calls): confidence filtering, deduplication,
 /// conflict detection, and overall scoring, driven by `config.report`
-/// (`min_confidence`, `drop_low_confidence`) and `config.scoring`.
-fn build_consolidated_report(reports: &[ExpertReport], config: &AppConfig) -> ConsolidatedReport {
+/// (`min_confidence`, `drop_low_confidence`) and `config.scoring`. The
+/// diff-file `coverage` is threaded in so the score is capped when files
+/// were not reviewed by any expert (anti-cheat: under-coverage must never
+/// inflate the score).
+fn build_consolidated_report(
+    reports: &[ExpertReport],
+    config: &AppConfig,
+    coverage: &FileCoverage,
+) -> ConsolidatedReport {
     ConsolidatorConfig {
         min_confidence: config.report.min_confidence,
         drop_low_confidence: config.report.drop_low_confidence,
         scoring: Some(config.scoring.clone()),
         ..Default::default()
     }
-    .consolidate(reports, None)
+    .consolidate_with_coverage(reports, None, coverage)
 }
 
 /// Reason recorded in [`DroppedFinding`] for findings filtered out because
@@ -590,47 +603,53 @@ pub(crate) async fn run_experts_inner(
     let total_experts = non_aggregators.len();
     let total_tasks = chunked_mode.as_ref().map(|(_, a)| a.len()).unwrap_or(total_experts);
 
-    // Build tasks: use chunked or non-chunked path
-    let tasks: Vec<Task> = if let Some((_chunks, assignments)) = chunked_mode {
-        let max_chunks_per_expert = config.diff.max_chunks_per_expert;
-        assignments
-            .into_iter()
-            .map(|(expert, files)| {
-                let files_for_task: Vec<DiffFile> = if max_chunks_per_expert > 0 && files.len() > max_chunks_per_expert
-                {
-                    files.into_iter().take(max_chunks_per_expert).collect()
-                } else {
-                    files
-                };
+    // Build tasks: use chunked or non-chunked path. Alongside each task we
+    // record the file paths it was assigned, so coverage accounting can tell
+    // which files actually got a reviewer (root cause: files that end up in
+    // no task, or only in failed tasks, must be surfaced, never silently
+    // dropped from the report).
+    let mut tasks: Vec<Task> = Vec::new();
+    let mut task_files: Vec<Vec<String>> = Vec::new();
 
-                let task_diff_text = processor::render_diff_text(&files_for_task);
-                let task_lang = filter::detect_language(&files_for_task);
-                // Chunked mode: each task injects only the contents of the
-                // files in its own chunk assignment.
-                let task_file_contents = crate::context::file_contents::build_file_contents_section(
-                    &files_for_task,
-                    &mr_info.project_path,
-                    max_context_file_bytes,
-                );
+    if let Some((_chunks, assignments)) = chunked_mode {
+        // Root cause A: `route_chunks` already bounded each expert to
+        // `max_chunks_per_expert` CHUNKS (preserving chunk boundaries), so no
+        // further per-file truncation happens here — flattening the chunk
+        // groups is all that remains. A defensively empty task is skipped.
+        for (expert, chunk_groups) in assignments {
+            let files_for_task: Vec<DiffFile> = chunk_groups.into_iter().flatten().collect();
+            if files_for_task.is_empty() {
+                continue;
+            }
+            task_files.push(files_for_task.iter().map(|f| f.path.clone()).collect());
 
-                create_expert_task(
-                    expert,
-                    mr_info.clone(),
-                    task_diff_text,
-                    task_file_contents,
-                    task_lang,
-                    llm_configs.to_vec(),
-                    config.clone(),
-                    semaphore.clone(),
-                    rate_limiter.clone(),
-                    completed_count.clone(),
-                    total_tasks,
-                    progress_map.cloned(),
-                    review_id.to_string(),
-                    global_context.clone(),
-                )
-            })
-            .collect()
+            let task_diff_text = processor::render_diff_text(&files_for_task);
+            let task_lang = filter::detect_language(&files_for_task);
+            // Chunked mode: each task injects only the contents of the
+            // files in its own chunk assignment.
+            let task_file_contents = crate::context::file_contents::build_file_contents_section(
+                &files_for_task,
+                &mr_info.project_path,
+                max_context_file_bytes,
+            );
+
+            tasks.push(create_expert_task(
+                expert,
+                mr_info.clone(),
+                task_diff_text,
+                task_file_contents,
+                task_lang,
+                llm_configs.to_vec(),
+                config.clone(),
+                semaphore.clone(),
+                rate_limiter.clone(),
+                completed_count.clone(),
+                total_tasks,
+                progress_map.cloned(),
+                review_id.to_string(),
+                global_context.clone(),
+            ));
+        }
     } else {
         // Non-chunked mode: all experts share one injection built from the
         // full changed-file list.
@@ -639,30 +658,63 @@ pub(crate) async fn run_experts_inner(
             &mr_info.project_path,
             max_context_file_bytes,
         );
-        non_aggregators
-            .into_iter()
-            .map(|expert| {
-                create_expert_task(
-                    expert,
-                    mr_info.clone(),
-                    diff_text.clone(),
-                    file_contents.clone(),
-                    lang.clone(),
-                    llm_configs.to_vec(),
-                    config.clone(),
-                    semaphore.clone(),
-                    rate_limiter.clone(),
-                    completed_count.clone(),
-                    total_tasks,
-                    progress_map.cloned(),
-                    review_id.to_string(),
-                    global_context.clone(),
-                )
-            })
-            .collect()
-    };
+        for expert in non_aggregators {
+            task_files.push(files.iter().map(|f| f.path.clone()).collect());
+            tasks.push(create_expert_task(
+                expert,
+                mr_info.clone(),
+                diff_text.clone(),
+                file_contents.clone(),
+                lang.clone(),
+                llm_configs.to_vec(),
+                config.clone(),
+                semaphore.clone(),
+                rate_limiter.clone(),
+                completed_count.clone(),
+                total_tasks,
+                progress_map.cloned(),
+                review_id.to_string(),
+                global_context.clone(),
+            ));
+        }
+    }
 
     let results: Vec<anyhow::Result<(ExpertReport, u64, u64)>> = join_all(tasks).await;
+
+    // Coverage accounting (anti-cheat): a file counts as reviewed only if it
+    // was assigned to a task that produced a report. Files assigned to no
+    // task at all (quota shortfall in `route_chunks`) or only to failed
+    // tasks are reported here and later cap the score, so under-coverage can
+    // never inflate the result (the 4-of-29-files / fake-85 regression).
+    let mut reviewed: HashSet<String> = HashSet::new();
+    for (result, paths) in results.iter().zip(task_files.iter()) {
+        if result.is_ok() {
+            reviewed.extend(paths.iter().cloned());
+        }
+    }
+    let coverage = FileCoverage {
+        total_files: files.len(),
+        reviewed_files: reviewed.len(),
+        unreviewed_files: files
+            .iter()
+            .map(|f| f.path.clone())
+            .filter(|p| !reviewed.contains(p))
+            .collect(),
+    };
+    if coverage.unreviewed_files.is_empty() {
+        info!(
+            "Coverage: {} of {} files reviewed (complete)",
+            coverage.reviewed_files, coverage.total_files
+        );
+    } else {
+        tracing::warn!(
+            "Coverage: {} of {} files reviewed; {} files not covered by any expert: {}",
+            coverage.reviewed_files,
+            coverage.total_files,
+            coverage.unreviewed_files.len(),
+            coverage.unreviewed_files.join(", ")
+        );
+    }
 
     // Mark expert_review complete
     mark_expert_stage_complete(progress_map, review_id);
@@ -724,8 +776,9 @@ pub(crate) async fn run_experts_inner(
 
     // Lead consolidation over the validated findings: confidence filtering,
     // deduplication, conflict detection, and overall scoring. Pure
-    // computation, so it always runs.
-    let consolidated = build_consolidated_report(&reports, config);
+    // computation, so it always runs. Coverage is threaded in so an
+    // under-covered run is scored honestly (capped), never inflated.
+    let consolidated = build_consolidated_report(&reports, config, &coverage);
 
     Ok((
         reports,
@@ -944,7 +997,7 @@ mod tests {
                 make_finding(Severity::Medium, 10, "b.rs", Some(2), "confident finding"),
             ],
         )];
-        let consolidated = build_consolidated_report(&reports, &config);
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2));
         assert_eq!(consolidated.low_confidence_removed, 1);
         assert_eq!(consolidated.findings.len(), 1);
         assert_eq!(consolidated.findings[0].title, "confident finding");
@@ -958,7 +1011,7 @@ mod tests {
             "security",
             vec![make_finding(Severity::High, 4, "a.rs", Some(1), "shaky finding")],
         )];
-        let consolidated = build_consolidated_report(&reports, &config);
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1));
         assert_eq!(consolidated.low_confidence_removed, 0);
         assert_eq!(consolidated.findings.len(), 1);
         // Downgraded one severity step: High → Medium
@@ -976,7 +1029,7 @@ mod tests {
         f2.recommendation = "Use spaces".to_string();
         f2.expert_name = "bob".to_string();
         let reports = vec![make_report("alice", vec![f1]), make_report("bob", vec![f2])];
-        let consolidated = build_consolidated_report(&reports, &config);
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1));
         assert!(!consolidated.conflicts.is_empty());
         assert!(consolidated.assessment.score <= 100);
         assert!(!consolidated.assessment.tl_dr.is_empty());

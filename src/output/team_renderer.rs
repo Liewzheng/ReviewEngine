@@ -207,6 +207,24 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
         "**Overall Assessment**: Overall Score: **{}/100** (Risk Level: {})\n\n",
         assessment.score, assessment.risk_level,
     ));
+    // Coverage banner: honest about how much of the diff was actually
+    // reviewed. Under-coverage is never hidden — it also caps the score.
+    if consolidated.total_files > 0 {
+        if consolidated.unreviewed_files.is_empty() {
+            out.push_str(&format!(
+                "**Coverage**: {} of {} files reviewed\n\n",
+                consolidated.reviewed_files, consolidated.total_files,
+            ));
+        } else {
+            out.push_str(&format!(
+                "**Coverage**: {} of {} files reviewed; **{} files not covered by any expert**: {}\n\n",
+                consolidated.reviewed_files,
+                consolidated.total_files,
+                consolidated.unreviewed_files.len(),
+                consolidated.unreviewed_files.join(", "),
+            ));
+        }
+    }
     out.push_str(&format!(
         "### TL;DR\n{}\n\n",
         close_unclosed_code_fences(&assessment.tl_dr)
@@ -482,6 +500,9 @@ mod tests {
                 tl_dr: tl_dr.to_string(),
             },
             consensus_reached: false,
+            total_files: 0,
+            reviewed_files: 0,
+            unreviewed_files: vec![],
         }
     }
 
@@ -495,6 +516,29 @@ mod tests {
         assert!(md.contains("### TL;DR"));
         assert!(md.contains("1 high found by 3 reviewers."));
         assert!(!md.contains("⚖️ Reviewer Discussion"));
+        // total_files == 0 → no coverage banner (backward compatible).
+        assert!(!md.contains("files reviewed"));
+    }
+
+    #[test]
+    fn test_render_lead_summary_full_coverage_banner() {
+        let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "1 high found by 3 reviewers.");
+        consolidated.total_files = 29;
+        consolidated.reviewed_files = 29;
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("**Coverage**: 29 of 29 files reviewed"));
+        assert!(!md.contains("not covered"));
+    }
+
+    #[test]
+    fn test_render_lead_summary_under_coverage_banner() {
+        let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "1 high found by 3 reviewers.");
+        consolidated.total_files = 29;
+        consolidated.reviewed_files = 27;
+        consolidated.unreviewed_files = vec!["src/skip_a.rs".to_string(), "src/skip_b.rs".to_string()];
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("**Coverage**: 27 of 29 files reviewed"));
+        assert!(md.contains("**2 files not covered by any expert**: src/skip_a.rs, src/skip_b.rs"));
     }
 
     /// Build a finding positioned at a conflict location, owned by an expert.

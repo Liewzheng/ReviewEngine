@@ -7,6 +7,25 @@ use review_engine::upgrade::verify::{extract_asset, parse_sha256_line, verify_fi
 use review_engine::upgrade::{current_asset_spec, InstallMethod, Release, ReleaseAsset, UpdateCheck, Version};
 use std::path::{Path, PathBuf};
 
+/// Resolve the `--verbose` raw-dump directory: `<output>.raw/` when an explicit
+/// `--output` file is given, otherwise `<output_dir>/review-raw/`. Returns
+/// `None` when `--verbose` is off or the directory cannot be created (a
+/// warning is printed; the review still runs).
+fn verbose_dump_dir(verbose: bool, output: &Option<String>, output_dir: &str) -> Option<PathBuf> {
+    if !verbose {
+        return None;
+    }
+    let dir = match output {
+        Some(path) => PathBuf::from(format!("{path}.raw")),
+        None => PathBuf::from(output_dir).join("review-raw"),
+    };
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("warning: [verbose] failed to create dump dir {}: {e}", dir.display());
+        return None;
+    }
+    Some(dir)
+}
+
 /// Resolve LLM configuration from multiple sources:
 /// 1. CLI --llm-config arguments (highest priority)
 /// 2. LLM_CONFIG environment variable
@@ -48,8 +67,15 @@ pub async fn run_stdin(format: &str, output: &Option<String>) -> Result<()> {
     let llm_configs: Vec<LLMConfig> = serde_json::from_value(req["llm_configs"].clone())?;
     let config_toml = req["config"].as_str().map(|s| s.to_string());
 
-    let result =
-        review_engine::run_review(mr_url, token, llm_configs, config_toml.map(ConfigSource::Inline), None).await?;
+    let result = review_engine::run_review(
+        mr_url,
+        token,
+        llm_configs,
+        config_toml.map(ConfigSource::Inline),
+        None,
+        None,
+    )
+    .await?;
     // The verification-enabled flag is resolved inside `run_review` and not
     // available here; `false` keeps the historical list-only appendix.
     write_output(&result, format, output, None, None, false)?;
@@ -68,6 +94,7 @@ pub async fn run_mr(
     publish: bool,
     progress_map: Option<ProgressMap>,
     review_id: &str,
+    verbose: bool,
 ) -> Result<()> {
     let token = if is_github_url(mr_url) {
         github_token.unwrap_or_else(|| std::env::var("GITHUB_TOKEN").unwrap_or_default())
@@ -77,9 +104,10 @@ pub async fn run_mr(
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source.clone()).await?;
     let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     let progress_override = progress_map.map(|map| (map, review_id.to_string()));
-    let result = review_engine::run_review(mr_url, &token, configs, config_source, progress_override).await?;
+    let result = review_engine::run_review(mr_url, &token, configs, config_source, progress_override, dump_dir).await?;
     write_output(
         &result,
         format,
@@ -150,6 +178,8 @@ pub async fn run_improve(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -206,6 +236,8 @@ pub async fn run_improve_local_diff(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -265,6 +297,8 @@ pub async fn run_improve_local_repo(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -323,6 +357,8 @@ pub async fn run_describe(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -381,6 +417,8 @@ pub async fn run_describe_local_diff(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -442,6 +480,8 @@ pub async fn run_describe_local_repo(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -497,6 +537,8 @@ pub async fn run_ask(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -547,6 +589,8 @@ async fn run_ask_with_diff(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -618,6 +662,8 @@ pub async fn run_ask_local_repo(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -681,6 +727,8 @@ pub async fn run_update_changelog(
             findings: vec![],
             markdown: md,
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }],
         aggregated: None,
         dropped_findings: vec![],
@@ -719,11 +767,13 @@ pub async fn run_local(
     output: &Option<String>,
     progress_map: Option<ProgressMap>,
     review_id: &str,
+    verbose: bool,
 ) -> Result<()> {
     let diff = tokio::fs::read_to_string(diff_path).await?;
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
     let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     // Root cause C: propagate the real `--local-path` (defaulting to the
     // current directory) instead of the placeholder "local", so the "Full
@@ -742,6 +792,7 @@ pub async fn run_local(
         &config,
         progress_map.clone(),
         review_id,
+        dump_dir,
     )
     .await?;
 
@@ -789,6 +840,7 @@ pub async fn run_local_repo(
     output: &Option<String>,
     progress_map: Option<ProgressMap>,
     review_id: &str,
+    verbose: bool,
 ) -> Result<()> {
     use review_engine::git::local::LocalGitBrowser;
 
@@ -813,6 +865,7 @@ pub async fn run_local_repo(
              the project .code-audit-config.toml, --llm-config, or LLM_CONFIG env var."
         );
     }
+    let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", base_ref);
 
@@ -824,6 +877,7 @@ pub async fn run_local_repo(
         &config,
         progress_map.clone(),
         review_id,
+        dump_dir,
     )
     .await?;
 
@@ -872,6 +926,7 @@ pub async fn run_local_path(
     output: &Option<String>,
     progress_map: Option<ProgressMap>,
     review_id: &str,
+    verbose: bool,
 ) -> Result<()> {
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
@@ -892,6 +947,7 @@ pub async fn run_local_path(
              the project .code-audit-config.toml, --llm-config, or LLM_CONFIG env var."
         );
     }
+    let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", "main");
 
@@ -903,6 +959,7 @@ pub async fn run_local_path(
         &config,
         progress_map.clone(),
         review_id,
+        dump_dir,
     )
     .await?;
 
@@ -924,6 +981,8 @@ pub async fn run_local_path(
                 file_count, path, file_count
             ),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         });
     }
 
@@ -1012,7 +1071,7 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
             let text = result
                 .reports
                 .iter()
-                .map(|r| r.markdown.clone())
+                .map(|r| review_engine::output::team_renderer::render_expert_section(r))
                 .collect::<Vec<_>>()
                 .join("\n\n---\n\n");
             let mut text = if text.trim().is_empty() {
@@ -1848,6 +1907,7 @@ mod tests {
                 risk_level: RiskLevel::Medium,
                 lead_override: None,
                 tl_dr: "Risk Level: Medium. 1 high found by 2 reviewers.".to_string(),
+                unverified: false,
             },
             consensus_reached: true,
             total_files: 0,
@@ -1863,6 +1923,8 @@ mod tests {
                 findings: vec![make_finding(Severity::High, "src/main.rs")],
                 markdown: "## Security Review\n\nSome findings.\n".to_string(),
                 raw_llm_response: String::new(),
+                parse_error: None,
+                raw_dump_path: None,
             }],
             aggregated: None,
             dropped_findings: vec![],

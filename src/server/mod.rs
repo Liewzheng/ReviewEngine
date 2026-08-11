@@ -132,6 +132,7 @@ pub(crate) async fn run_review_common(
         &config,
         Some(progress_map.clone()),
         &review_id,
+        None,
     )
     .await?;
 
@@ -254,11 +255,15 @@ mod tests {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let agg = Some(AggregatedReport {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         });
         let output = build_review_output_from_reports(reports, agg);
         assert!(
@@ -274,6 +279,8 @@ mod tests {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(
@@ -311,12 +318,16 @@ mod tests {
             }],
             markdown: "# Summary\n".to_string(),
             raw_llm_response: "---\n".to_string(),
+            parse_error: None,
+            raw_dump_path: None,
         };
         let reports = vec![ExpertReport {
             expert_name: "security".to_string(),
             findings: Default::default(),
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
 
         let output = build_review_output_from_reports(reports, Some(agg_report));
@@ -334,6 +345,8 @@ mod tests {
             findings: Default::default(),
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(output.aggregated.is_none());
@@ -352,6 +365,8 @@ mod tests {
             findings: Default::default(),
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(output.aggregated.is_none());

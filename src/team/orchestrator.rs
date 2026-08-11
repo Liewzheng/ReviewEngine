@@ -161,6 +161,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
                 &self.review_id,
                 base_ref.as_deref(),
                 head_ref.as_deref(),
+                None,
             )
             .await?;
 
@@ -370,6 +371,7 @@ fn create_expert_task(
     progress_map: Option<ProgressMap>,
     review_id: String,
     global_context: Option<GlobalReviewContext>,
+    dump_dir: Option<std::path::PathBuf>,
 ) -> Task {
     Box::pin(async move {
         let task_start = std::time::Instant::now();
@@ -401,6 +403,42 @@ fn create_expert_task(
         let llm_config = select_llm_config(&expert, &llm_configs);
         let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
         let report = crate::output::parser::parse_llm_response(&expert.name, &result.content);
+        let mut report = report;
+        // `--verbose`: persist the raw LLM prompt + response to the dump dir so
+        // a zero-finding or mis-parsed run can be debugged from the actual LLM
+        // exchange, and reference the file path on the report (the renderer
+        // shows a truncated excerpt + the full path).
+        if let Some(dir) = &dump_dir {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("warning: [verbose] failed to create dump dir {}: {e}", dir.display());
+            } else {
+                let seq = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let safe: String = expert
+                    .name
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                let prompt_path = dir.join(format!("{safe}.{seq}.prompt.txt"));
+                let resp_path = dir.join(format!("{safe}.{seq}.response.txt"));
+                let prompt_text = format!("=== SYSTEM ===\n{system}\n\n=== USER ===\n{user}\n");
+                if let Err(e) = std::fs::write(&prompt_path, &prompt_text) {
+                    eprintln!("warning: [verbose] failed to write prompt dump: {e}");
+                } else if let Err(e) = std::fs::write(&resp_path, &result.content) {
+                    eprintln!("warning: [verbose] failed to write response dump: {e}");
+                } else {
+                    report.raw_dump_path = Some(resp_path.display().to_string());
+                    eprintln!(
+                        "[verbose] {}: prompt -> {}, response -> {}",
+                        expert.name,
+                        prompt_path.display(),
+                        resp_path.display()
+                    );
+                }
+            }
+        }
         let latency_ms = task_start.elapsed().as_millis() as u64;
 
         crate::progress::update_expert_progress(progress_map.as_ref(), &review_id, &completed_count, total_tasks);
@@ -538,6 +576,7 @@ pub(crate) async fn run_experts_inner(
     review_id: &str,
     base_ref: Option<&str>,
     head_ref: Option<&str>,
+    dump_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Vec<ExpertMetrics>,
@@ -648,6 +687,7 @@ pub(crate) async fn run_experts_inner(
                 progress_map.cloned(),
                 review_id.to_string(),
                 global_context.clone(),
+                dump_dir.clone(),
             ));
         }
     } else {
@@ -675,6 +715,7 @@ pub(crate) async fn run_experts_inner(
                 progress_map.cloned(),
                 review_id.to_string(),
                 global_context.clone(),
+                dump_dir.clone(),
             ));
         }
     }
@@ -726,6 +767,10 @@ pub(crate) async fn run_experts_inner(
     for report in &mut reports {
         let before = report.findings.len();
         report.findings = validate_findings(&report.findings, &diff_files);
+        // Re-render the per-expert markdown from the validated findings so
+        // validation outcomes surface in the report — e.g. the keep-with-note
+        // annotation on findings whose line lies outside the diff hunk.
+        report.markdown = crate::output::renderer::render_expert_markdown(&report.expert_name, &report.findings);
         let dropped = before.saturating_sub(report.findings.len());
         if dropped > 0 {
             tracing::warn!(
@@ -809,6 +854,7 @@ pub async fn run_experts(
     config: &AppConfig,
     progress_map: Option<ProgressMap>,
     review_id: &str,
+    dump_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Option<GlobalReviewContext>,
@@ -841,6 +887,7 @@ pub async fn run_experts(
         review_id,
         Some(&mr_info.target_branch),
         Some(&mr_info.source_branch),
+        dump_dir,
     )
     .await?;
 
@@ -965,6 +1012,8 @@ mod tests {
             findings,
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }
     }
 
@@ -1047,7 +1096,7 @@ mod tests {
             "main".to_string(),
         );
         let (reports, _global_context, dropped_findings, consolidated) =
-            run_experts(&[], &mr_info, "", &[], &config, None, "test-review-id")
+            run_experts(&[], &mr_info, "", &[], &config, None, "test-review-id", None)
                 .await
                 .expect("run_experts with empty team should succeed");
         assert!(reports.is_empty());

@@ -98,6 +98,12 @@ pub struct OverallAssessment {
     pub lead_override: Option<String>,
     /// Summary of key findings.
     pub tl_dr: String,
+    /// True when every expert reported zero findings. A perfect score with no
+    /// findings is NOT evidence of quality — it may mean low coverage or a
+    /// systemic miss — so reports must flag the result as **unverified**
+    /// instead of presenting it as healthy.
+    #[serde(default)]
+    pub unverified: bool,
 }
 
 // ─── Global Review Context ────────────────────

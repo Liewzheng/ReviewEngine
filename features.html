@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>特性与实测数据 — ReviewEngine</title>
+  <meta name="description" content="ReviewEngine 特性：reng/review-engine 双命令、review 与 audit 分工、自升级可信链路、Web 一键升级、API 默认安全鉴权、前端性能。实测数据：11 位专家一轮评审 14–18.5 秒、峰值内存 ~39 MiB、900+ 测试。">
+  <meta name="color-scheme" content="dark">
+  <script>document.documentElement.classList.add('js')</script>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/i18n/zh-CN.js" defer></script>
+  <script src="assets/i18n/en.js" defer></script>
+  <script src="assets/i18n/zh-TW.js" defer></script>
+  <script src="assets/i18n/fr.js" defer></script>
+  <script src="assets/i18n/ja.js" defer></script>
+  <script src="assets/i18n/ko.js" defer></script>
+  <script src="assets/i18n/ru.js" defer></script>
+  <script src="assets/i18n.js" defer></script>
+  <script src="assets/site.js" defer></script>
+</head>
+<body data-page="features">
+  <a class="skip-link" href="#main" data-i18n="skip.link">跳到正文</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+        <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+        <span class="brand-alias">reng</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-i18n="nav.toggle">菜单</button>
+      <nav class="site-nav" id="site-nav" aria-label="主导航" data-i18n-attr="aria-label:nav.aria">
+        <ul>
+          <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+          <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+          <li><a href="features.html" aria-current="page" data-i18n="nav.features">特性</a></li>
+          <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+          <li class="nav-gh"><a href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- ============ 页首 ============ -->
+    <section class="page-hero hero">
+      <div class="container">
+        <div class="hero-top">
+          <div class="hero-vlabel" aria-hidden="true"><span class="vlabel" data-i18n="vl.features">特性</span></div>
+          <div class="hero-head" data-reveal>
+            <p class="eyebrow" data-i18n="features.hero.eyebrow">FEATURES · 只陈述事实</p>
+            <h1 class="hero-title"><span data-i18n="features.hero.title.l1">处处顺手，</span><br><span data-i18n="features.hero.title.l2">默认安全。</span></h1>
+            <p class="hero-sub" data-i18n="features.hero.sub">命令、升级、鉴权、部署——每个环节都按「开箱即用且默认安全」设计。文中性能与资源数据来自 2026-08-03 双机实测。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 特性 ============ -->
+    <section class="sec" id="features">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.design">设计</span></div>
+        <div class="sec-body">
+          <!-- 双命令 -->
+          <div class="feature" data-reveal>
+            <div class="feature-head">
+              <span class="feature-k" data-i18n="features.f1.k">DUAL-NAME · 双命令设计</span>
+              <h3 data-i18n="features.f1.h3">一个二进制，两个名字。</h3>
+            </div>
+            <div class="feature-body">
+              <p><span data-i18n="features.f1.body.a">无论通过</span> <code class="inline-code">install.sh</code><span data-i18n="features.f1.body.b">、Homebrew tap 还是 Docker 镜像安装，都会自带</span> <code class="inline-code">reng</code> <span data-i18n="features.f1.body.c">短别名。</span> <code class="inline-code">reng</code> <span data-i18n="features.f1.body.d">与</span> <code class="inline-code">review-engine</code> <span data-i18n="features.f1.body.e">是同一份二进制、同一条命令——你用哪个名字调用，帮助与用法输出就显示哪个名字。</span></p>
+            </div>
+          </div>
+
+          <!-- review 与 audit -->
+          <div class="feature" data-reveal>
+            <div class="feature-head">
+              <span class="feature-k" data-i18n="features.f2.k">TWO SCENARIOS · review 与 audit 分工</span>
+              <h3 data-i18n="features.f2.h3">评审一次改动，审计整仓健康。</h3>
+            </div>
+            <div class="feature-body">
+              <p data-i18n="features.f2.lead">命令行围绕两种真实场景做了明确分工，不把职责混在一个命令里。</p>
+              <div class="feature-cols">
+                <div class="col">
+                  <h4><code>reng review</code></h4>
+                  <p data-i18n="features.f2.col1.desc">分支评审：评审当前分支相对基线的差异、暂存区改动或指定 commit 区间，聚焦「这次改动会引入什么问题」。</p>
+                </div>
+                <div class="col">
+                  <h4><code>reng audit</code></h4>
+                  <p><span data-i18n="features.f2.col2.desc">整仓审计（</span><code>repo-review</code><span data-i18n="features.f2.col2.mid">的别名）：对全仓库做一轮健康度体检，输出整体评审结论，适合定期巡检。</span></p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 自升级 -->
+          <div class="feature" data-reveal>
+            <div class="feature-head">
+              <span class="feature-k" data-i18n="features.f3.k">SELF-UPGRADE · 可信升级链路</span>
+              <h3 data-i18n="features.f3.h3">升级不靠外部脚本，也不裸奔。</h3>
+            </div>
+            <div class="feature-body">
+              <p><span data-i18n="features.f3.lead">内置的</span> <code class="inline-code">reng upgrade</code> <span data-i18n="features.f3.mid">把「升级」本身也当作供应链攻击面来防，走完一整条可信链路：</span></p>
+              <div class="chain">
+                <span class="chain-step" data-i18n="features.f3.chain1">查询 GitHub Releases</span>
+                <span class="chain-arrow">→</span>
+                <span class="chain-step" data-i18n="features.f3.chain2">sha256 双重校验</span>
+                <span class="chain-arrow">→</span>
+                <span class="chain-step" data-i18n="features.f3.chain3">防 zip-slip / 解压炸弹</span>
+                <span class="chain-arrow">→</span>
+                <span class="chain-step" data-i18n="features.f3.chain4">替换前备份</span>
+                <span class="chain-arrow">→</span>
+                <span class="chain-step" data-i18n="features.f3.chain5">冒烟失败自动回滚</span>
+              </div>
+              <p style="margin-top:1.1rem"><span data-i18n="features.f3.tail.a">还会自动识别安装方式给出对应提示：Homebrew 提示</span> <code class="inline-code">brew upgrade review-engine</code><span data-i18n="features.f3.tail.b">，cargo 提示重新</span> <code class="inline-code">cargo install</code><span data-i18n="features.f3.tail.c">，Docker 提示在宿主机重建镜像，普通二进制则直接</span> <code class="inline-code">reng upgrade</code><span data-i18n="features.f3.tail.d">。</span></p>
+            </div>
+          </div>
+
+          <!-- Web 升级 -->
+          <div class="feature" data-reveal>
+            <div class="feature-head">
+              <span class="feature-k" data-i18n="features.f4.k">WEB UPGRADE · 一个弹窗完成更新</span>
+              <h3 data-i18n="features.f4.h3">Server 形态下，升级收进浏览器。</h3>
+            </div>
+            <div class="feature-body">
+              <p><span data-i18n="features.f4.body.a">部署为 Server 形态时，版本检查走</span> <code class="inline-code">GET /api/v1/system/upgrade/check</code><span data-i18n="features.f4.body.b">（服务端 1 小时缓存）；发起升级走</span> <code class="inline-code">POST /api/v1/system/upgrade</code><span data-i18n="features.f4.body.c">（单飞：同一时刻只允许一个任务，并发请求直接 409）；进度走</span> <code class="inline-code">GET /api/v1/system/upgrade/status</code><span data-i18n="features.f4.body.d">的 8 态状态机。Docker 形态下自动给出宿主机命令块，支持一键复制。</span></p>
+            </div>
+          </div>
+
+          <!-- API 鉴权 -->
+          <div class="feature" data-reveal>
+            <div class="feature-head">
+              <span class="feature-k" data-i18n="features.f5.k">SECURITY BY DEFAULT · API 默认安全</span>
+              <h3 data-i18n="features.f5.h3">开箱即用，不裸奔。</h3>
+            </div>
+            <div class="feature-body">
+              <p><span data-i18n="features.f5.body.a">REST API 采用</span> <strong data-i18n="features.f5.em1">Bearer Token 与 X-API-Key 双通道</strong><span data-i18n="features.f5.body.b">鉴权，比较使用恒定时间比较（constant-time），从时序上抵抗令牌猜测。默认只绑定回环地址；一旦绑定非回环地址，</span> <strong data-i18n="features.f5.em2">必须配置 token，否则服务拒绝启动</strong><span data-i18n="features.f5.body.c">——无 token 或 token 错误的请求一律返回 401。默认安全，不是事后补丁。</span></p>
+              <div class="provider-chips">
+                <span class="provider-chip">Authorization: Bearer &lt;token&gt;</span>
+                <span class="provider-chip">X-API-Key: &lt;token&gt;</span>
+                <span class="provider-chip">reng generate-token</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 前端性能 -->
+          <div class="feature" data-reveal>
+            <div class="feature-head">
+              <span class="feature-k" data-i18n="features.f6.k">FRONTEND · 首屏快到没有存在感</span>
+              <h3 data-i18n="features.f6.h3">路由级懒加载 + 按需引入。</h3>
+            </div>
+            <div class="feature-body">
+              <p><span data-i18n="features.f6.body.a">Web 前端采用路由级懒加载与 element-plus 按需引入，只打包真正用到的组件与样式。element-plus 单 chunk gzip 后仅</span> <strong>166 kB</strong><span data-i18n="features.f6.body.b">——页面打开速度，配得上引擎本身的轻快。</span></p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 实测数据 ============ -->
+    <section class="sec" id="bench">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.bench">实测</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow" data-i18n="features.bench.eyebrow">BENCHMARKS · 2026-08-03 实测</p>
+            <h2 data-i18n="features.bench.h2">数据说话，不夸大。</h2>
+          </div>
+          <p class="sec-lead" data-reveal data-i18n="features.bench.lead">两套测试环境：x86-64 主机（多核 CPU / 约 14 GiB 内存 / NVMe SSD）与 aarch64 主机（8 核 CPU / 约 8 GiB 内存 / NVMe）。评审是典型的 LLM I/O 等待型负载——绝大多数时间在等模型输出，CPU 几乎不忙。</p>
+
+          <div class="table-scroll" data-reveal>
+            <table class="data-table">
+              <caption class="sr-only" data-i18n="features.bench.t1.caption">资源占用实测数据</caption>
+              <thead>
+                <tr>
+                  <th scope="col" data-i18n="features.bench.t1.th1">指标</th>
+                  <th scope="col" data-i18n="features.bench.t1.th2">x86-64 主机</th>
+                  <th scope="col" data-i18n="features.bench.t1.th3">aarch64 主机</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t1.r1">空载常驻内存（RSS）</td>
+                  <td class="mono">~36 MiB</td>
+                  <td class="mono">~28 MiB</td>
+                </tr>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t1.r2">评审峰值内存（RSS）</td>
+                  <td class="mono">~39 MiB</td>
+                  <td class="mono">~31 MiB</td>
+                </tr>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t1.r3">评审期间 CPU 峰值</td>
+                  <td class="mono">0.26%</td>
+                  <td class="mono">5.23%</td>
+                </tr>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t1.r4">镜像体积</td>
+                  <td class="mono">168 MB</td>
+                  <td class="mono">231 MB</td>
+                </tr>
+              </tbody>
+              <tfoot>
+                <tr>
+                  <td colspan="3" data-i18n="features.bench.t1.tfoot">x86-64 在 2 核 / 2 GiB 容器限额下运行余量仍有 ~98%（CPU 99.8% 闲置）；aarch64 配置限额为实际用量的 64 倍。</td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+
+          <div class="table-scroll" data-reveal>
+            <table class="data-table">
+              <caption class="sr-only" data-i18n="features.bench.t2.caption">评审性能与稳定性</caption>
+              <thead>
+                <tr>
+                  <th scope="col" data-i18n="features.bench.t2.th1">维度</th>
+                  <th scope="col" data-i18n="features.bench.t2.th2">结果</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t2.r1.head">评审性能</td>
+                  <td><span data-i18n="features.bench.t2.r1.a">11 位 AI 专家协同一轮</span> <span class="mono">14–18.5</span> <span data-i18n="features.bench.t2.r1.b">秒，整体评分</span> <span class="mono">90/100</span> <span data-i18n="features.bench.t2.r1.c">（Low-Medium 风险）</span></td>
+                </tr>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t2.r2.head">部署时长</td>
+                  <td><span data-i18n="features.bench.t2.r2.a">x86-64 原生构建约</span> <span class="mono">3–10</span> <span data-i18n="features.bench.t2.r2.b">分钟；aarch64 交叉构建约</span> <span class="mono">5</span> <span data-i18n="features.bench.t2.r2.c">分钟 +</span> <span class="mono">~6</span> <span data-i18n="features.bench.t2.r2.d">秒镜像传输</span></td>
+                </tr>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t2.r3.head">稳定性基线</td>
+                  <td><span class="mono">cargo fmt</span> / <span class="mono">clippy</span> <span data-i18n="features.bench.t2.r3.desc">零警告 ·</span> <span class="mono">900+</span> <span data-i18n="features.bench.t2.r3.mid">项自动化测试</span></td>
+                </tr>
+                <tr>
+                  <td class="row-head" data-i18n="features.bench.t2.r4.head">发布自审</td>
+                  <td data-i18n="features.bench.t2.r4.desc">每轮合并前，用项目自己的多专家 AI 阵容审查本仓库自身的 diff</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CTA ============ -->
+    <section class="cta-band">
+      <div class="container" data-reveal>
+        <h2 data-i18n="features.cta.h2">这些数字，装上就能复现。</h2>
+        <p data-i18n="features.cta.p">一个几十 MiB 的二进制，装下一支 11 人 AI 评审团队。</p>
+        <div class="hero-cta" style="justify-content:center">
+          <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速上手</span><span class="btn-arrow">→</span></a>
+          <a class="btn btn-ghost" href="board.html"><span data-i18n="features.cta.btn2">看看评审席</span><span class="btn-arrow">→</span></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+            <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+            <span class="brand-alias">reng</span>
+          </a>
+          <p class="footer-tag">A virtual <span class="mono">CodeReview Board</span> for every pull request — multi-expert, scored, actionable。<span data-i18n="footer.tagline">把一支随时可用的 AI 评审团队，装进一个几十 MiB 常驻内存的二进制里。</span></p>
+          <p class="footer-license" data-i18n="footer.license">Apache-2.0 · 核心免费，个人与团队可用</p>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.site">站点</p>
+          <ul>
+            <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+            <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+            <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+            <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.project">项目</p>
+          <p><a class="github-url" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/Review-Engine</a></p>
+          <p data-i18n="footer.enterprise">Enterprise：SSO · 审计日志 · 自定义专家模板 · 专属支持，单独商业授权。</p>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 ReviewEngine</span>
+        <span data-i18n="footer.motto">用自己写的工具，审查自己写的代码。</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

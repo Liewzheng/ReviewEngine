@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>ReviewEngine · 多专家 AI 代码评审 — 把评审变成落印</title>
+  <meta name="description" content="ReviewEngine 是一个 Rust 编写的多专家 AI 代码评审工具：11 位 AI 专家并行评审每一次 PR/MR，输出带加权总分、风险等级与证据链的结构化报告。CLI 与 Server 双形态，单一静态二进制。">
+  <meta name="color-scheme" content="dark">
+  <script>document.documentElement.classList.add('js')</script>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/i18n/zh-CN.js" defer></script>
+  <script src="assets/i18n/en.js" defer></script>
+  <script src="assets/i18n/zh-TW.js" defer></script>
+  <script src="assets/i18n/fr.js" defer></script>
+  <script src="assets/i18n/ja.js" defer></script>
+  <script src="assets/i18n/ko.js" defer></script>
+  <script src="assets/i18n/ru.js" defer></script>
+  <script src="assets/i18n.js" defer></script>
+  <script src="assets/site.js" defer></script>
+</head>
+<body data-page="index">
+  <a class="skip-link" href="#main" data-i18n="skip.link">跳到正文</a>
+
+  <!-- 落印用的做旧滤镜：只此一处，随印章一起使用 -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+    <filter id="stamp-rough" x="-15%" y="-15%" width="130%" height="130%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.55" numOctaves="2" seed="9" result="noise"/>
+      <feDisplacementMap in="SourceGraphic" in2="noise" scale="6" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </svg>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+        <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+        <span class="brand-alias">reng</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-i18n="nav.toggle">菜单</button>
+      <nav class="site-nav" id="site-nav" aria-label="主导航" data-i18n-attr="aria-label:nav.aria">
+        <ul>
+          <li><a href="index.html" aria-current="page" data-i18n="nav.index">总览</a></li>
+          <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+          <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+          <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+          <li class="nav-gh"><a href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- ============ Hero ============ -->
+    <section class="hero">
+      <div class="container">
+        <div class="hero-top">
+          <div class="hero-vlabel" aria-hidden="true"><span class="vlabel" data-i18n="vl.board">评审席</span></div>
+          <div class="hero-head" data-reveal>
+            <p class="eyebrow" data-i18n="index.hero.eyebrow">CODE REVIEW BOARD · 多专家 · 打分 · 可执行</p>
+            <h1 class="hero-title"><span data-i18n="index.hero.title.l1">把一场评审，</span><br><span data-i18n="index.hero.title.l2a">变成一次</span><span class="mark" data-i18n="index.hero.title.l2b">落印</span><span data-i18n="index.hero.title.l2c">。</span></h1>
+            <p class="hero-sub">
+              <span class="en-line">A virtual <span class="mono">CodeReview Board</span> for every pull request — multi-expert, scored, actionable.</span>
+              <span data-i18n="index.hero.sub">11 位 AI 专家并行评审同一份 diff：每条 finding 都带 severity / confidence / evidence / impact / recommendation / effort，最终以加权总分与风险等级落印。</span>
+            </p>
+            <div class="hero-cta">
+              <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速上手</span><span class="btn-arrow">→</span></a>
+              <a class="btn btn-ghost" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
+            </div>
+            <ul class="hero-meta">
+              <li data-i18n="index.hero.meta1">Apache-2.0 · 核心免费</li>
+              <li data-i18n="index.hero.meta2">单一静态二进制</li>
+              <li data-i18n="index.hero.meta3">CLI · Server 双形态</li>
+              <li data-i18n="index.hero.meta4">本地优先</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="terminal-wrap" data-reveal data-d="0.08">
+          <div class="terminal" data-terminal>
+            <div class="terminal-bar">
+              <span class="terminal-dot"></span>
+              <span class="terminal-dot"></span>
+              <span class="terminal-dot"></span>
+              <span class="terminal-title" data-i18n="index.terminal.title">reng · 本地评审会话</span>
+            </div>
+            <div class="terminal-screen">
+              <span class="ln ln-cmd"><span class="prompt">$ </span>reng review --local-path . --base main</span>
+              <span class="ln ln-muted">Loading CodeReview Board · 11 experts</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Lead Reviewer · ready · weight 20</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Security Lead · ready · weight 15</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Performance Lead · ready · weight 10</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Quality Lead · ready · weight 10</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Reuse Lead · ready · weight 12</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Docs Lead · ready · weight 5</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> User Interface Expert · ready · weight 8</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Database Expert · ready · weight 5</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> DevOps Expert · ready · weight 5</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> API Design Expert · ready · weight 5</span>
+              <span class="ln ln-ok"><span class="ok">✓</span> Dependency Expert · ready · weight 5</span>
+              <span class="ln ln-sep">────────────────────────────────────────</span>
+              <span class="ln ln-muted">Board consensus reached · report ready</span>
+              <span class="ln ln-score">Overall Score    90/100</span>
+              <span class="ln ln-score">Risk Level       Low-Medium</span>
+            </div>
+          </div>
+
+          <div class="seal seal-hero" data-seal="hero" role="img" aria-label="加权总分 90/100，风险等级 Low-Medium" data-i18n-attr="aria-label:index.seal.hero.aria">
+            <svg class="seal-ring" viewBox="0 0 200 200" aria-hidden="true">
+              <defs>
+                <path id="sealArcTopH" d="M 28 100 A 72 72 0 0 1 172 100" fill="none"/>
+                <path id="sealArcBotH" d="M 28 100 A 72 72 0 0 0 172 100" fill="none"/>
+              </defs>
+              <text font-size="13" letter-spacing="2"><textPath href="#sealArcTopH" startOffset="50%" text-anchor="middle">REVIEW ENGINE</textPath></text>
+              <text font-size="11" letter-spacing="1.5"><textPath href="#sealArcBotH" startOffset="50%" text-anchor="middle">CODE REVIEW BOARD</textPath></text>
+            </svg>
+            <span class="seal-disc" aria-hidden="true"></span>
+            <span class="seal-core">
+              <span class="seal-score">90</span>
+              <span class="seal-denom">/ 100</span>
+              <span class="seal-tag">OVERALL</span>
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 关键数字 ============ -->
+    <section class="stats" aria-label="关键实测数据" data-i18n-attr="aria-label:index.stats.aria">
+      <div class="container">
+        <div class="stats-grid" data-reveal>
+          <div class="stat">
+            <span class="stat-num">14–18.5s</span>
+            <span class="stat-label" data-i18n="index.stats.label1">11 位 AI 专家一轮评审</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">~39 MiB</span>
+            <span class="stat-label" data-i18n="index.stats.label2">评审峰值内存 · x86-64 实测</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">900+</span>
+            <span class="stat-label" data-i18n="index.stats.label3">自动化测试持续守护</span>
+          </div>
+          <div class="stat">
+            <span class="stat-num">1</span>
+            <span class="stat-label" data-i18n="index.stats.label4">个静态二进制 · 几十 MiB 常驻</span>
+          </div>
+        </div>
+        <p class="stats-note"><span data-i18n="index.stats.note">2026-08-03 双机实测（x86-64 / aarch64）· 完整数据见</span> <a href="features.html" data-i18n="index.stats.note.link">特性与实测数据</a></p>
+      </div>
+    </section>
+
+    <!-- ============ 工作流 ============ -->
+    <section class="sec" id="workflow">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.workflow">工作流</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow">WORKFLOW</p>
+            <h2 data-i18n="index.workflow.h2">一场评审，四个环节。</h2>
+          </div>
+          <p class="sec-lead" data-reveal data-i18n="index.workflow.lead">输入可以是 MR、PR 或本地 diff；中间由 11 位专家并行完成；输出是一份落印的评分报告。</p>
+          <ol class="steps">
+            <li class="step" data-reveal>
+              <span class="step-no">01 · INPUT</span>
+              <h3 data-i18n="index.workflow.s1.title">输入</h3>
+              <p><code class="mono">reng review</code> <span data-i18n="index.workflow.s1.desc">接受分支基线、暂存区或 commit 区间，也能直接评审 GitLab MR / GitHub PR。</span></p>
+            </li>
+            <li class="step" data-reveal data-d="0.06">
+              <span class="step-no">02 · EXPERT BOARD</span>
+              <h3 data-i18n="index.workflow.s2.title">专家评审</h3>
+              <p data-i18n="index.workflow.s2.desc">11 位 AI 专家按各自 role、focus、principles 与 weight 并行评审同一份 diff，各出各的 finding。</p>
+            </li>
+            <li class="step" data-reveal data-d="0.12">
+              <span class="step-no">03 · CONSOLIDATION</span>
+              <h3 data-i18n="index.workflow.s3.title">汇总裁决</h3>
+              <p data-i18n="index.workflow.s3.desc">Lead Reviewer 汇总：合并重复、裁决分歧、过滤证据不成立的结论，抑制误报。</p>
+            </li>
+            <li class="step" data-reveal data-d="0.18">
+              <span class="step-no">04 · SCORED REPORT</span>
+              <h3 data-i18n="index.workflow.s4.title">评分落印</h3>
+              <p data-i18n="index.workflow.s4.desc">输出加权总分、风险等级，以及每条 finding 的证据链、影响与修复建议。</p>
+            </li>
+          </ol>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 报告样例 ============ -->
+    <section class="sec" id="report">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.report">报告</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow" data-i18n="index.report.eyebrow">SAMPLE REPORT · 摘自 README demo</p>
+            <h2 data-i18n="index.report.h2">分数是结果，证据是依据。</h2>
+          </div>
+          <p class="sec-lead" data-reveal data-i18n="index.report.lead">每条 finding 都携带 severity / confidence / evidence / impact / recommendation / effort；Lead 汇总后给出加权总分与风险等级。</p>
+
+          <div class="report-layout">
+            <div class="findings">
+              <article class="finding finding-critical" data-reveal>
+                <header class="finding-head">
+                  <span class="finding-sev sev-critical">Critical</span>
+                  <span class="finding-expert">Security Lead</span>
+                </header>
+                <h3 data-i18n="index.report.f1.title">Unvalidated user input passed directly to SQL builder</h3>
+                <dl class="finding-meta">
+                  <div><dt>Severity</dt><dd>Critical</dd></div>
+                  <div><dt>Confidence</dt><dd>High</dd></div>
+                  <div><dt>Effort</dt><dd>Medium</dd></div>
+                  <div class="wide"><dt>Impact</dt><dd data-i18n="index.report.f1.impact">Potential SQL injection allowing unauthorized data access</dd></div>
+                </dl>
+                <div class="finding-evidence"><code>src/db.rs:42</code> <span data-i18n="index.report.f1.evidence">— query.push_str(&amp;user_input) without parameterization</span></div>
+                <p class="finding-rec"><strong data-i18n="common.rec.label">Recommendation</strong><span data-i18n="index.report.f1.rec"> — 改用参数化查询或 prepared statement builder，并补充集成测试。</span></p>
+              </article>
+
+              <article class="finding finding-high" data-reveal data-d="0.08">
+                <header class="finding-head">
+                  <span class="finding-sev sev-high">High</span>
+                  <span class="finding-expert">Performance Lead</span>
+                </header>
+                <h3 data-i18n="index.report.f2.title">Nested loop over unindexed relation in hot path</h3>
+                <dl class="finding-meta">
+                  <div><dt>Severity</dt><dd>High</dd></div>
+                  <div><dt>Confidence</dt><dd>Medium</dd></div>
+                  <div><dt>Effort</dt><dd>Low</dd></div>
+                  <div class="wide"><dt>Impact</dt><dd data-i18n="index.report.f2.impact">O(n²) behavior under load; latency spikes likely with &gt;10k rows</dd></div>
+                </dl>
+                <div class="finding-evidence"><code>src/search.rs:88</code> <span data-i18n="index.report.f2.evidence">— loop inside load_user_records()</span></div>
+                <p class="finding-rec"><strong data-i18n="common.rec.label">Recommendation</strong><span data-i18n="index.report.f2.rec"> — 为 user_id 加数据库索引，并考虑批量抓取（batch fetching）。</span></p>
+              </article>
+            </div>
+
+            <aside class="report-side">
+              <table class="score-table" data-reveal>
+                <thead>
+                  <tr><th scope="col">Expert</th><th scope="col">Score</th><th scope="col">Weight</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td>Security Lead</td><td class="num">45/100</td><td class="num">25%</td></tr>
+                  <tr><td>Performance Lead</td><td class="num">70/100</td><td class="num">20%</td></tr>
+                  <tr><td>Quality Lead</td><td class="num">85/100</td><td class="num">20%</td></tr>
+                  <tr><td>Reuse Lead</td><td class="num">80/100</td><td class="num">15%</td></tr>
+                  <tr><td>Docs Lead</td><td class="num">90/100</td><td class="num">10%</td></tr>
+                  <tr><td>Maintainability Lead</td><td class="num">78/100</td><td class="num">10%</td></tr>
+                </tbody>
+                <tfoot>
+                  <tr><td colspan="2" data-i18n="index.report.overall">Overall · 风险 Medium</td><td class="num">72/100</td></tr>
+                </tfoot>
+              </table>
+
+              <div class="report-seal-block" data-reveal data-d="0.1">
+                <div class="seal seal-lg" data-seal="report" role="img" aria-label="加权总分 72/100，风险等级 Medium" data-i18n-attr="aria-label:index.seal.report.aria">
+                  <svg class="seal-ring" viewBox="0 0 200 200" aria-hidden="true">
+                    <defs>
+                      <path id="sealArcTopR" d="M 28 100 A 72 72 0 0 1 172 100" fill="none"/>
+                      <path id="sealArcBotR" d="M 28 100 A 72 72 0 0 0 172 100" fill="none"/>
+                    </defs>
+                    <text font-size="13" letter-spacing="2"><textPath href="#sealArcTopR" startOffset="50%" text-anchor="middle">REVIEW ENGINE</textPath></text>
+                    <text font-size="11" letter-spacing="1.5"><textPath href="#sealArcBotR" startOffset="50%" text-anchor="middle">CODE REVIEW BOARD</textPath></text>
+                  </svg>
+                  <span class="seal-disc" aria-hidden="true"></span>
+                  <span class="seal-core">
+                    <span class="seal-score">72</span>
+                    <span class="seal-denom">/ 100</span>
+                    <span class="seal-tag">OVERALL</span>
+                  </span>
+                </div>
+                <p class="report-seal-caption"><span data-i18n="index.report.sealCaption">加权总分</span> <b>72/100</b> <span data-i18n="index.report.sealRisk">· 风险 Medium</span></p>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 部署形态 ============ -->
+    <section class="sec" id="deploy">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.deploy">部署</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow">DEPLOY</p>
+            <h2 data-i18n="index.deploy.h2">一个二进制，四种落地方式。</h2>
+          </div>
+          <p class="sec-lead" data-reveal data-i18n="index.deploy.lead">安装、升级、跨架构部署，都由同一个静态二进制承载。</p>
+          <div class="cards-4">
+            <article class="deploy-card" data-reveal>
+              <code class="deploy-glyph">$ reng review</code>
+              <h3>CLI</h3>
+              <p data-i18n="index.deploy.c1.desc">本地评审、审计与自升级，无需常驻进程，脚本与 CI 里随手可用。</p>
+            </article>
+            <article class="deploy-card" data-reveal data-d="0.06">
+              <code class="deploy-glyph">$ reng serve</code>
+              <h3>Server</h3>
+              <p data-i18n="index.deploy.c2.desc">REST API + Web UI，团队集中查看评审历史、配置与升级。</p>
+            </article>
+            <article class="deploy-card" data-reveal data-d="0.12">
+              <code class="deploy-glyph">$ docker compose up -d</code>
+              <h3>Docker</h3>
+              <p data-i18n="index.deploy.c3.desc">跨 x86-64 / aarch64 的镜像开箱即用，一条命令拉起 Server 形态。</p>
+            </article>
+            <article class="deploy-card" data-reveal data-d="0.18">
+              <code class="deploy-glyph">$ brew install liewzheng/tap/review-engine</code>
+              <h3>Homebrew</h3>
+              <p data-i18n="index.deploy.c4.desc">随 Homebrew 生态管理安装与升级，同样自带 reng 短别名。</p>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CTA ============ -->
+    <section class="cta-band">
+      <div class="container" data-reveal>
+        <h2 data-i18n="index.cta.h2">下一场评审，现在就能跑。</h2>
+        <p data-i18n="index.cta.p">安装、配置一个 LLM、跑第一条命令——十分钟内看到第一份带分数的报告。</p>
+        <div class="hero-cta" style="justify-content:center">
+          <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速上手</span><span class="btn-arrow">→</span></a>
+          <a class="btn btn-ghost" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+            <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+            <span class="brand-alias">reng</span>
+          </a>
+          <p class="footer-tag">A virtual <span class="mono">CodeReview Board</span> for every pull request — multi-expert, scored, actionable。<span data-i18n="footer.tagline">把一支随时可用的 AI 评审团队，装进一个几十 MiB 常驻内存的二进制里。</span></p>
+          <p class="footer-license" data-i18n="footer.license">Apache-2.0 · 核心免费，个人与团队可用</p>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.site">站点</p>
+          <ul>
+            <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+            <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+            <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+            <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.project">项目</p>
+          <p><a class="github-url" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/Review-Engine</a></p>
+          <p data-i18n="footer.enterprise">Enterprise：SSO · 审计日志 · 自定义专家模板 · 专属支持，单独商业授权。</p>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 ReviewEngine</span>
+        <span data-i18n="footer.motto">用自己写的工具，审查自己写的代码。</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

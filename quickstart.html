@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>快速上手 · 安装与配置 — ReviewEngine</title>
+  <meta name="description" content="ReviewEngine 快速上手：install.sh / Homebrew / Docker 三种安装方式，LLM 配置（LLM_CONFIG 或 reng init），第一条评审命令，12 条命令表，以及 GitLab / GitHub / CI / REST API 集成入口。">
+  <meta name="color-scheme" content="dark">
+  <script>document.documentElement.classList.add('js')</script>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/i18n/zh-CN.js" defer></script>
+  <script src="assets/i18n/en.js" defer></script>
+  <script src="assets/i18n/zh-TW.js" defer></script>
+  <script src="assets/i18n/fr.js" defer></script>
+  <script src="assets/i18n/ja.js" defer></script>
+  <script src="assets/i18n/ko.js" defer></script>
+  <script src="assets/i18n/ru.js" defer></script>
+  <script src="assets/i18n.js" defer></script>
+  <script src="assets/site.js" defer></script>
+</head>
+<body data-page="quickstart">
+  <a class="skip-link" href="#main" data-i18n="skip.link">跳到正文</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+        <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+        <span class="brand-alias">reng</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-i18n="nav.toggle">菜单</button>
+      <nav class="site-nav" id="site-nav" aria-label="主导航" data-i18n-attr="aria-label:nav.aria">
+        <ul>
+          <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+          <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+          <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+          <li><a href="quickstart.html" aria-current="page" data-i18n="nav.quickstart">上手</a></li>
+          <li class="nav-gh"><a href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- ============ 页首 ============ -->
+    <section class="page-hero hero">
+      <div class="container">
+        <div class="hero-top">
+          <div class="hero-vlabel" aria-hidden="true"><span class="vlabel" data-i18n="vl.start">上手</span></div>
+          <div class="hero-head" data-reveal>
+            <p class="eyebrow" data-i18n="quickstart.hero.eyebrow">QUICKSTART · 安装 → 配 LLM → 评审</p>
+            <h1 class="hero-title"><span data-i18n="quickstart.hero.title.l1">十分钟，跑起</span><br><span data-i18n="quickstart.hero.title.l2">第一场评审。</span></h1>
+            <p class="hero-sub" data-i18n="quickstart.hero.sub">三种安装方式任选其一，配置一个 LLM，然后对本地分支发起第一场评审。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 安装 ============ -->
+    <section class="sec" id="install">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.install">安装</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow" data-i18n="quickstart.install.eyebrow">INSTALL · 三选一</p>
+            <h2 data-i18n="quickstart.install.h2">装一个静态二进制。</h2>
+          </div>
+
+          <div class="code" data-reveal>
+            <div class="code-label"><span data-i18n="quickstart.install.label1">bash · install.sh 一键安装</span></div>
+            <pre>curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash</pre>
+          </div>
+          <p class="sec-lead" style="margin-top:-.8rem" data-reveal><span data-i18n="quickstart.install.note.pre">自动检测平台、解析最新稳定版、校验 sha256，落位</span> <code class="mono">~/.local/bin</code> <span data-i18n="quickstart.install.note.mid">并创建</span> <code class="mono">reng</code> <span data-i18n="quickstart.install.note.post">符号链接。若该目录不在 PATH，请追加</span> <code class="mono">export PATH="$HOME/.local/bin:$PATH"</code><span data-i18n="quickstart.install.note.end">。</span></p>
+
+          <div class="code" data-reveal>
+            <div class="code-label"><span>bash · Homebrew tap</span></div>
+            <pre>brew install liewzheng/tap/review-engine</pre>
+          </div>
+
+          <div class="code" data-reveal>
+            <div class="code-label"><span data-i18n="quickstart.install.label3">bash · Docker 部署</span></div>
+            <pre>cp .env.example .env   <span class="cm" data-i18n="quickstart.install.cm1"># 按需填写 token</span>
+docker compose up -d    <span class="cm"># Web UI: http://localhost:18080</span></pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ LLM 配置 ============ -->
+    <section class="sec" id="llm">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.llm">模型</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow" data-i18n="quickstart.llm.eyebrow">LLM CONFIG · 任选其一</p>
+            <h2 data-i18n="quickstart.llm.h2">接一个 LLM 提供商。</h2>
+          </div>
+          <p class="sec-lead" data-reveal><span data-i18n="quickstart.llm.lead.a">支持 OpenAI、Anthropic、DeepSeek，以及任意 OpenAI 兼容端点。两种配置方式：环境变量</span> <code class="mono">LLM_CONFIG</code><span data-i18n="quickstart.llm.lead.b">，或</span> <code class="mono">reng init</code> <span data-i18n="quickstart.llm.lead.c">生成</span> <code class="mono">.code-audit-config.toml</code> <span data-i18n="quickstart.llm.lead.d">后编辑</span> <code class="mono">[[llm]]</code> <span data-i18n="quickstart.llm.lead.e">段。</span></p>
+
+          <div class="code" data-reveal>
+            <div class="code-label"><span data-i18n="quickstart.llm.label1">bash · LLM_CONFIG 环境变量（DeepSeek 示例）</span></div>
+            <pre>export LLM_CONFIG='[{"provider":"openai","model":"deepseek-chat","api_key":"sk-your-key","api_base":"https://api.deepseek.com/v1","max_tokens":4096,"temperature":0.3}]'</pre>
+          </div>
+
+          <div class="code" data-reveal>
+            <div class="code-label"><span data-i18n="quickstart.llm.label2">bash · 或生成项目配置</span></div>
+            <pre>reng init   <span class="cm" data-i18n="quickstart.llm.cm1"># 生成 .code-audit-config.toml，再编辑 [[llm]] 段</span></pre>
+          </div>
+
+          <div class="provider-chips" data-reveal>
+            <span class="provider-chip">OpenAI · GPT-4o</span>
+            <span class="provider-chip">Anthropic · Claude</span>
+            <span class="provider-chip">DeepSeek</span>
+            <span class="provider-chip" data-i18n="quickstart.llm.chip4">任意 OpenAI 兼容端点</span>
+          </div>
+
+          <div class="callout" data-reveal>
+            <strong data-i18n="quickstart.llm.callout.label">安全提示</strong><span data-i18n="quickstart.llm.callout.a">：请通过环境变量或密钥管理器注入</span> <code>api_key</code><span data-i18n="quickstart.llm.callout.b">，不要把真实密钥提交进版本库。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 第一条命令 ============ -->
+    <section class="sec" id="first-run">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.review">评审</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow">FIRST REVIEW</p>
+            <h2 data-i18n="quickstart.first.h2">跑第一条评审命令。</h2>
+          </div>
+
+          <div class="code" data-reveal>
+            <div class="code-label"><span data-i18n="quickstart.first.label1">bash · 评审当前分支相对 main 的改动</span></div>
+            <pre><span class="cm" data-i18n="quickstart.first.cm1"># 评审当前分支相对 main 的改动</span>
+reng review --local-path . --base main</pre>
+          </div>
+
+          <p class="sec-lead" data-reveal><span data-i18n="quickstart.first.lead.a">输出一份 Markdown 报告：加权总分、风险等级、每位专家的 finding。同一份二进制里，</span> <code class="mono">review</code> <span data-i18n="quickstart.first.lead.b">与</span> <code class="mono">audit</code> <span data-i18n="quickstart.first.lead.c">分工明确。</span></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 命令表 ============ -->
+    <section class="sec" id="commands">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.commands">命令</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow">COMMANDS</p>
+            <h2 data-i18n="quickstart.cmd.h2">小命令集，各司其职。</h2>
+          </div>
+          <div class="table-scroll" data-reveal>
+            <table class="cmd-table">
+              <caption class="sr-only" data-i18n="quickstart.cmd.caption">常用命令列表</caption>
+              <thead>
+                <tr><th scope="col" data-i18n="quickstart.cmd.th1">命令</th><th scope="col" data-i18n="quickstart.cmd.th2">用途</th></tr>
+              </thead>
+              <tbody>
+                <tr><td class="cmd">review</td><td data-i18n="quickstart.cmd.review">对 MR / PR / 本地 diff 跑一轮 CodeReview Board 评审</td></tr>
+                <tr><td class="cmd">audit</td><td data-i18n="quickstart.cmd.audit">整仓健康审计（repo-review 的别名），适合定期巡检</td></tr>
+                <tr><td class="cmd">describe</td><td data-i18n="quickstart.cmd.describe">由 diff 生成摘要或 MR/PR 描述</td></tr>
+                <tr><td class="cmd">improve</td><td data-i18n="quickstart.cmd.improve">针对 diff 给出具体的代码改进建议</td></tr>
+                <tr><td class="cmd">ask</td><td data-i18n="quickstart.cmd.ask">就 diff 提问</td></tr>
+                <tr><td class="cmd">update_changelog</td><td data-i18n="quickstart.cmd.update_changelog">依据近期提交生成或更新 changelog</td></tr>
+                <tr><td class="cmd">serve</td><td data-i18n="quickstart.cmd.serve">启动 REST API 与 webhook 服务</td></tr>
+                <tr><td class="cmd">upgrade</td><td data-i18n="quickstart.cmd.upgrade">自升级（--check / --yes / --rollback）</td></tr>
+                <tr><td class="cmd">validate</td><td data-i18n="quickstart.cmd.validate">校验 .code-audit-config.toml</td></tr>
+                <tr><td class="cmd">init</td><td data-i18n="quickstart.cmd.init">为新项目生成初始配置</td></tr>
+                <tr><td class="cmd">default</td><td data-i18n="quickstart.cmd.default">打印内置默认配置</td></tr>
+                <tr><td class="cmd">generate-token</td><td data-i18n="quickstart.cmd.generate-token">为 reng serve 生成随机 API token</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 集成 ============ -->
+    <section class="sec" id="integrate">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.integrate">集成</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow" data-i18n="quickstart.integrate.eyebrow">INTEGRATIONS · 多个入口</p>
+            <h2 data-i18n="quickstart.integrate.h2">嵌进现有的工作流。</h2>
+          </div>
+
+          <div class="integrations">
+            <div class="integration" data-reveal>
+              <span class="integration-name">GitLab MR</span>
+              <p class="integration-desc"><span data-i18n="quickstart.integrate.i1.desc.pre">评审 MR 并把报告回贴讨论区：</span> <code>reng review --mr-url https://gitlab.com/owner/repo/-/merge_requests/42</code><span data-i18n="quickstart.integrate.i1.desc.mid">；配置 webhook 后，MR 评论可直接触发</span> <code>/review</code><span data-i18n="quickstart.integrate.i1.desc.post">。</span></p>
+            </div>
+            <div class="integration" data-reveal data-d="0.05">
+              <span class="integration-name">GitHub PR</span>
+              <p class="integration-desc"><span data-i18n="quickstart.integrate.i2.desc.pre">评审 PR 并可选回写评论：</span> <code>reng review --mr-url https://github.com/owner/repo/pull/123</code><span data-i18n="quickstart.integrate.i2.desc.mid">；token 只需读权限即可拉取 diff，加</span> <code>--publish</code> <span data-i18n="quickstart.integrate.i2.desc.post">才写回讨论。</span></p>
+            </div>
+            <div class="integration" data-reveal data-d="0.1">
+              <span class="integration-name" data-i18n="quickstart.integrate.name.local">本地仓库</span>
+              <p class="integration-desc"><span data-i18n="quickstart.integrate.i3.desc.pre">评审工作区、暂存区或 commit 区间，无需远程：</span> <code>reng review --local-path . --staged</code> <span data-i18n="quickstart.integrate.i3.desc.mid">或</span> <code>--since HEAD~3 --until HEAD</code><span data-i18n="quickstart.integrate.i3.desc.post">。</span></p>
+            </div>
+            <div class="integration" data-reveal data-d="0.15">
+              <span class="integration-name">CI / CD</span>
+              <p class="integration-desc"><span data-i18n="quickstart.integrate.i4.desc.pre">作为 GitLab CI、GitHub Actions 或任意流水线的一步运行，输出 Markdown 或 JSON（</span> <code>--format markdown</code><span data-i18n="quickstart.integrate.i4.desc.post">）。</span></p>
+            </div>
+            <div class="integration" data-reveal data-d="0.2">
+              <span class="integration-name">REST API</span>
+              <p class="integration-desc"><code>reng serve</code> <span data-i18n="quickstart.integrate.i5.desc.pre">启动服务后，</span> <code>POST /api/v1/reviews</code> <span data-i18n="quickstart.integrate.i5.desc.mid">触发评审，Web UI 在</span> <code>http://localhost:18080</code><span data-i18n="quickstart.integrate.i5.desc.post">。</span></p>
+            </div>
+          </div>
+
+          <div class="callout" data-reveal>
+            <strong>API token</strong><span data-i18n="quickstart.token.callout.a">：用</span> <code>reng generate-token</code> <span data-i18n="quickstart.token.callout.b">生成随机 token；请求带</span> <code>Authorization: Bearer &lt;token&gt;</code> <span data-i18n="quickstart.token.callout.c">或</span> <code>X-API-Key: &lt;token&gt;</code><span data-i18n="quickstart.token.callout.d">。鉴权使用恒定时间比较；绑定非回环地址时强制要求 token，否则拒绝启动。前端首次访问会提示输入 token（保存于浏览器 localStorage，key 为</span> <code>review_engine_api_token</code><span data-i18n="quickstart.token.callout.e">），之后每次</span> <code>/api/v1/*</code> <span data-i18n="quickstart.token.callout.f">请求自动附带。</span>
+          </div>
+
+          <div class="callout" data-reveal>
+            <strong data-i18n="quickstart.security.callout.label">安全提示</strong><span data-i18n="quickstart.security.callout.a">：优先用</span> <code>GITLAB_TOKEN</code> / <code>GITHUB_TOKEN</code> <span data-i18n="quickstart.security.callout.b">环境变量传 token，避免从命令行参数泄漏进 shell 历史或进程列表。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CTA ============ -->
+    <section class="cta-band">
+      <div class="container" data-reveal>
+        <h2 data-i18n="quickstart.cta.h2">装好了？先跑一场看看。</h2>
+        <p data-i18n="quickstart.cta.p">评审自己的仓库，几分钟就能看到 11 位专家的第一份报告。</p>
+        <div class="hero-cta" style="justify-content:center">
+          <a class="btn btn-primary" href="board.html"><span data-i18n="quickstart.cta.btn2">认识评审席</span><span class="btn-arrow">→</span></a>
+          <a class="btn btn-ghost" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+            <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+            <span class="brand-alias">reng</span>
+          </a>
+          <p class="footer-tag">A virtual <span class="mono">CodeReview Board</span> for every pull request — multi-expert, scored, actionable。<span data-i18n="footer.tagline">把一支随时可用的 AI 评审团队，装进一个几十 MiB 常驻内存的二进制里。</span></p>
+          <p class="footer-license" data-i18n="footer.license">Apache-2.0 · 核心免费，个人与团队可用</p>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.site">站点</p>
+          <ul>
+            <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+            <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+            <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+            <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.project">项目</p>
+          <p><a class="github-url" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/Review-Engine</a></p>
+          <p data-i18n="footer.enterprise">Enterprise：SSO · 审计日志 · 自定义专家模板 · 专属支持，单独商业授权。</p>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 ReviewEngine</span>
+        <span data-i18n="footer.motto">用自己写的工具，审查自己写的代码。</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

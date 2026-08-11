@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>评审席 · 11 位专家 — ReviewEngine</title>
+  <meta name="description" content="ReviewEngine 的默认评审席由 11 位 AI 专家组成：Lead Reviewer 先注入上下文，其余专家并行评审同一份 diff。每位专家都有独立的 role、focus、principles 与 weight。名单来自 docs/code-audit-default.toml。">
+  <meta name="color-scheme" content="dark">
+  <script>document.documentElement.classList.add('js')</script>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/i18n/zh-CN.js" defer></script>
+  <script src="assets/i18n/en.js" defer></script>
+  <script src="assets/i18n/zh-TW.js" defer></script>
+  <script src="assets/i18n/fr.js" defer></script>
+  <script src="assets/i18n/ja.js" defer></script>
+  <script src="assets/i18n/ko.js" defer></script>
+  <script src="assets/i18n/ru.js" defer></script>
+  <script src="assets/i18n.js" defer></script>
+  <script src="assets/site.js" defer></script>
+</head>
+<body data-page="board">
+  <a class="skip-link" href="#main" data-i18n="skip.link">跳到正文</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+        <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+        <span class="brand-alias">reng</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-i18n="nav.toggle">菜单</button>
+      <nav class="site-nav" id="site-nav" aria-label="主导航" data-i18n-attr="aria-label:nav.aria">
+        <ul>
+          <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+          <li><a href="board.html" aria-current="page" data-i18n="nav.board">评审席</a></li>
+          <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+          <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+          <li class="nav-gh"><a href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <!-- ============ 页首 ============ -->
+    <section class="page-hero hero">
+      <div class="container">
+        <div class="hero-top">
+          <div class="hero-vlabel" aria-hidden="true"><span class="vlabel" data-i18n="vl.board">评审席</span></div>
+          <div class="hero-head" data-reveal>
+            <p class="eyebrow">REVIEW BOARD · 11 EXPERTS</p>
+            <h1 class="hero-title"><span data-i18n="board.hero.title.l1">评审席，</span><br><span data-i18n="board.hero.title.l2">每次评审都在场。</span></h1>
+            <p class="hero-sub"><span data-i18n="board.hero.sub.pre">默认团队由 11 位 AI 专家组成，名单来自</span> <code class="mono">docs/code-audit-default.toml</code><span data-i18n="board.hero.sub.post">。Lead 先注入分支摘要与项目概览，其余专家并行评审同一份 diff，各看各的关注面，最后按权重汇总落印。</span></p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 机制 ============ -->
+    <section class="sec" id="how">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.mech">机制</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow">HOW IT WORKS</p>
+            <h2 data-i18n="board.mech.h2">先对齐，再并行，最后汇总。</h2>
+          </div>
+          <div class="mech-list">
+            <div class="mech-item" data-reveal>
+              <span class="mech-k">01 · CONTEXT</span>
+              <h3 data-i18n="board.mech.m1.title">Lead 注入上下文</h3>
+              <p><span data-i18n="board.mech.m1.desc.pre">Lead Reviewer 结合 diff 与仓库元数据（文件树、README/清单摘录、近期 git 历史），产出</span> <span class="mono">Branch summary</span> <span data-i18n="board.mech.m1.desc.mid">与</span> <span class="mono">Project overview</span><span data-i18n="board.mech.m1.desc.post">，注入每位专家的提示词。</span></p>
+            </div>
+            <div class="mech-item" data-reveal data-d="0.08">
+              <span class="mech-k">02 · PARALLEL</span>
+              <h3 data-i18n="board.mech.m2.title">11 位专家并行</h3>
+              <p data-i18n="board.mech.m2.desc">各按 role / focus / principles 独立评审，互不等待。大 PR 会压缩分块，并按内容模式把相关文件优先路由给 Security、Performance 等专家。</p>
+            </div>
+            <div class="mech-item" data-reveal data-d="0.16">
+              <span class="mech-k">03 · CONSOLIDATE</span>
+              <h3 data-i18n="board.mech.m3.title">加权汇总落印</h3>
+              <p data-i18n="board.mech.m3.desc">按 weight 加权得到总分与风险等级；证据不符或低置信的 finding 被过滤或降级，重复项被合并，最终由 Lead 给出整体判断。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 专家阵容 ============ -->
+    <section class="sec" id="experts">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.lineup">阵容</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow" data-i18n="board.lineup.eyebrow">THE LINEUP · 出厂默认团队</p>
+            <h2 data-i18n="board.lineup.h2">11 位专家，权重合计 100。</h2>
+          </div>
+          <p class="sec-lead" data-reveal data-i18n="board.lineup.lead">角色、权重、关注面与原则全部来自默认配置。Lead 权重最高，代表整体判断；Security 次之——安全是硬要求；Docs 权重最低，因为文档变更不常发生。</p>
+
+          <div class="expert-grid">
+            <article class="expert-card" data-reveal>
+              <header class="expert-head">
+                <h3 class="expert-role">Lead Reviewer</h3>
+                <span class="expert-title">Staff Engineer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:20%"></span></span>
+                <span class="expert-weight-num">weight 20</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.lead.focus">架构 · 代码质量 · 可维护性 · 团队对齐</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.lead.p1">只批准我自己愿意合并的改动</li>
+                <li data-i18n="board.ex.lead.p2">每条 critical / high 必须有可落地的行动</li>
+                <li data-i18n="board.ex.lead.p3">用工程判断裁决评审分歧</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.05">
+              <header class="expert-head">
+                <h3 class="expert-role">Security Lead</h3>
+                <span class="expert-title">Staff Security Engineer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:15%"></span></span>
+                <span class="expert-weight-num">weight 15</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.security.focus">注入 · 授权 · 密钥 · 输入校验 · 密码学</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.security.p1">只报能讲清攻击场景的问题</li>
+                <li data-i18n="board.ex.security.p2">区分「确定有漏洞」与「值得验证」</li>
+                <li data-i18n="board.ex.security.p3">援引 OWASP / CWE</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.1">
+              <header class="expert-head">
+                <h3 class="expert-role">Performance Lead</h3>
+                <span class="expert-title">Performance Engineer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:10%"></span></span>
+                <span class="expert-weight-num">weight 10</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.performance.focus">算法 · 内存 · 并发 · IO · 缓存</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.performance.p1">先测量，再建议优化</li>
+                <li data-i18n="board.ex.performance.p2">聚焦热路径与可观察瓶颈</li>
+                <li data-i18n="board.ex.performance.p3">区分算法级优化与微优化</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.15">
+              <header class="expert-head">
+                <h3 class="expert-role">Quality Lead</h3>
+                <span class="expert-title">QA Engineer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:10%"></span></span>
+                <span class="expert-weight-num">weight 10</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.quality.focus">测试覆盖 · 边界条件 · 回归 · 测试设计</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.quality.p1">行为变更必须有测试覆盖</li>
+                <li data-i18n="board.ex.quality.p2">边界条件不是可选项</li>
+                <li data-i18n="board.ex.quality.p3">确定性测试优于脆弱的 mock</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.2">
+              <header class="expert-head">
+                <h3 class="expert-role">Reuse Lead</h3>
+                <span class="expert-title">Staff Software Engineer, Refactoring</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:12%"></span></span>
+                <span class="expert-weight-num">weight 12</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.reuse.focus">重复代码 · 重构 · 抽象 · God Class</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.reuse.p1">重复 2 次以上就该提取</li>
+                <li data-i18n="board.ex.reuse.p2">超 50 行或职责过多的函数应拆分</li>
+                <li data-i18n="board.ex.reuse.p3">多处硬编码值应常量化或入配置</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.25">
+              <header class="expert-head">
+                <h3 class="expert-role">Docs Lead</h3>
+                <span class="expert-title">Staff Technical Writer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:5%"></span></span>
+                <span class="expert-weight-num">weight 5</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.docs.focus">文档 · changelog · README · PR 描述 · 一致性</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.docs.p1">行为变更必须同步文档</li>
+                <li data-i18n="board.ex.docs.p2">CHANGELOG 必须可追溯用户可见变更</li>
+                <li data-i18n="board.ex.docs.p3">弃用与破坏性变更必须显式说明</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.3">
+              <header class="expert-head">
+                <h3 class="expert-role">User Interface Expert</h3>
+                <span class="expert-title">Senior Product Designer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:8%"></span></span>
+                <span class="expert-weight-num">weight 8</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.ux.focus">人因 · 一致性 · 命名 · 错误信息 · API 易用性 · 无障碍</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.ux.p1">每个界面都必须说清当前状态</li>
+                <li data-i18n="board.ex.ux.p2">错误信息要可读、可行动</li>
+                <li data-i18n="board.ex.ux.p3">不一致就是 bug</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.35">
+              <header class="expert-head">
+                <h3 class="expert-role">Database Expert</h3>
+                <span class="expert-title">Database Engineer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:5%"></span></span>
+                <span class="expert-weight-num">weight 5</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.database.focus">Schema 设计 · 查询性能 · 迁移安全 · N+1 · 数据完整性</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.database.p1">迁移必须向后兼容</li>
+                <li data-i18n="board.ex.database.p2">每条查询都应有理由，而非顺手</li>
+                <li data-i18n="board.ex.database.p3">索引选择要有依据，而非猜测</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.4">
+              <header class="expert-head">
+                <h3 class="expert-role">DevOps Expert</h3>
+                <span class="expert-title">DevOps Engineer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:5%"></span></span>
+                <span class="expert-weight-num">weight 5</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.devops.focus">容器化 · CI/CD · 基础设施 · 密钥管理 · 部署</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.devops.p1">基础设施应声明式、入版本库</li>
+                <li data-i18n="board.ex.devops.p2">密钥绝不硬编码</li>
+                <li data-i18n="board.ex.devops.p3">CI/CD 应快速失败、信息清晰</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.45">
+              <header class="expert-head">
+                <h3 class="expert-role">API Design Expert</h3>
+                <span class="expert-title">API Designer</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:5%"></span></span>
+                <span class="expert-weight-num">weight 5</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.api.focus">API 设计 · 向后兼容 · OpenAPI · 契约 · 命名</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.api.p1">契约必须显式且版本化</li>
+                <li data-i18n="board.ex.api.p2">破坏性变更必须有迁移路径</li>
+                <li data-i18n="board.ex.api.p3">遵循仓库既有约定</li>
+              </ul>
+            </article>
+
+            <article class="expert-card" data-reveal data-d="0.5">
+              <header class="expert-head">
+                <h3 class="expert-role">Dependency Expert</h3>
+                <span class="expert-title">Dependency Manager</span>
+              </header>
+              <div class="expert-weight">
+                <span class="expert-weight-track"><span class="expert-weight-fill" style="--w:5%"></span></span>
+                <span class="expert-weight-num">weight 5</span>
+              </div>
+              <p class="expert-focus" data-i18n="board.ex.dependency.focus">供应链 · 许可证合规 · CVE 扫描 · 版本锁定 · 传递依赖</p>
+              <ul class="expert-principles">
+                <li data-i18n="board.ex.dependency.p1">每个依赖都应有理由</li>
+                <li data-i18n="board.ex.dependency.p2">锁版本比区间更安全</li>
+                <li data-i18n="board.ex.dependency.p3">依赖变更需更高审视</li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ 可配置 ============ -->
+    <section class="sec" id="configurable">
+      <div class="container sec-grid">
+        <div class="sec-label" aria-hidden="true"><span class="vlabel" data-i18n="vl.config">可配置</span></div>
+        <div class="sec-body">
+          <div class="sec-head" data-reveal>
+            <p class="eyebrow">CONFIGURABLE</p>
+            <h2 data-i18n="board.config.h2">专家是配置，不是硬编码。</h2>
+          </div>
+          <p class="sec-lead" data-reveal><span data-i18n="board.config.lead.pre">这份名单只是出厂默认团队（</span><code class="mono">docs/code-audit-default.toml</code><span data-i18n="board.config.lead.mid">）。在项目根目录的</span> <code class="mono">.code-audit-config.toml</code> <span data-i18n="board.config.lead.post">里，可以启用、停用、增删或改写任何一位专家——name / role / title / weight / principles / focus / model 全部可配置；所有启用专家的 weight 之和须为 100。</span></p>
+          <div class="callout" data-reveal>
+            <strong data-i18n="board.config.callout.label">相关命令</strong>：<code>reng default</code> <span data-i18n="board.config.callout.d1">打印内置默认配置</span> · <code>reng init</code> <span data-i18n="board.config.callout.d2">为新项目生成配置</span> · <code>reng validate</code> <span data-i18n="board.config.callout.d3">校验配置是否合法。</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ CTA ============ -->
+    <section class="cta-band">
+      <div class="container" data-reveal>
+        <h2 data-i18n="board.cta.h2">看看这份阵容怎么跑起来。</h2>
+        <p data-i18n="board.cta.p">同一份 diff，11 个视角。安装后直接对本地分支或 MR 发起一场评审。</p>
+        <div class="hero-cta" style="justify-content:center">
+          <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速上手</span><span class="btn-arrow">→</span></a>
+          <a class="btn btn-ghost" href="features.html"><span data-i18n="board.cta.btn2">特性与实测</span><span class="btn-arrow">→</span></a>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+            <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+            <span class="brand-alias">reng</span>
+          </a>
+          <p class="footer-tag">A virtual <span class="mono">CodeReview Board</span> for every pull request — multi-expert, scored, actionable。<span data-i18n="footer.tagline">把一支随时可用的 AI 评审团队，装进一个几十 MiB 常驻内存的二进制里。</span></p>
+          <p class="footer-license" data-i18n="footer.license">Apache-2.0 · 核心免费，个人与团队可用</p>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.site">站点</p>
+          <ul>
+            <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+            <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+            <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+            <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.project">项目</p>
+          <p><a class="github-url" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/Review-Engine</a></p>
+          <p data-i18n="footer.enterprise">Enterprise：SSO · 审计日志 · 自定义专家模板 · 专属支持，单独商业授权。</p>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 ReviewEngine</span>
+        <span data-i18n="footer.motto">用自己写的工具，审查自己写的代码。</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

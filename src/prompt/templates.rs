@@ -10,6 +10,12 @@ macro_rules! context_boundary_block {
         r###"CONTEXT BOUNDARY:
 - You can see the diff below and, when provided, the full contents of the files changed by this MR. You can NOT see files that were not provided to you: imported helper files, the implementation of wrapper/helper functions, backend route definitions, or middleware.
 - Claims of the form "X is missing" (missing header, missing base path, missing validation, missing error handling) MUST be provable directly from the diff or the provided file contents. If you cannot prove a claim from them, either do NOT report it, or report it with severity `note` and confidence 4 or lower, and state the assumption it relies on explicitly in the summary, starting with "Assumption:".
+  EXCEPTION — missing check inside a function modified by this diff: if the missing validation / error handling lives inside a FUNCTION or CODE PATH that THIS diff modified (its body was changed, or a new call site was added), you MAY report it as a regular finding with severity `medium` or lower, IF AND ONLY IF all of the following hold:
+    (1) that function or call site appears in the diff with at least one modified or added line;
+    (2) you anchor the finding to one of those modified/added lines — use it as the finding's `line` and quote it as `evidence`;
+    (3) the missing check would have guarded behavior introduced or changed by this diff, not pre-existing behavior the diff did not touch.
+  The missing check itself does NOT need to be on a changed line; a modified line of its enclosing function is sufficient proof that the change is in scope.
+  中文说明（仅解释意图，不构成额外规则）: 被本次 diff 修改过的函数或新增调用点内缺失的校验与错误处理（例如在改动后的函数内未检查返回值、新增调用点未处理错误）属于本次改动的责任范围，应允许以 medium 或更低严重度报告；diff 之外的既有代码缺失仍按上一条压制，不得套用本例外。
 - When the reviewed code calls a wrapper or helper function (e.g. request(), apiClient, a wrapper, middleware) whose implementation was not provided, assume cross-cutting behavior (headers, base URL, serialization, error conversion) may already be handled by that layer unless the diff or provided file contents contain evidence to the contrary.
 - Do NOT make factual assertions about files, routes, or function implementations that do not appear in the diff or the provided file contents."###
     };
@@ -72,6 +78,7 @@ SCOPE RULES:
 - Do NOT report issues in pre-existing code shown only for context.
 - If you cannot determine whether a line is new or existing, skip the finding.
 - Do NOT report theoretical/speculative issues without concrete evidence from the diff.
+- EXCEPTION — missing check inside a modified function: per CONTEXT BOUNDARY, a finding about a missing validation / error handling inside a function modified by this diff may be anchored to a modified/added line of that function (that line becomes the finding's `line` and `evidence`); the missing check itself need not be a changed line. This exception never applies to pre-existing code the diff did not touch.
 
 "###,
     context_boundary_block!(),
@@ -548,5 +555,85 @@ mod tests {
     #[test]
     fn test_code_quality_template_requests_confidence() {
         assert!(CODE_QUALITY_SYSTEM_TEMPLATE.contains("confidence: 0-10"));
+    }
+
+    // ─── P0: missing-check exception inside modified functions ─────
+
+    #[test]
+    fn test_missing_check_exception_clause_present() {
+        // The "X is missing" constraint must carry the exception for missing
+        // checks inside functions modified by this diff, so canary-1-style
+        // findings (e.g. DQBUF result not checked inside a changed function)
+        // are reportable instead of being suppressed.
+        let block = CONTEXT_BOUNDARY_BLOCK;
+        assert!(block.contains("EXCEPTION"), "exception marker must be present");
+        assert!(
+            block.contains("missing check inside a function modified by this diff"),
+            "exception must name the modified-function scope"
+        );
+        assert!(
+            block.contains("missing validation"),
+            "exception must cover missing validation"
+        );
+        assert!(
+            block.contains("missing error handling"),
+            "exception must cover missing error handling"
+        );
+        assert!(
+            block.contains("severity `medium` or lower"),
+            "exception must cap severity at medium"
+        );
+        assert!(
+            block.contains("`evidence`"),
+            "exception must require anchoring to a modified line as evidence"
+        );
+        // The Chinese intent annotation is present.
+        assert!(block.contains("被本次 diff 修改过的函数"));
+    }
+
+    #[test]
+    fn test_scope_rules_exception_cross_reference() {
+        // The SCOPE RULES anchor rule must not contradict the CONTEXT BOUNDARY
+        // exception: a missing-check finding inside a modified function anchors
+        // to a modified/added line as its `line`/`evidence`.
+        let tpl = REVIEW_SYSTEM_TEMPLATE;
+        assert!(tpl.contains("SCOPE RULES"));
+        assert!(
+            tpl.contains("missing check inside a modified function"),
+            "SCOPE RULES must carry the cross-reference"
+        );
+        assert!(
+            tpl.contains("CONTEXT BOUNDARY"),
+            "SCOPE RULES must point at CONTEXT BOUNDARY"
+        );
+        assert!(
+            tpl.contains("pre-existing code the diff did not touch"),
+            "the diff-external suppression must be preserved"
+        );
+    }
+
+    #[test]
+    fn test_review_prompt_renders_exception_clause() {
+        // The RENDERED system prompt (what the LLM actually sees) must carry
+        // the exception — not just the source const.
+        use minijinja::Environment;
+        let mut env = Environment::new();
+        env.add_template("review_system", REVIEW_SYSTEM_TEMPLATE).unwrap();
+        let rendered = env
+            .get_template("review_system")
+            .unwrap()
+            .render(&serde_json::json!({
+                "perspective": "security expert",
+                "language": "c",
+                "max_findings": 20,
+            }))
+            .unwrap();
+        assert!(
+            rendered.contains("missing check inside a function modified by this diff"),
+            "rendered prompt must carry the exception"
+        );
+        assert!(rendered.contains("missing validation"));
+        assert!(rendered.contains("severity `medium` or lower"));
+        assert!(rendered.contains("SCOPE RULES"));
     }
 }

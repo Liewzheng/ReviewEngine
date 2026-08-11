@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.11] - 2026-08-11
+
+### Fixed
+- **Zero-finding reviews are flagged unverified instead of a clean bill of health (user-reported)**: the user's C project produced zero findings on three consecutive runs, each reported as a clean/healthy result and hiding a possible systemic miss. Now, when every expert reports zero findings, the assessment is marked `unverified` (`src/scoring/review.rs`) and the report's risk band is replaced with an explicit "unverified（全零发现 / zero findings）" marker (`src/team/lead_consolidator.rs`, `src/team/orchestrator.rs`, `src/output/team_renderer.rs`) instead of a perfect score — an empty result reads as "needs investigation" rather than "code is problem-free".
+- **`--verbose` dumps raw LLM input/output for auditability**: `--verbose` now persists the raw LLM request/response for debugging zero-finding or any other review — to `<output>.raw/` when an explicit `--output` file is given, otherwise to `<output_dir>/review-raw/`; an unparseable LLM response is recorded as a `parse_error` ("treated as no findings") so a silent zero-finding run can never be mistaken for a clean review. (`src/cli/mod.rs`, `src/cli/handlers.rs`, `src/output/parser.rs`, `src/server/mod.rs`)
+- **Findings outside changed hunks are kept (downgraded) instead of dropped**: a finding whose file is in the diff but whose line falls outside every changed hunk (e.g. the LLM flagged the enclosing function, or the hunk is a pure deletion) is now retained with a bilingual note "line outside diff hunk — 该行不在本次变更的 hunk 范围内，保留供参考" instead of being silently discarded. (`src/output/parser.rs`, `src/models/finding.rs`)
+
 ## [0.9.10] - 2026-08-10
 
 ### Added

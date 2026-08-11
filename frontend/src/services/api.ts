@@ -2,6 +2,42 @@ const BASE_URL = '/api/v1';
 const LS_TOKEN_KEY = 'review_engine_api_token';
 
 /**
+ * Error thrown by {@link request} for non-2xx responses. Carries the numeric
+ * HTTP status plus, when the backend provides one, the machine-readable
+ * `code` parsed from the JSON error body (`{"code": "..."}`) — e.g.
+ * `auth_required`, `bootstrap_key_required`, or `unauthorized`.
+ */
+export type ApiError = Error & {
+  status?: number;
+  code?: string;
+};
+
+type AuthSignalHandler = (code: string) => void;
+
+const authSignalHandlers = new Set<AuthSignalHandler>();
+
+/**
+ * Register a handler for auth-related 401 signals parsed from JSON error
+ * bodies. Dispatched codes:
+ * - `auth_required` — no token configured server-side; the app must show the
+ *   first-run bootstrap screen.
+ * - `unauthorized` — a token is configured but the request did not carry a
+ *   valid one; the app must prompt for the existing token.
+ * - `bootstrap_key_required` — first token on a non-loopback bind needs the
+ *   one-time bootstrap key (handled inline by the bootstrap screen).
+ *
+ * A single consumer (App.vue) drives the matching UI; services stay decoupled
+ * from Vue by emitting here instead of importing components.
+ */
+export function onAuthSignal(handler: AuthSignalHandler): void {
+  authSignalHandlers.add(handler);
+}
+
+function dispatchAuthSignal(code: string): void {
+  authSignalHandlers.forEach((handler) => handler(code));
+}
+
+/**
  * Read the current API token from browser localStorage.
  *
  * Token policy:
@@ -61,10 +97,27 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
 
   if (!resp.ok) {
     const text = await resp.text().catch(() => '');
-    const err = new Error(`HTTP ${resp.status}: ${resp.statusText}${text ? ' — ' + text : ''}`) as Error & { status?: number };
+    // Parse the machine-readable `code` from JSON error bodies so callers can
+    // branch on it (e.g. `auth_required`) without parsing the message text.
+    let code: string | undefined;
+    if (text) {
+      try {
+        const parsed = JSON.parse(text) as { code?: unknown };
+        if (typeof parsed.code === 'string') code = parsed.code;
+      } catch {
+        // Non-JSON body — keep the message-text fallback below.
+      }
+    }
+    const err = new Error(`HTTP ${resp.status}: ${resp.statusText}${text ? ' — ' + text : ''}`) as ApiError;
     // Attach the numeric status so callers can branch on 4xx/5xx instead of
     // parsing the message text (e.g. rerun's 404/409/422 handling).
     err.status = resp.status;
+    err.code = code;
+    // Surface auth signals (bootstrap needed / invalid token) so the app can
+    // switch to the right screen instead of only showing an error toast.
+    if (resp.status === 401 && code) {
+      dispatchAuthSignal(code);
+    }
     throw err;
   }
 

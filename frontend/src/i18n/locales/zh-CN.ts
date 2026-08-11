@@ -68,11 +68,33 @@ export default {
   },
   token: {
     title: '需要 API 令牌',
-    hintIntro: '请输入',
-    hintInstance:
-      '（为此 ReviewEngine 实例配置的 API 令牌）。该令牌存储在浏览器 localStorage 的',
-    hintRequest: '中，并在 API 请求中以 Bearer 令牌形式发送。',
+    unlockHint: '此实例需要 API 令牌。请输入您配置的令牌以继续。',
     placeholder: '粘贴您的 API 令牌',
+    tokenRequiredError: '请输入 API 令牌。',
+    invalidToken: '服务器拒绝了该令牌。请检查后重试。',
+    rotateTitle: '轮换 API 令牌',
+    rotatePlaceholder: '粘贴新令牌（留空则保持当前令牌不变）',
+    rotateHint: '新令牌将替换当前令牌，并立即生效。',
+    rotateSave: '轮换令牌',
+    rotateSuccess: 'API 令牌已更新。',
+    rotateFailed: '更新 API 令牌失败。',
+  },
+  bootstrap: {
+    title: '欢迎使用 Review Engine',
+    intro:
+      '此实例尚未配置 API 令牌。请创建一个以保护 API——令牌会保存到服务器并立即生效。',
+    tokenLabel: 'API 令牌',
+    tokenPlaceholder: '创建新的 API 令牌',
+    tokenRequiredError: '请输入 API 令牌。',
+    keyLabel: '引导密钥',
+    keyPlaceholder: '一次性引导密钥',
+    keyHint:
+      '通过 REVIEW_BOOTSTRAP_KEY 或 --bootstrap-key 设置，并会打印在启动日志中。',
+    keyRequiredError: '请输入引导密钥。',
+    keyInvalidError: '引导密钥无效或缺失。请查看启动日志。',
+    save: '设置令牌',
+    saving: '正在设置…',
+    saveError: '无法保存令牌，请重试。',
   },
   dashboard: {
     title: '仪表盘',

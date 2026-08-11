@@ -13,7 +13,75 @@ This guide walks you through deploying **review-engine** as a Docker container f
 
 ---
 
-## 🚀 Quick Start (5 minutes)
+## 🚀 快速部署(无需 Clone,pull 镜像)——推荐
+
+不需要 `git clone` 整个仓库:只需 **一个镜像 + 一份独立 compose 文件** 即可部署。
+镜像内含零编译二进制、前端 dist、首次同步与容器内自更新(UI 点 Upgrade 即可升级)。
+
+### 1. 拉取镜像
+
+```bash
+docker pull ghcr.io/liewzheng/review-engine:latest
+```
+
+> 镜像为多架构(amd64/arm64),由发版流水线自动推送 GHCR(ghcr.io/liewzheng/review-engine)。
+> 要锁版本用具体 tag(如 `:v0.9.9`);`:latest` 跟随最新发版。
+
+### 2. 准备独立 compose 文件
+
+`deploy/standalone-compose.yml` 是自包含的单文件(不依赖仓库其他文件),把它放到自己的部署目录:
+
+```bash
+mkdir -p ~/review-engine && cd ~/review-engine
+# 把 deploy/standalone-compose.yml 复制/下载到当前目录(可命名为 docker-compose.yml)
+```
+
+### 3. (可选)配置认证方式
+
+镜像默认走 **bootstrap 首次引导**:容器绑定 0.0.0.0(非 loopback),
+若不在环境里设 `REVIEW_API_TOKEN`,**必须**给一次性 `REVIEW_BOOTSTRAP_KEY`,否则服务拒绝启动:
+
+```bash
+echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
+```
+
+> 也可以直接在 .env 设 `REVIEW_API_TOKEN=xxxx`(env 注入,兼容旧版,优先于 UI 设置)。
+> 两种都不设 → 服务启动失败并提示(见容器日志),补上即可。
+
+### 4. 启动并验证
+
+```bash
+docker compose up -d
+docker compose ps                  # 等待 STATUS 变 (healthy)
+curl http://localhost:18080/health # 期望 {"status":"ok"}
+```
+
+所有卷目录(`config/ reports/ bin/ frontend-dist/ auth/`)自动相对当前目录创建,配置与代码分离。
+
+### 5. 首次 UI 引导
+
+打开 `http://<宿主IP>:18080`:
+
+- 首次进入按提示设置 **API token**(若用了 bootstrap key,页面会要求输入它作为一次性凭证);
+- 在 **Configuration** 页填写 GitLab EE 地址/token、webhook、LLM 配置(也可用环境变量注入,见下);
+- token 持久化到 `./auth/auth.toml`(**SHA-256 摘要,非明文**),设置完成后可从 .env 删掉 `REVIEW_BOOTSTRAP_KEY`。
+
+> **Linux NAS 提示**:bind 卷属主继承宿主,若容器写卷失败(如 "Permission denied"),
+> 先 `mkdir -p config reports bin frontend-dist auth && chown -R <容器UID> *`
+> (UID 以 `docker exec <容器名> id review-engine` 为准,典型 999)。
+
+### 6. 日常运维
+
+- **升级**:UI 右上角 Upgrade(容器内自更新——自动替换 `./bin` 与 `./frontend-dist` 卷并重启,无需重新 pull/重建);
+- **HTTPS**:取消 standalone-compose.yml 中 `443:8443` 端口与 `./tls` 卷注释,放好 `./tls/cert.pem`、`./tls/key.pem`,设 `REVIEW_TLS_CERT`/`REVIEW_TLS_KEY`;
+- **可选 env 注入**(也可全部在 UI Configuration 页填):`REVIEW_API_TOKEN`、`GITLAB_URL`、`GITLAB_TOKEN`、`GITLAB_WEBHOOK_SECRET`、`GITLAB_WEBHOOK_SIGNING_SECRET`、`LLM_CONFIG`。
+
+---
+
+## 🔧 源码构建部署(需要 Clone,高级/可选)
+
+> 以下为从源码构建镜像的方式(需要 `git clone` 整个仓库);不需要 clone 的部署
+> 见上方"🚀 快速部署(无需 Clone)"章节。两套部署互不冲突(镜像名/卷路径不同)。
 
 ### 1. Clone and Configure
 

@@ -263,6 +263,15 @@ pub fn render_team_report(
     render_team_report_with_scoring(team_name, reports, metrics, errors, None)
 }
 
+/// Render an inclusive line range as `L` (single line) or `L-H`.
+fn range_label(range: (u32, u32)) -> String {
+    if range.0 == range.1 {
+        format!("{}", range.0)
+    } else {
+        format!("{}-{}", range.0, range.1)
+    }
+}
+
 /// Render the lead consolidation summary as a Markdown section.
 ///
 /// Uses the same Overall Assessment / TL;DR formats as the team report.
@@ -277,11 +286,15 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
     let assessment = &consolidated.assessment;
     let mut out = String::from("## Lead Summary\n\n");
 
-    // Zero findings across every expert: never present a perfect score as
-    // "healthy". The risk band is replaced by an explicit "unverified" marker
-    // and a bilingual warning, so an empty result cannot read as a clean bill.
+    // Zero findings across every expert, or demonstrably insufficient hunk
+    // coverage: never present the result as "healthy". The risk band is
+    // replaced by an explicit "unverified" marker and a bilingual warning.
     let risk_label = if assessment.unverified {
-        "unverified（全零发现 / zero findings）".to_string()
+        if assessment.coverage_insufficient {
+            "unverified（审查覆盖不足 / insufficient coverage）".to_string()
+        } else {
+            "unverified（全零发现 / zero findings）".to_string()
+        }
     } else {
         format!("{}", assessment.risk_level)
     };
@@ -290,11 +303,19 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
         assessment.score, risk_label,
     ));
     if assessment.unverified {
-        out.push_str(
-            "> ⚠️ **Unverified result**: no expert reported any issue — a zero-finding \
-             outcome may indicate low coverage or a systemic miss, not a clean codebase. \
-             / 全零发现，结果未验证，可能为覆盖率不足或系统性漏报，请谨慎对待。\n\n",
-        );
+        if assessment.coverage_insufficient {
+            out.push_str(
+                "> ⚠️ **Unverified result**: demonstrated review coverage is below the \
+                 threshold — most of the diff was not demonstrably examined, so the verdict \
+                 is not trustworthy. / 审查覆盖不足：大部分改动未被可追溯地审查，结果不可信。\n\n",
+            );
+        } else {
+            out.push_str(
+                "> ⚠️ **Unverified result**: no expert reported any issue — a zero-finding \
+                 outcome may indicate low coverage or a systemic miss, not a clean codebase. \
+                 / 全零发现，结果未验证，可能为覆盖率不足或系统性漏报，请谨慎对待。\n\n",
+            );
+        }
     }
     // Coverage banner: honest about how much of the diff was actually
     // reviewed. Under-coverage is never hidden — it also caps the score.
@@ -312,6 +333,25 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                 consolidated.unreviewed_files.len(),
                 consolidated.unreviewed_files.join(", "),
             ));
+        }
+    }
+    // Hunk-level coverage ledger: changed ranges vs. demonstrably-touched
+    // ranges, plus the uncovered ranges (coverage debt). Rendered whenever the
+    // consolidator was given a ledger (the full `run_experts` path).
+    if let Some(coverage) = &consolidated.coverage {
+        out.push_str(&format!(
+            "**Hunk Coverage**: {}/{} changed lines demonstrably reviewed ({:.0}%)\n\n",
+            coverage.covered_changed_lines,
+            coverage.total_changed_lines,
+            coverage.ratio * 100.0,
+        ));
+        if !coverage.debt.is_empty() {
+            let debt: Vec<String> = coverage
+                .debt
+                .iter()
+                .map(|u| format!("`{}:{}`", u.file, range_label(u.range)))
+                .collect();
+            out.push_str(&format!("**未覆盖区域 / uncovered**: {}\n\n", debt.join(", "),));
         }
     }
     out.push_str(&format!(
@@ -602,11 +642,13 @@ mod tests {
                 lead_override: None,
                 tl_dr: tl_dr.to_string(),
                 unverified: false,
+                coverage_insufficient: false,
             },
             consensus_reached: false,
             total_files: 0,
             reviewed_files: 0,
             unreviewed_files: vec![],
+            coverage: None,
         }
     }
 
@@ -724,6 +766,52 @@ mod tests {
         let md = render_lead_summary(&consolidated);
         assert!(md.contains("Risk Level: healthy"), "non-unverified keeps its risk band");
         assert!(!md.contains("unverified"));
+    }
+
+    // ── hunk-level coverage ledger rendering ───────────────────────
+
+    #[test]
+    fn test_render_lead_summary_hunk_coverage_debt() {
+        let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "1 high found by 3 reviewers.");
+        consolidated.coverage = Some(crate::coverage::CoverageSummary {
+            total_changed_lines: 25,
+            covered_changed_lines: 19,
+            ratio: 19.0 / 25.0,
+            debt: vec![crate::coverage::UncoveredRange {
+                file: "c.c".to_string(),
+                range: (50, 55),
+            }],
+        });
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("Hunk Coverage"), "ledger section must render");
+        assert!(md.contains("19/25 changed lines demonstrably reviewed (76%)"));
+        assert!(md.contains("未覆盖区域 / uncovered"));
+        assert!(md.contains("c.c:50-55"), "coverage debt must list the uncovered range");
+    }
+
+    #[test]
+    fn test_render_lead_summary_coverage_insufficient_risk_label() {
+        let mut consolidated = make_consolidated(70, RiskLevel::Medium, "1 high found by 2 reviewers.");
+        consolidated.assessment.unverified = true;
+        consolidated.assessment.coverage_insufficient = true;
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("unverified（审查覆盖不足 / insufficient coverage）"));
+        assert!(md.contains("below the threshold"), "must explain why unverified");
+        assert!(
+            !md.contains("no expert reported any issue"),
+            "coverage-insufficient is not zero-findings"
+        );
+    }
+
+    #[test]
+    fn test_render_lead_summary_no_ledger_skips_hunk_section() {
+        // Backward-compatible path (consolidate() without a ledger): no hunk
+        // coverage section, and the risk band is untouched.
+        let mut consolidated = make_consolidated(92, RiskLevel::Healthy, "1 high found by 3 reviewers.");
+        consolidated.coverage = None;
+        let md = render_lead_summary(&consolidated);
+        assert!(!md.contains("Hunk Coverage"));
+        assert!(md.contains("Risk Level: healthy"));
     }
 
     // ── render_expert_section (parse error + raw dump) ─────────────

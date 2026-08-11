@@ -1908,11 +1908,13 @@ mod tests {
                 lead_override: None,
                 tl_dr: "Risk Level: Medium. 1 high found by 2 reviewers.".to_string(),
                 unverified: false,
+                coverage_insufficient: false,
             },
             consensus_reached: true,
             total_files: 0,
             reviewed_files: 0,
             unreviewed_files: vec![],
+            coverage: None,
         }
     }
 

@@ -84,6 +84,12 @@ pub struct ConsolidatedReport {
     /// Files no expert reviewed; their presence caps the score (anti-cheat).
     #[serde(default)]
     pub unreviewed_files: Vec<String>,
+    /// Hunk-level coverage ledger summary (`None` when no ledger was supplied,
+    /// e.g. the backward-compatible `consolidate` wrapper). When present, the
+    /// report renders the changed-vs-touched ratio and the uncovered ranges
+    /// (coverage debt), and an insufficient ratio contributes to `unverified`.
+    #[serde(default)]
+    pub coverage: Option<crate::coverage::CoverageSummary>,
 }
 
 /// A conflict between two or more experts on the same issue.
@@ -103,7 +109,7 @@ impl ConsolidatorConfig {
     /// cap). Prefer [`ConsolidatorConfig::consolidate_with_coverage`] so
     /// under-covered runs are scored honestly.
     pub fn consolidate(&self, reports: &[ExpertReport], total_score: Option<u8>) -> ConsolidatedReport {
-        self.consolidate_with_coverage(reports, total_score, &FileCoverage::default())
+        self.consolidate_with_coverage(reports, total_score, &FileCoverage::default(), None)
     }
 
     /// Run the full consolidation pipeline with diff-file coverage accounting.
@@ -113,11 +119,18 @@ impl ConsolidatorConfig {
     /// (`score × reviewed / total`) and the shortfall is called out in the
     /// TL;DR. This makes under-coverage impossible to hide behind a high
     /// score: a run that skipped files cannot outscore a full-coverage run.
+    ///
+    /// `ledger` carries the hunk-level coverage ledger (changed ranges vs.
+    /// demonstrated touches from findings). When its ratio falls below
+    /// [`crate::coverage::COVERAGE_THRESHOLD`], the assessment is flagged
+    /// `coverage_insufficient` and `unverified`, and the coverage debt is
+    /// stored on the report for rendering.
     pub fn consolidate_with_coverage(
         &self,
         reports: &[ExpertReport],
         total_score: Option<u8>,
         coverage: &FileCoverage,
+        ledger: Option<&crate::coverage::CoverageLedger>,
     ) -> ConsolidatedReport {
         let mut all_findings: Vec<Finding> = reports.iter().flat_map(|r| r.findings.clone()).collect();
 
@@ -170,8 +183,28 @@ impl ConsolidatorConfig {
         // Zero consolidated findings across every expert: the perfect score is
         // NOT evidence of quality — it may mean low coverage or a systemic
         // miss. Flag the assessment as unverified so the report never reads
-        // "healthy / all experts approve" for an empty result.
-        let unverified = all_findings.is_empty();
+        // "healthy / all experts approve" for an empty result. Hunk-level
+        // coverage insufficiency (demonstrated-touch ratio below threshold)
+        // also makes the result unverified — even when findings exist, a
+        // review that demonstrably examined only part of the diff is not a
+        // trustworthy overall verdict.
+        let coverage_summary = ledger.map(|l| l.summary());
+        let coverage_insufficient = coverage_summary.as_ref().map(|s| !s.is_sufficient()).unwrap_or(false);
+        if coverage_insufficient {
+            if let Some(s) = &coverage_summary {
+                tl_dr.push_str(&format!(
+                    "\n\n⚠️ 审查覆盖不足：{}/{} 行改动可追溯被审查（{} 处 hunk 未覆盖）——结果标记为不可信。\n\
+                     ⚠️ Insufficient review coverage: {}/{} changed lines demonstrably reviewed ({} uncovered range(s)) — result marked unverified.",
+                    s.covered_changed_lines,
+                    s.total_changed_lines,
+                    s.debt.len(),
+                    s.covered_changed_lines,
+                    s.total_changed_lines,
+                    s.debt.len(),
+                ));
+            }
+        }
+        let unverified = all_findings.is_empty() || coverage_insufficient;
 
         let assessment = OverallAssessment {
             score,
@@ -179,6 +212,7 @@ impl ConsolidatorConfig {
             lead_override: None,
             tl_dr,
             unverified,
+            coverage_insufficient,
         };
 
         ConsolidatedReport {
@@ -191,6 +225,7 @@ impl ConsolidatorConfig {
             total_files: coverage.total_files,
             reviewed_files: coverage.reviewed_files,
             unreviewed_files: coverage.unreviewed_files.clone(),
+            coverage: coverage_summary,
         }
     }
 
@@ -389,6 +424,71 @@ mod tests {
             parse_error: None,
             raw_dump_path: None,
         }
+    }
+
+    fn make_hunk(new_start: u32, new_lines: u32) -> DiffHunk {
+        DiffHunk {
+            header: format!("@@ -1,1 +{new_start},{new_lines} @@"),
+            old_start: 1,
+            old_lines: 1,
+            new_start,
+            new_lines,
+            lines: vec![],
+        }
+    }
+
+    // ─── hunk-level coverage ledger integration ────────────────────
+
+    #[test]
+    fn test_coverage_insufficient_marks_unverified_even_with_findings() {
+        let config = ConsolidatorConfig::default();
+        // 20 changed lines, only 2 demonstrably touched → ratio 0.1 < 0.7.
+        let diff_files = vec![("a.rs".to_string(), vec![make_hunk(10, 20)])];
+        let mut ledger = crate::coverage::CoverageLedger::from_diff_files(&diff_files);
+        ledger.mark_touched("a.rs", (10, 11), "security");
+        let findings = vec![make_finding(Severity::High, 8, "a.rs", Some(10), "Real issue")];
+        let reports = vec![make_report("security", findings)];
+        let result = config.consolidate_with_coverage(&reports, None, &FileCoverage::full(1), Some(&ledger));
+        assert!(result.assessment.coverage_insufficient);
+        assert!(
+            result.assessment.unverified,
+            "coverage insufficiency must make result unverified"
+        );
+        assert!(result.assessment.tl_dr.contains("审查覆盖不足"));
+        assert!(
+            result.coverage.is_some(),
+            "coverage summary must be stored on the report"
+        );
+    }
+
+    #[test]
+    fn test_sufficient_coverage_with_findings_not_unverified() {
+        let config = ConsolidatorConfig::default();
+        let diff_files = vec![("a.rs".to_string(), vec![make_hunk(10, 10)])];
+        let mut ledger = crate::coverage::CoverageLedger::from_diff_files(&diff_files);
+        ledger.mark_touched("a.rs", (10, 19), "security"); // full coverage
+        let findings = vec![make_finding(Severity::High, 8, "a.rs", Some(12), "Real issue")];
+        let reports = vec![make_report("security", findings)];
+        let result = config.consolidate_with_coverage(&reports, None, &FileCoverage::full(1), Some(&ledger));
+        assert!(!result.assessment.coverage_insufficient);
+        assert!(
+            !result.assessment.unverified,
+            "covered review with findings stays verified"
+        );
+    }
+
+    #[test]
+    fn test_ledger_without_findings_yields_zero_coverage_and_unverified() {
+        let config = ConsolidatorConfig::default();
+        let diff_files = vec![("a.rs".to_string(), vec![make_hunk(10, 20)])];
+        let ledger = crate::coverage::CoverageLedger::from_diff_files(&diff_files);
+        let reports = vec![make_report("security", vec![])];
+        let result = config.consolidate_with_coverage(&reports, None, &FileCoverage::full(1), Some(&ledger));
+        assert!(
+            result.assessment.unverified,
+            "zero findings ⇒ zero demonstrated coverage ⇒ unverified"
+        );
+        assert!(result.assessment.coverage_insufficient);
     }
 
     #[test]
@@ -640,7 +740,7 @@ mod tests {
             reviewed_files: 10,
             unreviewed_files: vec![],
         };
-        let result = config.consolidate_with_coverage(&reports, Some(85), &coverage);
+        let result = config.consolidate_with_coverage(&reports, Some(85), &coverage, None);
         assert_eq!(result.assessment.score, 85);
         assert!(result.unreviewed_files.is_empty());
         assert!(!result.assessment.tl_dr.contains("Coverage"));
@@ -656,7 +756,7 @@ mod tests {
             reviewed_files: 4,
             unreviewed_files: vec!["f5.rs".into()],
         };
-        let result = config.consolidate_with_coverage(&reports, Some(85), &coverage);
+        let result = config.consolidate_with_coverage(&reports, Some(85), &coverage, None);
         // 85 × 4/10 = 34
         assert_eq!(result.assessment.score, 34);
         assert_eq!(result.unreviewed_files, vec!["f5.rs".to_string()]);

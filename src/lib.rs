@@ -16,6 +16,7 @@
 pub mod actions;
 pub mod config;
 pub mod context;
+pub mod coverage;
 pub mod diff;
 pub mod error;
 pub mod expert;

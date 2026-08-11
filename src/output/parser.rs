@@ -64,6 +64,10 @@ fn fallback_report(expert_name: &str, yaml_text: &str) -> ExpertReport {
         findings,
         markdown,
         raw_llm_response: yaml_text.to_string(),
+        // Never silently present a failed parse as "no issues found": carry the
+        // failure so the report can surface a ⚠️ instead of a false clean bill.
+        parse_error: Some("LLM response could not be parsed into a valid review; treated as no findings".to_string()),
+        raw_dump_path: None,
     }
 }
 
@@ -84,6 +88,8 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: yaml_text.to_string(),
+            parse_error: Some("aggregator LLM response could not be parsed; treated as empty".to_string()),
+            raw_dump_path: None,
         });
     }
 
@@ -100,6 +106,8 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                     findings: vec![],
                     markdown: String::new(),
                     raw_llm_response: yaml_text.to_string(),
+                    parse_error: Some("aggregator LLM response could not be parsed; treated as empty".to_string()),
+                    raw_dump_path: None,
                 });
             }
             v
@@ -120,6 +128,10 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                             findings: vec![],
                             markdown: String::new(),
                             raw_llm_response: yaml_text.to_string(),
+                            parse_error: Some(
+                                "aggregator LLM response could not be parsed; treated as empty".to_string(),
+                            ),
+                            raw_dump_path: None,
                         });
                     }
                 }
@@ -129,6 +141,8 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                     findings: vec![],
                     markdown: String::new(),
                     raw_llm_response: yaml_text.to_string(),
+                    parse_error: Some("aggregator LLM response could not be parsed; treated as empty".to_string()),
+                    raw_dump_path: None,
                 });
             }
         }
@@ -141,6 +155,8 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
         findings,
         markdown,
         raw_llm_response: yaml_text.to_string(),
+        parse_error: None,
+        raw_dump_path: None,
     })
 }
 
@@ -153,6 +169,8 @@ fn build_expert_report(expert_name: &str, raw_response: &str, value: &serde_yaml
         findings,
         markdown,
         raw_llm_response: raw_response.to_string(),
+        parse_error: None,
+        raw_dump_path: None,
     })
 }
 
@@ -199,40 +217,56 @@ pub(crate) fn extract_first_fenced_yaml(text: &str) -> Option<String> {
         .and_then(|caps| caps.get(1).map(|m| m.as_str().to_string()))
 }
 
-/// Validate that findings point to files and lines present in the diff.
+/// Note appended to findings whose file is in the diff but whose line falls
+/// outside every changed hunk. The finding is kept (downgraded) rather than
+/// dropped — LLMs commonly flag the enclosing function declaration for C-like
+/// languages, and a plausible finding is more useful than a silent miss.
+const HUNK_OUTSIDE_NOTE: &str = "line outside diff hunk — 该行不在本次变更的 hunk 范围内，保留供参考";
+
+/// Validate that findings point to files present in the diff.
 ///
-/// - Findings whose `file` is not in `diff_files` are dropped.
-/// - Findings with `line: None` are kept if the file exists in the diff.
-/// - Findings with a line value are kept only when the range `[line, line_end]`
-///   (or `[line, line]` when `line_end` is `None`) overlaps with any hunk that
-///   has new lines in the new-file / hunk range. Pure-deletion hunks
-///   (`new_lines == 0`) are skipped because they contain no new code.
+/// - Findings whose `file` is NOT in `diff_files` are dropped (the original
+///   anti-hallucination intent: never report on files the review never saw).
+/// - Findings with `line: None` are kept when the file exists in the diff.
+/// - Findings with a line value are kept when the file is in the diff; if the
+///   line lies outside every changed hunk (e.g. the LLM flagged the enclosing
+///   function, or the hunk is a pure deletion), the finding is **downgraded to
+///   keep-with-note** instead of being dropped. `line_end` may span across
+///   hunks — only the starting line must be inside a hunk for a clean keep.
 pub fn validate_findings(findings: &[Finding], diff_files: &[(String, Vec<DiffHunk>)]) -> Vec<Finding> {
     let diff_map: std::collections::HashMap<_, _> = diff_files.iter().map(|(p, h)| (p.as_str(), h)).collect();
 
     findings
         .iter()
-        .filter(|f| {
+        .filter_map(|f| {
             let Some(hunks) = diff_map.get(f.file.as_str()) else {
-                return false;
+                return None;
             };
             match f.line {
-                None => true,
+                None => Some(f.clone()),
                 Some(line) => {
-                    let line_end = f.line_end.unwrap_or(line);
-                    hunks.iter().any(|h| {
+                    let in_hunk = hunks.iter().any(|h| {
                         if h.new_lines == 0 {
                             return false;
                         }
                         let start = h.new_start;
                         let end = h.new_start.saturating_add(h.new_lines.saturating_sub(1));
-                        // Require both endpoints of the finding range to lie within the hunk.
-                        line >= start && line <= end && line_end >= start && line_end <= end
-                    })
+                        line >= start && line <= end
+                    });
+                    if in_hunk {
+                        Some(f.clone())
+                    } else {
+                        let mut kept = f.clone();
+                        kept.summary = if kept.summary.is_empty() {
+                            format!("⚠️ {HUNK_OUTSIDE_NOTE}")
+                        } else {
+                            format!("{}\n\n> ⚠️ {HUNK_OUTSIDE_NOTE}", kept.summary)
+                        };
+                        Some(kept)
+                    }
                 }
             }
         })
-        .cloned()
         .collect()
 }
 
@@ -315,6 +349,10 @@ mod tests {
         assert_eq!(report.findings.len(), 1);
         assert_eq!(report.findings[0].file, "src/main.rs");
         assert_eq!(report.findings[0].severity, Severity::High);
+        assert!(
+            report.parse_error.is_none(),
+            "successful parse must not carry parse_error"
+        );
     }
 
     #[test]
@@ -358,6 +396,10 @@ review:
         let report = parse_llm_response("performance", yaml);
         assert!(report.findings.is_empty());
         assert!(!report.raw_llm_response.is_empty());
+        assert!(
+            report.parse_error.is_some(),
+            "a failed parse must surface parse_error, not silently read as 'no issues'"
+        );
     }
 
     #[test]
@@ -778,8 +820,15 @@ More text.
                 lines: vec![],
             }],
         )];
+        // File IS in the diff but the reported line is outside the hunk: the
+        // finding must be downgraded to keep-with-note, never dropped.
         let validated = validate_findings(&findings, &diff_files);
-        assert!(validated.is_empty());
+        assert_eq!(validated.len(), 1, "file in diff + line outside hunk must be kept");
+        assert!(
+            validated[0].summary.contains("line outside diff hunk"),
+            "kept finding must carry the outside-hunk note, got: {}",
+            validated[0].summary
+        );
     }
 
     #[test]
@@ -862,8 +911,15 @@ More text.
                 lines: vec![],
             }],
         )];
+        // File is in the diff (it was modified by a deletion): keep with the
+        // outside-hunk note instead of dropping.
         let validated = validate_findings(&findings, &diff_files);
-        assert!(validated.is_empty());
+        assert_eq!(
+            validated.len(),
+            1,
+            "file in diff must be kept even for a deletion-only hunk"
+        );
+        assert!(validated[0].summary.contains("line outside diff hunk"));
     }
 
     #[test]
@@ -898,8 +954,13 @@ More text.
                 lines: vec![],
             }],
         )];
+        // The starting line is inside the hunk; line_end may span beyond it.
         let validated = validate_findings(&findings, &diff_files);
-        assert!(validated.is_empty());
+        assert_eq!(validated.len(), 1, "line in hunk with spanning line_end must be kept");
+        assert!(
+            !validated[0].summary.contains("line outside diff hunk"),
+            "in-hunk finding must not carry the outside-hunk note"
+        );
     }
 
     #[test]

@@ -104,6 +104,13 @@ enum Commands {
         #[arg(long)]
         output: Option<String>,
 
+        /// Dump each expert's raw LLM prompt and response to `<output>.raw/`
+        /// (or `<output_dir>/review-raw/`) for debugging zero-finding or
+        /// mis-parsed reviews. File paths are printed to stderr and referenced
+        /// in the report.
+        #[arg(long)]
+        verbose: bool,
+
         /// Publish results back to the MR/PR discussion
         #[arg(long)]
         publish: bool,
@@ -481,10 +488,14 @@ pub async fn run() -> Result<()> {
             llm_config,
             format,
             output,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
-            handlers::run_local_path(&dir, &repo, config, llm_config, &format, &output, pm, &review_id).await?;
+            handlers::run_local_path(
+                &dir, &repo, config, llm_config, &format, &output, pm, &review_id, verbose,
+            )
+            .await?;
         }
         Commands::Review { path: Some(_), .. } => {
             anyhow::bail!("review --path requires --local-path <repo>");
@@ -498,6 +509,7 @@ pub async fn run() -> Result<()> {
             format,
             output,
             publish,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
@@ -512,6 +524,7 @@ pub async fn run() -> Result<()> {
                 publish,
                 pm,
                 &review_id,
+                verbose,
             )
             .await?;
         }
@@ -522,6 +535,7 @@ pub async fn run() -> Result<()> {
             llm_config,
             format,
             output,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
@@ -534,6 +548,7 @@ pub async fn run() -> Result<()> {
                 &output,
                 pm,
                 &review_id,
+                verbose,
             )
             .await?;
         }
@@ -548,6 +563,7 @@ pub async fn run() -> Result<()> {
             format,
             output,
             llm_config,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
@@ -564,6 +580,7 @@ pub async fn run() -> Result<()> {
                 &output,
                 pm,
                 &review_id,
+                verbose,
             )
             .await?;
         }

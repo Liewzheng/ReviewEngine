@@ -167,12 +167,18 @@ impl ConsolidatorConfig {
                 coverage.unreviewed_files.len()
             ));
         }
+        // Zero consolidated findings across every expert: the perfect score is
+        // NOT evidence of quality — it may mean low coverage or a systemic
+        // miss. Flag the assessment as unverified so the report never reads
+        // "healthy / all experts approve" for an empty result.
+        let unverified = all_findings.is_empty();
 
         let assessment = OverallAssessment {
             score,
             risk_level,
             lead_override: None,
             tl_dr,
+            unverified,
         };
 
         ConsolidatedReport {
@@ -311,7 +317,11 @@ impl ConsolidatorConfig {
         let expert_count = reports.len();
 
         if total_findings == 0 {
-            return format!("All {} experts approve. No issues found.", expert_count);
+            return format!(
+                "{} 位专家均未发现问题，但全零发现可能意味着审查覆盖率不足或系统性漏报，请谨慎对待（结果标记为“未验证/不可信”）。\n\n\
+                 {} experts reported no issues — this may indicate low coverage or a systemic issue; treat with caution (result marked unverified).",
+                expert_count, expert_count,
+            );
         }
 
         let mut parts = Vec::new();
@@ -376,6 +386,8 @@ mod tests {
             findings,
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }
     }
 
@@ -661,5 +673,36 @@ mod tests {
         assert_eq!(result.assessment.score, 85);
         assert_eq!(result.total_files, 0);
         assert!(result.unreviewed_files.is_empty());
+    }
+
+    // ─── zero-findings unverified flag ─────────────────────────────
+
+    #[test]
+    fn test_zero_findings_marked_unverified_and_tldr_cautions() {
+        let config = ConsolidatorConfig::default();
+        let reports = vec![make_report("security", vec![])];
+        let result = config.consolidate(&reports, None);
+        // All-zero → the perfect score is flagged unverified, and the TL;DR
+        // must not claim "All N experts approve".
+        assert!(
+            result.assessment.unverified,
+            "all-zero result must be flagged unverified"
+        );
+        assert!(result.assessment.score == 100, "score stays 100 (backward compat)");
+        let tl_dr = &result.assessment.tl_dr;
+        assert!(tl_dr.contains("reported no issues"), "got: {tl_dr}");
+        assert!(tl_dr.contains("treat with caution"), "got: {tl_dr}");
+        assert!(!tl_dr.contains("approve"), "must not claim approval, got: {tl_dr}");
+    }
+
+    #[test]
+    fn test_non_zero_findings_not_unverified() {
+        let config = ConsolidatorConfig::default();
+        let findings = vec![make_finding(Severity::High, 8, "a.rs", Some(1), "Real issue")];
+        let reports = vec![make_report("security", findings)];
+        let result = config.consolidate(&reports, None);
+        assert!(!result.assessment.unverified, "findings present ⇒ not unverified");
+        assert!(result.assessment.score < 100);
+        assert!(!result.assessment.tl_dr.contains("treat with caution"));
     }
 }

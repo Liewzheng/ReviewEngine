@@ -55,6 +55,10 @@ pub struct ReviewScoreRecord {
 /// - Round and clamp the final score to 0-100
 pub fn expert_score_with_config(findings: &[Finding], penalties: &PenaltyConfig) -> u8 {
     if findings.is_empty() {
+        // A perfect score for an empty finding set is NOT evidence of code
+        // quality — it only means "no issues reported". Callers must treat an
+        // all-zero run as **unverified** (see [`is_zero_findings`] and the
+        // consolidator's `unverified` flag) rather than as healthy.
         return 100;
     }
 
@@ -84,6 +88,16 @@ pub fn expert_score_with_config(findings: &[Finding], penalties: &PenaltyConfig)
 /// Defaults: Critical -30, High -15, Medium -5, Low -1, Note -0.
 pub fn expert_score(findings: &[Finding]) -> u8 {
     expert_score_with_config(findings, &PenaltyConfig::default())
+}
+
+/// True when an expert's finding set is empty.
+///
+/// An empty set scores a perfect 100, but that must not be read as "healthy":
+/// it may mean the expert genuinely saw nothing wrong, OR that the LLM output
+/// failed to parse / the review only skimmed the diff (low coverage, systemic
+/// miss). Reports use this to flag an all-zero run as **unverified**.
+pub fn is_zero_findings(findings: &[Finding]) -> bool {
+    findings.is_empty()
 }
 
 /// Compute the weighted score from a list of (score, weight) pairs.
@@ -227,6 +241,12 @@ mod tests {
     fn test_expert_score_perfect() {
         let score = expert_score(&[]);
         assert_eq!(score, 100);
+    }
+
+    #[test]
+    fn test_is_zero_findings_semantic_flag() {
+        assert!(is_zero_findings(&[]), "empty findings must be flagged unverified");
+        assert!(!is_zero_findings(&[make_finding(Severity::High)]));
     }
 
     #[test]

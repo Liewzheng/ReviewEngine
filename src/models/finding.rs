@@ -16,6 +16,16 @@ pub struct ExpertReport {
     pub markdown: String,
     /// Raw LLM response text (preserved for debugging / transparency).
     pub raw_llm_response: String,
+    /// Set when the LLM response could not be parsed into findings; carries
+    /// the parse error so the report can surface it (⚠️) instead of silently
+    /// showing "No issues found".
+    #[serde(default)]
+    pub parse_error: Option<String>,
+    /// Path of the dumped raw LLM prompt + response when the run was launched
+    /// with `--verbose` (see the orchestrator's verbose dump). `None` when the
+    /// raw exchange was not persisted to disk.
+    #[serde(default)]
+    pub raw_dump_path: Option<String>,
 }
 
 /// A single finding / issue identified during a code review.
@@ -157,6 +167,13 @@ pub struct AggregatedReport {
     pub markdown: String,
     /// Raw LLM response text from the aggregator call.
     pub raw_llm_response: String,
+    /// Set when the aggregator response could not be parsed; surfaced in the
+    /// report so a silent empty aggregation is not mistaken for "no issues".
+    #[serde(default)]
+    pub parse_error: Option<String>,
+    /// Path of the dumped raw LLM prompt + response with `--verbose`.
+    #[serde(default)]
+    pub raw_dump_path: Option<String>,
 }
 
 impl ReviewOutput {

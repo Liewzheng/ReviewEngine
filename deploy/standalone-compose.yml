@@ -1,0 +1,95 @@
+# ═══════════════════════════════════════════════════════════════════════
+# review-engine 独立部署(无需 clone 仓库,纯 pull)
+# ═══════════════════════════════════════════════════════════════════════
+# 用法(只需要这一个文件 + 一条 pull 命令,不需要 git clone 整个仓库):
+#
+#   1) docker pull ghcr.io/liewzheng/review-engine:latest
+#   2) 复制本文件到部署目录(如 ~/review-engine/docker-compose.yml),cd 过去:
+#        cd ~/review-engine
+#   3) (可选)首次启动前设置一次性引导 key —— 容器绑 0.0.0.0(非 loopback),
+#      不设 REVIEW_API_TOKEN 时必须给 REVIEW_BOOTSTRAP_KEY,否则服务拒绝启动:
+#        echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
+#      (或直接在 .env 里设 REVIEW_API_TOKEN=xxxx,env 注入方式兼容旧版)
+#   4) docker compose up -d
+#   5) 打开 http://<宿主IP>:18080 → 首次进入 UI,在 Configuration 页填写
+#      API token / GitLab / LLM;token 持久化到 ./auth/auth.toml(存 SHA-256 摘要,
+#      非明文),设置完成后可把 REVIEW_BOOTSTRAP_KEY 从 .env 删掉。
+#
+# 所有卷目录均相对当前目录自动创建(compose 相对路径),配置与代码/镜像分离。
+# Linux NAS 上 bind 卷属主继承宿主:若容器内 review-engine 写卷失败,先
+#   mkdir -p config reports bin frontend-dist auth && chown -R <容器UID> *
+#   (UID 以 `docker exec <容器名> id review-engine` 为准,如 999)。
+# 镜像为多架构(amd64/arm64),由 GitHub Actions 发版时推送(ghcr.io/liewzheng/
+# review-engine:v<tag> 与 :latest);容器内含前端 dist、首次同步与容器内自更新
+# (UI 点 Upgrade → 替换 ./bin 与 ./frontend-dist 卷 → 自动重启)。
+# ═══════════════════════════════════════════════════════════════════════
+
+services:
+  review-engine:
+    # 纯 pull 镜像,不 build。指定 tag 可锁版本(如 :v0.9.9),:latest 跟随发版。
+    image: ghcr.io/liewzheng/review-engine:latest
+    restart: unless-stopped
+
+    ports:
+      # HTTP(默认对外入口):宿主 18080 → 容器 8080
+      - "18080:8080"
+      # 可选 HTTPS(serve 内置 TLS):取消注释,并在下方启用
+      # REVIEW_TLS_CERT / REVIEW_TLS_KEY 与 ./tls 卷(见 TLS 小节)
+      # - "443:8443"
+
+    environment:
+      # ── API 认证(二选一)──
+      # 方式 A(env 注入,兼容旧版):REVIEW_API_TOKEN 非空时优先生效,无需引导。
+      # 方式 B(bootstrap,推荐):留空 → 服务以首次运行引导模式启动,首次打开
+      #   Web UI 时设置初始 token,持久化到 REVIEW_AUTH_FILE(./auth 卷)。
+      #   注意:容器绑 0.0.0.0(非 loopback),token 留空时必须同时设置一次性
+      #   REVIEW_BOOTSTRAP_KEY(openssl rand -hex 16),否则服务拒绝启动。
+      REVIEW_API_TOKEN: ${REVIEW_API_TOKEN:-}
+      REVIEW_BOOTSTRAP_KEY: ${REVIEW_BOOTSTRAP_KEY:-}
+      # token 摘要持久化文件(可写卷 ./auth;非明文,存 SHA-256)
+      REVIEW_AUTH_FILE: /app/auth/auth.toml
+
+      # ── GitLab EE 集成(可选注入;也完全可以在 UI 的 Configuration 页填写)──
+      GITLAB_URL: ${GITLAB_URL:-https://gitlab.example.com}
+      GITLAB_TOKEN: ${GITLAB_TOKEN:-}
+      GITLAB_WEBHOOK_SECRET: ${GITLAB_WEBHOOK_SECRET:-}
+      GITLAB_WEBHOOK_SIGNING_SECRET: ${GITLAB_WEBHOOK_SIGNING_SECRET:-}
+
+      # ── LLM 配置(可选注入;JSON 数组,也可在 UI Configuration 页填写)──
+      LLM_CONFIG: ${LLM_CONFIG:-}
+
+      # ── 容器内自更新(UI 点 Upgrade 后自动替换并重启,无需重建镜像)──
+      REVIEW_UPGRADE_INSTALL_DIR: /app/bin
+      REVIEW_UPGRADE_FRONTEND_DIR: /app/frontend/dist
+
+      # ── 路径与日志 ──
+      REVIEW_ENGINE_CONFIG_DIR: /app/config
+      REVIEW_ENGINE_REPORT_DIR: /app/reports
+      RUST_LOG: ${RUST_LOG:-info}
+      REVIEW_LOG_FORMAT: ${REVIEW_LOG_FORMAT:-json}
+
+      # ── 可选 HTTPS(serve 内置 TLS)──
+      # 两个都非空(如 true)即启用容器内 8443 TLS;证书/私钥放 ./tls 卷
+      # (生成:openssl req -x509 -newkey rsa:2048 -nodes -keyout tls/key.pem \
+      #   -out tls/cert.pem -days 365 -subj "/CN=<your-host>")
+      REVIEW_TLS_CERT: ${REVIEW_TLS_CERT:-}
+      REVIEW_TLS_KEY: ${REVIEW_TLS_KEY:-}
+
+    volumes:
+      # 可写部署卷(配置与代码分离;相对当前目录,自动创建)
+      - ./config:/app/config
+      - ./reports:/app/reports
+      - ./bin:/app/bin
+      - ./frontend-dist:/app/frontend/dist
+      - ./auth:/app/auth
+      # 可选:HTTPS 证书目录(启用 TLS 时)
+      # - ./tls:/app/tls
+      # 可选:GitLab SSH 私钥(SSH clone 场景;只读)
+      # - ~/.ssh:/app/.ssh:ro
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

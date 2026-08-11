@@ -68,11 +68,36 @@ export default {
   },
   token: {
     title: 'API トークンが必要です',
-    hintIntro: '入力してください：',
-    hintInstance:
-      '（この ReviewEngine インスタンス用に設定されたトークン）。トークンはブラウザの localStorage の',
-    hintRequest: 'に保存され、API リクエストでは Bearer トークンとして送信されます。',
+    unlockHint:
+      'このインスタンスには API トークンが必要です。設定したトークンを入力して続行してください。',
     placeholder: 'API トークンを貼り付け',
+    tokenRequiredError: 'API トークンを入力してください。',
+    invalidToken: 'トークンがサーバーに拒否されました。確認してもう一度お試しください。',
+    rotateTitle: 'API トークンを更新',
+    rotatePlaceholder:
+      '新しいトークンを貼り付け（空のままなら現在のトークンを維持）',
+    rotateHint: '新しいトークンが現在のトークンを置き換え、すぐに有効になります。',
+    rotateSave: 'トークンを更新',
+    rotateSuccess: 'API トークンを更新しました。',
+    rotateFailed: 'API トークンの更新に失敗しました。',
+  },
+  bootstrap: {
+    title: 'Review Engine へようこそ',
+    intro:
+      'このインスタンスにはまだ API トークンが設定されていません。API を保護するために作成してください——サーバーに保存され、すぐに有効になります。',
+    tokenLabel: 'API トークン',
+    tokenPlaceholder: '新しい API トークンを作成',
+    tokenRequiredError: 'API トークンを入力してください。',
+    keyLabel: 'ブートストラップキー',
+    keyPlaceholder: 'ワンタイムブートストラップキー',
+    keyHint:
+      'REVIEW_BOOTSTRAP_KEY または --bootstrap-key で設定し、起動ログに表示されます。',
+    keyRequiredError: 'ブートストラップキーを入力してください。',
+    keyInvalidError:
+      'ブートストラップキーが無効または欠落しています。起動ログを確認してください。',
+    save: 'トークンを設定',
+    saving: '設定中…',
+    saveError: 'トークンを保存できませんでした。もう一度お試しください。',
   },
   dashboard: {
     title: 'ダッシュボード',

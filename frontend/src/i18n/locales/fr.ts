@@ -68,11 +68,37 @@ export default {
   },
   token: {
     title: 'Jeton API requis',
-    hintIntro: 'Saisissez',
-    hintInstance:
-      ', jeton API configuré pour cette instance ReviewEngine. Le jeton est stocké dans le localStorage du navigateur sous',
-    hintRequest: ' et est envoyé comme jeton Bearer dans les requêtes API.',
+    unlockHint:
+      'Cette instance requiert un jeton API. Saisissez le jeton que vous avez configuré pour continuer.',
     placeholder: 'Collez votre jeton API',
+    tokenRequiredError: 'Veuillez saisir un jeton API.',
+    invalidToken: 'Le jeton a été rejeté par le serveur. Vérifiez-le et réessayez.',
+    rotateTitle: 'Rotation du jeton API',
+    rotatePlaceholder:
+      'Collez un nouveau jeton (laissez vide pour conserver le jeton actuel)',
+    rotateHint:
+      'Le nouveau jeton remplace le jeton actuel et prend effet immédiatement.',
+    rotateSave: 'Faire pivoter le jeton',
+    rotateSuccess: 'Jeton API mis à jour.',
+    rotateFailed: 'Échec de la mise à jour du jeton API.',
+  },
+  bootstrap: {
+    title: 'Bienvenue sur Review Engine',
+    intro:
+      "Aucun jeton API n'est encore configuré pour cette instance. Créez-en un pour sécuriser l'API — il est enregistré sur le serveur et prend effet immédiatement.",
+    tokenLabel: 'Jeton API',
+    tokenPlaceholder: 'Créer un nouveau jeton API',
+    tokenRequiredError: 'Veuillez saisir un jeton API.',
+    keyLabel: 'Clé d’amorçage',
+    keyPlaceholder: 'Clé d’amorçage à usage unique',
+    keyHint:
+      'Définie avec REVIEW_BOOTSTRAP_KEY ou --bootstrap-key, et affichée dans le journal de démarrage.',
+    keyRequiredError: 'Veuillez saisir la clé d’amorçage.',
+    keyInvalidError:
+      'La clé d’amorçage est invalide ou manquante. Consultez le journal de démarrage.',
+    save: 'Définir le jeton',
+    saving: 'Définition…',
+    saveError: 'Impossible d’enregistrer le jeton. Veuillez réessayer.',
   },
   dashboard: {
     title: 'Tableau de bord',

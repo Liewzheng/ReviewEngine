@@ -68,11 +68,35 @@ export default {
   },
   token: {
     title: 'API 토큰 필요',
-    hintIntro: '다음을 입력하세요:',
-    hintInstance:
-      '（이 ReviewEngine 인스턴스에 대해 설정된 API 토큰）。토큰은 브라우저 localStorage의',
-    hintRequest: '에 저장되며, API 요청 시 Bearer 토큰으로 전송됩니다.',
+    unlockHint:
+      '이 인스턴스에는 API 토큰이 필요합니다. 설정한 토큰을 입력하여 계속하세요.',
     placeholder: 'API 토큰 붙여넣기',
+    tokenRequiredError: 'API 토큰을 입력하세요.',
+    invalidToken: '서버가 토큰을 거부했습니다. 확인 후 다시 시도하세요.',
+    rotateTitle: 'API 토큰 교체',
+    rotatePlaceholder: '새 토큰 붙여넣기 (비워 두면 현재 토큰 유지)',
+    rotateHint: '새 토큰이 현재 토큰을 대체하며 즉시 적용됩니다.',
+    rotateSave: '토큰 교체',
+    rotateSuccess: 'API 토큰이 업데이트되었습니다.',
+    rotateFailed: 'API 토큰 업데이트에 실패했습니다.',
+  },
+  bootstrap: {
+    title: 'Review Engine에 오신 것을 환영합니다',
+    intro:
+      '이 인스턴스에는 아직 API 토큰이 설정되지 않았습니다. API를 보호하려면 토큰을 생성하세요 — 서버에 저장되며 즉시 적용됩니다.',
+    tokenLabel: 'API 토큰',
+    tokenPlaceholder: '새 API 토큰 생성',
+    tokenRequiredError: 'API 토큰을 입력하세요.',
+    keyLabel: '부트스트랩 키',
+    keyPlaceholder: '일회용 부트스트랩 키',
+    keyHint:
+      'REVIEW_BOOTSTRAP_KEY 또는 --bootstrap-key로 설정하며, 시작 로그에 출력됩니다.',
+    keyRequiredError: '부트스트랩 키를 입력하세요.',
+    keyInvalidError:
+      '부트스트랩 키가 잘못되었거나 누락되었습니다. 시작 로그를 확인하세요.',
+    save: '토큰 설정',
+    saving: '설정 중…',
+    saveError: '토큰을 저장하지 못했습니다. 다시 시도하세요.',
   },
   dashboard: {
     title: '대시보드',

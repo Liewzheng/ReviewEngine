@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.10] - 2026-08-10
+
+### Added
+- **GHCR image publish (pull-based deploy)**: `release.yml` gains a `push-ghcr` job that builds the zero-build image for `linux/amd64` + `linux/arm64` and pushes `ghcr.io/liewzheng/review-engine:<tag>` and `:latest`, so users can `docker pull ghcr.io/liewzheng/review-engine:v0.9.10` and deploy without cloning the repository; it waits on both the binary and `frontend-dist` assets so the image carries a complete backend + frontend. (`.github/workflows/release.yml`, `Dockerfile`)
+- **Standalone pull-based deployment**: `deploy/standalone-compose.yml` provides a minimal compose file that pulls the GHCR image (defaulting `REVIEW_ENGINE_VERSION` to the latest release) and wires the writable volumes and env from the host; `deploy/gitlab-ee.md` gains a quick pull-based deploy section. (`deploy/standalone-compose.yml`, `deploy/gitlab-ee.md`)
+- **UI-configurable API token with first-run bootstrap**: the API token can now be set from the Web UI — a `BootstrapScreen` appears on first run when no token is configured, persists the token through the backend (`src/server/api/system.rs`) into the writable config volume, and keeps a bootstrapped token readable at startup, so a fresh `docker compose up` with no token in `.env` still boots into a guided setup instead of being locked out; the `cli` gains a `bootstrap_key` path and the frontend `api.ts`/`system.ts` wire the flow (i18n in all six locales). (`src/server/auth.rs`, `src/server/api/system.rs`, `src/cli/mod.rs`, `frontend/src/components/Auth/BootstrapScreen.vue`, `frontend/src/services/system.ts`, `frontend/src/services/api.ts`, `frontend/src/App.vue`, `tests/server.rs`, `.env.example`, `docker-compose.yml`)
+- **Optional version build-arg**: the zero-build Dockerfile no longer requires `REVIEW_ENGINE_VERSION` — when omitted it resolves the GitHub `latest` release tag and downloads that release; CI still passes the exact tag for reproducibility. (`Dockerfile`)
+
 ## [0.9.9] - 2026-08-10
 
 ### Added

@@ -104,6 +104,63 @@ async fn wait_for_server(port: u16) {
     }
 }
 
+/// Spawn `serve` on a NON-loopback bind (`0.0.0.0`) with no API token but a
+/// one-time bootstrap key — the first-run Docker scenario. Every `/api/v1`
+/// endpoint returns 401 until the initial token is set with `X-Bootstrap-Key`.
+fn spawn_server_non_loopback_bootstrap(port: u16, bootstrap_key: &str) -> ServerGuard {
+    let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+    let mut cmd = Command::new(bin_path());
+    cmd.arg("serve")
+        .arg("--bind")
+        .arg("0.0.0.0")
+        .arg("--port")
+        .arg(port.to_string())
+        .arg("--bootstrap-key")
+        .arg(bootstrap_key)
+        .env("HOME", temp_dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let child = cmd.spawn().expect("failed to spawn review-engine serve");
+    ServerGuard {
+        child,
+        _temp_dir: temp_dir,
+    }
+}
+
+/// Drive a fresh no-token (loopback-bind, first-run) server through the
+/// bootstrap flow: `PUT /api/v1/system/token` sets `token`, and the returned
+/// client carries it as `Authorization: Bearer` for the rest of the test.
+///
+/// Every no-token integration test uses this, so the whole suite exercises the
+/// new first-run bootstrap path instead of relying on the old "token-less
+/// loopback API is open" behavior.
+async fn bootstrap_authed_client(port: u16, token: &str) -> reqwest::Client {
+    use reqwest::header::{HeaderValue, AUTHORIZATION};
+    let resp = reqwest::Client::new()
+        .put(format!("http://127.0.0.1:{}/api/v1/system/token", port))
+        .json(&serde_json::json!({ "token": token }))
+        .send()
+        .await
+        .expect("bootstrap PUT /api/v1/system/token");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "first-run bootstrap (loopback) must accept the initial token, got {}",
+        resp.status()
+    );
+    reqwest::Client::builder()
+        .default_headers({
+            let mut h = reqwest::header::HeaderMap::new();
+            h.insert(
+                AUTHORIZATION,
+                HeaderValue::from_str(&format!("Bearer {token}")).unwrap(),
+            );
+            h
+        })
+        .build()
+        .expect("failed to build authed client")
+}
+
 #[tokio::test]
 async fn health_endpoint() {
     let port = find_free_port();
@@ -523,7 +580,7 @@ async fn add_provider_accepts_frontend_field_names() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let resp = client
         .post(format!("http://127.0.0.1:{}/api/v1/llm/providers", port))
         .json(&serde_json::json!({
@@ -547,7 +604,9 @@ async fn add_provider_accepts_frontend_field_names() {
     assert_eq!(body["configured"], true);
 
     // The provider must be listed afterwards and marked as configured.
-    let resp = reqwest::get(format!("http://127.0.0.1:{}/api/v1/llm/providers", port))
+    let resp = client
+        .get(format!("http://127.0.0.1:{}/api/v1/llm/providers", port))
+        .send()
         .await
         .expect("failed to GET /api/v1/llm/providers");
     assert!(resp.status().is_success(), "GET providers returned {}", resp.status());
@@ -581,7 +640,7 @@ async fn add_provider_missing_provider_field_returns_400_json() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let resp = client
         .post(format!("http://127.0.0.1:{}/api/v1/llm/providers", port))
         .json(&serde_json::json!({
@@ -611,7 +670,7 @@ async fn update_provider_accepts_frontend_field_names() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let resp = client
         .post(format!("http://127.0.0.1:{}/api/v1/llm/providers", port))
         .json(&serde_json::json!({
@@ -678,7 +737,7 @@ async fn test_provider_accepts_empty_body_and_no_content_type() {
     let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let url = format!("http://127.0.0.1:{}/api/v1/llm/providers/openai-0/test", port);
 
     // 1) Empty body WITH `Content-Type: application/json` — the exact reported
@@ -770,10 +829,13 @@ async fn put_config_round_trip_does_not_duplicate_primary_provider() {
     };
     wait_for_server(port).await;
 
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);
 
     // Sanity: exactly one provider configured before any save.
-    let resp = reqwest::get(format!("{}/api/v1/llm/providers", base))
+    let resp = client
+        .get(format!("{}/api/v1/llm/providers", base))
+        .send()
         .await
         .expect("failed to GET /api/v1/llm/providers");
     let body: serde_json::Value = resp.json().await.expect("GET providers body is not JSON");
@@ -782,7 +844,9 @@ async fn put_config_round_trip_does_not_duplicate_primary_provider() {
 
     // GET /config exposes the primary in both the legacy fields and providers —
     // but never the live key: it must come back masked.
-    let resp = reqwest::get(format!("{}/api/v1/config", base))
+    let resp = client
+        .get(format!("{}/api/v1/config", base))
+        .send()
         .await
         .expect("failed to GET /api/v1/config");
     let config: serde_json::Value = resp.json().await.expect("GET /config body is not JSON");
@@ -802,7 +866,6 @@ async fn put_config_round_trip_does_not_duplicate_primary_provider() {
 
     // Save the config back unchanged, twice — each save must keep the provider
     // list at exactly one entry (no duplication, idempotent).
-    let client = reqwest::Client::new();
     for round in 1..=2 {
         let resp = client
             .put(format!("{}/api/v1/config", base))
@@ -817,7 +880,9 @@ async fn put_config_round_trip_does_not_duplicate_primary_provider() {
             resp.status()
         );
 
-        let resp = reqwest::get(format!("{}/api/v1/llm/providers", base))
+        let resp = client
+            .get(format!("{}/api/v1/llm/providers", base))
+            .send()
             .await
             .expect("failed to GET /api/v1/llm/providers");
         let body: serde_json::Value = resp.json().await.expect("GET providers body is not JSON");
@@ -866,7 +931,7 @@ async fn get_config_masks_keys_and_round_trip_preserves_them() {
     let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{port}");
 
     // GET /config must mask the key in both the legacy field and the providers.
@@ -958,7 +1023,7 @@ async fn repo_scan_rejects_invalid_paths() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let url = format!("http://127.0.0.1:{}/api/v1/repo-scan", port);
 
     // Nonexistent path → 400
@@ -1020,13 +1085,16 @@ async fn repo_scan_unknown_task_returns_404() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let resp = reqwest::get(format!(
-        "http://127.0.0.1:{}/api/v1/repo-scan/{}",
-        port,
-        uuid::Uuid::new_v4()
-    ))
-    .await
-    .expect("failed to GET /api/v1/repo-scan/{task_id}");
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let resp = client
+        .get(format!(
+            "http://127.0.0.1:{}/api/v1/repo-scan/{}",
+            port,
+            uuid::Uuid::new_v4()
+        ))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/repo-scan/{task_id}");
     assert_eq!(
         resp.status(),
         reqwest::StatusCode::NOT_FOUND,
@@ -1049,7 +1117,7 @@ async fn repo_scan_completes_and_returns_health_score() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let url = format!("http://127.0.0.1:{}/api/v1/repo-scan", port);
     let resp = client
         .post(&url)
@@ -1109,7 +1177,7 @@ async fn review_zero_output_with_expert_failures_marks_failed() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let url = format!("http://127.0.0.1:{}/api/v1/reviews", port);
     let resp = client
         .post(&url)
@@ -1252,7 +1320,7 @@ async fn review_falls_back_to_server_llm_configs_when_request_omits_them() {
     let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);
     // No `llm_configs` in the body — exactly what the frontend sends.
     let final_body = post_review_and_poll(&base, &client, None).await;
@@ -1300,7 +1368,7 @@ async fn review_request_llm_configs_take_priority_over_server_state() {
     let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &server_llm_config_env)]);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);
 
     // The server-side provider must actually be registered (so the 0-hits
@@ -1360,7 +1428,7 @@ async fn review_lifecycle_logs_carry_metadata() {
     let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);
     let final_body = post_review_and_poll(&base, &client, None).await;
     assert_eq!(final_body["status"].as_str(), Some("completed"));
@@ -1408,7 +1476,7 @@ async fn config_validate_missing_body_returns_json_error() {
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let resp = client
         .post(format!("http://127.0.0.1:{}/api/v1/config/validate", port))
         .json(&serde_json::json!({})) // missing required `body` field
@@ -1531,20 +1599,161 @@ async fn api_auth_enabled_accepts_valid_bearer_and_api_key() {
     assert!(body["version"].is_string(), "version body missing `version`: {body}");
 }
 
-/// Auth disabled (loopback bind, no token): the API must stay open — no
-/// token → 200. The auth middleware must not be mounted at all.
+/// First-run bootstrap (loopback bind, no token): every `/api/v1` endpoint
+/// returns `401 {"code":"auth_required"}` except the bootstrap endpoints, so
+/// the frontend can detect "no token configured" and walk the user through
+/// setting the initial token. Once set, the new token is enforced immediately.
 #[tokio::test]
-async fn api_auth_disabled_allows_without_token() {
+async fn api_bootstrap_loopback_first_run_sets_token_and_locks_api() {
     let port = find_free_port();
     let _guard = spawn_server(port);
     wait_for_server(port).await;
 
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}/api/v1");
+
+    // 1. No token yet → ordinary endpoints return 401 + the bootstrap signal.
     let resp = get_version(port, None, None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = resp.json().await.expect("401 body is JSON");
+    assert_eq!(body, serde_json::json!({"code": "auth_required"}));
+
+    // 2. The status probe is open and reports bootstrap-needed.
+    let resp = client.get(format!("{base}/system/auth-status")).send().await.unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("auth-status body is JSON");
+    assert_eq!(body["configured"], false);
+    assert_eq!(body["bootstrap"], true);
+    assert_eq!(
+        body["bootstrapKeyRequired"], false,
+        "loopback bind needs no bootstrap key"
+    );
+
+    // 3. Loopback bootstrap sets the initial token (no key required).
+    let resp = client
+        .put(format!("{base}/system/token"))
+        .json(&serde_json::json!({"token": API_TOKEN}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // 4. The new token is now enforced: correct one passes, missing is rejected
+    //    with the regular unauthorized error (no longer bootstrap mode).
+    let resp = get_version(port, Some(&format!("Bearer {API_TOKEN}")), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let body: serde_json::Value = resp.json().await.expect("version body is JSON");
+    assert!(body["version"].is_string());
+
+    let resp = get_version(port, None, None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = resp.json().await.expect("401 body is JSON");
+    assert_eq!(body, serde_json::json!({"error": "unauthorized"}));
+
+    // 5. auth-status now reports configured.
+    let resp = client.get(format!("{base}/system/auth-status")).send().await.unwrap();
+    let body: serde_json::Value = resp.json().await.expect("auth-status body is JSON");
+    assert_eq!(body["configured"], true);
+    assert_eq!(body["bootstrap"], false);
+}
+
+/// First-run bootstrap on a NON-loopback bind (`0.0.0.0` — the Docker case):
+/// the server starts only with a one-time bootstrap key, and `PUT
+/// /api/v1/system/token` accepts that key to set the initial token. Without
+/// the key the endpoint reports `401 {"code":"bootstrap_key_required"}`.
+#[tokio::test]
+async fn api_bootstrap_non_loopback_requires_bootstrap_key() {
+    let port = find_free_port();
+    let bootstrap_key = "one-time-bootstrap-key-123";
+    let _guard = spawn_server_non_loopback_bootstrap(port, bootstrap_key);
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}/api/v1");
+
+    // Without the key → 401 bootstrap_key_required.
+    let resp = client
+        .put(format!("{base}/system/token"))
+        .json(&serde_json::json!({"token": API_TOKEN}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = resp.json().await.expect("401 body is JSON");
+    assert_eq!(body, serde_json::json!({"code": "bootstrap_key_required"}));
+
+    // Ordinary endpoints are locked with the generic bootstrap signal.
+    let resp = get_version(port, None, None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = resp.json().await.expect("401 body is JSON");
+    assert_eq!(body, serde_json::json!({"code": "auth_required"}));
+
+    // With the key → the initial token is accepted.
+    let resp = client
+        .put(format!("{base}/system/token"))
+        .header("X-Bootstrap-Key", bootstrap_key)
+        .json(&serde_json::json!({"token": API_TOKEN}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // The new token is now enforced; the bootstrap key is inert.
+    let resp = get_version(port, Some(&format!("Bearer {API_TOKEN}")), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = client
+        .put(format!("{base}/system/token"))
+        .header("X-Bootstrap-Key", bootstrap_key)
+        .json(&serde_json::json!({"token": "second-token"}))
+        .send()
+        .await
+        .unwrap();
     assert_eq!(
         resp.status(),
-        reqwest::StatusCode::OK,
-        "auth-disabled server returned {} for an unauthenticated request",
-        resp.status()
+        reqwest::StatusCode::UNAUTHORIZED,
+        "bootstrap key must stop working once a token is configured"
+    );
+}
+
+/// Token rotation: once a token is configured, `PUT /api/v1/system/token`
+/// requires the CURRENT (old) token; a valid rotation makes the new token
+/// effective immediately and the old one stops working.
+#[tokio::test]
+async fn api_token_rotation_requires_old_token() {
+    let port = find_free_port();
+    let _guard = spawn_server_with_token(port, API_TOKEN);
+    wait_for_server(port).await;
+
+    let base = format!("http://127.0.0.1:{port}/api/v1");
+
+    // Rotate without the old token → 401.
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/system/token"))
+        .json(&serde_json::json!({"token": "rotated-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let body: serde_json::Value = resp.json().await.expect("401 body is JSON");
+    assert_eq!(body, serde_json::json!({"error": "unauthorized"}));
+
+    // Rotate with the old token → 200, and the new token is enforced.
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/system/token"))
+        .header("Authorization", format!("Bearer {API_TOKEN}"))
+        .json(&serde_json::json!({"token": "rotated-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    let resp = get_version(port, Some("Bearer rotated-token"), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = get_version(port, Some(&format!("Bearer {API_TOKEN}")), None).await;
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::UNAUTHORIZED,
+        "old token must be rejected"
     );
 }
 
@@ -1705,7 +1914,7 @@ async fn upgrade_check_caches_github_result() {
     );
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let url = format!("http://127.0.0.1:{}/api/v1/system/upgrade/check", port);
 
     let resp = client.get(&url).send().await.expect("GET check");
@@ -1770,7 +1979,7 @@ async fn upgrade_check_upstream_failure_returns_502_and_is_not_cached() {
     );
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let url = format!("http://127.0.0.1:{}/api/v1/system/upgrade/check", port);
 
     // Call twice: both must be 502 with a non-empty error. The second call
@@ -1864,7 +2073,7 @@ async fn upgrade_post_binary_single_flight_and_pipeline() {
     );
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
 
     let first = client.post(&base).send().await.expect("POST upgrade");
@@ -2007,7 +2216,7 @@ async fn upgrade_docker_auto_upgrades_binary_and_frontend_dist() {
     );
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
 
     let resp = client.post(&base).send().await.expect("POST upgrade");
@@ -2124,7 +2333,7 @@ async fn upgrade_docker_degrades_to_binary_only_without_dist_asset() {
     );
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
 
     let resp = client.post(&base).send().await.expect("POST upgrade");
@@ -2240,7 +2449,7 @@ async fn upgrade_docker_exits_zero_after_successful_upgrade() {
 
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let resp = client
         .post(format!("http://127.0.0.1:{port}/api/v1/system/upgrade"))
         .send()
@@ -2283,7 +2492,7 @@ async fn upgrade_brew_and_cargo_reject_with_hint() {
         let _guard = spawn_server_inner_with_env(port, None, &[("REVIEW_UPGRADE_METHOD", method)]);
         wait_for_server(port).await;
 
-        let client = reqwest::Client::new();
+        let client = bootstrap_authed_client(port, API_TOKEN).await;
         let resp = client
             .post(format!("http://127.0.0.1:{}/api/v1/system/upgrade", port))
             .send()
@@ -2389,7 +2598,7 @@ async fn upgrade_via_symlink_replaces_real_binary_and_preserves_link() {
     );
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
     let resp = client.post(&base).send().await.expect("POST upgrade");
     assert_eq!(
@@ -2465,7 +2674,7 @@ async fn upgrade_post_origin_validation_three_states() {
     );
     wait_for_server(port).await;
 
-    let client = reqwest::Client::new();
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}/api/v1/system/upgrade", port);
 
     // No Origin (curl / script / in-process) → allowed.

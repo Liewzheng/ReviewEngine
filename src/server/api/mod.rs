@@ -4,8 +4,10 @@
 //! (`/repo-scan`), system health (`/system`), configuration (`/config`),
 //! finding feedback (`/feedback`), and server-sent events (`/events`).
 //! Applies CORS middleware that allows
-//! all origins and optionally adds authentication middleware when
-//! [`AuthConfig`] indicates auth is enabled. The `routes` function assembles
+//! all origins and always mounts the authentication middleware (see
+//! [`auth_middleware`](crate::server::auth::auth_middleware)): with a token it
+//! enforces Bearer / X-API-Key, without one it gates the API behind first-run
+//! bootstrap (`401 {"code":"auth_required"}`). The `routes` function assembles
 //! the full [`Router`] with shared [`AppState`] and returns it to the caller.
 
 use axum::{middleware, Router};
@@ -47,9 +49,12 @@ pub fn routes(state: Arc<AppState>, auth: Arc<AuthConfig>) -> Router<Arc<AppStat
         .nest("/feedback", feedback::routes())
         .layer(cors);
 
-    if auth.is_enabled() {
-        router = router.layer(middleware::from_fn(crate::server::auth::auth_middleware));
-    }
+    // Always mount the auth gate, not just when a token was configured at
+    // startup: with no token the server runs in first-run bootstrap mode and
+    // every endpoint returns `401 {"code":"auth_required"}` except the
+    // bootstrap endpoints (PUT /system/token, GET /system/auth-status). With a
+    // token it enforces Bearer / X-API-Key as before.
+    router = router.layer(middleware::from_fn(crate::server::auth::auth_middleware));
 
     router.layer(axum::Extension(auth)).with_state(state)
 }

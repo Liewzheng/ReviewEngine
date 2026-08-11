@@ -68,11 +68,33 @@ export default {
   },
   token: {
     title: '需要 API 權杖',
-    hintIntro: '請輸入',
-    hintInstance:
-      '（為此 ReviewEngine 執行個體設定的 API 權杖）。該權杖儲存在瀏覽器 localStorage 的',
-    hintRequest: '中，並在 API 請求中以 Bearer 權杖的形式傳送。',
+    unlockHint: '此執行個體需要 API 權杖。請輸入您設定的權杖以繼續。',
     placeholder: '貼上您的 API 權杖',
+    tokenRequiredError: '請輸入 API 權杖。',
+    invalidToken: '伺服器拒絕了此權杖。請檢查後重試。',
+    rotateTitle: '輪換 API 權杖',
+    rotatePlaceholder: '貼上新權杖（留空則保持目前權杖不變）',
+    rotateHint: '新權杖將取代目前權杖，並立即生效。',
+    rotateSave: '輪換權杖',
+    rotateSuccess: 'API 權杖已更新。',
+    rotateFailed: '更新 API 權杖失敗。',
+  },
+  bootstrap: {
+    title: '歡迎使用 Review Engine',
+    intro:
+      '此執行個體尚未設定 API 權杖。請建立一個以保護 API——權杖會儲存到伺服器並立即生效。',
+    tokenLabel: 'API 權杖',
+    tokenPlaceholder: '建立新的 API 權杖',
+    tokenRequiredError: '請輸入 API 權杖。',
+    keyLabel: '引導金鑰',
+    keyPlaceholder: '一次性引導金鑰',
+    keyHint:
+      '透過 REVIEW_BOOTSTRAP_KEY 或 --bootstrap-key 設定，並會列印在啟動日誌中。',
+    keyRequiredError: '請輸入引導金鑰。',
+    keyInvalidError: '引導金鑰無效或缺失。請查看啟動日誌。',
+    save: '設定權杖',
+    saving: '正在設定…',
+    saveError: '無法儲存權杖，請重試。',
   },
   dashboard: {
     title: '儀表板',

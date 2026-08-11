@@ -88,10 +88,12 @@ jobs:
         working-directory: frontend
         run: tar -czf frontend-dist.tar.gz -C dist .
 
-      - uses: taiki-e/upload-release-assets-action@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          files: frontend/frontend-dist.tar.gz
+      # taiki-e/upload-release-assets-action 仓库不存在(404,历次发版即失败),
+      # 改用 GitHub CLI 上传同一资产——GITHUB_REF_NAME 即 tag 名(v0.9.10)。
+      - name: Upload frontend dist asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "$GITHUB_REF_NAME" frontend/frontend-dist.tar.gz --clobber
 
   push-ghcr:
     name: Publish GHCR Image

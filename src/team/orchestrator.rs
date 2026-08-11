@@ -508,6 +508,7 @@ fn build_consolidated_report(
     reports: &[ExpertReport],
     config: &AppConfig,
     coverage: &FileCoverage,
+    ledger: Option<&crate::coverage::CoverageLedger>,
 ) -> ConsolidatedReport {
     ConsolidatorConfig {
         min_confidence: config.report.min_confidence,
@@ -515,7 +516,40 @@ fn build_consolidated_report(
         scoring: Some(config.scoring.clone()),
         ..Default::default()
     }
-    .consolidate_with_coverage(reports, None, coverage)
+    .consolidate_with_coverage(reports, None, coverage, ledger)
+}
+
+/// Build the hunk-level coverage ledger from the parsed diff and the expert
+/// reports: changed ranges come from the diff hunks; touched ranges come from
+/// the lines that expert findings actually reference (evidence-based coverage —
+/// see the module docs for why). A file-scoped finding (`line: None`) marks
+/// the file's full changed range as read, since the expert demonstrated
+/// awareness of the file as a whole.
+fn build_coverage_ledger(
+    diff_files: &[(String, Vec<DiffHunk>)],
+    reports: &[ExpertReport],
+) -> crate::coverage::CoverageLedger {
+    let mut ledger = crate::coverage::CoverageLedger::from_diff_files(diff_files);
+    for report in reports {
+        for finding in &report.findings {
+            match (finding.line, finding.line_end) {
+                (Some(l), Some(e)) => ledger.mark_touched(&finding.file, (l, e.max(l)), &report.expert_name),
+                (Some(l), None) => ledger.mark_touched(&finding.file, (l, l), &report.expert_name),
+                (None, _) => {
+                    let ranges: Vec<(u32, u32)> = ledger
+                        .targets
+                        .iter()
+                        .find(|t| t.file == finding.file)
+                        .map(|t| t.changed_ranges.clone())
+                        .unwrap_or_default();
+                    for &(a, b) in &ranges {
+                        ledger.mark_touched(&finding.file, (a, b), &report.expert_name);
+                    }
+                }
+            }
+        }
+    }
+    ledger
 }
 
 /// Reason recorded in [`DroppedFinding`] for findings filtered out because
@@ -822,8 +856,11 @@ pub(crate) async fn run_experts_inner(
     // Lead consolidation over the validated findings: confidence filtering,
     // deduplication, conflict detection, and overall scoring. Pure
     // computation, so it always runs. Coverage is threaded in so an
-    // under-covered run is scored honestly (capped), never inflated.
-    let consolidated = build_consolidated_report(&reports, config, &coverage);
+    // under-covered run is scored honestly (capped), never inflated. The
+    // hunk-level ledger (changed vs. demonstrably-touched ranges) feeds the
+    // coverage-insufficient / unverified marking.
+    let coverage_ledger = build_coverage_ledger(&diff_files, &reports);
+    let consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger));
 
     Ok((
         reports,
@@ -1046,7 +1083,7 @@ mod tests {
                 make_finding(Severity::Medium, 10, "b.rs", Some(2), "confident finding"),
             ],
         )];
-        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2));
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None);
         assert_eq!(consolidated.low_confidence_removed, 1);
         assert_eq!(consolidated.findings.len(), 1);
         assert_eq!(consolidated.findings[0].title, "confident finding");
@@ -1060,7 +1097,7 @@ mod tests {
             "security",
             vec![make_finding(Severity::High, 4, "a.rs", Some(1), "shaky finding")],
         )];
-        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1));
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None);
         assert_eq!(consolidated.low_confidence_removed, 0);
         assert_eq!(consolidated.findings.len(), 1);
         // Downgraded one severity step: High → Medium
@@ -1078,7 +1115,7 @@ mod tests {
         f2.recommendation = "Use spaces".to_string();
         f2.expert_name = "bob".to_string();
         let reports = vec![make_report("alice", vec![f1]), make_report("bob", vec![f2])];
-        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1));
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None);
         assert!(!consolidated.conflicts.is_empty());
         assert!(consolidated.assessment.score <= 100);
         assert!(!consolidated.assessment.tl_dr.is_empty());

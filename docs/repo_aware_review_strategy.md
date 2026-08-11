@@ -11,6 +11,11 @@ related:
   - ../.notes/review_engine_rs_roadmap.md
   - professional_team_design.md
 --->
+
+> ⚠️ **历史设计稿（Historical Design）**：本文记录早期设计思路，其中的阈值、
+> 伪代码与配置示例可能与当前实现不一致。当前行为以代码与
+> `docs/code-audit-default.toml` 为准。
+
 > **Status:** Design proposal — future phases described here may not be fully implemented yet.
 >
 > **状态（v0.7.10）**：Lead Overview 全局上下文（Pass 1 生成 `GlobalReviewContext`，注入每个专家 prompt）与 finding 证据校验（`[report] verification_pass`）已落地。进行中：A2（仓库感知 prompt 注入）；关联项 A5（评分公式）、A7（冲突呈现）亦在推进。本文所述 RepoBrowser 工具化仓库浏览仍未实现。

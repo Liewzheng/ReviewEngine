@@ -11,7 +11,7 @@ The easiest way to install review-engine is with the `install.sh` script. It dow
 ### Stable release (recommended)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh | bash
 ```
 
 The script detects your platform, resolves the latest stable release, verifies the SHA256 checksum, and copies the default config to `~/.config/review-engine/.code-audit-config.toml`.
@@ -23,7 +23,7 @@ The installer also creates a `reng` symlink next to the binary. `reng` and `revi
 If you prefer to build from source, or a binary is not available for your platform:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash -s -- --source
+curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh | bash -s -- --source
 ```
 
 This requires `git` and `cargo`.
@@ -34,7 +34,7 @@ To install a specific version (for example a daily or pre-release tag), set `REV
 
 ```bash
 export REVIEW_ENGINE_VERSION="v0.x.x"
-curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh | bash
 ```
 
 > If `~/.local/bin` is not in your `PATH`, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile.

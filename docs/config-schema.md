@@ -171,7 +171,7 @@ Large PR detection and chunking configuration. Controls when compression, chunki
 | `max_tokens_per_chunk` | integer | `30000` | Token budget per chunk |
 | `large_pr_file_threshold` | integer | `21` | PRs with more files than this are treated as large PRs |
 | `large_pr_line_threshold` | integer | `1000` | PRs with more changed lines than this are treated as large PRs |
-| `compression_level` | string | `"aggressive"` | Compression level: `"none"` / `"moderate"` / `"aggressive"`. Note: compression level is currently auto-determined by `assess_large_pr()` (severity-driven); this config field is not yet honored |
+| `compression_level` | string | `"auto"` | Compression level: `"none"` / `"light"` / `"medium"` / `"aggressive"`. Honored since 0.9.5; `"auto"` defers to `assess_large_pr()` (severity-driven) selection. See `docs/code-audit-default.toml` |
 | `chunking_strategy` | string | `"adaptive"` | Chunking strategy: `"files"` / `"hunks"` / `"adaptive"` (see `src/team/orchestrator.rs`) |
 | `max_chunks_per_expert` | integer | `3` | Maximum number of chunks each expert receives |
 | `max_context_file_bytes` | integer | `60000` | Total byte budget for full changed-file contents injected into expert prompts (local reviews only, per-file cap 20000 bytes; `0` disables) |
@@ -189,7 +189,7 @@ max_input_tokens = 120000
 max_tokens_per_chunk = 30000
 large_pr_file_threshold = 21
 large_pr_line_threshold = 1000
-compression_level = "aggressive"
+compression_level = "auto"
 chunking_strategy = "adaptive"
 max_chunks_per_expert = 3
 max_context_file_bytes = 60000

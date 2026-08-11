@@ -38,7 +38,7 @@ reng audit --local-path . --format markdown       # 整仓健康审计
 3. 安全解压——内置对 **zip-slip 路径逃逸** 与 **解压炸弹** 的防护；
 4. 替换前自动备份原二进制，替换后执行冒烟检查，失败则**自动回滚**。
 
-更贴心的是，它会自动识别你的安装方式并给出对应升级命令：Homebrew 安装提示 `brew upgrade review-engine`，cargo 安装提示重新 `cargo install`，Docker 环境提示在宿主机重建镜像，普通二进制则直接 `reng upgrade`。提示样式参照知名 CLI 工具，一眼就知道该做什么。
+更贴心的是，它会自动识别你的安装方式并给出对应升级命令：Homebrew 安装提示 `brew upgrade review-engine`，cargo 安装提示重新 `cargo install`，Docker 环境提示在容器内自动升级（完成后容器自动重启），普通二进制则直接 `reng upgrade`。提示样式参照知名 CLI 工具，一眼就知道该做什么。
 
 ### Web 升级：一个弹窗，完成更新
 
@@ -48,7 +48,7 @@ reng audit --local-path . --format markdown       # 整仓健康审计
 - `POST /api/v1/system/upgrade` —— 发起升级（**单飞**：同一时刻只允许一个升级任务，进行中并发请求直接 409 拒绝）；
 - `GET /api/v1/system/upgrade/status` —— 查询进度（**8 态状态机**：空闲 / 检查 / 下载 / 校验 / 安装 / 完成 / 失败 / 不支持）。
 
-前端顶部有版本 chip，检测到新版本时亮起 **Update available** 标签并弹出升级窗口；Docker 形态下自动给出宿主机命令块并支持一键复制，无需进容器折腾。
+前端顶部有版本 chip，检测到新版本时亮起 **Update available** 标签并弹出升级窗口；Docker 形态支持**容器内自动升级**——点 Upgrade 即可替换二进制与前端并自动重启，无需重建镜像或进容器。
 
 ### API 鉴权：开箱即用，不裸奔
 
@@ -81,8 +81,8 @@ REST API 采用 **Bearer Token 与 X-API-Key 双通道** 鉴权，比较使用**
 
 ### 部署时长
 
-- **x86-64 原生构建**：约 **3–10 分钟**（视依赖镜像源而定）；
-- **aarch64 交叉构建**：约 **5 分钟**构建 + 约 **6 秒**镜像传输——在宿主机交叉编译，目标机无需慢速编译，拿到即可运行。
+- **零编译镜像**（v0.9.9+）：`Dockerfile` 不再编译 Rust / Vue，镜像构建 = 纯下载 release 资产（二进制 + 前端 dist，sha256 校验），**数分钟**完成，时长由网络带宽决定；
+- **GHCR 镜像**（v0.9.10+）：`docker pull ghcr.io/liewzheng/review-engine:latest`，无需 clone 仓库，秒级到分钟级。
 
 ### 稳定性基线
 

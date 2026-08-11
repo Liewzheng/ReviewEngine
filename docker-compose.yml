@@ -28,11 +28,25 @@ services:
 
     environment:
       # ── API Authentication ──
-      # Required for non-localhost binding.
-      # The backend uses this token to authenticate API requests. The frontend
-      # web UI prompts the user to enter this same token on first visit; it is
-      # then saved in the browser's localStorage and sent as a Bearer token.
-      REVIEW_API_TOKEN: ${REVIEW_API_TOKEN:?REVIEW_API_TOKEN is required}
+      # REVIEW_API_TOKEN is now OPTIONAL: when unset the server starts in
+      # first-run bootstrap mode and the initial token is set via the web UI
+      # (PUT /api/v1/system/token). The token is persisted (as a SHA-256 digest,
+      # never plaintext) to $REVIEW_AUTH_FILE. REVIEW_API_TOKEN, when set, still
+      # takes precedence over any persisted token — existing deployments keep
+      # working unchanged.
+      REVIEW_API_TOKEN: ${REVIEW_API_TOKEN:-}
+
+      # ── First-run bootstrap key (optional) ──
+      # Only needed when REVIEW_API_TOKEN is unset AND the container binds a
+      # non-loopback address (the default 0.0.0.0): the server refuses to start
+      # without it, so set a one-time key here (e.g. `openssl rand -hex 16`).
+      # The web UI prompts for this key when setting the initial token; it can
+      # be removed from .env after setup. For loopback-only binds no key is
+      # needed.
+      REVIEW_BOOTSTRAP_KEY: ${REVIEW_BOOTSTRAP_KEY:-}
+
+      # Auth token persistence file (writable volume ./auth mounted below).
+      REVIEW_AUTH_FILE: /app/auth/auth.toml
 
       # ── GitLab EE Integration ──
       # At least one of GITLAB_WEBHOOK_SECRET or GITLAB_WEBHOOK_SIGNING_SECRET must be configured
@@ -124,6 +138,13 @@ services:
       - type: bind
         source: ./frontend-dist
         target: /app/frontend/dist
+
+      # API 认证 token 持久化卷(非 read_only):存的是 token 的 SHA-256 摘要,
+      # 不是明文。token 由首次进入 Web UI 时填写保存(见 REVIEW_AUTH_FILE 环境
+      # 变量);bind 卷属主同样需 chown 到容器 UID 才能写入。
+      - type: bind
+        source: ./auth
+        target: /app/auth
 
     # Resource limits for SaaS stability
     deploy:

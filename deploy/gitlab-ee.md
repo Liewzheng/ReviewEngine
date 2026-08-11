@@ -104,9 +104,10 @@ nano .env
 `.env`, `config/`, `reports/` and `tls/` are **runtime deploy state**, not
 source code. `.env` is **not tracked** by git (see `.gitignore`), so a plain
 `git pull` on the deploy machine never conflicts with local credentials. Keep
-the code repository pristine — clone once, then `git pull` + rebuild to
-upgrade — and keep all credentials/data in a separate, independently-backed-up
-deploy directory.
+the code repository pristine — upgrades run **inside the container** (UI
+**Upgrade** button, or `POST /api/v1/system/upgrade`; no `git pull` or image
+rebuild needed) — and keep all credentials/data in a separate,
+independently-backed-up deploy directory.
 
 **Recommended: put runtime config in a repo-external deploy directory**
 (e.g. `/volume1/docker/reng/` on a Synology NAS):
@@ -129,11 +130,11 @@ SSH_KEY_PATH=/volume1/docker/reng/.ssh   # or keep your existing ~/.ssh
 ```
 
 Then start compose from the **code repository** but load the deploy `.env`
-explicitly:
+explicitly (compose builds the zero-build image on first `up`; routine upgrades
+run in-container and do **not** need a rebuild):
 
 ```bash
 cd ReviewEngine
-git pull && docker compose build review-engine
 docker compose --env-file /volume1/docker/reng/.env up -d --force-recreate review-engine
 ```
 
@@ -189,10 +190,10 @@ GITLAB_URL=https://gitlab.example.com
 docker compose up -d
 ```
 
-> **First build:** the Dockerfile is multi-stage and compiles the Rust backend
-> **and** the Vue frontend inside the image — no manual `npm run build` is
-> needed. The first build can take **10–30 minutes** depending on your network
-> and CPU; later rebuilds are faster thanks to layer caching.
+> **First build:** the Dockerfile is **zero-build** — the image build does not
+> compile Rust or Vue; it only downloads the prebuilt release binary and
+> frontend dist from GitHub Releases (both sha256-verified). Expect the build
+> to take **a few minutes** (network-bound), not tens of minutes.
 
 > **Logs:** app logs are written *inside the container* to
 > `$HOME/.config/review-engine/logs.ndjson` (not to docker stdout), so
@@ -429,12 +430,21 @@ curl http://localhost:18080/health
 
 ## 🔄 Updates
 
-```bash
-# Pull latest code
-git pull origin main
+Upgrades run **inside the container** — no `git pull`, no image rebuild:
 
-# Rebuild and restart
-docker compose down
+- **Web UI**: click the **Upgrade** button in the header. The service replaces
+  the binary (`./bin`) and frontend dist (`./frontend-dist`), then exits;
+  the compose `restart: unless-stopped` policy restarts the container with the
+  new version.
+- **API**: `POST /api/v1/system/upgrade` (same in-container path; progress via
+  `GET /api/v1/system/upgrade/status`).
+
+For source-built deployments, a full image rebuild is only needed to re-pull
+the release assets — the Dockerfile is **zero-build** (pure download), so a
+rebuild finishes in minutes, not tens of minutes:
+
+```bash
+git pull origin main
 docker compose up -d --build
 ```
 

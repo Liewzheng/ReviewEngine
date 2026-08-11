@@ -10,6 +10,11 @@ related:
   - ../.notes/review_engine_rs_roadmap.md
   - professional_team_design.md
 ---
+
+> ⚠️ **历史设计稿（Historical Design）**：本文记录早期设计思路，其中的阈值、
+> 伪代码与配置示例（如 `large_pr_file_threshold`、`[team]` 段）可能与当前实现
+> 不一致。当前行为以代码与 `docs/code-audit-default.toml` 为准。
+
 # review_engine 大 PR 审核方案
 
 > 目标：让虚拟研发团队（Virtual Engineering Team）能够高效、完整、低成本地审核超过模型上下文窗口的大型 PR。

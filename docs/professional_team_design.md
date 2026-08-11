@@ -11,6 +11,11 @@ related:
   - ../.notes/review_engine_rs_roadmap.md
   - repo_aware_review_strategy.md
 ---
+
+> ⚠️ **历史设计稿（Historical Design）**：本文记录早期设计思路，其中的阈值、
+> 伪代码与配置示例可能与当前实现不一致。当前行为以代码与
+> `docs/code-audit-default.toml` 为准。
+
 > **Status:** Design proposal — future phases described here may not be fully implemented yet.
 >
 > **状态（v0.7.10）**：多专家团队（TOML 定义角色/权重/trigger/commands）与 Lead 汇总（`lead_consolidator` 合并去重）已落地。进行中：A5（评分公式统一）、A7（冲突呈现）；关联项 A2（仓库感知 prompt 注入）亦在推进，MR 主路径评分接入（A1）尚未完成。

@@ -587,7 +587,7 @@ Response 200:
   "updateAvailable": true,
   "installMethod": "binary",             // binary | brew | docker | cargo | unknown
   "platformAssetAvailable": true,
-  "releaseUrl": "https://github.com/Liewzheng/Review-Engine/releases/tag/v0.9.0",
+  "releaseUrl": "https://github.com/Liewzheng/ReviewEngine/releases/tag/v0.9.0",
   "upgradeHint": "reng upgrade",         // 按安装方式给出的升级命令（与 CLI 提示一致）
   "cachedAt": "2026-08-03T10:00:00Z"     // RFC3339；从未缓存过则为空字符串
 }
@@ -597,24 +597,17 @@ Response 502:
 ```
 
 - `installMethod` 取值：`binary`（直接部署，可自动升级）/ `brew` / `docker` / `cargo` / `unknown`。
-- `upgradeHint` 对应各安装方式的升级命令：`binary` → `reng upgrade`；`brew` → `brew upgrade review-engine`；`cargo` → `cargo install review-engine --locked --features cli`；`docker` → `git pull && docker compose up -d --build`；`unknown` → 官方 `install.sh` 手动升级。
+- `upgradeHint` 对应各安装方式的升级命令：`binary` → `reng upgrade`；`brew` → `brew upgrade review-engine`；`cargo` → `cargo install review-engine --locked --features cli`；`docker` → `Web UI 或 reng upgrade 自动升级（容器将自动重启）`；`unknown` → 官方 `install.sh` 手动升级。
 
 #### `POST /api/v1/system/upgrade`
 
-按检测到的安装方式执行升级。`binary`（直接部署）会启动后台任务完成「下载 → SHA256 校验 → 解压 → 替换前冒烟测试 → 备份 → 原子替换 → 替换后复验」，失败即回滚并保留备份。同一时间只允许一个任务进行（single-flight），进行中并发请求返回 `409`。**运行中的服务进程不会被重启**：任务置为 `done` 表示磁盘上的二进制已替换，需重启服务后生效。
+按检测到的安装方式执行升级。`binary`（直接部署）与 `docker`（容器内）都会启动后台任务完成「下载 → SHA256 校验 → 解压 → 替换前冒烟测试 → 备份 → 原子替换 → 替换后复验」，失败即回滚并保留备份。同一时间只允许一个任务进行（single-flight），进行中并发请求返回 `409`。**是否重启取决于安装方式**：`binary` 直接部署下运行中的进程不会被重启，任务置为 `done` 表示磁盘上的二进制已替换，需手动重启服务生效；`docker` 容器下服务会**替换二进制与前端 dist 后主动 exit**，由 compose 的 `restart: unless-stopped` 自动拉起新版本（无需重建镜像）。
 
 ```
-Response 202 (binary，任务已启动):
+Response 202 (binary / docker，任务已启动):
 {
   "status": "started",
   "targetVersion": "0.9.0"
-}
-
-Response 200 (docker，容器内不支持自替换，需在宿主机执行):
-{
-  "status": "notSupported",
-  "instructions": "git pull && docker compose up -d --build",
-  "note": "容器内请勿自替换二进制，请在宿主机拉取新镜像并重建容器"
 }
 
 Response 400 (brew / cargo / unknown，返回手动升级提示):
@@ -643,9 +636,9 @@ Response 502 (最新版本检查失败):
 | `downloading` | 下载 release 资产 |
 | `verifying` | 校验 SHA256 |
 | `installing` | 解压并替换二进制 |
-| `done` | 完成（需重启服务生效） |
+| `done` | 完成 — binary 直接部署需手动重启生效；docker 容器随即自动重启 |
 | `failed` | 失败（`message` 含原因） |
-| `notSupported` | 安装方式不支持自替换（如 docker） |
+| `notSupported` | 保留状态：当前安装/平台不支持自升级（docker 已支持容器内自升级；平台无 release 资产时在 `POST` 阶段即返回 400，一般不进入此态） |
 
 `checking` / `downloading` / `verifying` / `installing` 为「进行中」状态（single-flight 门控：此时并发 `POST /api/v1/system/upgrade` 返回 `409`）。
 
@@ -655,7 +648,7 @@ Response 200:
   "state": "downloading",
   "message": "正在下载 release 资产",
   "currentVersion": "0.8.2",
-  "targetVersion": "0.9.0"      // 仅 binary 升级期间有值；其余为 null
+  "targetVersion": "0.9.0"      // 升级任务进行中有值；空闲/失败为 null（binary 与 docker 均如此）
 }
 ```
 

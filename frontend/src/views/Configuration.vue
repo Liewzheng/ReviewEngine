@@ -741,10 +741,20 @@ const rules = computed<FormRules>(() => ({
     { validator: validateUrl, trigger: 'blur' },
   ],
   'gitlab.apiToken': [
-    // The API token is deliberately never echoed back by GET /config, so an
-    // empty field means "keep the stored token" and must not be required.
-    // Only when the user types a new token is it length-checked.
-    { min: 10, message: t('config.validation.tokenMinLength'), trigger: 'blur' },
+    {
+      validator: (_rule: any, value: string, callback: Function) => {
+        // GET /config returns the `***` mask when a token is configured; that
+        // sentinel means "keep the stored token" and must never be
+        // length-flagged. An empty value means "clear the token" (explicit
+        // intent), also valid. Only a genuinely new token is length-checked.
+        if (!value || value === '***' || value.length >= 10) {
+          callback()
+          return
+        }
+        callback(new Error(t('config.validation.tokenMinLength')))
+      },
+      trigger: 'blur',
+    },
   ],
   'llm.apiBaseUrl': [
     { validator: validateUrl, trigger: 'blur' },

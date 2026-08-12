@@ -305,7 +305,7 @@ export default {
       title: 'GitLab 集成',
       url: 'GitLab URL',
       urlPlaceholder: 'https://gitlab.example.com（留空则保留原值）',
-      apiTokenPlaceholder: 'glpat-...（留空则保留原值）',
+      apiTokenPlaceholder: 'glpat-...（*** 保留原值；留空则清除）',
       revealApiTokenAria: '显示 API 令牌',
       webhookSecret: 'Webhook 密钥',
       revealWebhookAria: '显示 Webhook 密钥',

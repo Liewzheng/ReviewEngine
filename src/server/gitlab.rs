@@ -458,6 +458,18 @@ async fn run_review_for_mr(
     super::run_review_common(mr_url, gitlab_token, dispatcher, dispatch_key, sha).await
 }
 
+/// True when `note` (already lowercased) begins with a slash command whose
+/// first path segment is exactly `cmd` — i.e. `/review` and `/review/123`
+/// match, but `/reviewer` / `/reviewxyz` do not. The command must be followed
+/// by a path separator (`/`) or the end of the note, so prefix lookalikes
+/// never trigger a review (`^/review(/|$)` semantics).
+fn note_starts_with_command(note: &str, cmd: &str) -> bool {
+    let Some(rest) = note.strip_prefix(cmd) else {
+        return false;
+    };
+    rest.is_empty() || rest.starts_with('/')
+}
+
 async fn handle_note_hook(
     body: &str,
     dispatcher: &MrDispatcher,
@@ -471,8 +483,9 @@ async fn handle_note_hook(
     let note = parsed["object_attributes"]["note"].as_str().unwrap_or("");
     let note_lower = note.to_lowercase();
 
-    // Check for commands like /review, /describe
-    if note_lower.starts_with("/review") || note_lower.starts_with("/describe") {
+    // Check for commands like /review, /describe. Matched on a path-segment
+    // boundary so `/reviewer` / `/reviewxyz` never trigger a review.
+    if note_starts_with_command(&note_lower, "/review") || note_starts_with_command(&note_lower, "/describe") {
         let project_url = parsed["project"]["web_url"].as_str().unwrap_or("").to_string();
         let mr_iid = parsed["merge_request"]["iid"]
             .as_u64()
@@ -1115,5 +1128,30 @@ mod tests {
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::FORBIDDEN);
+    }
+
+    // ── Note hook command matching (HIGH-2: prefix lookalike regression) ───
+
+    #[test]
+    fn test_note_command_matches_exact_and_path_prefix() {
+        // `/review` alone triggers.
+        assert!(note_starts_with_command("/review", "/review"));
+        // `/review/123` — a path segment after the command — triggers.
+        assert!(note_starts_with_command("/review/123", "/review"));
+        assert!(note_starts_with_command("/review/123 details", "/review"));
+        // Prefix lookalikes must NOT trigger.
+        assert!(!note_starts_with_command("/reviewer", "/review"));
+        assert!(!note_starts_with_command("/reviewer/456", "/review"));
+        assert!(!note_starts_with_command("/reviewxyz", "/review"));
+        // A command followed by a space is not a path-segment boundary: no trigger.
+        assert!(!note_starts_with_command("/review @someone", "/review"));
+        // `/describe` shares the same boundary semantics.
+        assert!(note_starts_with_command("/describe", "/describe"));
+        assert!(note_starts_with_command("/describe/foo", "/describe"));
+        assert!(!note_starts_with_command("/describefoo", "/describe"));
+        // Not a command at all.
+        assert!(!note_starts_with_command("review this", "/review"));
+        assert!(!note_starts_with_command("", "/review"));
+        assert!(!note_starts_with_command("needs-review", "/review"));
     }
 }

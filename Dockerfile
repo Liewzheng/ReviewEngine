@@ -28,7 +28,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && apt-get clean
 
 # 创建非 root 用户
-RUN groupadd -r review-engine && useradd -r -g review-engine -d /app -s /sbin/nologin review-engine
+# 固定 UID/GID(9001):useradd -r 的 UID 由构建系统分配,不可靠(NAS 上实测撞车)。
+# 9001 避开宿主常见 UID(1000)与被占用的 999;改此值须同步文档中的 chown 引导。
+RUN groupadd -r -g 9001 review-engine && useradd -r -u 9001 -g review-engine -d /app -s /sbin/nologin review-engine
 
 WORKDIR /app
 

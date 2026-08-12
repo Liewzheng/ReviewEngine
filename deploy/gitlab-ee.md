@@ -56,8 +56,8 @@ echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
 mkdir -p config reports bin frontend-dist auth tls
 
 # 修正 bind 卷属主(Linux/NAS 必须——卷目录属主继承宿主用户,容器内 review-engine
-# 用户(UID 999)写卷会 Permission denied;Docker Desktop 无此问题):
-sudo docker exec <容器名> id review-engine   # 查真实 UID(默认 999);容器名通常为 <目录名>-review-engine-1
+# 用户写卷会 Permission denied;Docker Desktop 无此问题):
+docker run --rm --entrypoint id ghcr.io/liewzheng/review-engine:latest review-engine  # 查真实 UID,以实际输出为准,勿假设 999
 sudo chown -R <UID>:<UID> bin frontend-dist auth config reports tls
 
 docker compose up -d

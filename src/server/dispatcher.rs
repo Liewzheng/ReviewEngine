@@ -70,6 +70,17 @@ pub enum ShouldStart {
     InProgress,
 }
 
+/// [`MrDispatcher::wait`] 的返回结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitOutcome {
+    /// Review 已完成，或本来就没有正在运行的 review 需要等待（含条目被移除）。
+    Completed,
+    /// 在 running-marker 超时周期内未观察到完成信号。调用方不应永久挂起，
+    /// 应重新调用 [`MrDispatcher::try_start`]：此时过期标记通常已被清除，
+    /// 会返回 `Go` 从而走 abort 恢复路径。
+    TimedOut,
+}
+
 /// On-disk representation of the dispatcher state.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedState {
@@ -152,8 +163,22 @@ impl MrDispatcher {
         }
     }
 
-    /// 等待当前 review 完成。
-    pub async fn wait(&self, mr_url: &str) {
+    /// 等待当前 review 完成，最长等待一个 running-marker 超时周期
+    /// （即 `self.timeout`，默认 15 分钟）。
+    ///
+    /// 等待被 `tokio::time::timeout` 强制上界：若 review task 被 abort、
+    /// 永远不会调用 [`Self::complete`]/[`Self::reset`]，`wait` 也会在超时后
+    /// 返回 [`WaitOutcome::TimedOut`]，而不是在 `rx.changed()` 上永久
+    /// pending，从而保证 abort 后调用方线程/任务可回收（HIGH-1）。
+    ///
+    /// 超时取 `self.timeout` 而非更短的固定值：调用方的既有模式是
+    /// `wait().await` 之后立即重新 `try_start`。以 `TimedOut` 返回时 running
+    /// 标记恰好已经过期（`is_expired` 按 `>=` 判定），`try_start` 会返回 `Go`
+    /// 走恢复路径；若用更短的固定超时（如 60s），健康但较慢的 review 尚未
+    /// 结束时调用方会在 `try_start` 得到 `InProgress` 并丢弃本次延迟的
+    /// review —— 属于回归。
+    pub async fn wait(&self, mr_url: &str) -> WaitOutcome {
+        let wait_timeout = self.timeout;
         let mut rx = {
             let map = self.inner.lock().await;
             match map.get(mr_url) {
@@ -162,11 +187,23 @@ impl MrDispatcher {
             }
         };
 
-        if let Some(ref mut rx) = rx {
-            if *rx.borrow() {
-                return;
-            }
-            let _ = rx.changed().await;
+        let Some(ref mut rx) = rx else {
+            // 没有正在运行的 review —— 无需等待。
+            return WaitOutcome::Completed;
+        };
+
+        if *rx.borrow() {
+            // complete()/reset() 在 wait() 开始监听之前已经发出信号。
+            return WaitOutcome::Completed;
+        }
+
+        match tokio::time::timeout(wait_timeout, rx.changed()).await {
+            // 正常完成：收到新信号。
+            Ok(Ok(())) => WaitOutcome::Completed,
+            // 发送端被 drop（条目被 remove() 移除或状态表销毁）：无可等待之物。
+            Ok(Err(_)) => WaitOutcome::Completed,
+            // 超时：review 未在超时周期内完成（如 task 被 abort），返回可识别状态。
+            Err(_) => WaitOutcome::TimedOut,
         }
     }
 
@@ -322,8 +359,8 @@ mod tests {
     #[tokio::test]
     async fn test_wait_returns_immediately_when_not_running() {
         let d = MrDispatcher::new();
-        // Not started yet — wait returns immediately
-        d.wait("mr1").await;
+        // Not started yet — wait returns immediately with Completed
+        assert_eq!(d.wait("mr1").await, WaitOutcome::Completed);
     }
 
     #[tokio::test]
@@ -336,8 +373,8 @@ mod tests {
             d2.complete("mr1", "sha1").await;
         });
 
-        // Wait should return after complete is called
-        d.wait("mr1").await;
+        // Wait should return Completed after complete is called
+        assert_eq!(d.wait("mr1").await, WaitOutcome::Completed);
         handle.await.unwrap();
     }
 
@@ -350,8 +387,44 @@ mod tests {
         // Signal before wait enters the await
         d.complete("mr1", "sha1").await;
 
-        // wait() should see the signal was already sent and return immediately
-        d.wait("mr1").await;
+        // wait() should see the signal was already sent and return Completed immediately
+        assert_eq!(d.wait("mr1").await, WaitOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn test_wait_returns_timed_out_when_review_aborted() {
+        // HIGH-1 regression test: the review task is aborted before it can call
+        // complete()/reset(), so the signal is never sent and the running marker
+        // is never cleared. wait() must NOT block forever on rx.changed().
+        let d = MrDispatcher::with_state_file(None, Duration::from_millis(50));
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+
+        // wait() must return within a bound with a distinguishable outcome.
+        let outcome = tokio::time::timeout(Duration::from_secs(2), d.wait("mr1"))
+            .await
+            .expect("wait() must return within 2s even when the review is aborted");
+        assert_eq!(outcome, WaitOutcome::TimedOut);
+
+        // Recovery: after TimedOut the caller re-checks try_start, which sees the
+        // expired marker and starts a new review.
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::Go);
+    }
+
+    #[tokio::test]
+    async fn test_wait_returns_completed_when_entry_removed() {
+        // The entry is removed while a waiter is listening: the watch sender is
+        // dropped, so wait() must resolve (Completed), not hang.
+        let d = MrDispatcher::new();
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+
+        let d2 = d.clone();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            d2.remove("mr1").await;
+        });
+
+        assert_eq!(d.wait("mr1").await, WaitOutcome::Completed);
+        handle.await.unwrap();
     }
 
     #[tokio::test]

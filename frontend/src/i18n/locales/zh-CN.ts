@@ -293,6 +293,7 @@ export default {
       modelRequired: '必须填写默认模型',
       expertRequired: '至少需要一个专家',
       fixBeforeSave: '保存前请先修复校验错误',
+      saveWithWarnings: '部分必填项未填写，将按当前内容保存',
     },
     unsaved: {
       title: '未保存的更改',

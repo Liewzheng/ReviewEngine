@@ -297,6 +297,7 @@ export default {
       modelRequired: 'Le modèle par défaut est requis',
       expertRequired: 'Au moins un expert est requis',
       fixBeforeSave: "Veuillez corriger les erreurs de validation avant d'enregistrer",
+      saveWithWarnings: 'Certains champs obligatoires sont manquants ; enregistrement avec les valeurs actuelles',
     },
     unsaved: {
       title: 'Modifications non enregistrées',

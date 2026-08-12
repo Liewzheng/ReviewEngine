@@ -296,6 +296,7 @@ export default {
       modelRequired: 'デフォルトモデルは必須です',
       expertRequired: 'エキスパートが 1 人以上必要です',
       fixBeforeSave: '保存する前に検証エラーを修正してください',
+      saveWithWarnings: '一部の必須項目が未入力です。現在の内容のまま保存します',
     },
     unsaved: {
       title: '未保存の変更',

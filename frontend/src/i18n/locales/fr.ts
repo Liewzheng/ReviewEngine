@@ -81,6 +81,12 @@ export default {
     rotateSave: 'Faire pivoter le jeton',
     rotateSuccess: 'Jeton API mis à jour.',
     rotateFailed: 'Échec de la mise à jour du jeton API.',
+    rotateBootstrapKeyLabel: 'Clé d’amorçage (facultatif)',
+    rotateBootstrapKeyPlaceholder: 'Clé d’amorçage à usage unique',
+    rotateBootstrapKeyHint:
+      'Pour une rotation de secours lorsque le jeton actuel est invalide — définie avec REVIEW_BOOTSTRAP_KEY ou --bootstrap-key.',
+    rotateInvalidHint:
+      'Le jeton actuel a été rejeté par le serveur. Saisissez la Clé d’amorçage ci-dessus pour faire pivoter, ou modifiez REVIEW_API_TOKEN dans votre .env et redémarrez.',
   },
   bootstrap: {
     title: 'Bienvenue sur Review Engine',

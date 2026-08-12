@@ -40,6 +40,10 @@ const bootstrapKeyRequired = ref(false)
 const tokenDialogVisible = ref(false)
 const tokenDialogMode = ref<'unlock' | 'rotate'>('unlock')
 const tokenInput = ref('')
+// Optional Bootstrap Key for the rotate dialog: the backend accepts it
+// (X-Bootstrap-Key) as a rotation credential even when the current token is
+// invalid/lost — the self-rescue path that breaks the rotation deadlock.
+const rotateBootstrapKey = ref('')
 const rotateSaving = ref(false)
 const unlockError = ref<string | null>(null)
 const unlockDismissed = ref(false)
@@ -79,6 +83,7 @@ function handleAuthSignal(code: string) {
 function openUnlockDialog(error?: string | null) {
   tokenDialogMode.value = 'unlock'
   tokenInput.value = ''
+  rotateBootstrapKey.value = ''
   unlockError.value = error ?? null
   tokenDialogVisible.value = true
 }
@@ -89,6 +94,7 @@ function openTokenDialog() {
   if (getApiToken()) {
     tokenDialogMode.value = 'rotate'
     tokenInput.value = ''
+    rotateBootstrapKey.value = ''
     unlockError.value = null
     tokenDialogVisible.value = true
   } else {
@@ -142,21 +148,25 @@ async function saveTokenFromDialog() {
   unlockError.value = null
   try {
     // PUT /system/token authenticates with the current token (added by
-    // request() from localStorage) and persists the new one server-side.
-    await setSystemToken(newToken)
+    // request() from localStorage) — or, when the current token is invalid,
+    // with the optional bootstrap key (X-Bootstrap-Key) the backend accepts as
+    // a rotation credential. The new token is persisted server-side.
+    const bootstrapKey = rotateBootstrapKey.value.trim()
+    await setSystemToken(newToken, bootstrapKey || undefined)
     setApiToken(newToken)
     tokenDialogVisible.value = false
     ElMessage.success(t('token.rotateSuccess'))
   } catch (e) {
     const code = (e as { code?: string })?.code
     if (code === 'unauthorized') {
-      // The cached token is not accepted by the server (rotated elsewhere or
-      // cleared). Switch this dialog to unlock mode so the user enters the
-      // existing token instead of a new one.
+      // The cached token is not accepted by the server (rotated elsewhere, or
+      // the effective token comes from REVIEW_API_TOKEN / auth.toml while the
+      // browser holds a stale copy). Keep the rotate dialog open so the user
+      // can retry with the Bootstrap Key (REVIEW_BOOTSTRAP_KEY / --bootstrap-key);
+      // if neither the current token nor a bootstrap key is available, update
+      // REVIEW_API_TOKEN in .env and restart.
       clearApiToken()
-      tokenDialogMode.value = 'unlock'
-      tokenInput.value = ''
-      unlockError.value = t('token.invalidToken')
+      unlockError.value = t('token.rotateInvalidHint')
     } else {
       ElMessage.error(t('token.rotateFailed'))
     }
@@ -350,6 +360,7 @@ const pageTitle = computed(() => {
     </template>
     <template v-else>
       <p class="token-hint">{{ $t('token.rotateHint') }}</p>
+      <p v-if="unlockError" class="token-error" role="alert">{{ unlockError }}</p>
       <el-input
         v-model="tokenInput"
         type="password"
@@ -357,8 +368,21 @@ const pageTitle = computed(() => {
         show-password
         clearable
         autocomplete="new-password"
+        @input="clearUnlockError"
         @keyup.enter="saveTokenFromDialog"
       />
+      <label class="token-field-label" for="rotate-bootstrap-key">{{ $t('token.rotateBootstrapKeyLabel') }}</label>
+      <el-input
+        id="rotate-bootstrap-key"
+        v-model="rotateBootstrapKey"
+        type="password"
+        :placeholder="$t('token.rotateBootstrapKeyPlaceholder')"
+        show-password
+        clearable
+        autocomplete="off"
+        @input="clearUnlockError"
+      />
+      <p class="token-bootstrap-hint">{{ $t('token.rotateBootstrapKeyHint') }}</p>
     </template>
     <template #footer>
       <el-button @click="onCancelTokenDialog">{{ $t('common.cancel') }}</el-button>
@@ -619,6 +643,21 @@ const pageTitle = computed(() => {
   font-size: 13px;
   line-height: 1.5;
   margin: 0 0 12px;
+}
+
+.token-field-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin: 14px 0 6px;
+}
+
+.token-bootstrap-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: 6px 0 0;
 }
 
 .boot-splash {

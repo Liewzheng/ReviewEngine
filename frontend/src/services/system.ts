@@ -39,6 +39,10 @@ export function getAuthStatus(): Promise<AuthStatus> {
  *   REVIEW_BOOTSTRAP_KEY / --bootstrap-key) via the `X-Bootstrap-Key` header.
  * - A token already configured: the caller must authenticate with the current
  *   token — `request` adds `Authorization: Bearer <cached token>` automatically.
+ *   If the current token is invalid or lost, pass `bootstrapKey` (from
+ *   REVIEW_BOOTSTRAP_KEY / --bootstrap-key) or use the env/CLI token
+ *   (REVIEW_API_TOKEN / --api-token): the backend accepts all three as
+ *   rotation credentials, so a stale cached token no longer deadlocks rotation.
  *
  * @returns the parsed response, `{status: 'saved', configured: true}` on success.
  */

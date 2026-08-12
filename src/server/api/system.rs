@@ -263,7 +263,10 @@ struct PutTokenRequest {
 ///
 /// Auth contract (enforced by `auth_middleware`, not re-checked here):
 /// - A token is already configured → the caller must authenticate with the
-///   current (old) token; otherwise 401.
+///   current (old) token, the one-time bootstrap key (`X-Bootstrap-Key`), or
+///   the explicit env/CLI token (`REVIEW_API_TOKEN` / `--api-token`); the
+///   latter two are the self-rescue path when the current token is invalid or
+///   lost. Otherwise 401.
 /// - No token yet (first-run bootstrap) → reachable from a loopback bind, or
 ///   with the one-time bootstrap key (`X-Bootstrap-Key`) on a non-loopback
 ///   bind.

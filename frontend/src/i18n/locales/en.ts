@@ -89,6 +89,12 @@ export default {
     rotateSave: 'Rotate Token',
     rotateSuccess: 'API token updated successfully.',
     rotateFailed: 'Failed to update the API token.',
+    rotateBootstrapKeyLabel: 'Bootstrap Key (optional)',
+    rotateBootstrapKeyPlaceholder: 'One-time bootstrap key',
+    rotateBootstrapKeyHint:
+      'For rescue rotation when the current token is invalid — set with REVIEW_BOOTSTRAP_KEY or --bootstrap-key.',
+    rotateInvalidHint:
+      'The current token was rejected by the server. Enter the Bootstrap Key above to rotate, or update REVIEW_API_TOKEN in your .env and restart.',
   },
   bootstrap: {
     title: 'Welcome to Review Engine',

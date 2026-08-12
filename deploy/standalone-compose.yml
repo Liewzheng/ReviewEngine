@@ -10,12 +10,18 @@
 #      不设 REVIEW_API_TOKEN 时必须给 REVIEW_BOOTSTRAP_KEY,否则服务拒绝启动:
 #        echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
 #      (或直接在 .env 里设 REVIEW_API_TOKEN=xxxx,env 注入方式兼容旧版)
-#   4) docker compose up -d
-#   5) 打开 http://<宿主IP>:18080 → 首次进入 UI,在 Configuration 页填写
+#   4) 预建 bind mount 源目录(Linux/NAS 必须——源目录不存在时 docker compose up
+#      会报 "Bind mount failed: '.../xxx' does not exist" 并中止;Docker Desktop
+#      会自动创建目录,Linux/NAS 不会):
+#        mkdir -p config reports bin frontend-dist auth tls
+#      (config/reports/bin/frontend-dist/auth 必建;tls 可选,仅启用 HTTPS 时使用)
+#   5) docker compose up -d
+#   6) 打开 http://<宿主IP>:18080 → 首次进入 UI,在 Configuration 页填写
 #      API token / GitLab / LLM;token 持久化到 ./auth/auth.toml(存 SHA-256 摘要,
 #      非明文),设置完成后可把 REVIEW_BOOTSTRAP_KEY 从 .env 删掉。
 #
-# 所有卷目录均相对当前目录自动创建(compose 相对路径),配置与代码/镜像分离。
+# 所有卷目录均为相对当前目录的 bind mount(配置与代码/镜像分离);注意 Linux/NAS 上
+# bind mount 源目录不会自动创建,请先按步骤 4 的 mkdir -p 预建。
 # Linux NAS 上 bind 卷属主继承宿主:若容器内 review-engine 写卷失败,先
 #   mkdir -p config reports bin frontend-dist auth && chown -R <容器UID> *
 #   (UID 以 `docker exec <容器名> id review-engine` 为准,如 999)。
@@ -76,7 +82,7 @@ services:
       REVIEW_TLS_KEY: ${REVIEW_TLS_KEY:-}
 
     volumes:
-      # 可写部署卷(配置与代码分离;相对当前目录,自动创建)
+      # 可写部署卷(配置与代码分离;相对当前目录的 bind mount——源目录须先按步骤 4 预建)
       - ./config:/app/config
       - ./reports:/app/reports
       - ./bin:/app/bin

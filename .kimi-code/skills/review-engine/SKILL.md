@@ -70,6 +70,7 @@ For a complete config reference see [references/config.md](references/config.md)
 |------|---------|
 | Audit the whole repository | `reng audit --local-path .` |
 | Review current branch vs `main` | `reng review --local-path . --base main` |
+| 全量审查仓库内单个子目录/子模块 | `reng review --local-path . --path <dir>` |
 | Review a GitHub PR / GitLab MR | `reng review --mr-url <URL> --publish` |
 | Generate a PR/MR description | `reng describe --mr-url <URL>` |
 | Suggest concrete improvements | `reng improve --mr-url <URL>` |

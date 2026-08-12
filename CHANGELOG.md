@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Docs
+- **Subdirectory full-content review documented**: `reng review --local-path <repo> --path <dir>` now has a dedicated "Review a single subdirectory" section in `docs/getting-started.md` — full-content semantics (synthetic empty-tree diff), constraints (relative path, requires `--local-path`, mutually exclusive with `--mr-url` / `--diff` / `--stdin` / `--base` / `--head` / `--since` / `--until` / `--staged`), what is skipped (symlinks, non-UTF-8, filtered extensions, dependency/build output dirs), and the zero-findings coverage note. The review-engine skill's common-commands table gains the `--path` row. (`docs/getting-started.md`, `.kimi-code/skills/review-engine/SKILL.md`)
+- **Promo-site publishing policy recorded**: GitHub Pages is now the single publishing entry (OSS mirror retired); the docs portal renders `main`-branch `docs/` as-is without multi-language translation; `gh-pages` must carry `.nojekyll`. (`.kimi-code/pipeline.md`)
+
 ## [0.9.14] - 2026-08-12
 
 ### Fixed

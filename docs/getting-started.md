@@ -109,6 +109,64 @@ reng audit --local-path . --format markdown
 
 ---
 
+## Review a single subdirectory (子库/子目录单独审查)
+
+`review --path` runs a review on one subdirectory or submodule of a repository. Use it when a large monorepo keeps a subproject outside normal PR-based reviews.
+
+### Core command
+
+```bash
+reng review --local-path <repo> --path <dir>
+```
+
+`--path` triggers a **full-content review**: every reviewable file in the directory is treated as newly added code against a synthetic empty-tree diff (`--- /dev/null`, with the whole file as `+` lines). The normal expert pipeline applies — large-PR chunking, full-file content injection, and finding validation — so a big directory is split and covered exactly like a large PR.
+
+### Examples
+
+Review `src/actions` in the current checkout and write a Markdown report:
+
+```bash
+reng review --local-path . --path src/actions --format markdown --output report.md --progress
+```
+
+Review a submodule inside a repository checked out elsewhere:
+
+```bash
+reng review --local-path /path/to/repo --path packages/parser --format json --output parser-review.json
+```
+
+> Only want the *recent changes* in a directory? Build a diff for it and review that instead:
+>
+> ```bash
+> git diff <base> -- <dir> > changes.diff
+> reng review --diff changes.diff
+> ```
+
+### Constraints
+
+- `--path` must be a **relative path** to the repository root; absolute paths and `..` are rejected.
+- `--path` must be combined with `--local-path`, which names the repository root.
+- `--path` is mutually exclusive with `--mr-url`, `--diff`, `--stdin`, `--base`, `--head`, `--since`, `--until`, and `--staged`.
+- If the directory does not exist, is empty, or contains no reviewable files, review-engine exits with an error instead of producing an empty report.
+
+### What gets reviewed and what is skipped
+
+Under a git repository, "reviewable" means the files reported by `git ls-files --cached --others --exclude-standard` — tracked files plus untracked files that are not gitignored. Outside git, the directory is walked recursively while skipping the fixed ignore list.
+
+Files that cannot be reviewed are skipped silently rather than flagged: symlinks, non-UTF-8 files, and filtered extensions such as `.lock`, `.sum`, `.png`, `.min.js`, and `package-lock.json`. Dependency and build output directories — `node_modules/`, `target/`, `dist/`, `build/`, `.venv/`, `vendor/` — are also ignored, so `frontend/dist` is skipped automatically.
+
+### Zero-findings reports
+
+A full-content review reads every file, so a report with zero findings still appends a coverage statement: it records how many files were covered in full and notes that zero findings does not mean the code is problem-free.
+
+### How this differs from `audit` and `--base`
+
+- `reng audit` runs whole-repository health checks, not a per-file diff-style review.
+- `reng review --base` reviews the diff between branches or commits.
+- `reng review --path` reviews the full current content of one directory inside the repository.
+
+---
+
 ## Review a GitLab MR or GitHub PR
 
 ### GitLab MR

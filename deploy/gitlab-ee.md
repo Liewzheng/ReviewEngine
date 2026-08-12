@@ -54,6 +54,12 @@ echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
 # 预建 bind mount 源目录(Linux/NAS 必须——源目录不存在时 docker compose up 会报
 # "Bind mount failed: '.../xxx' does not exist";Docker Desktop 会自动建,Linux 不会)
 mkdir -p config reports bin frontend-dist auth tls
+
+# 修正 bind 卷属主(Linux/NAS 必须——卷目录属主继承宿主用户,容器内 review-engine
+# 用户(UID 999)写卷会 Permission denied;Docker Desktop 无此问题):
+sudo docker exec <容器名> id review-engine   # 查真实 UID(默认 999);容器名通常为 <目录名>-review-engine-1
+sudo chown -R <UID>:<UID> bin frontend-dist auth config reports tls
+
 docker compose up -d
 docker compose ps                  # 等待 STATUS 变 (healthy)
 curl http://localhost:18080/health # 期望 {"status":"ok"}

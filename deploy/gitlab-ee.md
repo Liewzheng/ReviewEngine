@@ -36,17 +36,21 @@ mkdir -p ~/review-engine && cd ~/review-engine
 # 把 deploy/standalone-compose.yml 复制/下载到当前目录(可命名为 docker-compose.yml)
 ```
 
-### 3. (可选)配置认证方式
+### 3. 设置 API Token(二选一)
 
-镜像默认走 **bootstrap 首次引导**:容器绑定 0.0.0.0(非 loopback),
-若不在环境里设 `REVIEW_API_TOKEN`,**必须**给一次性 `REVIEW_BOOTSTRAP_KEY`,否则服务拒绝启动:
+登录入口:默认 `http://<宿主IP>:18080`(compose 映射 `18080:8080`);启用 HTTPS 后为 `https://<宿主IP>`(443)。
+
+**方式 A — Bootstrap 引导(推荐)**:token 无需预先生成。容器绑定 0.0.0.0(非 loopback),未设 token 时以引导模式启动,但**必须**给一次性 bootstrap key,否则服务拒绝启动:
 
 ```bash
 echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
 ```
 
-> 也可以直接在 .env 设 `REVIEW_API_TOKEN=xxxx`(env 注入,兼容旧版,优先于 UI 设置)。
-> 两种都不设 → 服务启动失败并提示(见容器日志),补上即可。
+启动服务(见第 4 步)后打开 `http://<宿主IP>:18080`,在引导页填一个**自己创建的 API Token** 和 .env 里的 **Bootstrap Key**;保存后 token 以 **SHA-256 摘要**(非明文)持久化到 `./auth/auth.toml`,bootstrap key 仅一次性,设置完成后即可从 .env 删除。
+
+**方式 B — Env 直接注入(兼容旧版)**:在 .env 设 `REVIEW_API_TOKEN=<openssl rand -hex 32 生成的>`,启动后用它登录即可(env 优先于 UI 设置)。
+
+> **忘记 token?** token 只存摘要、无法找回:删除 `./auth/auth.toml` 后重新引导(需在 .env 重新加 `REVIEW_BOOTSTRAP_KEY`),或改设 `REVIEW_API_TOKEN` 后重启容器。
 
 ### 4. 启动并验证
 
@@ -60,11 +64,7 @@ curl http://localhost:18080/health # 期望 {"status":"ok"}
 
 ### 5. 首次 UI 引导
 
-打开 `http://<宿主IP>:18080`:
-
-- 首次进入按提示设置 **API token**(若用了 bootstrap key,页面会要求输入它作为一次性凭证);
-- 在 **Configuration** 页填写 GitLab EE 地址/token、webhook、LLM 配置(也可用环境变量注入,见下);
-- token 持久化到 `./auth/auth.toml`(**SHA-256 摘要,非明文**),设置完成后可从 .env 删掉 `REVIEW_BOOTSTRAP_KEY`。
+打开 `http://<宿主IP>:18080`,在 **Configuration** 页填写 GitLab EE 地址/token、webhook、LLM 配置(也可用环境变量注入,见下)。
 
 > **Linux NAS 提示**:bind 卷属主继承宿主,若容器写卷失败(如 "Permission denied"),
 > 先 `mkdir -p config reports bin frontend-dist auth && chown -R <容器UID> *`
@@ -343,7 +343,7 @@ curl -k https://localhost:8443/health
 
 | Item | Status | How |
 |------|--------|-----|
-| API token set | ☐ | `REVIEW_API_TOKEN` in `.env` |
+| API token set | ☐ | `REVIEW_API_TOKEN` in `.env`, or set via the bootstrap UI on first run |
 | API auth enforced | ☐ | `curl -i http://<server>:18080/api/v1/system/version` without a token should return `401 Unauthorized` |
 | Webhook secret (legacy) set | ☐ | `GITLAB_WEBHOOK_SECRET` in `.env` (optional) |
 | Webhook signing token set | ☐ | `GITLAB_WEBHOOK_SIGNING_SECRET` in `.env` (recommended, GitLab 19.0+) |

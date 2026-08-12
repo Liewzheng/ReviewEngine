@@ -119,10 +119,10 @@ rebuild needed) — and keep all credentials/data in a separate,
 independently-backed-up deploy directory.
 
 **Recommended: put runtime config in a repo-external deploy directory**
-(e.g. `/volume1/docker/reng/` on a Synology NAS):
+(e.g. `/path/to/reng-deploy/` on a Synology NAS):
 
 ```text
-/volume1/docker/reng/
+/path/to/reng-deploy/
 ├── .env          # real credentials (copy from .env.example, then edit)
 ├── config/       # review-engine config → mounted to /app/config (read-only)
 ├── reports/      # review reports     → mounted to /app/reports
@@ -133,9 +133,9 @@ Point the compose volume variables at that directory with **absolute paths**
 inside the deploy `.env`:
 
 ```bash
-CONFIG_PATH=/volume1/docker/reng/config
-REPORTS_PATH=/volume1/docker/reng/reports
-SSH_KEY_PATH=/volume1/docker/reng/.ssh   # or keep your existing ~/.ssh
+CONFIG_PATH=/path/to/reng-deploy/config
+REPORTS_PATH=/path/to/reng-deploy/reports
+SSH_KEY_PATH=/path/to/reng-deploy/.ssh   # or keep your existing ~/.ssh
 ```
 
 Then start compose from the **code repository** but load the deploy `.env`
@@ -144,7 +144,7 @@ run in-container and do **not** need a rebuild):
 
 ```bash
 cd ReviewEngine
-docker compose --env-file /volume1/docker/reng/.env up -d --force-recreate review-engine
+docker compose --env-file /path/to/reng-deploy/.env up -d --force-recreate review-engine
 ```
 
 The repo working tree stays clean (`git status` shows no runtime files), and

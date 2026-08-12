@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>文档 · 入门与参考 — ReviewEngine</title>
+  <meta name="description" content="ReviewEngine 文档门户：入门、配置、集成、API 与协议、企业版、架构与方案、决策记录。文档为原文，不随界面语言翻译。">
+  <meta name="color-scheme" content="dark">
+  <script>document.documentElement.classList.add('js')</script>
+  <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&family=Noto+Serif+SC:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/site.css">
+  <script src="assets/i18n/zh-CN.js" defer></script>
+  <script src="assets/i18n/en.js" defer></script>
+  <script src="assets/i18n/zh-TW.js" defer></script>
+  <script src="assets/i18n/fr.js" defer></script>
+  <script src="assets/i18n/ja.js" defer></script>
+  <script src="assets/i18n/ko.js" defer></script>
+  <script src="assets/i18n/ru.js" defer></script>
+  <script src="assets/i18n.js" defer></script>
+  <script src="assets/docs-manifest.js" defer></script>
+  <script src="assets/vendor/marked.min.js" defer></script>
+  <script src="assets/docs.js" defer></script>
+  <script src="assets/site.js" defer></script>
+</head>
+<body data-page="docs">
+  <a class="skip-link" href="#main" data-i18n="skip.link">跳到正文</a>
+
+  <header class="site-header">
+    <div class="container header-inner">
+      <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+        <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+        <span class="brand-alias">reng</span>
+      </a>
+      <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" data-i18n="nav.toggle">菜单</button>
+      <nav class="site-nav" id="site-nav" aria-label="主导航" data-i18n-attr="aria-label:nav.aria">
+        <ul>
+          <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+          <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+          <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+          <li><a href="quickstart.html" data-i18n="nav.quickstart">快速部署</a></li>
+          <li><a href="docs.html" aria-current="page" data-i18n="nav.docs">文档</a></li>
+          <li class="nav-gh"><a href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
+        </ul>
+      </nav>
+    </div>
+  </header>
+
+  <main id="main">
+    <div class="container docs-layout">
+      <nav class="doc-tree" id="doc-tree" aria-label="文档目录">
+        <button class="doc-tree-toggle" id="doc-tree-toggle" type="button" aria-expanded="false" aria-controls="doc-tree-groups">目录</button>
+        <div class="doc-tree-groups" id="doc-tree-groups"></div>
+      </nav>
+
+      <article class="doc-main">
+        <div class="doc-state" id="doc-loading">加载中…</div>
+        <div class="doc-state doc-error" id="doc-error" hidden>
+          <p>文档加载失败，请检查网络后重试。</p>
+          <button class="doc-retry" type="button" id="doc-retry">重试</button>
+        </div>
+        <div class="doc-content" id="doc-content" hidden></div>
+      </article>
+    </div>
+  </main>
+
+  <footer class="site-footer">
+    <div class="container">
+      <div class="footer-grid">
+        <div class="footer-brand">
+          <a class="brand" href="index.html" aria-label="ReviewEngine 首页" data-i18n-attr="aria-label:brand.aria">
+            <span class="brand-name">Review<span class="brand-accent">Engine</span></span>
+            <span class="brand-alias">reng</span>
+          </a>
+          <p class="footer-tag">A virtual <span class="mono">CodeReview Board</span> for every pull request — multi-expert, scored, actionable。<span data-i18n="footer.tagline">把一支随时可用的 AI 评审团队，装进一个几十 MiB 常驻内存的二进制里。</span></p>
+          <p class="footer-license" data-i18n="footer.license">Apache-2.0 · 核心免费，个人与团队可用</p>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.site">站点</p>
+          <ul>
+            <li><a href="index.html" data-i18n="nav.index">总览</a></li>
+            <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
+            <li><a href="features.html" data-i18n="nav.features">特性</a></li>
+            <li><a href="quickstart.html" data-i18n="nav.quickstart">快速部署</a></li>
+            <li><a href="docs.html" data-i18n="nav.docs">文档</a></li>
+          </ul>
+        </div>
+        <div class="footer-col">
+          <p class="footer-h" data-i18n="footer.col.project">项目</p>
+          <p><a class="github-url" href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/ReviewEngine</a></p>
+          <p data-i18n="footer.enterprise">Enterprise：SSO · 审计日志 · 自定义专家模板 · 专属支持，单独商业授权。</p>
+        </div>
+      </div>
+      <div class="footer-bottom">
+        <span>© 2026 ReviewEngine</span>
+        <span data-i18n="footer.motto">用自己写的工具，审查自己写的代码。</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

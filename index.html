@@ -45,8 +45,9 @@
           <li><a href="index.html" aria-current="page" data-i18n="nav.index">总览</a></li>
           <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
           <li><a href="features.html" data-i18n="nav.features">特性</a></li>
-          <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
-          <li class="nav-gh"><a href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
+          <li><a href="quickstart.html" data-i18n="nav.quickstart">快速部署</a></li>
+          <li><a href="docs.html" data-i18n="nav.docs">文档</a></li>
+          <li class="nav-gh"><a href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
         </ul>
       </nav>
     </div>
@@ -66,9 +67,13 @@
               <span data-i18n="index.hero.sub">11 位 AI 专家并行评审同一份 diff：每条 finding 都带 severity / confidence / evidence / impact / recommendation / effort，最终以加权总分与风险等级落印。</span>
             </p>
             <div class="hero-cta">
-              <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速上手</span><span class="btn-arrow">→</span></a>
-              <a class="btn btn-ghost" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
+              <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速部署</span><span class="btn-arrow">→</span></a>
+              <a class="btn btn-ghost" href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
             </div>
+            <!-- 系统感知安装推荐：JS 识别 OS 后才显示其一，其余与无 JS 时保持 hidden -->
+            <p class="rec-line" data-rec-os="mac" hidden><code>brew install liewzheng/tap/review-engine</code><a href="quickstart.html#install" data-i18n="index.recOther">其他平台 →</a><a href="https://github.com/Liewzheng/ReviewEngine/releases" target="_blank" rel="noopener noreferrer" data-i18n="index.recBinary">下载二进制 →</a></p>
+            <p class="rec-line" data-rec-os="linux" hidden><code>curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/main/install.sh | bash</code><a href="quickstart.html#install" data-i18n="index.recOther">其他平台 →</a><a href="https://github.com/Liewzheng/ReviewEngine/releases" target="_blank" rel="noopener noreferrer" data-i18n="index.recBinary">下载二进制 →</a></p>
+            <p class="rec-line" data-rec-os="win" hidden><code>docker pull ghcr.io/liewzheng/review-engine:latest</code><a href="quickstart.html#install" data-i18n="index.recOther">其他平台 →</a><a href="https://github.com/Liewzheng/ReviewEngine/releases" target="_blank" rel="noopener noreferrer" data-i18n="index.recBinary">下载二进制 →</a></p>
             <ul class="hero-meta">
               <li data-i18n="index.hero.meta1">Apache-2.0 · 核心免费</li>
               <li data-i18n="index.hero.meta2">单一静态二进制</li>
@@ -319,8 +324,8 @@
         <h2 data-i18n="index.cta.h2">下一场评审，现在就能跑。</h2>
         <p data-i18n="index.cta.p">安装、配置一个 LLM、跑第一条命令——十分钟内看到第一份带分数的报告。</p>
         <div class="hero-cta" style="justify-content:center">
-          <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速上手</span><span class="btn-arrow">→</span></a>
-          <a class="btn btn-ghost" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
+          <a class="btn btn-primary" href="quickstart.html"><span data-i18n="cta.quickstart">快速部署</span><span class="btn-arrow">→</span></a>
+          <a class="btn btn-ghost" href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
         </div>
       </div>
     </section>
@@ -343,12 +348,13 @@
             <li><a href="index.html" data-i18n="nav.index">总览</a></li>
             <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
             <li><a href="features.html" data-i18n="nav.features">特性</a></li>
-            <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+            <li><a href="quickstart.html" data-i18n="nav.quickstart">快速部署</a></li>
+            <li><a href="docs.html" data-i18n="nav.docs">文档</a></li>
           </ul>
         </div>
         <div class="footer-col">
           <p class="footer-h" data-i18n="footer.col.project">项目</p>
-          <p><a class="github-url" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/Review-Engine</a></p>
+          <p><a class="github-url" href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/ReviewEngine</a></p>
           <p data-i18n="footer.enterprise">Enterprise：SSO · 审计日志 · 自定义专家模板 · 专属支持，单独商业授权。</p>
         </div>
       </div>

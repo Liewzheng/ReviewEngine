@@ -112,8 +112,36 @@
     if (desc) desc.setAttribute('content', t('meta.' + page + '.desc'));
 
     ensureFonts(lang);
+    applySystemRec();   // after translations: reveal the OS-matched install hint
 
     document.dispatchEvent(new CustomEvent('landing:i18n', { detail: { lang: lang } }));
+  }
+
+  /* ---------- system-aware install recommendation ----------
+     Detects the visitor OS and reveals exactly one matching hint:
+       index:      the hero <p class="rec-line" data-rec-os="…">
+       quickstart: the install <div class="code" data-os="…"> gets the
+                   .is-recommended highlight + its .rec-badge is shown.
+     Undetected OS or no JS → everything stays hidden, no residue. */
+  function detectOS() {
+    var ua = (navigator.userAgent || '').toLowerCase();
+    var p = (navigator.platform || '').toLowerCase();
+    if (ua.indexOf('mac') !== -1 || ua.indexOf('iphone') !== -1 || ua.indexOf('ipad') !== -1 || p.indexOf('mac') !== -1) return 'mac';
+    if (ua.indexOf('win') !== -1 || p.indexOf('win') !== -1) return 'win';
+    if (ua.indexOf('linux') !== -1 || p.indexOf('linux') !== -1) return 'linux';
+    return null;
+  }
+  function applySystemRec() {
+    var os = detectOS();
+    var lines = document.querySelectorAll('[data-rec-os]');
+    for (var i = 0; i < lines.length; i++) lines[i].hidden = lines[i].getAttribute('data-rec-os') !== os;
+    var blocks = document.querySelectorAll('.code[data-os]');
+    for (var j = 0; j < blocks.length; j++) {
+      var match = blocks[j].getAttribute('data-os') === os;
+      blocks[j].classList.toggle('is-recommended', match);
+      var badge = blocks[j].querySelector('.rec-badge');
+      if (badge) badge.hidden = !match;
+    }
   }
 
   /* ---------- switcher UI ---------- */

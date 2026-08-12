@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>快速上手 · 安装与配置 — ReviewEngine</title>
-  <meta name="description" content="ReviewEngine 快速上手：install.sh / Homebrew / Docker 三种安装方式，LLM 配置（LLM_CONFIG 或 reng init），第一条评审命令，12 条命令表，以及 GitLab / GitHub / CI / REST API 集成入口。">
+  <title>快速部署 · 安装与配置 — ReviewEngine</title>
+  <meta name="description" content="ReviewEngine 快速部署：install.sh / Homebrew / Docker 三种安装方式，LLM 配置（LLM_CONFIG 或 reng init），第一条评审命令，12 条命令表，以及 GitLab / GitHub / CI / REST API 集成入口。">
   <meta name="color-scheme" content="dark">
   <script>document.documentElement.classList.add('js')</script>
   <link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
@@ -37,8 +37,9 @@
           <li><a href="index.html" data-i18n="nav.index">总览</a></li>
           <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
           <li><a href="features.html" data-i18n="nav.features">特性</a></li>
-          <li><a href="quickstart.html" aria-current="page" data-i18n="nav.quickstart">上手</a></li>
-          <li class="nav-gh"><a href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
+          <li><a href="quickstart.html" aria-current="page" data-i18n="nav.quickstart">快速部署</a></li>
+          <li><a href="docs.html" data-i18n="nav.docs">文档</a></li>
+          <li class="nav-gh"><a href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer" data-i18n="nav.github">GitHub ↗</a></li>
         </ul>
       </nav>
     </div>
@@ -49,7 +50,7 @@
     <section class="page-hero hero">
       <div class="container">
         <div class="hero-top">
-          <div class="hero-vlabel" aria-hidden="true"><span class="vlabel" data-i18n="vl.start">上手</span></div>
+          <div class="hero-vlabel" aria-hidden="true"><span class="vlabel" data-i18n="vl.start">部署</span></div>
           <div class="hero-head" data-reveal>
             <p class="eyebrow" data-i18n="quickstart.hero.eyebrow">QUICKSTART · 安装 → 配 LLM → 评审</p>
             <h1 class="hero-title"><span data-i18n="quickstart.hero.title.l1">十分钟，跑起</span><br><span data-i18n="quickstart.hero.title.l2">第一场评审。</span></h1>
@@ -69,21 +70,31 @@
             <h2 data-i18n="quickstart.install.h2">装一个静态二进制。</h2>
           </div>
 
-          <div class="code" data-reveal>
-            <div class="code-label"><span data-i18n="quickstart.install.label1">bash · install.sh 一键安装</span></div>
-            <pre>curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash</pre>
+          <div class="code" data-reveal data-os="linux">
+            <div class="code-label"><span class="code-label-left"><span data-i18n="quickstart.install.label1">bash · install.sh 一键安装</span><span class="rec-badge" data-i18n="quickstart.recBadge" hidden>推荐 · 你的系统</span></span></div>
+            <pre>curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/main/install.sh | bash</pre>
           </div>
           <p class="sec-lead" style="margin-top:-.8rem" data-reveal><span data-i18n="quickstart.install.note.pre">自动检测平台、解析最新稳定版、校验 sha256，落位</span> <code class="mono">~/.local/bin</code> <span data-i18n="quickstart.install.note.mid">并创建</span> <code class="mono">reng</code> <span data-i18n="quickstart.install.note.post">符号链接。若该目录不在 PATH，请追加</span> <code class="mono">export PATH="$HOME/.local/bin:$PATH"</code><span data-i18n="quickstart.install.note.end">。</span></p>
 
-          <div class="code" data-reveal>
-            <div class="code-label"><span>bash · Homebrew tap</span></div>
+          <div class="code" data-reveal data-os="mac">
+            <div class="code-label"><span class="code-label-left"><span>bash · Homebrew tap</span><span class="rec-badge" data-i18n="quickstart.recBadge" hidden>推荐 · 你的系统</span></span></div>
             <pre>brew install liewzheng/tap/review-engine</pre>
           </div>
 
+          <div class="code" data-reveal data-os="win">
+            <div class="code-label"><span class="code-label-left"><span data-i18n="quickstart.docker.a.label">bash · Docker 独立部署（推荐）</span><span class="rec-badge" data-i18n="quickstart.recBadge" hidden>推荐 · 你的系统</span></span></div>
+            <pre>docker pull ghcr.io/liewzheng/review-engine:v0.9.12   <span class="cm" data-i18n="quickstart.docker.a.c1"># 或 :latest 跟随最新版</span>
+curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/Liewzheng/ReviewEngine/main/deploy/standalone-compose.yml
+echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env   <span class="cm" data-i18n="quickstart.docker.a.c2"># 非 loopback 访问需要一次性引导 key</span>
+docker compose up -d
+<span class="cm" data-i18n="quickstart.docker.a.c3"># 打开 http://&lt;宿主IP&gt;:18080 → 引导界面设 API token → Configuration 填 GitLab/LLM</span></pre>
+          </div>
+
           <div class="code" data-reveal>
-            <div class="code-label"><span data-i18n="quickstart.install.label3">bash · Docker 部署</span></div>
-            <pre>cp .env.example .env   <span class="cm" data-i18n="quickstart.install.cm1"># 按需填写 token</span>
-docker compose up -d    <span class="cm"># Web UI: http://localhost:18080</span></pre>
+            <div class="code-label"><span data-i18n="quickstart.docker.b.label">bash · Docker 克隆构建</span></div>
+            <pre>git clone https://github.com/Liewzheng/ReviewEngine.git
+cd ReviewEngine &amp;&amp; cp .env.example .env   <span class="cm" data-i18n="quickstart.docker.b.c1"># 填 REVIEW_API_TOKEN 等；REVIEW_ENGINE_VERSION=v0.9.12</span>
+docker compose build review-engine &amp;&amp; docker compose up -d</pre>
           </div>
         </div>
       </div>
@@ -231,7 +242,7 @@ reng review --local-path . --base main</pre>
         <p data-i18n="quickstart.cta.p">评审自己的仓库，几分钟就能看到 11 位专家的第一份报告。</p>
         <div class="hero-cta" style="justify-content:center">
           <a class="btn btn-primary" href="board.html"><span data-i18n="quickstart.cta.btn2">认识评审席</span><span class="btn-arrow">→</span></a>
-          <a class="btn btn-ghost" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
+          <a class="btn btn-ghost" href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer"><span data-i18n="cta.github">GitHub</span><span class="btn-arrow">↗</span></a>
         </div>
       </div>
     </section>
@@ -254,12 +265,13 @@ reng review --local-path . --base main</pre>
             <li><a href="index.html" data-i18n="nav.index">总览</a></li>
             <li><a href="board.html" data-i18n="nav.board">评审席</a></li>
             <li><a href="features.html" data-i18n="nav.features">特性</a></li>
-            <li><a href="quickstart.html" data-i18n="nav.quickstart">上手</a></li>
+            <li><a href="quickstart.html" data-i18n="nav.quickstart">快速部署</a></li>
+            <li><a href="docs.html" data-i18n="nav.docs">文档</a></li>
           </ul>
         </div>
         <div class="footer-col">
           <p class="footer-h" data-i18n="footer.col.project">项目</p>
-          <p><a class="github-url" href="https://github.com/Liewzheng/Review-Engine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/Review-Engine</a></p>
+          <p><a class="github-url" href="https://github.com/Liewzheng/ReviewEngine" target="_blank" rel="noopener noreferrer">github.com/Liewzheng/ReviewEngine</a></p>
           <p data-i18n="footer.enterprise">Enterprise：SSO · 审计日志 · 自定义专家模板 · 专属支持，单独商业授权。</p>
         </div>
       </div>

@@ -16,11 +16,13 @@
 #        mkdir -p config reports bin frontend-dist auth tls
 #      (config/reports/bin/frontend-dist/auth 必建;tls 可选,仅启用 HTTPS 时使用)
 #   5) 修正 bind 卷属主(Linux/NAS 必须——卷目录属主继承宿主用户,容器内
-#      review-engine 用户(UID 999)写卷会 Permission denied):
-#         sudo docker exec <容器名> id review-engine   # 查真实 UID(默认 999)
+#      review-engine 用户写卷会 Permission denied):
+#         docker run --rm --entrypoint id ghcr.io/liewzheng/review-engine:latest review-engine
+#         # 输出形如 uid=9001(review-engine) gid=9001(review-engine);以实际输出为准,
+#         # 勿假设固定值(useradd -r 为构建时分配,UID 可能漂移;用 docker exec 查需
+#         # 容器已起来,Permission denied 循环时不可靠,故用 docker run 直接查镜像)
 #         sudo chown -R <UID>:<UID> bin frontend-dist auth config reports tls
-#      (容器名通常为 <部署目录名>-review-engine-1,以 docker compose ps 为准;
-#       Docker Desktop 无此问题——自动处理;Linux/NAS 必须手动 chown,否则
+#      (Docker Desktop 无此问题——自动处理;Linux/NAS 必须手动 chown,否则
 #       entrypoint 首次同步 cp 会 Permission denied 并 restart 循环)
 #   6) docker compose up -d
 #   7) 打开 http://<宿主IP>:18080 → 首次进入 UI,在 Configuration 页填写
@@ -30,8 +32,8 @@
 # 所有卷目录均为相对当前目录的 bind mount(配置与代码/镜像分离);注意 Linux/NAS 上
 # bind mount 源目录不会自动创建,请先按步骤 4 的 mkdir -p 预建。
 # Linux NAS 上 bind 卷属主继承宿主:容器内 review-engine 写卷 Permission denied
-# 时,按步骤 5 查 UID 并 chown(UID 以 `docker exec <容器名> id review-engine` 为准,
-# 默认 999)。
+# 时,按步骤 5 查 UID 并 chown(UID 以 `docker run --rm --entrypoint id <镜像>
+# review-engine` 实际输出为准,勿假设 999)。
 # 镜像为多架构(amd64/arm64),由 GitHub Actions 发版时推送(ghcr.io/liewzheng/
 # review-engine:v<tag> 与 :latest);容器内含前端 dist、首次同步与容器内自更新
 # (UI 点 Upgrade → 替换 ./bin 与 ./frontend-dist 卷 → 自动重启)。

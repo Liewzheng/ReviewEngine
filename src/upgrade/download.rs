@@ -59,7 +59,7 @@ pub async fn download_asset(
     result
 }
 
-/// Download `asset` and its `<asset>.sha256` sidecar, verify the checksum, and
+/// Download `asset` and its `<prefix>-<triple>.sha256` sidecar, verify the checksum, and
 /// rename the verified file into place at `dest_dir/<asset.name>`.
 ///
 /// On any failure both temp files are removed and `dest_dir` is left as it
@@ -281,7 +281,7 @@ mod tests {
             size: data.len() as u64,
         };
         let checksum = ReleaseAsset {
-            name: format!("{}.sha256", asset.name),
+            name: "review-engine-x86_64-unknown-linux-gnu.sha256".to_string(),
             download_url: format!("{}/asset.tar.gz.sha256", server.uri()),
             size: checksum_text.len() as u64,
         };
@@ -319,7 +319,7 @@ mod tests {
         };
         let checksum_text = format!("{bad_hex}  asset.tar.gz");
         let checksum = ReleaseAsset {
-            name: format!("{}.sha256", asset.name),
+            name: "review-engine-x86_64-unknown-linux-gnu.sha256".to_string(),
             download_url: format!("{}/asset.tar.gz.sha256", server.uri()),
             size: checksum_text.len() as u64,
         };

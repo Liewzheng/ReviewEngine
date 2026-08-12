@@ -141,9 +141,21 @@ pub fn find_asset<'a>(release: &'a Release, spec: &AssetSpec) -> Option<&'a Rele
     release.assets.iter().find(|a| a.name == name)
 }
 
-/// Find the `.sha256` sidecar for an asset name (e.g. `<asset>.sha256`).
+/// Find the `.sha256` sidecar for an asset.
+///
+/// Real releases publish the sidecar as `<prefix>-<triple>.sha256` — **no**
+/// archive extension (taiki-e/upload-rust-binary-action), while the asset it
+/// vouches for is `...tar.gz` / `...zip`. So strip the archive extension from
+/// `asset_name` before appending `.sha256` (e.g.
+/// `review-engine-x86_64-unknown-linux-gnu.tar.gz` →
+/// `review-engine-x86_64-unknown-linux-gnu.sha256`). A checksum named
+/// `...tar.gz.sha256` (the old wrong convention) never matches.
 pub fn find_checksum_asset<'a>(release: &'a Release, asset_name: &str) -> Option<&'a ReleaseAsset> {
-    let name = format!("{asset_name}.sha256");
+    let base = asset_name
+        .strip_suffix(".tar.gz")
+        .or_else(|| asset_name.strip_suffix(".zip"))
+        .unwrap_or(asset_name);
+    let name = format!("{base}.sha256");
     release.assets.iter().find(|a| a.name == name)
 }
 
@@ -171,8 +183,10 @@ mod tests {
                     "size": 200
                 },
                 {
-                    "name": "review-engine-x86_64-unknown-linux-gnu.tar.gz.sha256",
-                    "browser_download_url": "https://example.com/x86_64-linux.tar.gz.sha256",
+                    // Real taiki-e convention: `<prefix>-<triple>.sha256`, no
+                    // archive extension.
+                    "name": "review-engine-x86_64-unknown-linux-gnu.sha256",
+                    "browser_download_url": "https://example.com/x86_64-linux.sha256",
                     "size": 72
                 }
             ]
@@ -268,11 +282,53 @@ mod tests {
         let asset = find_asset(&release, &spec).expect("linux x86_64 asset exists");
         assert_eq!(asset.name, "review-engine-x86_64-unknown-linux-gnu.tar.gz");
 
+        // Regression (HIGH): the published checksum is `<triple>.sha256` (no
+        // archive extension). It must be found from the archive asset name.
         let checksum = find_checksum_asset(&release, &asset.name).expect("checksum asset exists");
-        assert_eq!(checksum.name, "review-engine-x86_64-unknown-linux-gnu.tar.gz.sha256");
+        assert_eq!(checksum.name, "review-engine-x86_64-unknown-linux-gnu.sha256");
+        assert_eq!(
+            super::super::platform::asset_spec_for("linux", "x86_64")
+                .unwrap()
+                .checksum_name("review-engine"),
+            checksum.name
+        );
 
         // The fixture has no Windows asset — must not match the linux one.
         let absent = super::super::platform::asset_spec_for("windows", "x86_64").unwrap();
         assert!(find_asset(&release, &absent).is_none());
+    }
+
+    /// Regression: a checksum asset named with the old wrong convention
+    /// (`...tar.gz.sha256`) must NOT be found, and a release with only the
+    /// archive but no real-format checksum yields `None` — exactly the 400
+    /// "checksum missing" case the fix targets.
+    #[test]
+    fn find_checksum_asset_matches_real_format_only() {
+        let release: Release = serde_json::from_value(release_json("v0.9.0")).expect("valid release json");
+        let asset_name = "review-engine-x86_64-unknown-linux-gnu.tar.gz";
+        let checksum = find_checksum_asset(&release, asset_name).expect("real-format checksum exists");
+
+        // Wrong old convention must never be matched: strip of `.tar.gz` yields
+        // `...linux-gnu.sha256`, so a `...tar.gz.sha256` asset is invisible.
+        let wrong_name = format!("{asset_name}.sha256");
+        assert_ne!(checksum.name, wrong_name, "old wrong naming must not match");
+        assert!(
+            !release.assets.iter().any(|a| a.name == wrong_name),
+            "fixture must not carry the old wrong checksum name"
+        );
+
+        // A release with the archive but no real-format sidecar → None.
+        let no_sidecar: Release = serde_json::from_value(json!({
+            "tag_name": "v0.9.0",
+            "html_url": "https://example.com",
+            "published_at": "2024-06-01T00:00:00Z",
+            "assets": [{
+                "name": asset_name,
+                "browser_download_url": "https://example.com/bin.tar.gz",
+                "size": 100
+            }]
+        }))
+        .expect("valid release json");
+        assert!(find_checksum_asset(&no_sidecar, asset_name).is_none());
     }
 }

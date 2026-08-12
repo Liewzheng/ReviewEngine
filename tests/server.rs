@@ -2299,7 +2299,7 @@ async fn upgrade_docker_auto_upgrades_binary_and_frontend_dist() {
                 {"name": asset_name, "browser_download_url": format!("{api_base}/asset"), "size": tar_bytes.len()},
                 {"name": checksum_name, "browser_download_url": format!("{api_base}/checksum"), "size": checksum_text.len()},
                 {"name": "frontend-dist.tar.gz", "browser_download_url": format!("{api_base}/dist"), "size": dist_bytes.len()},
-                {"name": "frontend-dist.tar.gz.sha256", "browser_download_url": format!("{api_base}/dist.sha256"), "size": dist_checksum_text.len()}
+                {"name": "frontend-dist.sha256", "browser_download_url": format!("{api_base}/dist.sha256"), "size": dist_checksum_text.len()}
             ]
         })))
         .mount(&mock)
@@ -2526,7 +2526,7 @@ async fn upgrade_docker_exits_zero_after_successful_upgrade() {
                 {"name": asset_name, "browser_download_url": format!("{api_base}/asset"), "size": tar_bytes.len()},
                 {"name": checksum_name, "browser_download_url": format!("{api_base}/checksum"), "size": checksum_text.len()},
                 {"name": "frontend-dist.tar.gz", "browser_download_url": format!("{api_base}/dist"), "size": dist_bytes.len()},
-                {"name": "frontend-dist.tar.gz.sha256", "browser_download_url": format!("{api_base}/dist.sha256"), "size": dist_checksum_text.len()}
+                {"name": "frontend-dist.sha256", "browser_download_url": format!("{api_base}/dist.sha256"), "size": dist_checksum_text.len()}
             ]
         })))
         .mount(&mock)

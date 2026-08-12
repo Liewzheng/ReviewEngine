@@ -1,8 +1,10 @@
 //! Maps `std::env::consts::{OS, ARCH}` onto release asset identities.
 //!
 //! A release publishes one archive per rustc target triple plus a matching
-//! `<asset>.sha256` sidecar. This module owns that mapping and the asset
-//! naming rules so download/verify and the CLI/Web layers agree on names.
+//! `<prefix>-<triple>.sha256` sidecar (published by
+//! taiki-e/upload-rust-binary-action; the checksum name carries **no** archive
+//! extension). This module owns that mapping and the asset naming rules so
+//! download/verify and the CLI/Web layers agree on names.
 
 use super::error::{Result, UpgradeError};
 
@@ -32,9 +34,11 @@ impl AssetSpec {
         format!("{prefix}-{}.{ext}", self.triple)
     }
 
-    /// Checksum sidecar name, e.g. `review-engine-x86_64-apple-darwin.tar.gz.sha256`.
+    /// Checksum sidecar name published by taiki-e/upload-rust-binary-action:
+    /// `<prefix>-<triple>.sha256` — no archive extension (e.g.
+    /// `review-engine-x86_64-apple-darwin.sha256`).
     pub fn checksum_name(&self, prefix: &str) -> String {
-        format!("{}.sha256", self.asset_name(prefix))
+        format!("{prefix}-{}.sha256", self.triple)
     }
 
     /// `true` for the Windows zip format.
@@ -142,7 +146,7 @@ mod tests {
         );
         assert_eq!(
             mac.checksum_name("review-engine"),
-            "review-engine-aarch64-apple-darwin.tar.gz.sha256"
+            "review-engine-aarch64-apple-darwin.sha256"
         );
 
         let win = asset_spec_for("windows", "x86_64").unwrap();
@@ -152,7 +156,7 @@ mod tests {
         );
         assert_eq!(
             win.checksum_name("review-engine"),
-            "review-engine-x86_64-pc-windows-msvc.zip.sha256"
+            "review-engine-x86_64-pc-windows-msvc.sha256"
         );
         assert!(win.is_windows());
         assert!(!mac.is_windows());

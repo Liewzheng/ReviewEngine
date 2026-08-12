@@ -275,7 +275,7 @@ async fn start_upgrade_inner(state: Arc<AppState>, mode: UpgradeMode) -> axum::r
         }
     };
 
-    if check.asset.is_none() || check.checksum_asset.is_none() {
+    if check.asset.is_none() {
         set_job(
             &state,
             UpgradeJobState::Failed,
@@ -284,6 +284,18 @@ async fn start_upgrade_inner(state: Arc<AppState>, mode: UpgradeMode) -> axum::r
         return (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "no release asset for this platform" })),
+        )
+            .into_response();
+    }
+    if check.checksum_asset.is_none() {
+        set_job(
+            &state,
+            UpgradeJobState::Failed,
+            "release 缺少 sha256 校验资产，无法自动升级",
+        );
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "release has no checksum asset for this platform" })),
         )
             .into_response();
     }

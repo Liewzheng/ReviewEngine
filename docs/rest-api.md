@@ -615,8 +615,9 @@ Response 400 (brew / cargo / unknown，返回手动升级提示):
 { "error": "检测到 cargo 安装，请手动执行升级命令", "upgradeHint": "cargo install review-engine --locked --features cli" }
 { "error": "无法识别安装方式，请使用官方 install.sh 手动升级", "upgradeHint": "使用官方 install.sh 手动升级" }
 
-Response 400 (当前平台无对应 release 资产，无法自动升级):
+Response 400 (当前平台无对应 release 资产 / 缺少 sha256 校验资产，无法自动升级):
 { "error": "no release asset for this platform" }
+{ "error": "release has no checksum asset for this platform" }
 
 Response 409 (已有升级任务进行中):
 { "error": "升级任务已在进行中，请稍后再试" }

@@ -1001,6 +1001,22 @@ Authorization: Bearer review_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p
 X-API-Key: review_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p
 ```
 
+### 轮换 API Token（`PUT /api/v1/system/token`）
+
+设置或轮换 API Token：服务端持久化其摘要（auth.toml）并热切换生效，无需重启。
+
+轮换仍需认证，但可接受以下任一凭证（避免 token 失效时无法自救的死锁）：
+
+1. **当前有效 token** —— `Authorization: Bearer` / `X-API-Key`（常规路径）；
+2. **Bootstrap Key** —— `X-Bootstrap-Key: <key>`（`REVIEW_BOOTSTRAP_KEY` /
+   `--bootstrap-key`）。当当前 token 丢失或失效（例如浏览器 localStorage 里是旧值）
+   时，用 Bootstrap Key 即可轮换到新 token —— 这是推荐的自救路径；
+3. **env/CLI 显式 token** —— `REVIEW_API_TOKEN` / `--api-token` 指定的 token
+   始终可作为轮换凭证（env 优先级覆盖），即使运行期已被 UI 轮换覆盖。
+
+> 安全模型不变：轮换仍要求某种有效凭证；Bootstrap Key 只放行轮换端点，**不会**
+> 解锁其他 `/api/v1/*` 端点（普通端点仍只认当前有效 token）。
+
 ### 与 GitLab webhook 的关系
 
 已有独立的 `X-Gitlab-Token` 校验（`src/server/gitlab.rs`），两者不冲突：

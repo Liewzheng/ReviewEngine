@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.13] - 2026-08-12
+
+### Fixed
+- **Container UID pinned to 9001 (NAS bind-mount fix)**: the runtime user was created with `useradd -r`, whose UID is assigned by the build system and can drift — and on Synology NAS the commonly-used UID 999 collides with the host's `synopkgs` user, so bind-mount volumes chowned to 999 still hit `Permission denied` in the `cp` first-boot sync loop. The Dockerfile now pins the UID/GID explicitly to 9001 (clear of common host users), and the standalone deploy docs tell users to read the real UID via `docker run --rm --entrypoint id <image> review-engine` instead of assuming 999. (`Dockerfile`, `deploy/standalone-compose.yml`, `deploy/gitlab-ee.md`)
+- **Standalone deployment: bind-volume mkdir pre-create + chown guide**: on Linux/NAS the compose bind-mount source dirs are not auto-created (Docker Desktop does, Linux does not) — `docker compose up` aborts with `Bind mount failed: '.../xxx' does not exist`. The standalone-compose header now documents a one-shot `mkdir -p config reports bin frontend-dist auth tls` pre-create step plus the chown step for the non-root container user, and `deploy/gitlab-ee.md` mirrors it in the quick-start section. (`deploy/standalone-compose.yml`, `deploy/gitlab-ee.md`)
+
 ## [0.9.12] - 2026-08-11
 
 ### Added

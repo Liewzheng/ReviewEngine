@@ -874,6 +874,7 @@ mod tests {
     /// maxConcurrentReviews and dropped `llm.providers`.
     #[tokio::test]
     async fn put_config_sparse_patch_preserves_omitted_fields() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         {
             let ui = state.ui_config.read().unwrap();
@@ -913,6 +914,7 @@ mod tests {
     /// provider list survives untouched.
     #[tokio::test]
     async fn put_config_sparse_llm_patch_keeps_key_and_providers() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         let resp = put_config(
             State(state.clone()),
@@ -933,6 +935,7 @@ mod tests {
     /// keeps every field, never a wipe.
     #[tokio::test]
     async fn put_config_empty_object_is_noop() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         let before = state.ui_config.read().unwrap().clone();
         let resp = put_config(State(state.clone()), Json(serde_json::json!({})))
@@ -951,6 +954,7 @@ mod tests {
     /// field (e.g. `"minScore": "high"`) fails the merged deserialization.
     #[tokio::test]
     async fn put_config_malformed_update_rejected() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         for payload in [
             serde_json::json!(null),
@@ -1001,9 +1005,12 @@ mod tests {
 
     /// Every `put_config` call writes the global GitLab runtime (an empty
     /// submitted `apiToken` clears it), so any test that drives `put_config`
-    /// races with the others on `gl_rt.token`. Serialize them with an
-    /// async-aware mutex (held across the awaited handlers); tests that only
-    /// read `ui_config`/`get_config` never take this lock.
+    /// races with the others on `gl_rt.token` — including `gitlab_api_token_mask_round_trip`,
+    /// whose keep/clear/replace assertions read that same global.
+    ///
+    /// Invariant: **every test that calls `put_config` MUST take this lock**
+    /// (async-aware, so it can be held across the awaited handlers). The
+    /// `get_config`-only tests never write the runtime and do not take it.
     static GITLAB_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     fn gitlab_runtime_token() -> String {

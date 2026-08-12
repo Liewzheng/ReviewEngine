@@ -77,6 +77,7 @@ LANDING_I18N['ja'] = {
   'index.hero.meta4': 'ローカルファースト',
   'index.recOther': '他のプラットフォーム →',
   'index.recBinary': 'バイナリをダウンロード →',
+  'index.recLabel': 'bash · 推奨インストール',
   'index.terminal.title': 'reng · ローカルレビューセッション',
   'index.stats.aria': '主要な実測データ',
   'index.stats.label1': '11 人の AI エキスパートによる 1 ラウンドのレビュー',

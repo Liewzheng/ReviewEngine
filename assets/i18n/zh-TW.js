@@ -83,6 +83,7 @@ LANDING_I18N['zh-TW'] = {
   'index.hero.meta4': '本地優先',
   'index.recOther': '其他平台 →',
   'index.recBinary': '下載二進位 →',
+  'index.recLabel': 'bash · 推薦安裝',
   'index.terminal.title': 'reng · 本機評審工作階段',
   'index.stats.aria': '關鍵實測數據',
   'index.stats.label1': '11 位 AI 專家一輪評審',

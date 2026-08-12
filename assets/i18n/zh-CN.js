@@ -85,6 +85,7 @@ LANDING_I18N['zh-CN'] = {
   'index.hero.meta4': '本地优先',
   'index.recOther': '其他平台 →',
   'index.recBinary': '下载二进制 →',
+  'index.recLabel': 'bash · 推荐安装',
   'index.terminal.title': 'reng · 本地评审会话',
   'index.stats.aria': '关键实测数据',
   'index.stats.label1': '11 位 AI 专家一轮评审',

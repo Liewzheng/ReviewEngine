@@ -119,7 +119,8 @@
 
   /* ---------- system-aware install recommendation ----------
      Detects the visitor OS and reveals exactly one matching hint:
-       index:      the hero <p class="rec-line" data-rec-os="…">
+       index:      the hero <div class="code rec-code" data-rec-os="…">
+                   plus the shared .rec-links row below it
        quickstart: the install <div class="code" data-os="…"> gets the
                    .is-recommended highlight + its .rec-badge is shown.
      Undetected OS or no JS → everything stays hidden, no residue. */
@@ -135,6 +136,8 @@
     var os = detectOS();
     var lines = document.querySelectorAll('[data-rec-os]');
     for (var i = 0; i < lines.length; i++) lines[i].hidden = lines[i].getAttribute('data-rec-os') !== os;
+    var links = document.querySelectorAll('[data-rec-links]');
+    for (var k = 0; k < links.length; k++) links[k].hidden = (os === null);
     var blocks = document.querySelectorAll('.code[data-os]');
     for (var j = 0; j < blocks.length; j++) {
       var match = blocks[j].getAttribute('data-os') === os;

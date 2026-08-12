@@ -476,7 +476,7 @@ html[lang="ru"] .vlabel {
   height: 2.25rem;
   background: var(--line);
 }
-.hero-head { max-width: 58ch; }
+.hero-head { max-width: 58ch; min-width: 0; }   /* grid track may shrink below nowrap pre content */
 .hero-title { margin: .25rem 0 1.25rem; }
 .hero-title .mark {
   background: linear-gradient(var(--bronze), var(--bronze)) no-repeat 0 100% / 100% 2px;
@@ -503,33 +503,22 @@ html[lang="ru"] .vlabel {
 .hero-meta li { display: inline-flex; align-items: center; gap: .5rem; }
 .hero-meta li::before { content: ""; width: 4px; height: 4px; border-radius: 50%; background: var(--bronze); opacity: .7; }
 
-/* system-aware install recommendation (index hero) — hidden until JS detects the OS */
-.rec-line {
+/* system-aware install recommendation (index hero) — .code card per OS,
+   shown only when JS detects the OS; links row sits below the card */
+.rec-code { max-width: 640px; }
+.rec-links {
   display: flex;
-  align-items: center;
   flex-wrap: wrap;
-  gap: .5rem;
-  margin-top: 1.5rem;
+  gap: .4rem 1.2rem;
+  margin-top: .55rem;
+  max-width: 640px;
   font-size: var(--step-small);
-  color: var(--paper-dim);
-  line-height: 1.6;
 }
-.rec-line code {
-  font-family: var(--font-mono);
-  font-size: .82em;
-  color: var(--paper);
-  background: var(--surface);
-  border: 1px solid var(--line-soft);
-  border-radius: 5px;
-  padding: .15em .5em;
-  overflow-wrap: anywhere;
-}
-.rec-line a {
-  font-size: .82em;
+.rec-links a {
   color: var(--paper-dim);
   border-bottom: 1px solid var(--line-soft);
 }
-.rec-line a:hover { color: var(--bronze); border-bottom-color: var(--bronze); }
+.rec-links a:hover { color: var(--bronze); border-bottom-color: var(--bronze); }
 
 /* terminal */
 .terminal-wrap { position: relative; margin-top: clamp(2.75rem, 5vw, 3.75rem); }

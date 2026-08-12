@@ -94,6 +94,7 @@ LANDING_I18N['ko'] = {
   'index.hero.meta4': '로컬 우선',
   'index.recOther': '다른 플랫폼 →',
   'index.recBinary': '바이너리 다운로드 →',
+  'index.recLabel': 'bash · 권장 설치',
   'index.terminal.title': 'reng · 로컬 리뷰 세션',
   'index.stats.aria': '핵심 측정 데이터',
   'index.stats.label1': '11명의 AI 전문가 1회 리뷰',

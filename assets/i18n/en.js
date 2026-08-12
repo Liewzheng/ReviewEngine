@@ -77,6 +77,7 @@ LANDING_I18N['en'] = {
   'index.hero.meta4': 'local-first',
   'index.recOther': 'Other platforms →',
   'index.recBinary': 'Download binary →',
+  'index.recLabel': 'bash · recommended install',
   'index.terminal.title': 'reng · local review session',
   'index.stats.aria': 'Key measured numbers',
   'index.stats.label1': 'one review by 11 AI experts',

@@ -205,10 +205,7 @@
   function copiedLabel() { return I18N_T ? I18N_T('common.copied') : '已复制'; }
   function copyFailLabel() { return I18N_T ? I18N_T('common.copyFail') : '失败'; }
   function copyAria() { return I18N_T ? I18N_T('common.copyAria') : '复制命令'; }
-  function copyText(text) {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      return navigator.clipboard.writeText(text);
-    }
+  function legacyCopy(text) {
     return new Promise(function (resolve, reject) {
       var ta = document.createElement('textarea');
       ta.value = text;
@@ -217,10 +214,17 @@
       ta.style.left = '-9999px';
       document.body.appendChild(ta);
       ta.select();
-      try { document.execCommand('copy'); resolve(); }
+      try { var ok = document.execCommand('copy'); ok ? resolve() : reject(new Error('execCommand copy failed')); }
       catch (e) { reject(e); }
       document.body.removeChild(ta);
     });
+  }
+  function copyText(text) {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      // async API may reject (no user activation / permission denied) — fall back
+      return navigator.clipboard.writeText(text).catch(function () { return legacyCopy(text); });
+    }
+    return legacyCopy(text);
   }
   var copyButtons = [];
   for (var b = 0; b < blocks.length; b++) {

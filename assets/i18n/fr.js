@@ -94,6 +94,7 @@ LANDING_I18N['fr'] = {
   'index.hero.meta4': 'local d’abord',
   'index.recOther': 'Autres plateformes →',
   'index.recBinary': 'Télécharger le binaire →',
+  'index.recLabel': 'bash · installation recommandée',
   'index.terminal.title': 'reng · session de revue locale',
   'index.stats.aria': 'Chiffres clés mesurés',
   'index.stats.label1': 'une revue par 11 experts IA',

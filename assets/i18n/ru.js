@@ -79,6 +79,7 @@ LANDING_I18N['ru'] = {
   'index.hero.meta4': 'сначала локально',
   'index.recOther': 'Другие платформы →',
   'index.recBinary': 'Скачать бинарник →',
+  'index.recLabel': 'bash · рекомендуемая установка',
   'index.terminal.title': 'reng · локальная сессия ревью',
   'index.stats.aria': 'Ключевые замеры',
   'index.stats.label1': 'один раунд ревью 11 AI-экспертов',

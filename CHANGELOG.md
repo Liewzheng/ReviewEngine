@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.12] - 2026-08-11
+
+### Added
+- **Coverage ledger — auditable, per-hunk review coverage**: the consolidated report now carries a coverage ledger (`src/coverage/mod.rs`) that records, per file, which changed hunks each expert actually reviewed and which hunks were never covered; a "reviewed" result is backed by concrete line-range evidence instead of an unverifiable claim. (`src/coverage/mod.rs`, `src/team/orchestrator.rs`, `src/team/lead_consolidator.rs`, `src/output/team_renderer.rs`, `src/models/mod.rs`, `src/cli/handlers.rs`, `src/lib.rs`)
+- **Insufficient coverage is flagged unverified**: when the ledger shows changed hunks that no expert covered, the assessment is marked `unverified` with an explicit "coverage insufficient（覆盖不足）" note instead of presenting a clean result — an uncovered hunk reads as "needs investigation", mirroring the zero-finding rule from v0.9.11. (`src/team/lead_consolidator.rs`, `src/team/orchestrator.rs`, `src/output/team_renderer.rs`)
+
+### Fixed
+- **Review prompt may report missing checks inside modified functions (missing-check exception)**: the prompt contract previously discouraged reporting missing validations inside a function modified by the diff, letting canary-style false negatives (a real missing check inside an edited function) slip through as "not in scope"; the contract now explicitly allows reporting a missing check whose enclosing function was modified, keeping the finding actionable and tied to the change. (`src/prompt/templates.rs`)
+- **Docs aligned with v0.9.11**: `docs/`, `deploy/gitlab-ee.md` and `.env.example` now describe the zero-build image, in-container `reng upgrade`, GHCR pull-based deployment and the unverified flag instead of the stale v0.9.9/v0.9.10 wording. (`docs/*.md`, `deploy/gitlab-ee.md`, `.env.example`)
+
 ## [0.9.11] - 2026-08-11
 
 ### Fixed

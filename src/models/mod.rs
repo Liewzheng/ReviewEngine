@@ -104,6 +104,12 @@ pub struct OverallAssessment {
     /// instead of presenting it as healthy.
     #[serde(default)]
     pub unverified: bool,
+    /// True when demonstrated hunk coverage fell below the threshold (or zero
+    /// findings made coverage untraceable). Kept separate from `unverified` so
+    /// the report can say WHY the result is unverified (coverage vs. no
+    /// findings). `unverified` is set when EITHER is true.
+    #[serde(default)]
+    pub coverage_insufficient: bool,
 }
 
 // ─── Global Review Context ────────────────────

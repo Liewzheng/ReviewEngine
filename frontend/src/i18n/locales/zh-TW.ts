@@ -293,6 +293,7 @@ export default {
       modelRequired: '必須填寫預設模型',
       expertRequired: '至少需要一位專家',
       fixBeforeSave: '儲存前請先修正驗證錯誤',
+      saveWithWarnings: '部分必填欄位未填寫，將以目前內容儲存',
     },
     unsaved: {
       title: '未儲存的變更',

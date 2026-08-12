@@ -295,6 +295,7 @@ export default {
       modelRequired: '기본 모델이 필요합니다',
       expertRequired: '전문가가 1명 이상 필요합니다',
       fixBeforeSave: '저장 전에 검증 오류를 수정하세요',
+      saveWithWarnings: '일부 필수 항목이 입력되지 않았습니다. 현재 내용으로 저장합니다',
     },
     unsaved: {
       title: '저장되지 않은 변경 사항',

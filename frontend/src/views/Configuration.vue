@@ -21,7 +21,7 @@
         </template>
         <template v-else>
           <el-badge :is-dot="dirty" type="danger">
-            <el-button type="primary" :loading="saving" :disabled="!dirty || (!formValid && !providersDirty)" @click="saveChanges">
+            <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
               <el-icon><Check /></el-icon>
               <span>{{ $t('common.saveChanges') }}</span>
             </el-button>
@@ -567,7 +567,7 @@
     <!-- Mobile Sticky Actions -->
     <div v-if="isEditing" class="mobile-actions">
       <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
-        <el-button type="primary" :loading="saving" :disabled="!dirty || (!formValid && !providersDirty)" @click="saveChanges">
+        <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
           {{ $t('common.saveChanges') }}
         </el-button>
       </el-badge>
@@ -862,44 +862,17 @@ async function saveChanges() {
   }
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
+  // Missing/incorrect fields keep their inline validation errors, but they
+  // must not block saving: the backend treats empty secret/token fields as
+  // "keep the stored value", so a partially-filled form saves safely. Warn,
+  // then save with whatever is present.
   if (!valid) {
-    // The main form is invalid but provider edits are pending: offer to
-    // persist just the providers instead of losing them to the validation
-    // failure.
-    if (providersDirty.value) {
-      let saveOnly = false
-      try {
-        await ElMessageBox.confirm(
-          t('config.providers.saveOnlyConfirm'),
-          t('config.validation.title'),
-          {
-            confirmButtonText: t('config.providers.saveOnlyBtn'),
-            cancelButtonText: t('common.cancel'),
-            type: 'warning',
-          }
-        )
-        saveOnly = true
-      } catch { /* cancelled — fall through to the error highlight below */ }
-      if (saveOnly) {
-        await saveProvidersOnly()
-        return
-      }
-    }
-    nextTick(() => {
-      const firstError = document.querySelector('.el-form-item.is-error')
-      if (firstError) {
-        firstError.classList.add('shake-error')
-        setTimeout(() => firstError.classList.remove('shake-error'), 300)
-        firstError.scrollIntoView({ behavior: 'smooth', block: 'center' })
-      }
-    })
     ElNotification({
       title: t('config.validation.title'),
-      message: t('config.validation.fixBeforeSave'),
+      message: t('config.validation.saveWithWarnings'),
       type: 'warning',
-      duration: 3000,
+      duration: 4000,
     })
-    return
   }
 
   try {

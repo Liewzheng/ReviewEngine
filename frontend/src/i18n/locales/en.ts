@@ -305,6 +305,7 @@ export default {
       modelRequired: 'Default Model is required',
       expertRequired: 'At least one expert is required',
       fixBeforeSave: 'Please fix validation errors before saving',
+      saveWithWarnings: 'Some required fields are missing; saving with current values',
     },
     unsaved: {
       title: 'Unsaved Changes',

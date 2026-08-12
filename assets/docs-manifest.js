@@ -3,6 +3,7 @@ window.DOCS_MANIFEST = [
   {path:'README.md', group:'入门', title:'review-engine Documentation'},
   {path:'getting-started.md', group:'入门', title:'Getting Started with review-engine'},
   {path:'features.md', group:'入门', title:'review-engine 特性概览'},
+  {path:'faq.md', group:'入门', title:'FAQ:API Token 与部署排查'},
   {path:'configuration.md', group:'配置', title:'Configuration'},
   {path:'config-schema.md', group:'配置', title:'Configuration Schema Reference'},
   {path:'code-audit-default.toml', group:'配置', title:'默认审计配置（TOML）'},

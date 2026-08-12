@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.16] - 2026-08-12
+
+### Fixed
+- **Upgrade checksum asset naming mismatch (UI/CLI reported "no release asset for this platform")**: the upgrade flow looks up the `.sha256` sidecar for each platform archive, but it built the checksum asset name by appending `.sha256` to the full archive name (`...tar.gz.sha256`), while real releases publish the sidecar as `<prefix>-<triple>.sha256` with **no** archive extension (taiki-e/upload-rust-binary-action convention) — so every upgrade attempt failed to find the checksum asset and reported *no release asset for this platform*. The lookup now strips `.tar.gz` / `.zip` from the asset name before appending `.sha256` (e.g. `review-engine-x86_64-unknown-linux-gnu.sha256`), with a regression test against the published asset list. (`src/upgrade/github_release.rs`, `src/upgrade/platform.rs`, `src/upgrade/download.rs`, `src/upgrade/verify.rs`, `src/upgrade/mod.rs`, `src/server/api/upgrade.rs`, `src/cli/handlers.rs`, `tests/server.rs`)
+- **Cargo.lock synced to the crate version (the v0.9.15 bump left the lockfile behind)**: the v0.9.15 bump updated `Cargo.toml` but not the root package entry in `Cargo.lock` (still `0.9.14`), so a reproducible build would resolve the review-engine crate itself to the stale version. The lockfile root package now tracks the crate version. (`Cargo.lock`)
+
 ## [0.9.15] - 2026-08-12
 
 ### Fixed

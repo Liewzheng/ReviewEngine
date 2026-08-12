@@ -16,7 +16,7 @@ This guide walks you through deploying **review-engine** as a Docker container f
 ## 🚀 快速部署(无需 Clone,pull 镜像)——推荐
 
 不需要 `git clone` 整个仓库:只需 **一个镜像 + 一份独立 compose 文件** 即可部署。
-镜像内含零编译二进制、前端 dist、首次同步与容器内自更新(UI 点 Upgrade 即可升级)。
+镜像内含零编译二进制、前端 dist、自动版本感知同步与容器内自更新(UI 点 Upgrade 即可升级)。pull 新镜像后 entrypoint 启动时会自动检测镜像/卷二进制版本,镜像更新则自动覆盖卷内旧二进制与 dist(无需手动清空 `./bin`、`./frontend-dist` 卷)。
 
 ### 1. 拉取镜像
 
@@ -81,7 +81,7 @@ curl http://localhost:18080/health # 期望 {"status":"ok"}
 
 ### 6. 日常运维
 
-- **升级**:UI 右上角 Upgrade(容器内自更新——自动替换 `./bin` 与 `./frontend-dist` 卷并重启,无需重新 pull/重建);
+- **升级**:两种方式——① UI 右上角 Upgrade(容器内自更新——自动替换 `./bin` 与 `./frontend-dist` 卷并重启,无需重新 pull/重建);② `docker pull` 新镜像后 `docker compose up -d`,entrypoint 启动时自动检测镜像/卷二进制版本,镜像更新则自动覆盖卷内旧二进制与 dist(无需手动清空 `./bin`、`./frontend-dist` 卷;卷版本 >= 镜像版本时保留卷,不降级);
 - **HTTPS**:取消 standalone-compose.yml 中 `443:8443` 端口与 `./tls` 卷注释,放好 `./tls/cert.pem`、`./tls/key.pem`,设 `REVIEW_TLS_CERT`/`REVIEW_TLS_KEY`;
 - **可选 env 注入**(也可全部在 UI Configuration 页填):`REVIEW_API_TOKEN`、`GITLAB_URL`、`GITLAB_TOKEN`、`GITLAB_WEBHOOK_SECRET`、`GITLAB_WEBHOOK_SIGNING_SECRET`、`LLM_CONFIG`。
 
@@ -447,6 +447,12 @@ Upgrades run **inside the container** — no `git pull`, no image rebuild:
   new version.
 - **API**: `POST /api/v1/system/upgrade` (same in-container path; progress via
   `GET /api/v1/system/upgrade/status`).
+- **Image pull**: `docker pull` a newer image and restart the container —
+  the entrypoint now compares the image binary version against the volume
+  binary version on startup and **auto-overwrites stale volume binaries/dist**
+  when the image is newer (no manual clearing of `./bin` / `./frontend-dist`
+  volumes needed). When the volume version is already >= the image version the
+  volume is kept — in-container self-upgrades are never downgraded.
 
 For source-built deployments, a full image rebuild is only needed to re-pull
 the release assets — the Dockerfile is **zero-build** (pure download), so a

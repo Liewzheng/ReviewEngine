@@ -46,7 +46,7 @@ mkdir -p ~/review-engine && cd ~/review-engine
 echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
 ```
 
-启动服务(见第 4 步)后打开 `http://<宿主IP>:18080`,在引导页填一个**自己创建的 API Token** 和 .env 里的 **Bootstrap Key**;保存后 token 以 **SHA-256 摘要**(非明文)持久化到 `./auth/auth.toml`,bootstrap key 仅一次性,设置完成后即可从 .env 删除。
+启动服务(见第 4 步)后打开 `http://<宿主IP>:18080`,在引导页填一个**自己创建的 API Token** 和 .env 里的 **Bootstrap Key**;保存后 token 以 **SHA-256 摘要**(非明文)持久化到 `./auth/auth.toml`。bootstrap key 是一次性引导凭证,不是日常登录凭证,设置完成后即可从 .env 删除;但它同时也是 token 失效时**轮换自救**的凭证(见 [FAQ §3](../docs/faq.md#3-换密码轮换-token))——要保留免重启自救能力就别删。
 
 **方式 B — Env 直接注入(兼容旧版)**:在 .env 设 `REVIEW_API_TOKEN=<openssl rand -hex 32 生成的>`,启动后用它登录即可(env 优先于 UI 设置)。
 

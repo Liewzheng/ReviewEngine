@@ -361,7 +361,62 @@ impl UiConfig {
     }
 }
 
-async fn put_config(State(state): State<Arc<AppState>>, Json(mut body): Json<UiConfig>) -> impl IntoResponse {
+/// Deep-merge `patch` into `base` (both JSON values), returning the result.
+///
+/// Object leaves merge key-by-key: a key present in `patch` overwrites the
+/// same key in `base`, a key absent from `patch` keeps `base`'s value.
+/// Non-object values (scalars, arrays, `null`) replace the base wholesale.
+/// This gives `PUT /config` partial-update semantics: omitted fields keep
+/// their stored value instead of being reset to a serde default.
+fn merge_json(base: &serde_json::Value, patch: &serde_json::Value) -> serde_json::Value {
+    match (base, patch) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(patch)) => {
+            let mut merged = base.clone();
+            for (key, value) in patch {
+                let next = match merged.get(key) {
+                    Some(existing) => merge_json(existing, value),
+                    None => value.clone(),
+                };
+                merged.insert(key.clone(), next);
+            }
+            serde_json::Value::Object(merged)
+        }
+        (_, patch) => patch.clone(),
+    }
+}
+
+async fn put_config(State(state): State<Arc<AppState>>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
+    // Contract: `PUT /config` is a PARTIAL update. Only fields present in the
+    // request JSON overwrite the stored config; omitted fields keep their
+    // current values. A sparse PUT (e.g. just `{"rules":{"minScore":90}}`)
+    // must never silently zero temperature/minScore/maxConcurrentReviews/
+    // enableMetrics or drop `llm.providers`. We merge the request over a
+    // snapshot of the stored UI config, then run the existing save pipeline
+    // unchanged — a full-form PUT (every field present) deep-merges to exactly
+    // the request, so behaviour is identical to the old wholesale replace.
+    if !payload.is_object() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "config update must be a JSON object"})),
+        )
+            .into_response();
+    }
+    let mut body: UiConfig = {
+        let stored = state.ui_config.read().unwrap().clone();
+        // UiConfig is a plain struct of serde-native types, so serializing the
+        // stored config cannot fail; the fallback is unreachable defensive code.
+        let stored_json = serde_json::to_value(&stored).unwrap_or_else(|_| serde_json::json!({}));
+        match serde_json::from_value(merge_json(&stored_json, &payload)) {
+            Ok(ui) => ui,
+            Err(e) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({"error": format!("invalid config update: {e}")})),
+                )
+                    .into_response();
+            }
+        }
+    };
     // Snapshot of currently-stored LLM configs, used to resolve "keep
     // unchanged" when the UI submits an empty or masked key (frontend "leave
     // blank = unchanged"; `GET /config` returns `***` for a configured key).
@@ -706,7 +761,12 @@ mod tests {
         let mut ui = state.ui_config.read().unwrap().clone();
         mask_secrets(&mut ui);
 
-        let resp = put_config(State(state.clone()), Json(ui)).await.into_response();
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::to_value(&ui).expect("UiConfig must serialize")),
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(stored_openai_key(&state), "sk-primary");
         // And the persisted UI config still surfaces the mask, not the secret.
@@ -723,7 +783,12 @@ mod tests {
             p.api_key = String::new();
         }
 
-        let resp = put_config(State(state.clone()), Json(ui)).await.into_response();
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::to_value(&ui).expect("UiConfig must serialize")),
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(stored_openai_key(&state), "sk-primary");
     }
@@ -736,9 +801,118 @@ mod tests {
         ui.llm.openai_api_key = "sk-new".to_string();
         ui.llm.providers[0].api_key = "sk-new".to_string();
 
-        let resp = put_config(State(state.clone()), Json(ui)).await.into_response();
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::to_value(&ui).expect("UiConfig must serialize")),
+        )
+        .await
+        .into_response();
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(stored_openai_key(&state), "sk-new");
+    }
+
+    /// Partial-update regression: a sparse PUT (only `rules.minScore` present)
+    /// must update that field and keep every omitted field at its stored value —
+    /// not reset it to a serde default. The old `*ui = body` replaced the whole
+    /// config, so this request silently zeroed temperature / enableMetrics /
+    /// maxConcurrentReviews and dropped `llm.providers`.
+    #[tokio::test]
+    async fn put_config_sparse_patch_preserves_omitted_fields() {
+        let state = state_with_openai("sk-primary");
+        {
+            let ui = state.ui_config.read().unwrap();
+            assert_eq!(ui.rules.min_score, 75, "baseline min_score");
+            assert_eq!(ui.llm.temperature, 0.7, "baseline temperature");
+            assert!(ui.advanced.enable_metrics, "baseline enable_metrics");
+            assert_eq!(ui.advanced.max_concurrent_reviews, 5, "baseline max concurrent");
+            assert_eq!(ui.llm.providers.len(), 1, "baseline providers");
+        }
+
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ui = state.ui_config.read().unwrap();
+        // Provided field updated...
+        assert_eq!(ui.rules.min_score, 90);
+        // ...every omitted field keeps its stored value.
+        assert_eq!(ui.llm.temperature, 0.7, "omitted temperature must not reset");
+        assert!(ui.advanced.enable_metrics, "omitted enableMetrics must not reset");
+        assert_eq!(
+            ui.advanced.max_concurrent_reviews, 5,
+            "omitted maxConcurrentReviews must not reset"
+        );
+        assert_eq!(ui.llm.providers.len(), 1, "omitted providers must not be dropped");
+        assert_eq!(ui.llm.openai_api_key, API_KEY_MASK, "stored key stays masked");
+        assert_eq!(stored_openai_key(&state), "sk-primary", "live key preserved");
+    }
+
+    /// A sparse LLM patch must not clobber the stored key: with only
+    /// `llm.temperature` present, the merged config carries the masked key,
+    /// which resolves to the stored live key ("leave unchanged"), and the
+    /// provider list survives untouched.
+    #[tokio::test]
+    async fn put_config_sparse_llm_patch_keeps_key_and_providers() {
+        let state = state_with_openai("sk-primary");
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::json!({ "llm": { "temperature": 0.2 } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ui = state.ui_config.read().unwrap();
+        assert_eq!(ui.llm.temperature, 0.2);
+        assert_eq!(ui.llm.openai_api_key, API_KEY_MASK);
+        assert_eq!(ui.llm.providers.len(), 1);
+        assert_eq!(stored_openai_key(&state), "sk-primary");
+    }
+
+    /// An empty object `{}` is the degenerate sparse case: a no-op save that
+    /// keeps every field, never a wipe.
+    #[tokio::test]
+    async fn put_config_empty_object_is_noop() {
+        let state = state_with_openai("sk-primary");
+        let before = state.ui_config.read().unwrap().clone();
+        let resp = put_config(State(state.clone()), Json(serde_json::json!({})))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let after = state.ui_config.read().unwrap().clone();
+        assert_eq!(before.rules.min_score, after.rules.min_score);
+        assert_eq!(before.llm.temperature, after.llm.temperature);
+        assert_eq!(before.llm.providers.len(), after.llm.providers.len());
+        assert_eq!(stored_openai_key(&state), "sk-primary");
+    }
+
+    /// A non-object or type-invalid update must be rejected with 422, not
+    /// silently accepted: `null`/`[]` are not a config patch, and a wrong-typed
+    /// field (e.g. `"minScore": "high"`) fails the merged deserialization.
+    #[tokio::test]
+    async fn put_config_malformed_update_rejected() {
+        let state = state_with_openai("sk-primary");
+        for payload in [
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({ "rules": { "minScore": "high" } }),
+        ] {
+            let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "malformed patch must be rejected"
+            );
+        }
+        // And nothing was persisted by any of the rejected patches.
+        let ui = state.ui_config.read().unwrap();
+        assert_eq!(ui.rules.min_score, 75);
+        assert_eq!(ui.llm.temperature, 0.7);
+        assert_eq!(stored_openai_key(&state), "sk-primary");
     }
 
     #[test]

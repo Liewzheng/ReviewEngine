@@ -1344,11 +1344,13 @@ html[lang="ru"] .vlabel {
 @media (min-width: 1200px) {
   .hero .container { max-width: min(1320px, calc(100vw - 4rem)); }
   .hero-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 600px);
-    gap: clamp(2rem, 4vw, 3.5rem);
+    grid-template-columns: minmax(0, 720px) minmax(0, 600px);
+    gap: clamp(1.25rem, 2.5vw, 2.25rem);   /* tighter than the previous 4vw/3.5rem */
     align-items: center;
+    justify-content: center;               /* keep the two columns tight and centered */
   }
   .hero-grid .terminal-wrap { margin-top: 0; }
+  .hero-head { max-width: 72ch; }          /* let the text fill the left column so the terminal reads closer */
 }
 @media (min-width: 1600px) {
   .hero .container { max-width: min(1560px, calc(100vw - 6rem)); }

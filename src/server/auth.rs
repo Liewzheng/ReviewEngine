@@ -56,6 +56,12 @@ fn is_loopback_bind(bind_addr: &str) -> bool {
 pub struct AuthConfig {
     /// SHA-256 hex digest of the effective API token; `None` = no token yet.
     token_hash: RwLock<Option<String>>,
+    /// SHA-256 hex digest of the explicit env/CLI token (`REVIEW_API_TOKEN` /
+    /// `--api-token`) when one was supplied at startup. Kept even after a
+    /// runtime rotation so the operator's env-configured token remains a valid
+    /// rotation credential — the env-precedence self-rescue path when the
+    /// browser holds a stale persisted token.
+    explicit_token_hash: Option<String>,
     /// Where `update_token` persists the digest (default
     /// `~/.config/review-engine/auth.toml`, overridable with `REVIEW_AUTH_FILE`).
     /// `None` keeps the token in memory only (tests / degraded environments).
@@ -80,8 +86,10 @@ impl AuthConfig {
                  For local-only access, bind to 127.0.0.1 (default)."
             ));
         }
+        let token_hash = token.map(|t| sha256_hex(&t));
         Ok(Self {
-            token_hash: RwLock::new(token.map(|t| sha256_hex(&t))),
+            token_hash: RwLock::new(token_hash.clone()),
+            explicit_token_hash: token_hash,
             store_path: None,
             bootstrap_key: None,
             loopback_bind,
@@ -105,7 +113,8 @@ impl AuthConfig {
         let store_path = store_path.or_else(default_auth_file_path);
         let bootstrap_key = bootstrap_key.filter(|k| !k.is_empty());
 
-        let mut token_hash = explicit_token.map(|t| sha256_hex(&t));
+        let explicit_token_hash = explicit_token.map(|t| sha256_hex(&t));
+        let mut token_hash = explicit_token_hash.clone();
         if token_hash.is_none() {
             if let Some(path) = &store_path {
                 if let Some(hash) = load_auth_file(path)? {
@@ -125,6 +134,7 @@ impl AuthConfig {
 
         Ok(Self {
             token_hash: RwLock::new(token_hash),
+            explicit_token_hash,
             store_path,
             bootstrap_key,
             loopback_bind,
@@ -179,6 +189,28 @@ impl AuthConfig {
             return false;
         }
         constant_time_eq_str(&sha256_hex(provided), &expected)
+    }
+
+    /// Whether `req` carries the explicit env/CLI token (`REVIEW_API_TOKEN` /
+    /// `--api-token`). Env-precedence override: even after `update_token`
+    /// swapped the effective in-memory token, the operator's env-configured
+    /// token stays valid as a rotation credential — a browser holding a stale
+    /// persisted token can still rescue rotation with the env token.
+    fn check_explicit_token(&self, req: &Request) -> bool {
+        let Some(expected) = &self.explicit_token_hash else {
+            return false;
+        };
+        let provided = req
+            .headers()
+            .get("Authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .or_else(|| req.headers().get("X-API-Key").and_then(|v| v.to_str().ok()))
+            .unwrap_or("");
+        if provided.is_empty() {
+            return false;
+        }
+        constant_time_eq_str(&sha256_hex(provided), expected)
     }
 
     /// Whether `req` carries the one-time bootstrap key (first-run on a
@@ -498,7 +530,11 @@ mod tests {
 
     #[test]
     fn test_resolve_missing_file_yields_bootstrap_on_loopback() {
-        let config = AuthConfig::resolve(None, "127.0.0.1", None, None).unwrap();
+        // store_path is a fresh temp file (not the developer's real auth file)
+        // so the test is hermetic: a missing file must mean "no token".
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("auth.toml");
+        let config = AuthConfig::resolve(None, "127.0.0.1", Some(store), None).unwrap();
         assert!(!config.is_enabled());
         assert!(config.bootstrap_mode());
         assert!(!config.bootstrap_key_required(), "loopback bootstrap needs no key");
@@ -506,12 +542,16 @@ mod tests {
 
     #[test]
     fn test_resolve_non_loopback_no_token_refused_without_key() {
-        assert!(AuthConfig::resolve(None, "0.0.0.0", None, None).is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("auth.toml");
+        assert!(AuthConfig::resolve(None, "0.0.0.0", Some(store), None).is_err());
     }
 
     #[test]
     fn test_resolve_non_loopback_bootstrap_key_enters_bootstrap() {
-        let config = AuthConfig::resolve(None, "0.0.0.0", None, Some("boot-key".to_string())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("auth.toml");
+        let config = AuthConfig::resolve(None, "0.0.0.0", Some(store), Some("boot-key".to_string())).unwrap();
         assert!(!config.is_enabled());
         assert!(config.bootstrap_key_required());
     }
@@ -595,7 +635,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_middleware_loopback_bootstrap_contract() {
-        let auth = Arc::new(AuthConfig::resolve(None, "127.0.0.1", None, None).unwrap());
+        // Hermetic: fresh temp store path, so a developer's real auth file
+        // (~/.config/review-engine/auth.toml) can never flip this into a
+        // configured-token state.
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("auth.toml");
+        let auth = Arc::new(AuthConfig::resolve(None, "127.0.0.1", Some(store), None).unwrap());
 
         // Ordinary endpoint → 401 auth_required.
         let resp = run_through_middleware(
@@ -635,7 +680,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_middleware_non_loopback_bootstrap_needs_key() {
-        let auth = Arc::new(AuthConfig::resolve(None, "0.0.0.0", None, Some("boot-key".to_string())).unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("auth.toml");
+        let auth = Arc::new(AuthConfig::resolve(None, "0.0.0.0", Some(store), Some("boot-key".to_string())).unwrap());
 
         // PUT /system/token without the key → 401 bootstrap_key_required.
         let resp = run_through_middleware(
@@ -729,6 +776,136 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_middleware_configured_token_can_rotate_with_bootstrap_key() {
+        // Deadlock rescue (方案 A): when the current token is invalid/lost, the
+        // one-time bootstrap key must still rotate a configured token — it is
+        // NOT limited to the first-run bootstrap window.
+        let auth = Arc::new(
+            AuthConfig::resolve(
+                Some("current-token".to_string()),
+                "0.0.0.0",
+                None,
+                Some("boot-key".to_string()),
+            )
+            .unwrap(),
+        );
+
+        // Rotation without any credential → 401.
+        let resp = run_through_middleware(
+            auth.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/system/token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // Rotation with the bootstrap key → 200 even though a token is set.
+        let resp = run_through_middleware(
+            auth.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/system/token")
+                .header("X-Bootstrap-Key", "boot-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Wrong bootstrap key → 401.
+        let resp = run_through_middleware(
+            auth.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/system/token")
+                .header("X-Bootstrap-Key", "wrong-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_middleware_configured_token_rotates_with_env_token_after_runtime_rotation() {
+        // Env precedence override (方案 B): the explicit (REVIEW_API_TOKEN /
+        // --api-token) token remains a valid rotation credential even after a
+        // runtime UI rotation swapped the in-memory effective token — the
+        // operator's env config always wins.
+        let auth = Arc::new(AuthConfig::resolve(Some("env-token".to_string()), "0.0.0.0", None, None).unwrap());
+        auth.update_token("ui-token").unwrap(); // runtime rotation via the UI
+
+        // The in-memory effective token authenticates rotation…
+        let resp = run_through_middleware(
+            auth.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/system/token")
+                .header("Authorization", "Bearer ui-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // …and so does the env-configured token, even though it is no longer
+        // the effective runtime token.
+        let resp = run_through_middleware(
+            auth.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/system/token")
+                .header("Authorization", "Bearer env-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A random token is still rejected.
+        let resp = run_through_middleware(
+            auth.clone(),
+            Request::builder()
+                .method("PUT")
+                .uri("/system/token")
+                .header("Authorization", "Bearer unknown-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_middleware_bootstrap_key_does_not_unlock_ordinary_endpoints_when_configured() {
+        // Security model preserved: once a token is configured, the bootstrap
+        // key is accepted ONLY for token rotation, never for ordinary endpoints.
+        let auth = Arc::new(
+            AuthConfig::resolve(
+                Some("current-token".to_string()),
+                "0.0.0.0",
+                None,
+                Some("boot-key".to_string()),
+            )
+            .unwrap(),
+        );
+        let resp = run_through_middleware(
+            auth.clone(),
+            Request::builder()
+                .method("GET")
+                .uri("/system/version")
+                .header("X-Bootstrap-Key", "boot-key")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
     async fn test_middleware_configured_token_gates_ordinary_endpoints() {
         let auth = Arc::new(AuthConfig::resolve(Some("secret".to_string()), "0.0.0.0", None, None).unwrap());
         let resp = run_through_middleware(
@@ -788,9 +965,12 @@ fn query_token_for_sse(req: &Request) -> Option<&str> {
 /// Axum middleware that gates every `/api/v1` endpoint.
 ///
 /// Always mounted. Behaviour depends on the current runtime token:
-/// - Token configured → every endpoint (including `PUT /system/token`) requires
-///   a valid `Authorization: Bearer` / `X-API-Key`; otherwise `401
-///   {"error":"unauthorized"}`.
+/// - Token configured → every endpoint requires a valid `Authorization: Bearer`
+///   / `X-API-Key`; otherwise `401 {"error":"unauthorized"}`. `PUT
+///   /system/token` additionally accepts the one-time bootstrap key
+///   (`X-Bootstrap-Key`) or the explicit env/CLI token as rotation credentials
+///   — the self-rescue path when the current token is lost or stale. Ordinary
+///   endpoints are NOT unlocked by these; the effective token still gates them.
 /// - No token (first-run bootstrap) → `GET /system/auth-status` stays open and
 ///   `PUT /system/token` is reachable from a loopback bind or with the one-time
 ///   bootstrap key (`X-Bootstrap-Key`); every other endpoint returns `401
@@ -835,11 +1015,21 @@ pub async fn auth_middleware(req: Request, next: Next) -> impl IntoResponse {
     }
 
     if auth.check(&req) {
-        Ok(next.run(req).await)
-    } else {
-        Err((
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "unauthorized"})),
-        ))
+        return Ok(next.run(req).await);
     }
+    // Rotation rescue (deadlock break): when the current token is lost or
+    // rejected — e.g. the browser cached a stale token while the server's
+    // effective token comes from REVIEW_API_TOKEN / auth.toml — the operator
+    // can still rotate `PUT /system/token` with either the one-time bootstrap
+    // key (`X-Bootstrap-Key`, REVIEW_BOOTSTRAP_KEY / --bootstrap-key) or the
+    // explicit env/CLI token (REVIEW_API_TOKEN / --api-token). Ordinary
+    // endpoints are deliberately NOT unlocked by these; the effective token
+    // still gates them.
+    if is_put_token && (auth.valid_bootstrap_key(&req) || auth.check_explicit_token(&req)) {
+        return Ok(next.run(req).await);
+    }
+    Err((
+        StatusCode::UNAUTHORIZED,
+        Json(serde_json::json!({"error": "unauthorized"})),
+    ))
 }

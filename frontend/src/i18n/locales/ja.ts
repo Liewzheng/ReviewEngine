@@ -80,6 +80,12 @@ export default {
     rotateSave: 'トークンを更新',
     rotateSuccess: 'API トークンを更新しました。',
     rotateFailed: 'API トークンの更新に失敗しました。',
+    rotateBootstrapKeyLabel: 'ブートストラップキー（任意）',
+    rotateBootstrapKeyPlaceholder: 'ワンタイム ブートストラップキー',
+    rotateBootstrapKeyHint:
+      '現在のトークンが無効な場合の復旧用ローテーション — REVIEW_BOOTSTRAP_KEY または --bootstrap-key で設定します。',
+    rotateInvalidHint:
+      '現在のトークンはサーバーに拒否されました。上記のブートストラップキーを入力してローテーションするか、.env の REVIEW_API_TOKEN を変更して再起動してください。',
   },
   bootstrap: {
     title: 'Review Engine へようこそ',

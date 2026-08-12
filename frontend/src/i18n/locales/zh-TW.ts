@@ -78,6 +78,12 @@ export default {
     rotateSave: '輪換權杖',
     rotateSuccess: 'API 權杖已更新。',
     rotateFailed: '更新 API 權杖失敗。',
+    rotateBootstrapKeyLabel: 'Bootstrap Key（選填）',
+    rotateBootstrapKeyPlaceholder: '一次性引導金鑰',
+    rotateBootstrapKeyHint:
+      '目前權杖無效時的自救輪換憑證——透過 REVIEW_BOOTSTRAP_KEY 或 --bootstrap-key 設定。',
+    rotateInvalidHint:
+      '目前權杖已被伺服器拒絕。請輸入上方的 Bootstrap Key 進行輪換，或修改 .env 中的 REVIEW_API_TOKEN 後重建。',
   },
   bootstrap: {
     title: '歡迎使用 Review Engine',

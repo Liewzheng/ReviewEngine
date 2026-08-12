@@ -78,6 +78,12 @@ export default {
     rotateSave: '轮换令牌',
     rotateSuccess: 'API 令牌已更新。',
     rotateFailed: '更新 API 令牌失败。',
+    rotateBootstrapKeyLabel: 'Bootstrap Key（可选）',
+    rotateBootstrapKeyPlaceholder: '一次性引导密钥',
+    rotateBootstrapKeyHint:
+      '当前令牌无效时的自救轮换凭证——通过 REVIEW_BOOTSTRAP_KEY 或 --bootstrap-key 设置。',
+    rotateInvalidHint:
+      '当前令牌已被服务器拒绝。请输入上方的 Bootstrap Key 进行轮换，或修改 .env 中的 REVIEW_API_TOKEN 后重建。',
   },
   bootstrap: {
     title: '欢迎使用 Review Engine',

@@ -79,6 +79,12 @@ export default {
     rotateSave: '토큰 교체',
     rotateSuccess: 'API 토큰이 업데이트되었습니다.',
     rotateFailed: 'API 토큰 업데이트에 실패했습니다.',
+    rotateBootstrapKeyLabel: '부트스트랩 키 (선택 사항)',
+    rotateBootstrapKeyPlaceholder: '일회용 부트스트랩 키',
+    rotateBootstrapKeyHint:
+      '현재 토큰이 유효하지 않을 때 복구용 교체 — REVIEW_BOOTSTRAP_KEY 또는 --bootstrap-key로 설정합니다.',
+    rotateInvalidHint:
+      '현재 토큰이 서버에서 거부되었습니다. 위의 부트스트랩 키를 입력해 교체하거나, .env의 REVIEW_API_TOKEN을 변경하고 재시작하세요.',
   },
   bootstrap: {
     title: 'Review Engine에 오신 것을 환영합니다',

@@ -1698,9 +1698,23 @@ async fn api_bootstrap_non_loopback_requires_bootstrap_key() {
         .unwrap();
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
 
-    // The new token is now enforced; the bootstrap key is inert.
+    // The new token is now enforced for ordinary endpoints; the bootstrap key
+    // does NOT unlock them (security model preserved).
     let resp = get_version(port, Some(&format!("Bearer {API_TOKEN}")), None).await;
     assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = get_version(port, None, None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+    let resp = client
+        .get(format!("{base}/system/version"))
+        .header("X-Bootstrap-Key", bootstrap_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // The bootstrap key stays valid as a ROTATION credential — the deadlock
+    // rescue: even when the current token is lost/invalid, X-Bootstrap-Key
+    // rotates to a fresh token (previously it went inert, locking operators out).
     let resp = client
         .put(format!("{base}/system/token"))
         .header("X-Bootstrap-Key", bootstrap_key)
@@ -1710,9 +1724,16 @@ async fn api_bootstrap_non_loopback_requires_bootstrap_key() {
         .unwrap();
     assert_eq!(
         resp.status(),
-        reqwest::StatusCode::UNAUTHORIZED,
-        "bootstrap key must stop working once a token is configured"
+        reqwest::StatusCode::OK,
+        "bootstrap key must remain a valid rotation credential once a token is configured"
     );
+
+    // The rotated token is enforced and the bootstrap key still does not open
+    // ordinary endpoints.
+    let resp = get_version(port, Some("Bearer second-token"), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    let resp = get_version(port, None, None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
 }
 
 /// Token rotation: once a token is configured, `PUT /api/v1/system/token`
@@ -1755,6 +1776,113 @@ async fn api_token_rotation_requires_old_token() {
         reqwest::StatusCode::UNAUTHORIZED,
         "old token must be rejected"
     );
+}
+
+/// Deadlock rescue via the bootstrap key (end-to-end): with a token configured
+/// and the browser holding a STALE credential, `PUT /api/v1/system/token` with
+/// `X-Bootstrap-Key` still rotates to a fresh token. The bootstrap key does NOT
+/// unlock ordinary endpoints once a token is configured.
+#[tokio::test]
+async fn api_token_rotation_rescue_via_bootstrap_key() {
+    let port = find_free_port();
+    let bootstrap_key = "rescue-bootstrap-key-456";
+    // Loopback bind + env token + env bootstrap key — the deployed default.
+    let _guard = spawn_server_inner_with_env(port, Some(API_TOKEN), &[("REVIEW_BOOTSTRAP_KEY", bootstrap_key)]);
+    wait_for_server(port).await;
+
+    let base = format!("http://127.0.0.1:{port}/api/v1");
+
+    // The browser's stale token is rejected on ordinary endpoints.
+    let resp = get_version(port, Some("Bearer stale-browser-token"), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Rotating with the stale token fails — the deadlock the fix removes.
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/system/token"))
+        .header("Authorization", "Bearer stale-browser-token")
+        .json(&serde_json::json!({"token": "rescued-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // Self-rescue: X-Bootstrap-Key authenticates the rotation regardless of
+    // the (stale) current token.
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/system/token"))
+        .header("X-Bootstrap-Key", bootstrap_key)
+        .json(&serde_json::json!({"token": "rescued-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "bootstrap key must rotate a configured token (deadlock rescue)"
+    );
+
+    // The rescued token is now enforced…
+    let resp = get_version(port, Some("Bearer rescued-token"), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+    // …and the bootstrap key still does not open ordinary endpoints.
+    let resp = reqwest::Client::new()
+        .get(format!("{base}/system/version"))
+        .header("X-Bootstrap-Key", bootstrap_key)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // A wrong bootstrap key never rotates.
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/system/token"))
+        .header("X-Bootstrap-Key", "wrong-key")
+        .json(&serde_json::json!({"token": "should-not-stick"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+}
+
+/// Deadlock rescue via env precedence (end-to-end): the env/CLI token
+/// (`REVIEW_API_TOKEN` / `--api-token`) stays a valid rotation credential even
+/// after a runtime rotation swapped the effective token — the operator's env
+/// config always wins, so a rotation is never unrecoverable.
+#[tokio::test]
+async fn api_token_rotation_env_token_remains_valid_after_runtime_rotation() {
+    let port = find_free_port();
+    let _guard = spawn_server_with_token(port, API_TOKEN);
+    wait_for_server(port).await;
+
+    let base = format!("http://127.0.0.1:{port}/api/v1");
+
+    // Rotate to a new effective token using the env token (normal path).
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/system/token"))
+        .header("Authorization", format!("Bearer {API_TOKEN}"))
+        .json(&serde_json::json!({"token": "rotated-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // The env token is no longer the effective token for ordinary endpoints…
+    let resp = get_version(port, Some(&format!("Bearer {API_TOKEN}")), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+
+    // …but it still authenticates rotation (env precedence override).
+    let resp = reqwest::Client::new()
+        .put(format!("{base}/system/token"))
+        .header("Authorization", format!("Bearer {API_TOKEN}"))
+        .json(&serde_json::json!({"token": "env-rescued-token"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
+
+    // The env-rescued token is now effective.
+    let resp = get_version(port, Some("Bearer env-rescued-token"), None).await;
+    assert_eq!(resp.status(), reqwest::StatusCode::OK);
 }
 
 /// Auth enabled: the SSE log stream is reachable via `?token=` because

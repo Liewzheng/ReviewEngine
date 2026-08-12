@@ -27,25 +27,22 @@ services:
       # - "${REVIEW_ENGINE_PORT:-18080}:8080"
 
     environment:
-      # ── API Authentication ──
-      # REVIEW_API_TOKEN is now OPTIONAL: when unset the server starts in
-      # first-run bootstrap mode and the initial token is set via the web UI
-      # (PUT /api/v1/system/token). The token is persisted (as a SHA-256 digest,
-      # never plaintext) to $REVIEW_AUTH_FILE. REVIEW_API_TOKEN, when set, still
-      # takes precedence over any persisted token — existing deployments keep
-      # working unchanged.
+      # ── API 认证(对外网开放 0.0.0.0 时,下面二选一,否则拒绝启动)──
+      # 方式 A(直接给密码,兼容旧版):在 .env 设 REVIEW_API_TOKEN=<密码>。
+      #   服务器启动直接采用,优先于之前存过的;即使被网页换过,它仍可用来换密码。
+      # 方式 B(引导设置,推荐):REVIEW_API_TOKEN 留空 → 首次打开网页时填
+      #   "自己想用的密码 + REVIEW_BOOTSTRAP_KEY"完成设置;密码以 SHA-256 摘要
+      #   (指纹,非明文)存进 $REVIEW_AUTH_FILE。
       REVIEW_API_TOKEN: ${REVIEW_API_TOKEN:-}
 
-      # ── First-run bootstrap key (optional) ──
-      # Only needed when REVIEW_API_TOKEN is unset AND the container binds a
-      # non-loopback address (the default 0.0.0.0): the server refuses to start
-      # without it, so set a one-time key here (e.g. `openssl rand -hex 16`).
-      # The web UI prompts for this key when setting the initial token; it can
-      # be removed from .env after setup. For loopback-only binds no key is
-      # needed.
+      # ── 开荒钥匙 bootstrap key(仅方式 B 需要)──
+      # 对外网开放(默认 0.0.0.0)且没直接给密码时必须配,否则拒绝启动——防止
+      # 内网任何人都能抢着设密码把服务劫持走。示例:`openssl rand -hex 16`。
+      # 首次设置完可删;但它是"密码丢了免重启自救"的凭证,想保留自救能力就别删
+      # (或留 REVIEW_API_TOKEN)。只绑 127.0.0.1 的本机场景不需要。
       REVIEW_BOOTSTRAP_KEY: ${REVIEW_BOOTSTRAP_KEY:-}
 
-      # Auth token persistence file (writable volume ./auth mounted below).
+      # 密码指纹的存储文件(存 SHA-256 摘要,非明文;可写卷 ./auth 挂载在下方)。
       REVIEW_AUTH_FILE: /app/auth/auth.toml
 
       # ── GitLab EE Integration ──

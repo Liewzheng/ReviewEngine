@@ -18,6 +18,40 @@ The script detects your platform, resolves the latest stable release, verifies t
 
 The installer also creates a `reng` symlink next to the binary. `reng` and `review-engine` are the same command — examples below use `reng`.
 
+### Windows
+
+A native Windows binary is published as a zip asset — no `install.sh` or WSL required. Download `review-engine-x86_64-pc-windows-msvc.zip` (contains `review-engine.exe`) from the [Releases page](https://github.com/Liewzheng/ReviewEngine/releases) (Windows on ARM: `review-engine-aarch64-pc-windows-msvc.zip`).
+
+```powershell
+# 1. Download the zip asset (PowerShell)
+Invoke-WebRequest -Uri "https://github.com/Liewzheng/ReviewEngine/releases/latest/download/review-engine-x86_64-pc-windows-msvc.zip" -OutFile "$env:TEMP\review-engine.zip"
+
+# 2. Extract to C:\review-engine\
+Expand-Archive -Path "$env:TEMP\review-engine.zip" -DestinationPath "C:\review-engine\" -Force
+```
+
+Add `C:\review-engine\` to `PATH` — either way works:
+
+```powershell
+# Current session only (temporary)
+$env:Path = "C:\review-engine;$env:Path"
+
+# Permanently (takes effect in new terminals)
+setx PATH "C:\review-engine;$env:PATH"
+```
+
+Verify:
+
+```powershell
+review-engine --version
+```
+
+`reng` is an alias for the same binary — the Unix installer creates the `reng` symlink automatically, but the Windows zip contains only `review-engine.exe`. Either call `review-engine` directly, or make a copy named `reng.exe` next to it if you prefer the short name.
+
+> Git Bash / MSYS2 users can also run the official `install.sh` — it has a Windows branch — but it needs `curl`, `jq`, `unzip`, and `sha256sum` installed; the zip + PATH steps above are the most direct route.
+
+Next, configure an LLM provider — see [Configure your LLM provider](#configure-your-llm-provider) below and [`configuration.md`](configuration.md) for the full config reference.
+
 ### Source build
 
 If you prefer to build from source, or a binary is not available for your platform:

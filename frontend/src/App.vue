@@ -14,7 +14,10 @@ import {
   Key,
   Menu,
 } from '@element-plus/icons-vue'
-import { setApiToken, clearApiToken, getApiToken } from './services/api'
+import { ElMessage } from 'element-plus'
+import { setApiToken, clearApiToken, getApiToken, onAuthSignal } from './services/api'
+import { getAuthStatus, setSystemToken, type AuthStatus } from './services/system'
+import BootstrapScreen from './components/Auth/BootstrapScreen.vue'
 import UpgradeDialog from './components/Upgrade/UpgradeDialog.vue'
 import LanguageSwitcher from './components/common/LanguageSwitcher.vue'
 import { useUpgrade } from './composables/useUpgrade'
@@ -25,8 +28,25 @@ const { t } = useI18n()
 const route = useRoute()
 const isDark = ref(true)
 const sidebarCollapsed = ref(false)
+
+// --- API token auth state ---
+// The authoritative source for "is a token configured" is the backend
+// (auth.toml); localStorage only caches the session credential. On first run
+// (configured=false) the app shows a full-screen bootstrap screen; once
+// configured, a dialog handles unlocking (enter the existing token) and
+// rotation (set a new one).
+const authPhase = ref<'checking' | 'bootstrap' | 'ready'>('checking')
+const bootstrapKeyRequired = ref(false)
 const tokenDialogVisible = ref(false)
+const tokenDialogMode = ref<'unlock' | 'rotate'>('unlock')
 const tokenInput = ref('')
+const rotateSaving = ref(false)
+const unlockError = ref<string | null>(null)
+const unlockDismissed = ref(false)
+// True only for the instant an unlock save closes the dialog — lets
+// `onTokenDialogClose` distinguish "user dismissed the prompt" from "user
+// unlocked successfully" so a later 401 can re-prompt.
+const unlockSaved = ref(false)
 
 // Locale infra: Element Plus messages follow the app locale via el-config-provider.
 const { elementLocale } = useLocale()
@@ -34,26 +54,145 @@ const { elementLocale } = useLocale()
 // Upgrade feature: module-scope singleton shared with UpgradeDialog.
 const { dialogVisible, check, open, fetchCheck } = useUpgrade()
 
-const hasApiToken = (): boolean => {
-  if (typeof localStorage === 'undefined') return false
-  return !!localStorage.getItem('review_engine_api_token')
+/**
+ * Route auth-related 401 signals to the matching screen. Registered before the
+ * first request so a 401 during startup is never misread as a plain error.
+ */
+function handleAuthSignal(code: string) {
+  if (code === 'auth_required') {
+    // No token configured server-side (e.g. it was cleared while the app was
+    // open): switch to the first-run bootstrap screen.
+    authPhase.value = 'bootstrap'
+    return
+  }
+  if (code === 'unauthorized') {
+    // A token is configured but this request did not carry a valid one (no
+    // token cached, or the cached one is stale/rotated elsewhere). Prompt once
+    // per session; the header "API Token" button re-opens the dialog anytime.
+    if (authPhase.value === 'bootstrap' || tokenDialogVisible.value || unlockDismissed.value) return
+    clearApiToken()
+    openUnlockDialog(t('token.invalidToken'))
+  }
+  // `bootstrap_key_required` is handled inline by the bootstrap screen.
 }
 
-const openTokenDialog = () => {
-  tokenInput.value = getApiToken() || ''
+function openUnlockDialog(error?: string | null) {
+  tokenDialogMode.value = 'unlock'
+  tokenInput.value = ''
+  unlockError.value = error ?? null
   tokenDialogVisible.value = true
 }
 
-const saveApiToken = () => {
-  const token = tokenInput.value.trim()
-  if (token) {
-    setApiToken(token)
+function openTokenDialog() {
+  // Header button: with a cached token it rotates the server-side token
+  // (empty input = keep current); without one it asks for the existing token.
+  if (getApiToken()) {
+    tokenDialogMode.value = 'rotate'
+    tokenInput.value = ''
+    unlockError.value = null
+    tokenDialogVisible.value = true
   } else {
-    clearApiToken()
+    openUnlockDialog()
   }
+}
+
+function onTokenDialogClose() {
+  if (tokenDialogMode.value === 'unlock' && !unlockSaved.value) {
+    // User closed the unlock prompt without saving: don't re-nag on every
+    // background 401. The header "API Token" button remains available for
+    // reopening.
+    unlockDismissed.value = true
+  }
+  unlockSaved.value = false
+}
+
+function onCancelTokenDialog() {
   tokenDialogVisible.value = false
-  // Reload so the rest of the app picks up the new token state.
-  window.location.reload()
+}
+
+function clearUnlockError() {
+  unlockError.value = null
+}
+
+async function saveTokenFromDialog() {
+  if (tokenDialogMode.value === 'unlock') {
+    const tokenValue = tokenInput.value.trim()
+    if (!tokenValue) {
+      unlockError.value = t('token.tokenRequiredError')
+      return
+    }
+    // The token already lives on the server (configured=true); this dialog
+    // only unlocks this browser session by caching it locally. A wrong token
+    // surfaces as 401 unauthorized on the next request, which re-opens the
+    // dialog with an "invalid token" hint.
+    setApiToken(tokenValue)
+    unlockDismissed.value = false
+    unlockSaved.value = true
+    tokenDialogVisible.value = false
+    return
+  }
+
+  // Rotate: empty input keeps the current token.
+  const newToken = tokenInput.value.trim()
+  if (!newToken) {
+    tokenDialogVisible.value = false
+    return
+  }
+  rotateSaving.value = true
+  unlockError.value = null
+  try {
+    // PUT /system/token authenticates with the current token (added by
+    // request() from localStorage) and persists the new one server-side.
+    await setSystemToken(newToken)
+    setApiToken(newToken)
+    tokenDialogVisible.value = false
+    ElMessage.success(t('token.rotateSuccess'))
+  } catch (e) {
+    const code = (e as { code?: string })?.code
+    if (code === 'unauthorized') {
+      // The cached token is not accepted by the server (rotated elsewhere or
+      // cleared). Switch this dialog to unlock mode so the user enters the
+      // existing token instead of a new one.
+      clearApiToken()
+      tokenDialogMode.value = 'unlock'
+      tokenInput.value = ''
+      unlockError.value = t('token.invalidToken')
+    } else {
+      ElMessage.error(t('token.rotateFailed'))
+    }
+  } finally {
+    rotateSaving.value = false
+  }
+}
+
+/**
+ * Resolve the auth phase at startup against the backend's authority. Falls
+ * back to the old localStorage heuristic if the backend is unreachable.
+ */
+async function resolveAuthPhase() {
+  let status: AuthStatus | null = null
+  try {
+    status = await getAuthStatus()
+  } catch {
+    // Backend unreachable (e.g. dev server without the API up): trust a
+    // cached token; otherwise prompt for one.
+    status = null
+  }
+  if (status && !status.configured) {
+    bootstrapKeyRequired.value = status.bootstrapKeyRequired
+    authPhase.value = 'bootstrap'
+    return
+  }
+  authPhase.value = 'ready'
+  if (!getApiToken()) {
+    openUnlockDialog()
+  }
+}
+
+function onBootstrapDone() {
+  authPhase.value = 'ready'
+  // Re-run the one-shot version/update check now that requests authenticate.
+  fetchCheck()
 }
 
 onMounted(() => {
@@ -65,12 +204,13 @@ onMounted(() => {
   }
   document.documentElement.setAttribute('data-theme', isDark.value ? 'dark' : 'light')
 
-  // One-shot version/update check at startup (server caches for 1h; no polling).
-  fetchCheck()
-
-  if (!hasApiToken()) {
-    tokenDialogVisible.value = true
-  }
+  // Register the auth signal handler first, then resolve the phase. The
+  // version check waits for phase resolution so its 401 (if any) routes
+  // through the right screen instead of racing the bootstrap decision.
+  onAuthSignal(handleAuthSignal)
+  void resolveAuthPhase().finally(() => {
+    fetchCheck()
+  })
 })
 
 const toggleTheme = () => {
@@ -103,7 +243,15 @@ const pageTitle = computed(() => {
 
 <template>
   <el-config-provider :locale="elementLocale">
-    <div class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
+    <!-- First-run: no token configured server-side → full-screen setup. The
+         layout (and its router-view) stays unmounted so no request fires with
+         a missing token until one is set. -->
+    <BootstrapScreen
+      v-if="authPhase === 'bootstrap'"
+      :bootstrap-key-required="bootstrapKeyRequired"
+      @done="onBootstrapDone"
+    />
+    <div v-else-if="authPhase === 'ready'" class="app-layout" :class="{ 'sidebar-collapsed': sidebarCollapsed }">
     <!-- Sidebar -->
     <aside class="sidebar">
       <div class="sidebar-brand">
@@ -170,33 +318,53 @@ const pageTitle = computed(() => {
     </div>
   </div>
 
-  <!-- API Token prompt -->
+  <!-- Startup: auth phase not yet resolved — keep the (unauthorized) layout
+       from flashing before we know whether bootstrap is needed. -->
+  <div v-else class="boot-splash" role="status" aria-label="Loading">
+    <span class="brand-icon">🔍</span>
+  </div>
+
+  <!-- API Token dialog: unlock (enter the existing token) or rotate (set a new one) -->
   <el-dialog
     v-model="tokenDialogVisible"
-    :title="$t('token.title')"
-    width="420px"
+    :title="tokenDialogMode === 'rotate' ? $t('token.rotateTitle') : $t('token.title')"
+    width="440px"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
-    :show-close="hasApiToken()"
     align-center
+    @close="onTokenDialogClose"
   >
-    <p class="token-hint">
-      {{ $t('token.hintIntro') }} <code>REVIEW_API_TOKEN</code>
-      {{ $t('token.hintInstance') }}
-      <code>review_engine_api_token</code>
-      {{ $t('token.hintRequest') }}
-    </p>
-    <el-input
-      v-model="tokenInput"
-      type="password"
-      :placeholder="$t('token.placeholder')"
-      show-password
-      clearable
-      @keyup.enter="saveApiToken"
-    />
+    <template v-if="tokenDialogMode === 'unlock'">
+      <p class="token-hint">{{ $t('token.unlockHint') }}</p>
+      <p v-if="unlockError" class="token-error" role="alert">{{ unlockError }}</p>
+      <el-input
+        v-model="tokenInput"
+        type="password"
+        :placeholder="$t('token.placeholder')"
+        show-password
+        clearable
+        autocomplete="off"
+        @input="clearUnlockError"
+        @keyup.enter="saveTokenFromDialog"
+      />
+    </template>
+    <template v-else>
+      <p class="token-hint">{{ $t('token.rotateHint') }}</p>
+      <el-input
+        v-model="tokenInput"
+        type="password"
+        :placeholder="$t('token.rotatePlaceholder')"
+        show-password
+        clearable
+        autocomplete="new-password"
+        @keyup.enter="saveTokenFromDialog"
+      />
+    </template>
     <template #footer>
-      <el-button @click="tokenDialogVisible = false">{{ $t('common.cancel') }}</el-button>
-      <el-button type="primary" @click="saveApiToken">{{ $t('common.save') }}</el-button>
+      <el-button @click="onCancelTokenDialog">{{ $t('common.cancel') }}</el-button>
+      <el-button type="primary" :loading="rotateSaving" @click="saveTokenFromDialog">
+        {{ tokenDialogMode === 'rotate' ? $t('token.rotateSave') : $t('common.save') }}
+      </el-button>
     </template>
   </el-dialog>
 
@@ -444,6 +612,25 @@ const pageTitle = computed(() => {
   font-size: 13px;
   line-height: 1.5;
   margin: 0 0 16px 0;
+}
+
+.token-error {
+  color: var(--error);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0 0 12px;
+}
+
+.boot-splash {
+  height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background-color: var(--bg-primary);
+}
+
+.boot-splash .brand-icon {
+  font-size: 40px;
 }
 
 /* Mobile */

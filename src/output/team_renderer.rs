@@ -5,6 +5,80 @@ use crate::models::*;
 use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
 use crate::team::lead_consolidator::ConsolidatedReport;
 
+/// How many characters of a raw LLM response to inline in the report before
+/// pointing at the full dump file. Keeps the report readable while making the
+/// LLM input/output inspectable.
+const RAW_RESPONSE_EXCERPT_CHARS: usize = 500;
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+    }
+}
+
+/// Render one expert's report section for the final markdown report, including
+/// the parse-failure and raw-response annotations that the pre-rendered
+/// `report.markdown` does not carry.
+///
+/// - Base section: `report.markdown` (pre-rendered per-expert section).
+/// - Parse failure (`parse_error` set): the misleading "No issues found" body
+///   is replaced by an explicit ⚠️ note, and a truncated raw excerpt is shown
+///   so the failure is diagnosable even without a dump file.
+/// - `--verbose` dump (`raw_dump_path` set): a truncated raw-response summary
+///   plus the full dump file path.
+pub fn render_expert_section(report: &crate::models::ExpertReport) -> String {
+    let mut section = report.markdown.clone();
+    let mut extras = String::new();
+
+    if let Some(err) = report.parse_error.as_deref() {
+        if report.findings.is_empty() {
+            // Replace the silent "No issues found" body with the parse failure.
+            section = format!(
+                "## {} Review\n\n> ⚠️ **{} 输出解析失败** / Expert \"{}\" failed to parse its output: {}\n\n",
+                capitalize(&report.expert_name),
+                report.expert_name,
+                report.expert_name,
+                err,
+            );
+        } else {
+            extras.push_str(&format!(
+                "> ⚠️ **{} 输出解析失败（部分结果）** / parse failed: {}\n\n",
+                report.expert_name, err,
+            ));
+        }
+    }
+
+    let show_raw = report.parse_error.is_some() || report.raw_dump_path.is_some();
+    if show_raw {
+        let excerpt: String = report
+            .raw_llm_response
+            .chars()
+            .take(RAW_RESPONSE_EXCERPT_CHARS)
+            .collect();
+        let truncated = report.raw_llm_response.chars().count() > RAW_RESPONSE_EXCERPT_CHARS;
+        extras.push_str("**Raw LLM response**（原始 LLM 输出）\n\n```text\n");
+        extras.push_str(&excerpt);
+        if truncated {
+            extras.push_str("… (truncated)");
+        }
+        extras.push_str("\n```\n\n");
+        if let Some(path) = report.raw_dump_path.as_deref() {
+            extras.push_str(&format!("> 完整原始响应 / full raw response: `{path}`\n\n"));
+        }
+    }
+
+    if !extras.is_empty() {
+        if !section.ends_with('\n') {
+            section.push('\n');
+        }
+        section.push('\n');
+        section.push_str(&extras);
+    }
+    section
+}
+
 /// Render a full team report as markdown.
 ///
 /// # Parameters
@@ -189,6 +263,15 @@ pub fn render_team_report(
     render_team_report_with_scoring(team_name, reports, metrics, errors, None)
 }
 
+/// Render an inclusive line range as `L` (single line) or `L-H`.
+fn range_label(range: (u32, u32)) -> String {
+    if range.0 == range.1 {
+        format!("{}", range.0)
+    } else {
+        format!("{}-{}", range.0, range.1)
+    }
+}
+
 /// Render the lead consolidation summary as a Markdown section.
 ///
 /// Uses the same Overall Assessment / TL;DR formats as the team report.
@@ -203,10 +286,37 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
     let assessment = &consolidated.assessment;
     let mut out = String::from("## Lead Summary\n\n");
 
+    // Zero findings across every expert, or demonstrably insufficient hunk
+    // coverage: never present the result as "healthy". The risk band is
+    // replaced by an explicit "unverified" marker and a bilingual warning.
+    let risk_label = if assessment.unverified {
+        if assessment.coverage_insufficient {
+            "unverified（审查覆盖不足 / insufficient coverage）".to_string()
+        } else {
+            "unverified（全零发现 / zero findings）".to_string()
+        }
+    } else {
+        format!("{}", assessment.risk_level)
+    };
     out.push_str(&format!(
         "**Overall Assessment**: Overall Score: **{}/100** (Risk Level: {})\n\n",
-        assessment.score, assessment.risk_level,
+        assessment.score, risk_label,
     ));
+    if assessment.unverified {
+        if assessment.coverage_insufficient {
+            out.push_str(
+                "> ⚠️ **Unverified result**: demonstrated review coverage is below the \
+                 threshold — most of the diff was not demonstrably examined, so the verdict \
+                 is not trustworthy. / 审查覆盖不足：大部分改动未被可追溯地审查，结果不可信。\n\n",
+            );
+        } else {
+            out.push_str(
+                "> ⚠️ **Unverified result**: no expert reported any issue — a zero-finding \
+                 outcome may indicate low coverage or a systemic miss, not a clean codebase. \
+                 / 全零发现，结果未验证，可能为覆盖率不足或系统性漏报，请谨慎对待。\n\n",
+            );
+        }
+    }
     // Coverage banner: honest about how much of the diff was actually
     // reviewed. Under-coverage is never hidden — it also caps the score.
     if consolidated.total_files > 0 {
@@ -223,6 +333,25 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                 consolidated.unreviewed_files.len(),
                 consolidated.unreviewed_files.join(", "),
             ));
+        }
+    }
+    // Hunk-level coverage ledger: changed ranges vs. demonstrably-touched
+    // ranges, plus the uncovered ranges (coverage debt). Rendered whenever the
+    // consolidator was given a ledger (the full `run_experts` path).
+    if let Some(coverage) = &consolidated.coverage {
+        out.push_str(&format!(
+            "**Hunk Coverage**: {}/{} changed lines demonstrably reviewed ({:.0}%)\n\n",
+            coverage.covered_changed_lines,
+            coverage.total_changed_lines,
+            coverage.ratio * 100.0,
+        ));
+        if !coverage.debt.is_empty() {
+            let debt: Vec<String> = coverage
+                .debt
+                .iter()
+                .map(|u| format!("`{}:{}`", u.file, range_label(u.range)))
+                .collect();
+            out.push_str(&format!("**未覆盖区域 / uncovered**: {}\n\n", debt.join(", "),));
         }
     }
     out.push_str(&format!(
@@ -330,7 +459,11 @@ fn generate_tldr(reports: &[crate::team::ExpertReport], risk: &RiskLevel) -> Str
     let total_findings: usize = reports.iter().map(|r| r.findings.len()).sum();
 
     if total_findings == 0 {
-        return format!("No issues found. All {} experts approve.", expert_count);
+        return format!(
+            "{} 位专家均未发现问题，但全零发现可能意味着审查覆盖率不足或系统性漏报，请谨慎对待（结果标记为“未验证/不可信”）。\n\n\
+             {} experts reported no issues — this may indicate low coverage or a systemic issue; treat with caution (result marked unverified).",
+            expert_count, expert_count,
+        );
     }
 
     let mut parts = Vec::new();
@@ -397,6 +530,8 @@ mod tests {
             findings,
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let metrics = vec![ExpertMetrics {
             name: "security".to_string(),
@@ -420,7 +555,11 @@ mod tests {
     #[test]
     fn test_generate_tldr_no_findings() {
         let tl_dr = generate_tldr(&[], &RiskLevel::Low);
-        assert!(tl_dr.contains("No issues found"));
+        // Zero findings must be flagged as unverified, never "all experts approve".
+        assert!(tl_dr.contains("reported no issues"), "got: {tl_dr}");
+        assert!(tl_dr.contains("treat with caution"), "got: {tl_dr}");
+        assert!(!tl_dr.contains("All"), "must not claim approval, got: {tl_dr}");
+        assert!(!tl_dr.contains("No issues found. All"), "got: {tl_dr}");
     }
 
     #[test]
@@ -431,6 +570,8 @@ mod tests {
             findings,
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let metrics = vec![ExpertMetrics {
             name: "security".to_string(),
@@ -474,6 +615,8 @@ mod tests {
             findings,
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let metrics = vec![ExpertMetrics {
             name: "security".to_string(),
@@ -498,11 +641,14 @@ mod tests {
                 risk_level,
                 lead_override: None,
                 tl_dr: tl_dr.to_string(),
+                unverified: false,
+                coverage_insufficient: false,
             },
             consensus_reached: false,
             total_files: 0,
             reviewed_files: 0,
             unreviewed_files: vec![],
+            coverage: None,
         }
     }
 
@@ -599,5 +745,128 @@ mod tests {
         assert!(md.contains("- **security**: Use constant-time comparison"));
         assert!(md.contains("- **performance**: Cache the token hash"));
         assert!(md.contains("**Lead resolution**: Adopt **security**'s position (no severity information available)"));
+    }
+
+    // ── unverified (zero-findings) rendering ───────────────────────
+
+    #[test]
+    fn test_render_lead_summary_unverified_not_healthy() {
+        let mut consolidated = make_consolidated(100, RiskLevel::Healthy, "bilingual unverified note");
+        consolidated.assessment.unverified = true;
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("unverified"), "risk label must say unverified, got: {md}");
+        assert!(!md.contains("Risk Level: healthy"), "must not claim healthy, got: {md}");
+        assert!(md.contains("zero findings"), "must carry the zero-findings warning");
+    }
+
+    #[test]
+    fn test_render_lead_summary_normal_keeps_risk_level() {
+        let mut consolidated = make_consolidated(92, RiskLevel::Healthy, "1 high found by 3 reviewers.");
+        consolidated.assessment.unverified = false;
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("Risk Level: healthy"), "non-unverified keeps its risk band");
+        assert!(!md.contains("unverified"));
+    }
+
+    // ── hunk-level coverage ledger rendering ───────────────────────
+
+    #[test]
+    fn test_render_lead_summary_hunk_coverage_debt() {
+        let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "1 high found by 3 reviewers.");
+        consolidated.coverage = Some(crate::coverage::CoverageSummary {
+            total_changed_lines: 25,
+            covered_changed_lines: 19,
+            ratio: 19.0 / 25.0,
+            debt: vec![crate::coverage::UncoveredRange {
+                file: "c.c".to_string(),
+                range: (50, 55),
+            }],
+        });
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("Hunk Coverage"), "ledger section must render");
+        assert!(md.contains("19/25 changed lines demonstrably reviewed (76%)"));
+        assert!(md.contains("未覆盖区域 / uncovered"));
+        assert!(md.contains("c.c:50-55"), "coverage debt must list the uncovered range");
+    }
+
+    #[test]
+    fn test_render_lead_summary_coverage_insufficient_risk_label() {
+        let mut consolidated = make_consolidated(70, RiskLevel::Medium, "1 high found by 2 reviewers.");
+        consolidated.assessment.unverified = true;
+        consolidated.assessment.coverage_insufficient = true;
+        let md = render_lead_summary(&consolidated);
+        assert!(md.contains("unverified（审查覆盖不足 / insufficient coverage）"));
+        assert!(md.contains("below the threshold"), "must explain why unverified");
+        assert!(
+            !md.contains("no expert reported any issue"),
+            "coverage-insufficient is not zero-findings"
+        );
+    }
+
+    #[test]
+    fn test_render_lead_summary_no_ledger_skips_hunk_section() {
+        // Backward-compatible path (consolidate() without a ledger): no hunk
+        // coverage section, and the risk band is untouched.
+        let mut consolidated = make_consolidated(92, RiskLevel::Healthy, "1 high found by 3 reviewers.");
+        consolidated.coverage = None;
+        let md = render_lead_summary(&consolidated);
+        assert!(!md.contains("Hunk Coverage"));
+        assert!(md.contains("Risk Level: healthy"));
+    }
+
+    // ── render_expert_section (parse error + raw dump) ─────────────
+
+    #[test]
+    fn test_render_expert_section_plain_report_unchanged() {
+        let findings = vec![make_test_finding(Severity::High, "src/main.rs")];
+        let report = ExpertReport {
+            expert_name: "security".to_string(),
+            findings,
+            markdown: "## Security Review\n\n...".to_string(),
+            raw_llm_response: "raw".to_string(),
+            parse_error: None,
+            raw_dump_path: None,
+        };
+        assert_eq!(render_expert_section(&report), report.markdown);
+    }
+
+    #[test]
+    fn test_render_expert_section_parse_error_surfaces_instead_of_no_issues() {
+        let report = ExpertReport {
+            expert_name: "performance".to_string(),
+            findings: vec![],
+            markdown: "## Performance Review\n\nNo issues found.\n".to_string(),
+            raw_llm_response: "review:\n  findings: [unclosed".to_string(),
+            parse_error: Some("YAML parse failed".to_string()),
+            raw_dump_path: None,
+        };
+        let section = render_expert_section(&report);
+        assert!(
+            section.contains("输出解析失败"),
+            "parse failure must be surfaced, got: {section}"
+        );
+        assert!(!section.contains("No issues found"), "must not silently say no issues");
+        assert!(
+            section.contains("review:\n  findings: [unclosed"),
+            "raw excerpt must be inlined"
+        );
+    }
+
+    #[test]
+    fn test_render_expert_section_raw_dump_path_referenced() {
+        let report = ExpertReport {
+            expert_name: "security".to_string(),
+            findings: vec![make_test_finding(Severity::High, "src/main.rs")],
+            markdown: "## Security Review\n\nfinding...".to_string(),
+            raw_llm_response: "x".repeat(1200),
+            parse_error: None,
+            raw_dump_path: Some("/tmp/report.raw/security.1.response.txt".to_string()),
+        };
+        let section = render_expert_section(&report);
+        assert!(section.contains("Raw LLM response"), "raw section must be present");
+        assert!(section.contains("… (truncated)"), "long raw must be truncated");
+        assert!(section.contains("/tmp/report.raw/security.1.response.txt"));
+        // Not the full 1200 chars inline.
+        assert!(!section.contains(&"x".repeat(1200)));
     }
 }

@@ -104,6 +104,13 @@ enum Commands {
         #[arg(long)]
         output: Option<String>,
 
+        /// Dump each expert's raw LLM prompt and response to `<output>.raw/`
+        /// (or `<output_dir>/review-raw/`) for debugging zero-finding or
+        /// mis-parsed reviews. File paths are printed to stderr and referenced
+        /// in the report.
+        #[arg(long)]
+        verbose: bool,
+
         /// Publish results back to the MR/PR discussion
         #[arg(long)]
         publish: bool,
@@ -132,6 +139,13 @@ enum Commands {
         /// API token for authentication (required when bind != 127.0.0.1)
         #[arg(long)]
         api_token: Option<String>,
+
+        /// One-time bootstrap key for first-run setup: lets a non-loopback
+        /// bind start without an API token and accept the FIRST token via the
+        /// web UI (`PUT /api/v1/system/token` with `X-Bootstrap-Key`).
+        /// Env: REVIEW_BOOTSTRAP_KEY.
+        #[arg(long)]
+        bootstrap_key: Option<String>,
 
         /// GitHub personal access token
         #[arg(long)]
@@ -474,10 +488,14 @@ pub async fn run() -> Result<()> {
             llm_config,
             format,
             output,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
-            handlers::run_local_path(&dir, &repo, config, llm_config, &format, &output, pm, &review_id).await?;
+            handlers::run_local_path(
+                &dir, &repo, config, llm_config, &format, &output, pm, &review_id, verbose,
+            )
+            .await?;
         }
         Commands::Review { path: Some(_), .. } => {
             anyhow::bail!("review --path requires --local-path <repo>");
@@ -491,6 +509,7 @@ pub async fn run() -> Result<()> {
             format,
             output,
             publish,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
@@ -505,6 +524,7 @@ pub async fn run() -> Result<()> {
                 publish,
                 pm,
                 &review_id,
+                verbose,
             )
             .await?;
         }
@@ -515,6 +535,7 @@ pub async fn run() -> Result<()> {
             llm_config,
             format,
             output,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
@@ -527,6 +548,7 @@ pub async fn run() -> Result<()> {
                 &output,
                 pm,
                 &review_id,
+                verbose,
             )
             .await?;
         }
@@ -541,6 +563,7 @@ pub async fn run() -> Result<()> {
             format,
             output,
             llm_config,
+            verbose,
             ..
         } => {
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
@@ -557,6 +580,7 @@ pub async fn run() -> Result<()> {
                 &output,
                 pm,
                 &review_id,
+                verbose,
             )
             .await?;
         }
@@ -603,6 +627,7 @@ pub async fn run() -> Result<()> {
             port,
             bind,
             api_token,
+            bootstrap_key,
             github_token,
             github_webhook_secret,
             gitlab_token,
@@ -627,9 +652,18 @@ pub async fn run() -> Result<()> {
                     return Err(anyhow::anyhow!("--tls-cert and --tls-key must be provided together"));
                 }
             };
-            // Resolve API token: CLI arg > env var
-            let api_token = api_token.or_else(|| std::env::var("REVIEW_API_TOKEN").ok());
-            let auth = Arc::new(review_engine::server::auth::AuthConfig::new(api_token, &bind)?);
+            // Resolve API token precedence: CLI arg > env var > persisted auth
+            // file (loaded inside `AuthConfig::resolve`). `None` on a loopback
+            // bind enters first-run bootstrap mode; a non-loopback bind requires
+            // either a token or a one-time bootstrap key.
+            let explicit_token = api_token.or_else(|| std::env::var("REVIEW_API_TOKEN").ok());
+            let bootstrap_key = bootstrap_key.or_else(|| std::env::var("REVIEW_BOOTSTRAP_KEY").ok());
+            let auth = Arc::new(review_engine::server::auth::AuthConfig::resolve(
+                explicit_token,
+                &bind,
+                None,
+                bootstrap_key,
+            )?);
 
             let mut config = review_engine::config::resolve_config(None).await?;
             // LLM_CONFIG env is a fallback for the provider list only: a

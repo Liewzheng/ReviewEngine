@@ -78,11 +78,35 @@ export default {
   },
   token: {
     title: 'API Token Required',
-    hintIntro: 'Enter the',
-    hintInstance:
-      "configured for this ReviewEngine instance. The token is stored in your browser's localStorage under",
-    hintRequest: 'and is sent as a Bearer token on API requests.',
+    unlockHint:
+      'This instance requires an API token. Enter the token you configured to continue.',
     placeholder: 'Paste your API token',
+    tokenRequiredError: 'Please enter an API token.',
+    invalidToken: 'The token was rejected by the server. Check it and try again.',
+    rotateTitle: 'Rotate API Token',
+    rotatePlaceholder: 'Paste a new token (leave empty to keep the current one)',
+    rotateHint: 'The new token replaces the current one and takes effect immediately.',
+    rotateSave: 'Rotate Token',
+    rotateSuccess: 'API token updated successfully.',
+    rotateFailed: 'Failed to update the API token.',
+  },
+  bootstrap: {
+    title: 'Welcome to Review Engine',
+    intro:
+      'No API token is configured for this instance yet. Create one to secure the API — it is saved on the server and takes effect immediately.',
+    tokenLabel: 'API Token',
+    tokenPlaceholder: 'Create a new API token',
+    tokenRequiredError: 'Please enter an API token.',
+    keyLabel: 'Bootstrap Key',
+    keyPlaceholder: 'One-time bootstrap key',
+    keyHint:
+      'Set with REVIEW_BOOTSTRAP_KEY or --bootstrap-key, and printed in the startup log.',
+    keyRequiredError: 'Please enter the bootstrap key.',
+    keyInvalidError:
+      'The bootstrap key is invalid or missing. Check the startup log.',
+    save: 'Set Token',
+    saving: 'Setting…',
+    saveError: 'Could not save the token. Please try again.',
   },
   dashboard: {
     title: 'Dashboard',

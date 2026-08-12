@@ -13,6 +13,10 @@ related:
   - ../.notes/review_engine_rs_roadmap.md
 ---
 
+> ⚠️ **历史设计稿（Historical Design）**：本文记录早期设计思路，其中的阈值、
+> 伪代码与配置示例可能与当前实现不一致。当前行为以代码与
+> `docs/code-audit-default.toml` 为准。
+
 # 专家聚合上下文增强方案
 
 > 目标：让 aggregator（LLM 聚合专家）在合并各专家报告时，拥有完整的 PR 上下文（标题、描述、Lead 概述），生成更有全局视野的整合报告。

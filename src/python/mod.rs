@@ -36,7 +36,7 @@ fn review(
     let config_source = config_toml.map(|s| ConfigSource::Inline(s));
 
     let result =
-        rt.block_on(async { crate::run_review(&mr_url, &gitlab_token, llm_configs, config_source, None).await });
+        rt.block_on(async { crate::run_review(&mr_url, &gitlab_token, llm_configs, config_source, None, None).await });
 
     match result {
         Ok(output) => {

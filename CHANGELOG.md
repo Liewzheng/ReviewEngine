@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.9.12] - 2026-08-11
+
+### Added
+- **Coverage ledger — auditable, per-hunk review coverage**: the consolidated report now carries a coverage ledger (`src/coverage/mod.rs`) that records, per file, which changed hunks each expert actually reviewed and which hunks were never covered; a "reviewed" result is backed by concrete line-range evidence instead of an unverifiable claim. (`src/coverage/mod.rs`, `src/team/orchestrator.rs`, `src/team/lead_consolidator.rs`, `src/output/team_renderer.rs`, `src/models/mod.rs`, `src/cli/handlers.rs`, `src/lib.rs`)
+- **Insufficient coverage is flagged unverified**: when the ledger shows changed hunks that no expert covered, the assessment is marked `unverified` with an explicit "coverage insufficient（覆盖不足）" note instead of presenting a clean result — an uncovered hunk reads as "needs investigation", mirroring the zero-finding rule from v0.9.11. (`src/team/lead_consolidator.rs`, `src/team/orchestrator.rs`, `src/output/team_renderer.rs`)
+
+### Fixed
+- **Review prompt may report missing checks inside modified functions (missing-check exception)**: the prompt contract previously discouraged reporting missing validations inside a function modified by the diff, letting canary-style false negatives (a real missing check inside an edited function) slip through as "not in scope"; the contract now explicitly allows reporting a missing check whose enclosing function was modified, keeping the finding actionable and tied to the change. (`src/prompt/templates.rs`)
+- **Docs aligned with v0.9.11**: `docs/`, `deploy/gitlab-ee.md` and `.env.example` now describe the zero-build image, in-container `reng upgrade`, GHCR pull-based deployment and the unverified flag instead of the stale v0.9.9/v0.9.10 wording. (`docs/*.md`, `deploy/gitlab-ee.md`, `.env.example`)
+
+## [0.9.11] - 2026-08-11
+
+### Fixed
+- **Zero-finding reviews are flagged unverified instead of a clean bill of health (user-reported)**: the user's C project produced zero findings on three consecutive runs, each reported as a clean/healthy result and hiding a possible systemic miss. Now, when every expert reports zero findings, the assessment is marked `unverified` (`src/scoring/review.rs`) and the report's risk band is replaced with an explicit "unverified（全零发现 / zero findings）" marker (`src/team/lead_consolidator.rs`, `src/team/orchestrator.rs`, `src/output/team_renderer.rs`) instead of a perfect score — an empty result reads as "needs investigation" rather than "code is problem-free".
+- **`--verbose` dumps raw LLM input/output for auditability**: `--verbose` now persists the raw LLM request/response for debugging zero-finding or any other review — to `<output>.raw/` when an explicit `--output` file is given, otherwise to `<output_dir>/review-raw/`; an unparseable LLM response is recorded as a `parse_error` ("treated as no findings") so a silent zero-finding run can never be mistaken for a clean review. (`src/cli/mod.rs`, `src/cli/handlers.rs`, `src/output/parser.rs`, `src/server/mod.rs`)
+- **Findings outside changed hunks are kept (downgraded) instead of dropped**: a finding whose file is in the diff but whose line falls outside every changed hunk (e.g. the LLM flagged the enclosing function, or the hunk is a pure deletion) is now retained with a bilingual note "line outside diff hunk — 该行不在本次变更的 hunk 范围内，保留供参考" instead of being silently discarded. (`src/output/parser.rs`, `src/models/finding.rs`)
+
+## [0.9.10] - 2026-08-10
+
+### Added
+- **GHCR image publish (pull-based deploy)**: `release.yml` gains a `push-ghcr` job that builds the zero-build image for `linux/amd64` + `linux/arm64` and pushes `ghcr.io/liewzheng/review-engine:<tag>` and `:latest`, so users can `docker pull ghcr.io/liewzheng/review-engine:v0.9.10` and deploy without cloning the repository; it waits on both the binary and `frontend-dist` assets so the image carries a complete backend + frontend. (`.github/workflows/release.yml`, `Dockerfile`)
+- **Standalone pull-based deployment**: `deploy/standalone-compose.yml` provides a minimal compose file that pulls the GHCR image (defaulting `REVIEW_ENGINE_VERSION` to the latest release) and wires the writable volumes and env from the host; `deploy/gitlab-ee.md` gains a quick pull-based deploy section. (`deploy/standalone-compose.yml`, `deploy/gitlab-ee.md`)
+- **UI-configurable API token with first-run bootstrap**: the API token can now be set from the Web UI — a `BootstrapScreen` appears on first run when no token is configured, persists the token through the backend (`src/server/api/system.rs`) into the writable config volume, and keeps a bootstrapped token readable at startup, so a fresh `docker compose up` with no token in `.env` still boots into a guided setup instead of being locked out; the `cli` gains a `bootstrap_key` path and the frontend `api.ts`/`system.ts` wire the flow (i18n in all six locales). (`src/server/auth.rs`, `src/server/api/system.rs`, `src/cli/mod.rs`, `frontend/src/components/Auth/BootstrapScreen.vue`, `frontend/src/services/system.ts`, `frontend/src/services/api.ts`, `frontend/src/App.vue`, `tests/server.rs`, `.env.example`, `docker-compose.yml`)
+- **Optional version build-arg**: the zero-build Dockerfile no longer requires `REVIEW_ENGINE_VERSION` — when omitted it resolves the GitHub `latest` release tag and downloads that release; CI still passes the exact tag for reproducibility. (`Dockerfile`)
+
 ## [0.9.9] - 2026-08-10
 
 ### Added

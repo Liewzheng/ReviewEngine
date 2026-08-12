@@ -161,6 +161,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
                 &self.review_id,
                 base_ref.as_deref(),
                 head_ref.as_deref(),
+                None,
             )
             .await?;
 
@@ -370,6 +371,7 @@ fn create_expert_task(
     progress_map: Option<ProgressMap>,
     review_id: String,
     global_context: Option<GlobalReviewContext>,
+    dump_dir: Option<std::path::PathBuf>,
 ) -> Task {
     Box::pin(async move {
         let task_start = std::time::Instant::now();
@@ -401,6 +403,42 @@ fn create_expert_task(
         let llm_config = select_llm_config(&expert, &llm_configs);
         let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
         let report = crate::output::parser::parse_llm_response(&expert.name, &result.content);
+        let mut report = report;
+        // `--verbose`: persist the raw LLM prompt + response to the dump dir so
+        // a zero-finding or mis-parsed run can be debugged from the actual LLM
+        // exchange, and reference the file path on the report (the renderer
+        // shows a truncated excerpt + the full path).
+        if let Some(dir) = &dump_dir {
+            if let Err(e) = std::fs::create_dir_all(dir) {
+                eprintln!("warning: [verbose] failed to create dump dir {}: {e}", dir.display());
+            } else {
+                let seq = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let safe: String = expert
+                    .name
+                    .chars()
+                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                    .collect();
+                let prompt_path = dir.join(format!("{safe}.{seq}.prompt.txt"));
+                let resp_path = dir.join(format!("{safe}.{seq}.response.txt"));
+                let prompt_text = format!("=== SYSTEM ===\n{system}\n\n=== USER ===\n{user}\n");
+                if let Err(e) = std::fs::write(&prompt_path, &prompt_text) {
+                    eprintln!("warning: [verbose] failed to write prompt dump: {e}");
+                } else if let Err(e) = std::fs::write(&resp_path, &result.content) {
+                    eprintln!("warning: [verbose] failed to write response dump: {e}");
+                } else {
+                    report.raw_dump_path = Some(resp_path.display().to_string());
+                    eprintln!(
+                        "[verbose] {}: prompt -> {}, response -> {}",
+                        expert.name,
+                        prompt_path.display(),
+                        resp_path.display()
+                    );
+                }
+            }
+        }
         let latency_ms = task_start.elapsed().as_millis() as u64;
 
         crate::progress::update_expert_progress(progress_map.as_ref(), &review_id, &completed_count, total_tasks);
@@ -470,6 +508,7 @@ fn build_consolidated_report(
     reports: &[ExpertReport],
     config: &AppConfig,
     coverage: &FileCoverage,
+    ledger: Option<&crate::coverage::CoverageLedger>,
 ) -> ConsolidatedReport {
     ConsolidatorConfig {
         min_confidence: config.report.min_confidence,
@@ -477,7 +516,40 @@ fn build_consolidated_report(
         scoring: Some(config.scoring.clone()),
         ..Default::default()
     }
-    .consolidate_with_coverage(reports, None, coverage)
+    .consolidate_with_coverage(reports, None, coverage, ledger)
+}
+
+/// Build the hunk-level coverage ledger from the parsed diff and the expert
+/// reports: changed ranges come from the diff hunks; touched ranges come from
+/// the lines that expert findings actually reference (evidence-based coverage —
+/// see the module docs for why). A file-scoped finding (`line: None`) marks
+/// the file's full changed range as read, since the expert demonstrated
+/// awareness of the file as a whole.
+fn build_coverage_ledger(
+    diff_files: &[(String, Vec<DiffHunk>)],
+    reports: &[ExpertReport],
+) -> crate::coverage::CoverageLedger {
+    let mut ledger = crate::coverage::CoverageLedger::from_diff_files(diff_files);
+    for report in reports {
+        for finding in &report.findings {
+            match (finding.line, finding.line_end) {
+                (Some(l), Some(e)) => ledger.mark_touched(&finding.file, (l, e.max(l)), &report.expert_name),
+                (Some(l), None) => ledger.mark_touched(&finding.file, (l, l), &report.expert_name),
+                (None, _) => {
+                    let ranges: Vec<(u32, u32)> = ledger
+                        .targets
+                        .iter()
+                        .find(|t| t.file == finding.file)
+                        .map(|t| t.changed_ranges.clone())
+                        .unwrap_or_default();
+                    for &(a, b) in &ranges {
+                        ledger.mark_touched(&finding.file, (a, b), &report.expert_name);
+                    }
+                }
+            }
+        }
+    }
+    ledger
 }
 
 /// Reason recorded in [`DroppedFinding`] for findings filtered out because
@@ -538,6 +610,7 @@ pub(crate) async fn run_experts_inner(
     review_id: &str,
     base_ref: Option<&str>,
     head_ref: Option<&str>,
+    dump_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Vec<ExpertMetrics>,
@@ -648,6 +721,7 @@ pub(crate) async fn run_experts_inner(
                 progress_map.cloned(),
                 review_id.to_string(),
                 global_context.clone(),
+                dump_dir.clone(),
             ));
         }
     } else {
@@ -675,6 +749,7 @@ pub(crate) async fn run_experts_inner(
                 progress_map.cloned(),
                 review_id.to_string(),
                 global_context.clone(),
+                dump_dir.clone(),
             ));
         }
     }
@@ -726,6 +801,10 @@ pub(crate) async fn run_experts_inner(
     for report in &mut reports {
         let before = report.findings.len();
         report.findings = validate_findings(&report.findings, &diff_files);
+        // Re-render the per-expert markdown from the validated findings so
+        // validation outcomes surface in the report — e.g. the keep-with-note
+        // annotation on findings whose line lies outside the diff hunk.
+        report.markdown = crate::output::renderer::render_expert_markdown(&report.expert_name, &report.findings);
         let dropped = before.saturating_sub(report.findings.len());
         if dropped > 0 {
             tracing::warn!(
@@ -777,8 +856,11 @@ pub(crate) async fn run_experts_inner(
     // Lead consolidation over the validated findings: confidence filtering,
     // deduplication, conflict detection, and overall scoring. Pure
     // computation, so it always runs. Coverage is threaded in so an
-    // under-covered run is scored honestly (capped), never inflated.
-    let consolidated = build_consolidated_report(&reports, config, &coverage);
+    // under-covered run is scored honestly (capped), never inflated. The
+    // hunk-level ledger (changed vs. demonstrably-touched ranges) feeds the
+    // coverage-insufficient / unverified marking.
+    let coverage_ledger = build_coverage_ledger(&diff_files, &reports);
+    let consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger));
 
     Ok((
         reports,
@@ -809,6 +891,7 @@ pub async fn run_experts(
     config: &AppConfig,
     progress_map: Option<ProgressMap>,
     review_id: &str,
+    dump_dir: Option<std::path::PathBuf>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Option<GlobalReviewContext>,
@@ -841,6 +924,7 @@ pub async fn run_experts(
         review_id,
         Some(&mr_info.target_branch),
         Some(&mr_info.source_branch),
+        dump_dir,
     )
     .await?;
 
@@ -965,6 +1049,8 @@ mod tests {
             findings,
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }
     }
 
@@ -997,7 +1083,7 @@ mod tests {
                 make_finding(Severity::Medium, 10, "b.rs", Some(2), "confident finding"),
             ],
         )];
-        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2));
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None);
         assert_eq!(consolidated.low_confidence_removed, 1);
         assert_eq!(consolidated.findings.len(), 1);
         assert_eq!(consolidated.findings[0].title, "confident finding");
@@ -1011,7 +1097,7 @@ mod tests {
             "security",
             vec![make_finding(Severity::High, 4, "a.rs", Some(1), "shaky finding")],
         )];
-        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1));
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None);
         assert_eq!(consolidated.low_confidence_removed, 0);
         assert_eq!(consolidated.findings.len(), 1);
         // Downgraded one severity step: High → Medium
@@ -1029,7 +1115,7 @@ mod tests {
         f2.recommendation = "Use spaces".to_string();
         f2.expert_name = "bob".to_string();
         let reports = vec![make_report("alice", vec![f1]), make_report("bob", vec![f2])];
-        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1));
+        let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None);
         assert!(!consolidated.conflicts.is_empty());
         assert!(consolidated.assessment.score <= 100);
         assert!(!consolidated.assessment.tl_dr.is_empty());
@@ -1047,7 +1133,7 @@ mod tests {
             "main".to_string(),
         );
         let (reports, _global_context, dropped_findings, consolidated) =
-            run_experts(&[], &mr_info, "", &[], &config, None, "test-review-id")
+            run_experts(&[], &mr_info, "", &[], &config, None, "test-review-id", None)
                 .await
                 .expect("run_experts with empty team should succeed");
         assert!(reports.is_empty());

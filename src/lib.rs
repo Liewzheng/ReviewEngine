@@ -16,6 +16,7 @@
 pub mod actions;
 pub mod config;
 pub mod context;
+pub mod coverage;
 pub mod diff;
 pub mod error;
 pub mod expert;
@@ -71,6 +72,7 @@ pub async fn run_review(
     llm_configs: Vec<LLMConfig>,
     config_source: Option<ConfigSource>,
     progress_override: Option<(crate::progress::ProgressMap, String)>,
+    dump_dir: Option<std::path::PathBuf>,
 ) -> Result<ReviewOutput> {
     let config = config::resolve_config(config_source.clone()).await?;
 
@@ -115,6 +117,7 @@ pub async fn run_review(
         &app_config,
         Some(progress_map.clone()),
         &review_id,
+        dump_dir,
     )
     .await?;
 
@@ -170,7 +173,10 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
 
     let mut md = String::from("# CodeReview Board\n\n");
     for report in &output.reports {
-        md.push_str(&report.markdown);
+        // render_expert_section appends the parse-failure / raw-response
+        // annotations that the pre-rendered `markdown` does not carry, so a
+        // silent zero-finding run is never mistaken for a clean review.
+        md.push_str(&crate::output::team_renderer::render_expert_section(report));
         md.push_str("\n\n---\n\n");
     }
     // Lead consolidation summary (score / TL;DR / conflicts), rendered after

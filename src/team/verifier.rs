@@ -372,6 +372,8 @@ mod tests {
             findings,
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "review-engine"
-version = "0.9.9"
+version = "0.9.12"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -137,3 +137,5 @@ module_name_repetitions = { level = "allow", priority = -1 }
 tempfile = "3.27.0"
 wiremock = "0.6"
 rcgen = "0.13"
+# Router::oneshot for driving requests through middleware in unit tests.
+tower = "0.5"

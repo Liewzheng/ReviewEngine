@@ -132,6 +132,7 @@ pub(crate) async fn run_review_common(
         &config,
         Some(progress_map.clone()),
         &review_id,
+        None,
     )
     .await?;
 
@@ -254,11 +255,15 @@ mod tests {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let agg = Some(AggregatedReport {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         });
         let output = build_review_output_from_reports(reports, agg);
         assert!(
@@ -274,6 +279,8 @@ mod tests {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(
@@ -311,12 +318,16 @@ mod tests {
             }],
             markdown: "# Summary\n".to_string(),
             raw_llm_response: "---\n".to_string(),
+            parse_error: None,
+            raw_dump_path: None,
         };
         let reports = vec![ExpertReport {
             expert_name: "security".to_string(),
             findings: Default::default(),
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
 
         let output = build_review_output_from_reports(reports, Some(agg_report));
@@ -334,6 +345,8 @@ mod tests {
             findings: Default::default(),
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(output.aggregated.is_none());
@@ -352,6 +365,8 @@ mod tests {
             findings: Default::default(),
             markdown: String::new(),
             raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(output.aggregated.is_none());
@@ -425,7 +440,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     use anyhow::Context as _;
 
-    let app = router::build(state, auth, webhook_handlers);
+    let app = router::build(state, auth.clone(), webhook_handlers);
 
     let http_addr = format!("{}:{}", bind, port);
     let http_listener = bind_listener(&http_addr, port, "--port").await?;
@@ -438,6 +453,16 @@ pub async fn serve(
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "disabled".to_string());
     println!("review-engine listening on http://{http_addr} (health: http://{http_addr}/health, logs: {log_path})");
+    if !auth.is_enabled() {
+        // First-run bootstrap: the /api/v1 API is locked (401 auth_required)
+        // until the initial token is set. Loopback binds can set it directly;
+        // a non-loopback bind requires the one-time bootstrap key.
+        if auth.bootstrap_key_required() {
+            println!("  ⚠  no API token configured — first-run bootstrap on bind '{bind}': set the initial token via PUT /api/v1/system/token with header `X-Bootstrap-Key` (or use --api-token / REVIEW_API_TOKEN)");
+        } else {
+            println!("  ⚠  no API token configured — first-run bootstrap (loopback): set the initial token via the web UI (PUT /api/v1/system/token)");
+        }
+    }
 
     let http_app = app.clone();
     let http_future = async {

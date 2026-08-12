@@ -33,8 +33,9 @@ RUN groupadd -r review-engine && useradd -r -g review-engine -d /app -s /sbin/no
 WORKDIR /app
 
 # ── 零编译构建参数 ────────────────────────────────────────────────────────
-# REVIEW_ENGINE_VERSION:必填,对应 GitHub Release 的 tag(如 v0.9.8),决定下载
-#   哪个版本的二进制与前端 dist。留空则构建立即失败(fail-fast),防静默用错版本。
+# REVIEW_ENGINE_VERSION:可空。指定时对应 GitHub Release 的 tag(如 v0.9.8),
+#   决定下载哪个版本的二进制与前端 dist;留空时自动解析 GitHub latest release
+#   tag 下载(解析失败才 fail)。CI 传具体 tag 构建对应版本;本地不传即构建最新版。
 # REVIEW_ENGINE_BASE_URL:Release 资产下载根地址(含 /download)。默认官方 GitHub;
 #   国内网络不稳时可指向 gh-proxy.com 等镜像或内网资产服务器,便于 NAS 部署与
 #   本地验证(不改默认值即官方发布路径)。
@@ -46,21 +47,26 @@ ARG REVIEW_ENGINE_BASE_URL="https://github.com/Liewzheng/ReviewEngine/releases/d
 # 校验纪律对齐 src/upgrade:必须下载 .sha256 副件并 sha256sum -c 校验(sidecar
 # 内记录完整资产文件名,故下载到 /app 时保持原名)。sidecar 命名注意:release
 # 实际资产是 <triple>.sha256,不是 <archive>.tar.gz.sha256。
-RUN test -n "$REVIEW_ENGINE_VERSION" \
-      || { echo "ERROR: REVIEW_ENGINE_VERSION build-arg is required (e.g. v0.9.8)"; exit 1; } \
+RUN VERSION="${REVIEW_ENGINE_VERSION:-}" \
+    && if [ -z "$VERSION" ]; then \
+         echo ">> REVIEW_ENGINE_VERSION 未指定,解析 GitHub latest release tag"; \
+         VERSION="$(curl -fsSL --retry 2 --connect-timeout 15 -o /dev/null -w '%{url_effective}' -L "${REVIEW_ENGINE_BASE_URL%/download}/latest" | sed -n 's#.*/releases/tag/##p')"; \
+         test -n "$VERSION" || { echo "ERROR: 无法解析 latest release tag(网络失败或仓库不可达)"; exit 1; }; \
+         echo ">> 解析到 latest tag: ${VERSION}"; \
+       fi \
     && case "$(uname -m)" in \
          x86_64|amd64)  TRIPLE="x86_64-unknown-linux-gnu" ;; \
          aarch64|arm64) TRIPLE="aarch64-unknown-linux-gnu" ;; \
          *) echo "ERROR: unsupported architecture: $(uname -m)"; exit 1 ;; \
        esac \
-    && echo ">> [1/3] download review-engine-${TRIPLE}.tar.gz (${REVIEW_ENGINE_VERSION})" \
+    && echo ">> [1/3] download review-engine-${TRIPLE}.tar.gz (${VERSION})" \
     && curl -fsSL --retry 3 --connect-timeout 15 \
          -o "review-engine-${TRIPLE}.tar.gz" \
-         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/review-engine-${TRIPLE}.tar.gz" \
-    && echo ">> [2/3] verify sha256 (${REVIEW_ENGINE_VERSION})" \
+         "${REVIEW_ENGINE_BASE_URL}/${VERSION}/review-engine-${TRIPLE}.tar.gz" \
+    && echo ">> [2/3] verify sha256 (${VERSION})" \
     && curl -fsSL --retry 3 --connect-timeout 15 \
          -o "review-engine-${TRIPLE}.sha256" \
-         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/review-engine-${TRIPLE}.sha256" \
+         "${REVIEW_ENGINE_BASE_URL}/${VERSION}/review-engine-${TRIPLE}.sha256" \
     && sha256sum -c "review-engine-${TRIPLE}.sha256" \
     && tar -xzf "review-engine-${TRIPLE}.tar.gz" -C /usr/local/bin \
     && rm -f "review-engine-${TRIPLE}.tar.gz" "review-engine-${TRIPLE}.sha256" \
@@ -77,17 +83,20 @@ RUN test -n "$REVIEW_ENGINE_VERSION" \
 # 占位页(可接受),待含 dist 资产的 release 重建镜像即有前端。二进制下载与
 # sha256 校验保持硬失败;frontend-dist 的 sha256 副件暂未发布,其校验可选:
 # 副件存在则校验,404 则告警跳过(与 install.sh 校验策略一致)。
-RUN test -n "$REVIEW_ENGINE_VERSION" \
-      || { echo "ERROR: REVIEW_ENGINE_VERSION build-arg is required (e.g. v0.9.8)"; exit 1; } \
+RUN VERSION="${REVIEW_ENGINE_VERSION:-}" \
+    && if [ -z "$VERSION" ]; then \
+         VERSION="$(curl -fsSL --retry 2 --connect-timeout 15 -o /dev/null -w '%{url_effective}' -L "${REVIEW_ENGINE_BASE_URL%/download}/latest" | sed -n 's#.*/releases/tag/##p')"; \
+         test -n "$VERSION" || { echo "ERROR: 无法解析 latest release tag(网络失败或仓库不可达)"; exit 1; }; \
+       fi \
     && mkdir -p /app/frontend-dist-image \
-    && echo ">> [3/3] download frontend-dist.tar.gz (${REVIEW_ENGINE_VERSION})" \
+    && echo ">> [3/3] download frontend-dist.tar.gz (${VERSION})" \
     && if curl -fsSL --retry 3 --connect-timeout 15 \
          -o frontend-dist.tar.gz \
-         "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz"; then \
+         "${REVIEW_ENGINE_BASE_URL}/${VERSION}/frontend-dist.tar.gz"; then \
          echo "   frontend-dist.tar.gz 下载成功,校验并解包"; \
          if curl -fsSL --retry 3 --connect-timeout 15 \
               -o frontend-dist.tar.gz.sha256 \
-              "${REVIEW_ENGINE_BASE_URL}/${REVIEW_ENGINE_VERSION}/frontend-dist.tar.gz.sha256"; then \
+              "${REVIEW_ENGINE_BASE_URL}/${VERSION}/frontend-dist.tar.gz.sha256"; then \
            sha256sum -c frontend-dist.tar.gz.sha256 || exit 1; \
          else \
            echo "WARN: frontend-dist.tar.gz.sha256 不存在,跳过前端资产校验"; \
@@ -96,7 +105,7 @@ RUN test -n "$REVIEW_ENGINE_VERSION" \
          && rm -f frontend-dist.tar.gz frontend-dist.tar.gz.sha256 \
          && ls -la /app/frontend-dist-image; \
        else \
-         echo "WARN: frontend-dist.tar.gz 不存在(${REVIEW_ENGINE_VERSION} release 未含该资产),跳过前端部署,镜像仅含二进制"; \
+         echo "WARN: frontend-dist.tar.gz 不存在(${VERSION} release 未含该资产),跳过前端部署,镜像仅含二进制"; \
          echo "      serve 对空 /app/frontend/dist 会 fallback 到 coming soon 占位页(可接受;待含 dist 资产的 release 重建即有前端)"; \
        fi
 

@@ -576,7 +576,7 @@ async fn run_review(
 
     let review_result = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        orchestrator::run_experts(&experts, &mr_info, &diff_raw, &llm_configs, &app_config, None, ""),
+        orchestrator::run_experts(&experts, &mr_info, &diff_raw, &llm_configs, &app_config, None, "", None),
     )
     .await;
 
@@ -759,6 +759,8 @@ mod tests {
             findings,
             markdown: format!("## {} review\n", name),
             raw_llm_response: format!("raw {}", name),
+            parse_error: None,
+            raw_dump_path: None,
         }
     }
 

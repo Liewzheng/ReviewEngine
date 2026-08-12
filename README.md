@@ -6,7 +6,7 @@
 
 **Free for individuals · Enterprise features available**
 
-[中文文档](README.zh-CN.md)
+[中文文档](README.zh-CN.md) · [Product site](https://liewzheng.github.io/ReviewEngine/) · [Docs portal](https://liewzheng.github.io/ReviewEngine/docs.html)
 
 ReviewEngine is released under the [Apache License 2.0](LICENSE). The core CLI, local review, GitLab/GitHub integrations, REST API, and default expert team are free and open source. Enterprise features such as SSO, audit logs, custom expert templates, and dedicated support are offered separately under a commercial license.
 
@@ -49,7 +49,7 @@ You might like ReviewEngine if:
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | 🧑‍⚖️ **Multi-expert Board**              | Configure a team of AI experts with distinct roles, focus areas, principles, and weights.                      |
 | 📊 **Structured scoring & risk level** | Individual expert scores, weighted overall score, and risk level: Low / Low-Medium / Medium / High / Critical. |
-| 💻 **Local-first review**              | Review `--local-path`, `--base`, `--staged`, `--since`, `--until` — no remote MR/PR required.                  |
+| 💻 **Local-first review**              | Review `--local-path`, `--path` (subdirectory), `--base`, `--staged`, `--since`, `--until` — no remote MR/PR required.                  |
 | ⚡ **Single static binary**            | Install with `install.sh` and run anywhere: CI, laptop, or server.                                             |
 
 ---
@@ -109,14 +109,14 @@ You might like ReviewEngine if:
 Install the latest static binary:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh | bash
 ```
 
 The installer requires `curl`, `jq`, and `sha256sum` (Linux) or `shasum` (macOS).
 
 > **Security tip:** You can also download the script first, inspect it, and run it locally:
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh -o install.sh
+> curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh -o install.sh
 > # inspect install.sh, then:
 > bash install.sh
 > ```
@@ -154,9 +154,11 @@ reng upgrade --rollback  # restore the previous binary after a bad upgrade
 `reng upgrade` detects how you installed the binary and shows the right action:
 Homebrew installs run `brew upgrade review-engine`, cargo installs are rebuilt
 with `cargo install review-engine --locked --features cli`, Docker deployments
-upgrade on the host (`git pull && docker compose up -d --build`), and plain
-binary installs are replaced atomically (backup + smoke test + rollback on
-failure).
+upgrade **inside the container** (the web UI **Upgrade** button, or
+`POST /api/v1/system/upgrade` — the container restarts itself with the new
+binary; pulling a newer image also works, the entrypoint syncs it to the
+volumes on next start), and plain binary installs are replaced atomically
+(backup + smoke test + rollback on failure).
 
 For a detailed walkthrough, see [`docs/getting-started.md`](docs/getting-started.md).  
 For full CLI options, environment variables, LLM providers, and config reference, see [`docs/configuration.md`](docs/configuration.md), [`docs/integrations/`](docs/integrations/), and [`docs/rest-api.md`](docs/rest-api.md).
@@ -166,6 +168,7 @@ For full CLI options, environment variables, LLM providers, and config reference
 | Option | Description |
 |---|---|
 | `--local-path <path>` | Path to the repository to review. |
+| `--path <dir>` | Review one subdirectory by its **full current content** (use with `--local-path`; mutually exclusive with `--base` / `--staged` / other diff-based options). |
 | `--base <ref>` | Base ref to compare against (e.g. `main`). |
 | `--staged` | Review staged changes only. |
 | `--since <ref>` / `--until <ref>` | Review a commit range. |
@@ -274,17 +277,14 @@ commands run inside the container can use the same short alias
 
 ### API token in the web UI
 
-When you access the frontend for the first time, it prompts for an API token.
-Enter the same value you configured for `REVIEW_API_TOKEN`:
+On first access the frontend runs a bootstrap flow to set the initial API token. Either way works:
 
-- The token is saved in your browser's localStorage under the key `review_engine_api_token`.
-- It is sent as `Authorization: Bearer <token>` on every `/api/v1/*` request.
-- Use the **API Token** button in the header to change or clear the stored token.
+- **Bootstrap (recommended)** — set `REVIEW_BOOTSTRAP_KEY=<one-time key>` in `.env`; the first-run UI asks for the token you want plus that key, then persists the token (as a SHA-256 digest, never plaintext) to the auth file. The key can be removed from `.env` afterwards.
+- **Direct env** — set `REVIEW_API_TOKEN=<token>` in `.env`; the server uses it directly (env takes precedence).
 
-> **Security tip:** `REVIEW_API_TOKEN` is required when the backend binds to a
-> non-loopback address. Keep it secret, rotate it regularly, and pass it to the
-> container through environment variables or a secrets manager — never commit
-> it to version control.
+On a non-loopback bind (`0.0.0.0`), one of the two is required or the server refuses to start. The token is saved in your browser's localStorage under the key `review_engine_api_token`, sent as `Authorization: Bearer <token>` on every `/api/v1/*` request, and can be changed or cleared via the **API Token** button in the header.
+
+> **Security tip:** keep the token secret, rotate it regularly, and pass it via environment variables or a secrets manager — never commit it to version control. Full terminology and troubleshooting (API token vs bootstrap key, 401 steps, rotation) is in [`docs/faq.md`](docs/faq.md).
 
 ---
 
@@ -333,18 +333,19 @@ Both summaries are injected into each expert reviewer’s prompt so that subsequ
 
 ## Performance
 
-ReviewEngine is designed to be lightweight and CI-friendly. Resource usage is dominated by LLM network latency, not local CPU or memory.
+ReviewEngine is designed to be lightweight and CI-friendly. A review is an **LLM-waiting workload**: local CPU does almost nothing while the model responds — resource usage is dominated by LLM/network latency, not local CPU or memory.
 
-Benchmarked on a ~30k LOC repository (3 runs, `reng audit`, local CLI, DeepSeek model):
+Benchmarked on **v0.9.14** across four platforms (macOS arm64 / Linux x86_64 / Linux aarch64 / Windows x86_64), on a fixed standard review object (perf-bench-repo: 20 files / 2,000 lines / 10 files changed, +150/−40):
 
-| Metric | Average |
+| Metric | v0.9.14 (four platforms) |
 |---|---|
-| Wall time | ~5 m 46 s |
-| Peak memory | ~9 MB |
-| Max RSS | ~19 MB |
-| CPU time | ~0.07 s |
+| Idle memory (RSS) | 8.6–20.5 MiB |
+| Peak memory during review (RSS) | 42–56 MiB |
+| Local CPU time per review | 0.11–0.63 s (average <1%) |
+| LLM/network wait share | >99% of wall time |
+| Wall time (direct connect) | ~1–2 min (≈50 s on fast networks) |
 
-For a typical branch/MR review, the `review` command usually completes in **30–50 s**, depending on the LLM provider and network conditions.
+Full dual-version data — a plain-language summary plus a technical appendix with per-metric measurement methodology — is in [`docs/features.md`](docs/features.md). Older pre-v0.9.14 baselines (different versions and review objects) are not directly comparable.
 
 ---
 

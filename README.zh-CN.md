@@ -6,7 +6,7 @@
 
 **个人免费 · 企业版功能可选**
 
-[English Documentation](README.md)
+[English Documentation](README.md) · [Product site](https://liewzheng.github.io/ReviewEngine/) · [Docs portal](https://liewzheng.github.io/ReviewEngine/docs.html)
 
 ReviewEngine 基于 [Apache License 2.0](LICENSE) 发布。核心 CLI、本地评审、GitLab/GitHub 集成、REST API 和默认专家团队均免费开源。SSO、审计日志、自定义专家模板、专属支持等企业功能则通过商业许可单独提供。
 
@@ -49,7 +49,7 @@ ReviewEngine 把一支虚拟工程师团队带到每一次评审中：一个可�
 | -------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | 🧑‍⚖️ **多专家评审委员会**               | 配置一支 AI 专家团队，各自拥有不同的角色、关注点、原则和权重。                                               |
 | 📊 **结构化评分与风险等级**             | 专家独立打分、加权总分，以及风险等级：低 / 低-中 / 中 / 高 / 严重。                                            |
-| 💻 **本地优先评审**                     | 支持 `--local-path`、`--base`、`--staged`、`--since`、`--until` —— 不需要远程 MR/PR。                          |
+| 💻 **本地优先评审**                     | 支持 `--local-path`、`--path`（子目录）、`--base`、`--staged`、`--since`、`--until` —— 不需要远程 MR/PR。          |
 | ⚡ **单一静态二进制**                   | 通过 `install.sh` 安装，可在 CI、笔记本或服务器上任意运行。                                                     |
 
 ---
@@ -109,14 +109,14 @@ ReviewEngine 把一支虚拟工程师团队带到每一次评审中：一个可�
 安装最新静态二进制：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh | bash
 ```
 
 安装脚本依赖 `curl`、`jq` 和 `sha256sum`（Linux）或 `shasum`（macOS）。
 
 > **安全提示：** 你也可以先下载脚本、检查内容后再本地运行：
 > ```bash
-> curl -fsSL https://raw.githubusercontent.com/Liewzheng/Review-Engine/master/install.sh -o install.sh
+> curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/install.sh -o install.sh
 > # 检查 install.sh 内容，然后：
 > bash install.sh
 > ```
@@ -143,6 +143,7 @@ review-engine review --local-path . --base main
 | 选项 | 说明 |
 |---|---|
 | `--local-path <path>` | 要评审的仓库路径。 |
+| `--path <dir>` | 评审仓库内某个子目录的**全量当前内容**（与 `--local-path` 配合；与 `--base` / `--staged` 等基于 diff 的选项互斥）。 |
 | `--base <ref>` | 对比的基准 ref（例如 `main`）。 |
 | `--staged` | 只评审暂存区改动。 |
 | `--since <ref>` / `--until <ref>` | 评审一个提交范围。 |
@@ -242,18 +243,19 @@ cp -R .kimi-code/skills/review-engine ~/.kimi-code/skills/
 
 ## 性能
 
-ReviewEngine 设计为轻量且适合 CI 运行。资源消耗主要由 LLM 网络延迟决定，而不是本地 CPU 或内存。
+ReviewEngine 设计为轻量且适合 CI 运行。评审是 **LLM 等待型负载**：模型响应期间本地 CPU 几乎不忙——资源消耗主要由 LLM/网络延迟决定，而不是本地 CPU 或内存。
 
-针对约 3 万行代码仓库的基准测试（3 次运行，`repo-review`，本地 CLI，DeepSeek 模型）：
+**v0.9.14** 四平台实测（macOS arm64 / Linux x86_64 / Linux aarch64 / Windows x86_64），统一标准评审对象 perf-bench-repo（20 文件 / 2000 行 / 10 文件改动 +150/−40）：
 
-| 指标 | 平均值 |
+| 指标 | v0.9.14（四平台） |
 |---|---|
-| 总耗时 | 约 5 分 46 秒 |
-| 峰值内存 | 约 9 MB |
-| Max RSS | 约 19 MB |
-| CPU 时间 | 约 0.07 秒 |
+| 空载常驻内存（RSS） | 8.6–20.5 MiB |
+| 评审峰值内存（RSS） | 42–56 MiB |
+| 单次评审本地 CPU 时间 | 0.11–0.63 s（平均 <1%） |
+| LLM/网络等待占比 | 占墙钟 >99% |
+| 评审墙钟（直连） | 约 1–2 分钟（快网络约 50 s） |
 
-对于典型的 branch/MR 评审，`review` 命令通常在 **30–50 秒** 内完成，具体取决于 LLM 提供商和网络状况。
+完整双版本数据（通俗总结 + 含逐项测量方法的技术附录）见 [`docs/features.md`](docs/features.md)。早于 v0.9.14 的旧基线（版本与评审对象均不同）不可直接横向对比。
 
 ---
 

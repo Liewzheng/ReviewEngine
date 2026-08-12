@@ -458,6 +458,12 @@ html[lang="ru"] .vlabel {
   padding-top: clamp(3.5rem, 7vw, 5.5rem);
   padding-bottom: clamp(3rem, 6vw, 4.5rem);
 }
+/* hero two-column wrapper: single column by default (terminal below text),
+   split into text-left + terminal-right from 1200px up */
+.hero-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
 .hero-top {
   display: grid;
   grid-template-columns: var(--label-col) 1fr;
@@ -1332,6 +1338,22 @@ html[lang="ru"] .vlabel {
 .js [data-reveal].is-visible { opacity: 1; transform: none; }
 
 /* ---------- 19. Responsive ---------- */
+/* wide screens: hero becomes two columns — text left, terminal right.
+   The container widens slightly from 1200px and further from 1600px so a
+   wide viewport never leaves a lopsided empty right band. */
+@media (min-width: 1200px) {
+  .hero .container { max-width: min(1320px, calc(100vw - 4rem)); }
+  .hero-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 600px);
+    gap: clamp(2rem, 4vw, 3.5rem);
+    align-items: center;
+  }
+  .hero-grid .terminal-wrap { margin-top: 0; }
+}
+@media (min-width: 1600px) {
+  .hero .container { max-width: min(1560px, calc(100vw - 6rem)); }
+}
+
 @media (max-width: 1024px) {
   .steps { grid-template-columns: repeat(2, 1fr); }
   .cards-4 { grid-template-columns: repeat(2, 1fr); }

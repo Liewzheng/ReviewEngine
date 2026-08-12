@@ -308,7 +308,7 @@ export default {
       title: 'GitLab 統合',
       url: 'GitLab URL',
       urlPlaceholder: 'https://gitlab.example.com（空欄の場合は現在の値を保持）',
-      apiTokenPlaceholder: 'glpat-...（空欄の場合は現在の値を保持）',
+      apiTokenPlaceholder: 'glpat-...（*** は現在の値を保持、空欄は削除）',
       revealApiTokenAria: 'API トークンを表示',
       webhookSecret: 'Webhook シークレット',
       revealWebhookAria: 'Webhook シークレットを表示',

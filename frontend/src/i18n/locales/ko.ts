@@ -307,7 +307,7 @@ export default {
       title: 'GitLab 통합',
       url: 'GitLab URL',
       urlPlaceholder: 'https://gitlab.example.com（비워두면 현재 값 유지）',
-      apiTokenPlaceholder: 'glpat-...（비워두면 현재 값 유지）',
+      apiTokenPlaceholder: 'glpat-...（*** 현재 값 유지, 비우면 삭제）',
       revealApiTokenAria: 'API 토큰 표시',
       webhookSecret: 'Webhook 시크릿',
       revealWebhookAria: 'Webhook 시크릿 표시',

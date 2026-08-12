@@ -30,7 +30,7 @@ fn is_blank_or_masked(key: &str) -> bool {
 }
 
 /// Replace live API keys with the mask sentinel before serializing to the UI.
-/// `GET /config` must never return a real LLM key.
+/// `GET /config` must never return a real LLM key or the GitLab API token.
 fn mask_secrets(ui: &mut UiConfig) {
     if !ui.llm.openai_api_key.is_empty() {
         ui.llm.openai_api_key = API_KEY_MASK.to_string();
@@ -39,6 +39,9 @@ fn mask_secrets(ui: &mut UiConfig) {
         if !provider.api_key.is_empty() {
             provider.api_key = API_KEY_MASK.to_string();
         }
+    }
+    if !ui.gitlab.api_token.is_empty() {
+        ui.gitlab.api_token = API_KEY_MASK.to_string();
     }
 }
 
@@ -53,8 +56,22 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut ui = state.ui_config.read().unwrap().clone();
-    // Never leak a live LLM API key to the UI: a configured key comes back as
-    // the `***` mask, which the frontend treats as "leave unchanged" on save.
+    // A GitLab token configured outside the UI (CLI `--gitlab-token` /
+    // `GITLAB_TOKEN` at startup) lives only in the runtime config and is never
+    // mapped into `ui_config`. Surface it as the mask so the frontend never
+    // shows "not set" for a configured token — and, since an empty `apiToken`
+    // on PUT clears the token, an unrelated save can never silently wipe a
+    // CLI/env-configured token.
+    let runtime_has_token = crate::server::gitlab::gitlab_runtime()
+        .read()
+        .map(|rt| !rt.token.is_empty())
+        .unwrap_or(false);
+    if runtime_has_token && ui.gitlab.api_token.is_empty() {
+        ui.gitlab.api_token = API_KEY_MASK.to_string();
+    }
+    // Never leak a live LLM API key or the GitLab API token to the UI: a
+    // configured key comes back as the `***` mask, which the frontend treats
+    // as "leave unchanged" on save.
     mask_secrets(&mut ui);
     Json(ui).into_response()
 }
@@ -385,6 +402,48 @@ fn merge_json(base: &serde_json::Value, patch: &serde_json::Value) -> serde_json
     }
 }
 
+/// Apply the submitted GitLab UI section to the runtime config, resolving the
+/// API token with masking semantics (contract-4, aligned with LLM keys):
+/// - a real value replaces the stored token;
+/// - the mask sentinel `***` keeps the stored token;
+/// - an empty string clears it.
+///
+/// Returns the resolved token (empty = unset) so the caller can persist the
+/// mask/empty projection in `ui_config` and `GET /config` never leaks a live
+/// token (see `mask_secrets`). Webhook secrets keep their existing
+/// "non-empty overwrites, empty keeps" behavior.
+fn apply_gitlab_runtime_config(
+    gl_rt: &mut crate::server::gitlab::GitLabRuntimeConfig,
+    ui_gl: &UiGitLabConfig,
+) -> String {
+    let submitted = ui_gl.api_token.clone();
+    let new_token = if submitted.is_empty() {
+        // Empty string explicitly clears the token.
+        String::new()
+    } else if submitted == API_KEY_MASK {
+        // Mask sentinel means "keep the stored token".
+        gl_rt.token.clone()
+    } else {
+        // A real token replaces the stored one.
+        submitted
+    };
+    gl_rt.token = new_token.clone();
+
+    if !ui_gl.webhook_secret.is_empty() {
+        gl_rt.webhook_secret = ui_gl.webhook_secret.clone();
+    }
+    if !ui_gl.webhook_signing_secret.is_empty() {
+        let s = ui_gl.webhook_signing_secret.clone();
+        let signing_key = s
+            .strip_prefix("whsec_")
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok());
+        gl_rt.signing_secret = Some(s);
+        gl_rt.signing_key = signing_key;
+    }
+
+    new_token
+}
+
 async fn put_config(State(state): State<Arc<AppState>>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
     // Contract: `PUT /config` is a PARTIAL update. Only fields present in the
     // request JSON overwrite the stored config; omitted fields keep their
@@ -539,25 +598,19 @@ async fn put_config(State(state): State<Arc<AppState>>, Json(payload): Json<serd
     *ui = body;
 
     // Sync GitLab config to the global runtime so webhook handler picks up changes
-    // without requiring a restart.
+    // without requiring a restart. The API token follows LLM-key masking
+    // semantics (`***` keeps, empty clears, a real value replaces); the real
+    // token lives in the runtime only, and `ui_config` persists the mask/empty
+    // projection so `GET /config` never echoes it (see `mask_secrets`).
     {
         let rt = crate::server::gitlab::gitlab_runtime();
         let mut gl_rt = rt.write().unwrap();
-        let ui_gl = &ui.gitlab;
-        if !ui_gl.api_token.is_empty() {
-            gl_rt.token = ui_gl.api_token.clone();
-        }
-        if !ui_gl.webhook_secret.is_empty() {
-            gl_rt.webhook_secret = ui_gl.webhook_secret.clone();
-        }
-        if !ui_gl.webhook_signing_secret.is_empty() {
-            let s = ui_gl.webhook_signing_secret.clone();
-            let signing_key = s
-                .strip_prefix("whsec_")
-                .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok());
-            gl_rt.signing_secret = Some(s);
-            gl_rt.signing_key = signing_key;
-        }
+        let resolved_token = apply_gitlab_runtime_config(&mut gl_rt, &ui.gitlab);
+        ui.gitlab.api_token = if resolved_token.is_empty() {
+            String::new()
+        } else {
+            API_KEY_MASK.to_string()
+        };
     }
 
     Json(serde_json::json!({"status": "saved"})).into_response()
@@ -757,6 +810,7 @@ mod tests {
     /// server-side — never replace it with the mask.
     #[tokio::test]
     async fn put_config_masked_round_trip_preserves_key() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         let mut ui = state.ui_config.read().unwrap().clone();
         mask_secrets(&mut ui);
@@ -776,6 +830,7 @@ mod tests {
     /// "Leave blank = unchanged": a PUT with an empty key keeps the stored key.
     #[tokio::test]
     async fn put_config_blank_key_keeps_existing() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         let mut ui = state.ui_config.read().unwrap().clone();
         ui.llm.openai_api_key = String::new();
@@ -796,6 +851,7 @@ mod tests {
     /// A real new key in a PUT replaces the stored one.
     #[tokio::test]
     async fn put_config_new_key_replaces_stored() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-old");
         let mut ui = state.ui_config.read().unwrap().clone();
         ui.llm.openai_api_key = "sk-new".to_string();
@@ -818,6 +874,7 @@ mod tests {
     /// maxConcurrentReviews and dropped `llm.providers`.
     #[tokio::test]
     async fn put_config_sparse_patch_preserves_omitted_fields() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         {
             let ui = state.ui_config.read().unwrap();
@@ -857,6 +914,7 @@ mod tests {
     /// provider list survives untouched.
     #[tokio::test]
     async fn put_config_sparse_llm_patch_keeps_key_and_providers() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         let resp = put_config(
             State(state.clone()),
@@ -877,6 +935,7 @@ mod tests {
     /// keeps every field, never a wipe.
     #[tokio::test]
     async fn put_config_empty_object_is_noop() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         let before = state.ui_config.read().unwrap().clone();
         let resp = put_config(State(state.clone()), Json(serde_json::json!({})))
@@ -895,6 +954,7 @@ mod tests {
     /// field (e.g. `"minScore": "high"`) fails the merged deserialization.
     #[tokio::test]
     async fn put_config_malformed_update_rejected() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
         let state = state_with_openai("sk-primary");
         for payload in [
             serde_json::json!(null),
@@ -920,5 +980,193 @@ mod tests {
         assert!(is_blank_or_masked(""));
         assert!(is_blank_or_masked(API_KEY_MASK));
         assert!(!is_blank_or_masked("sk-real"));
+    }
+
+    // ── GitLab apiToken masking (contract-4) ──────────────────────────────
+
+    /// Snapshot/restore guard for the global GitLab runtime, so a round-trip
+    /// test can seed `gl_rt.token` without leaking state into the parallel
+    /// webhook-handler tests, which read the same global via
+    /// `effective_config`.
+    struct GitLabRuntimeGuard(crate::server::gitlab::GitLabRuntimeConfig);
+
+    impl GitLabRuntimeGuard {
+        fn new() -> Self {
+            Self(crate::server::gitlab::gitlab_runtime().read().unwrap().clone())
+        }
+    }
+
+    impl Drop for GitLabRuntimeGuard {
+        fn drop(&mut self) {
+            let mut rt = crate::server::gitlab::gitlab_runtime().write().unwrap();
+            *rt = self.0.clone();
+        }
+    }
+
+    /// Every `put_config` call writes the global GitLab runtime (an empty
+    /// submitted `apiToken` clears it), so any test that drives `put_config`
+    /// races with the others on `gl_rt.token` — including `gitlab_api_token_mask_round_trip`,
+    /// whose keep/clear/replace assertions read that same global.
+    ///
+    /// Invariant: **every test that calls `put_config` MUST take this lock**
+    /// (async-aware, so it can be held across the awaited handlers). The
+    /// `get_config`-only tests never write the runtime and do not take it.
+    static GITLAB_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    fn gitlab_runtime_token() -> String {
+        crate::server::gitlab::gitlab_runtime().read().unwrap().token.clone()
+    }
+
+    async fn config_response_body(resp: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// Security regression: `GET /config` must never return the GitLab API
+    /// token in plaintext — a configured token comes back as the mask.
+    #[tokio::test]
+    async fn get_config_never_leaks_gitlab_api_token() {
+        let state = state_with_openai("sk-super-secret");
+        state.ui_config.write().unwrap().gitlab.api_token = "glpat-super-secret".to_string();
+
+        let body = config_response_body(get_config(State(state)).await.into_response()).await;
+        assert_eq!(body["gitlab"]["apiToken"], API_KEY_MASK);
+        assert_ne!(body["gitlab"]["apiToken"], "glpat-super-secret");
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(
+            !serialized.contains("glpat-super-secret"),
+            "secret leaked in {serialized}"
+        );
+    }
+
+    /// A token configured outside the UI (runtime only, e.g. CLI/env at
+    /// startup) is surfaced as the mask by GET, so the frontend never shows
+    /// "not set" for a configured token and an unrelated save cannot clear it.
+    #[tokio::test]
+    async fn get_config_surfaces_runtime_only_gitlab_token_as_mask() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+        let _guard = GitLabRuntimeGuard::new();
+        let state = state_with_openai("sk-primary");
+        // ui_config carries no GitLab token; only the runtime does.
+        crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-cli".to_string();
+
+        let body = config_response_body(get_config(State(state)).await.into_response()).await;
+        assert_eq!(body["gitlab"]["apiToken"], API_KEY_MASK);
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(!serialized.contains("glpat-cli"), "secret leaked in {serialized}");
+    }
+
+    /// Pure semantics: the mask sentinel `***` keeps the stored token.
+    #[test]
+    fn gitlab_runtime_token_resolution_keeps_on_mask() {
+        let mut rt = crate::server::gitlab::GitLabRuntimeConfig {
+            webhook_secret: String::new(),
+            signing_secret: None,
+            signing_key: None,
+            token: "glpat-stored".to_string(),
+        };
+        let mut ui = UiGitLabConfig::default();
+        ui.api_token = API_KEY_MASK.to_string();
+
+        let resolved = apply_gitlab_runtime_config(&mut rt, &ui);
+        assert_eq!(resolved, "glpat-stored");
+        assert_eq!(rt.token, "glpat-stored");
+    }
+
+    /// Pure semantics: an empty string clears the stored token.
+    #[test]
+    fn gitlab_runtime_token_resolution_clears_on_empty() {
+        let mut rt = crate::server::gitlab::GitLabRuntimeConfig {
+            webhook_secret: String::new(),
+            signing_secret: None,
+            signing_key: None,
+            token: "glpat-stored".to_string(),
+        };
+        let ui = UiGitLabConfig::default(); // api_token = ""
+
+        let resolved = apply_gitlab_runtime_config(&mut rt, &ui);
+        assert!(resolved.is_empty());
+        assert!(rt.token.is_empty());
+    }
+
+    /// Pure semantics: a real value replaces the stored token.
+    #[test]
+    fn gitlab_runtime_token_resolution_replaces_on_real_value() {
+        let mut rt = crate::server::gitlab::GitLabRuntimeConfig {
+            webhook_secret: String::new(),
+            signing_secret: None,
+            signing_key: None,
+            token: "glpat-old".to_string(),
+        };
+        let mut ui = UiGitLabConfig::default();
+        ui.api_token = "glpat-new".to_string();
+
+        let resolved = apply_gitlab_runtime_config(&mut rt, &ui);
+        assert_eq!(resolved, "glpat-new");
+        assert_eq!(rt.token, "glpat-new");
+    }
+
+    /// End-to-end round trip through `PUT /config` / `GET /config`: GET masks
+    /// the configured token, a masked (`***`) PUT keeps it, an empty PUT
+    /// clears it, a real PUT replaces it — and the plaintext never leaks.
+    #[tokio::test]
+    async fn gitlab_api_token_mask_round_trip() {
+        let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+        let _guard = GitLabRuntimeGuard::new();
+        let state = state_with_openai("sk-primary");
+
+        // Seed a configured GitLab token, as the runtime would hold it.
+        crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-stored".to_string();
+        state.ui_config.write().unwrap().gitlab.api_token = API_KEY_MASK.to_string();
+
+        // 1. GET returns the mask, never the plaintext.
+        let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+        assert_eq!(body["gitlab"]["apiToken"], API_KEY_MASK);
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(!serialized.contains("glpat-stored"), "secret leaked in {serialized}");
+
+        // 2. PUT with `***` keeps the stored token.
+        let mut ui = state.ui_config.read().unwrap().clone();
+        ui.gitlab.api_token = API_KEY_MASK.to_string();
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::to_value(&ui).expect("UiConfig must serialize")),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(gitlab_runtime_token(), "glpat-stored");
+        assert_eq!(state.ui_config.read().unwrap().gitlab.api_token, API_KEY_MASK);
+
+        // 3. PUT with an empty string clears the token.
+        let mut ui = state.ui_config.read().unwrap().clone();
+        ui.gitlab.api_token = String::new();
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::to_value(&ui).expect("UiConfig must serialize")),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(gitlab_runtime_token().is_empty());
+        assert!(state.ui_config.read().unwrap().gitlab.api_token.is_empty());
+
+        // 4. PUT with a real token replaces it and is never echoed back.
+        let mut ui = state.ui_config.read().unwrap().clone();
+        ui.gitlab.api_token = "glpat-new".to_string();
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::to_value(&ui).expect("UiConfig must serialize")),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(gitlab_runtime_token(), "glpat-new");
+        assert_eq!(state.ui_config.read().unwrap().gitlab.api_token, API_KEY_MASK);
+
+        let body = config_response_body(get_config(State(state)).await.into_response()).await;
+        assert_eq!(body["gitlab"]["apiToken"], API_KEY_MASK);
+        let serialized = serde_json::to_string(&body).unwrap();
+        assert!(!serialized.contains("glpat-new"), "secret leaked in {serialized}");
     }
 }

@@ -317,7 +317,7 @@ export default {
       title: 'GitLab Integration',
       url: 'GitLab URL',
       urlPlaceholder: 'https://gitlab.example.com (leave empty to keep)',
-      apiTokenPlaceholder: 'glpat-... (leave empty to keep)',
+      apiTokenPlaceholder: 'glpat-... (*** keeps current; empty clears)',
       revealApiTokenAria: 'Reveal API Token',
       webhookSecret: 'Webhook Secret',
       revealWebhookAria: 'Reveal Webhook Secret',

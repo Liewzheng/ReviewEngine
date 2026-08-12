@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.14] - 2026-08-12
+
+### Fixed
+- **Token rotation deadlock fixed (rescue path via bootstrap key / env override)**: when the current API token is invalid (rotated server-side, or mistyped), the auth layer previously offered no way back in — the web UI only accepted the stored token and the admin was locked out of the deployment. The auth flow now accepts the one-time `REVIEW_BOOTSTRAP_KEY` (or an env-injected token) as an override path even when the current token is invalid, so an invalidated token can be rotated without a filesystem hack. (`src/server/auth.rs`)
+- **Docs: consolidated API token setup guide + deployment FAQ**: the quick-start docs now funnel API token setup through the login-port + bootstrap/env paths (removing duplicated/divergent token instructions), and a new `docs/faq.md` answers real-world pitfalls — API token auth vs bootstrap key, bind-mount `Permission denied` on NAS, token rotation after a bad token, and the container user UID question (999 vs pinned 9001). (`docs/*.md`, `docs/faq.md`, `deploy/gitlab-ee.md`)
+
 ## [0.9.13] - 2026-08-12
 
 ### Fixed

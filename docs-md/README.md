@@ -7,7 +7,7 @@ This directory contains the user-facing documentation for review-engine.
 | Document | What you'll learn |
 |---|---|
 | [Getting Started](getting-started.md) | Install review-engine, configure an LLM provider, and run your first local or remote review. |
-| [FAQ / Troubleshooting](faq.md) | API token (API Key) setup, 401 errors, forgotten-token recovery, and container bind-volume pitfalls. |
+| [FAQ / Troubleshooting](faq.md) | API token setup, 401 errors, forgotten-token recovery, and container bind-volume pitfalls. |
 | [Configuration](configuration.md) | How config files are merged, command enablement, expert teams, and validation. |
 
 ## Integrations

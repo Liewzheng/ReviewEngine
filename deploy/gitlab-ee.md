@@ -48,15 +48,24 @@ echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
 > 也可以直接在 .env 设 `REVIEW_API_TOKEN=xxxx`(env 注入,兼容旧版,优先于 UI 设置)。
 > 两种都不设 → 服务启动失败并提示(见容器日志),补上即可。
 
-### 4. 启动并验证
+### 4. 预建卷目录并启动
 
 ```bash
+# 预建 bind mount 源目录(Linux/NAS 必须——源目录不存在时 docker compose up 会报
+# "Bind mount failed: '.../xxx' does not exist";Docker Desktop 会自动建,Linux 不会)
+mkdir -p config reports bin frontend-dist auth tls
+
+# 修正 bind 卷属主(Linux/NAS 必须——卷目录属主继承宿主用户,容器内 review-engine
+# 用户写卷会 Permission denied;Docker Desktop 无此问题):
+docker run --rm --entrypoint id ghcr.io/liewzheng/review-engine:latest review-engine  # 查真实 UID,以实际输出为准,勿假设 999
+sudo chown -R <UID>:<UID> bin frontend-dist auth config reports tls
+
 docker compose up -d
 docker compose ps                  # 等待 STATUS 变 (healthy)
 curl http://localhost:18080/health # 期望 {"status":"ok"}
 ```
 
-所有卷目录(`config/ reports/ bin/ frontend-dist/ auth/`)自动相对当前目录创建,配置与代码分离。
+所有卷目录(`config/ reports/ bin/ frontend-dist/ auth/`)为相对当前目录的 bind mount(配置与代码分离);Linux/NAS 上源目录不会自动创建,务必先执行上面的 `mkdir -p` 预建。
 
 ### 5. 首次 UI 引导
 

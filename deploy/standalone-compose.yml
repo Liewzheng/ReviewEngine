@@ -10,15 +10,30 @@
 #      不设 REVIEW_API_TOKEN 时必须给 REVIEW_BOOTSTRAP_KEY,否则服务拒绝启动:
 #        echo "REVIEW_BOOTSTRAP_KEY=$(openssl rand -hex 16)" >> .env
 #      (或直接在 .env 里设 REVIEW_API_TOKEN=xxxx,env 注入方式兼容旧版)
-#   4) docker compose up -d
-#   5) 打开 http://<宿主IP>:18080 → 首次进入 UI,在 Configuration 页填写
+#   4) 预建 bind mount 源目录(Linux/NAS 必须——源目录不存在时 docker compose up
+#      会报 "Bind mount failed: '.../xxx' does not exist" 并中止;Docker Desktop
+#      会自动创建目录,Linux/NAS 不会):
+#        mkdir -p config reports bin frontend-dist auth tls
+#      (config/reports/bin/frontend-dist/auth 必建;tls 可选,仅启用 HTTPS 时使用)
+#   5) 修正 bind 卷属主(Linux/NAS 必须——卷目录属主继承宿主用户,容器内
+#      review-engine 用户写卷会 Permission denied):
+#         docker run --rm --entrypoint id ghcr.io/liewzheng/review-engine:latest review-engine
+#         # 输出形如 uid=9001(review-engine) gid=9001(review-engine);以实际输出为准,
+#         # 勿假设固定值(useradd -r 为构建时分配,UID 可能漂移;用 docker exec 查需
+#         # 容器已起来,Permission denied 循环时不可靠,故用 docker run 直接查镜像)
+#         sudo chown -R <UID>:<UID> bin frontend-dist auth config reports tls
+#      (Docker Desktop 无此问题——自动处理;Linux/NAS 必须手动 chown,否则
+#       entrypoint 首次同步 cp 会 Permission denied 并 restart 循环)
+#   6) docker compose up -d
+#   7) 打开 http://<宿主IP>:18080 → 首次进入 UI,在 Configuration 页填写
 #      API token / GitLab / LLM;token 持久化到 ./auth/auth.toml(存 SHA-256 摘要,
 #      非明文),设置完成后可把 REVIEW_BOOTSTRAP_KEY 从 .env 删掉。
 #
-# 所有卷目录均相对当前目录自动创建(compose 相对路径),配置与代码/镜像分离。
-# Linux NAS 上 bind 卷属主继承宿主:若容器内 review-engine 写卷失败,先
-#   mkdir -p config reports bin frontend-dist auth && chown -R <容器UID> *
-#   (UID 以 `docker exec <容器名> id review-engine` 为准,如 999)。
+# 所有卷目录均为相对当前目录的 bind mount(配置与代码/镜像分离);注意 Linux/NAS 上
+# bind mount 源目录不会自动创建,请先按步骤 4 的 mkdir -p 预建。
+# Linux NAS 上 bind 卷属主继承宿主:容器内 review-engine 写卷 Permission denied
+# 时,按步骤 5 查 UID 并 chown(UID 以 `docker run --rm --entrypoint id <镜像>
+# review-engine` 实际输出为准,勿假设 999)。
 # 镜像为多架构(amd64/arm64),由 GitHub Actions 发版时推送(ghcr.io/liewzheng/
 # review-engine:v<tag> 与 :latest);容器内含前端 dist、首次同步与容器内自更新
 # (UI 点 Upgrade → 替换 ./bin 与 ./frontend-dist 卷 → 自动重启)。
@@ -76,7 +91,7 @@ services:
       REVIEW_TLS_KEY: ${REVIEW_TLS_KEY:-}
 
     volumes:
-      # 可写部署卷(配置与代码分离;相对当前目录,自动创建)
+      # 可写部署卷(配置与代码分离;相对当前目录的 bind mount——源目录须先按步骤 4 预建)
       - ./config:/app/config
       - ./reports:/app/reports
       - ./bin:/app/bin

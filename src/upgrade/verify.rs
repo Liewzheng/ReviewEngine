@@ -3,7 +3,7 @@
 //! Two failure modes are defended here:
 //!
 //! * **Corruption / MITM** — every downloaded asset is verified against its
-//!   `<asset>.sha256` sidecar before it is trusted or extracted.
+//!   `<prefix>-<triple>.sha256` sidecar before it is trusted or extracted.
 //! * **Zip-slip** — an attacker-controlled archive can name an entry `../../x`
 //!   or `/etc/x` to write outside the extraction root. We validate **every**
 //!   entry (including symlink/hardlink targets) before writing **any** file,

@@ -1399,8 +1399,15 @@ async fn resolve_update_check() -> Result<UpdateCheck> {
             download_url: t.asset_url,
             size: t.asset_size,
         };
+        // Mirrors `find_checksum_asset`: the published sidecar is
+        // `<base>.sha256` with no archive extension.
+        let checksum_base = t
+            .asset_name
+            .strip_suffix(".tar.gz")
+            .or_else(|| t.asset_name.strip_suffix(".zip"))
+            .unwrap_or(&t.asset_name);
         let checksum = ReleaseAsset {
-            name: format!("{}.sha256", t.asset_name),
+            name: format!("{checksum_base}.sha256"),
             download_url: t.checksum_url,
             size: t.checksum_size,
         };

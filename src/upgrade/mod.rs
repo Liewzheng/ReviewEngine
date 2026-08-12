@@ -38,7 +38,7 @@ pub struct UpdateCheck {
     pub platform: Option<AssetSpec>,
     /// The asset for the current platform, when present in the release.
     pub asset: Option<ReleaseAsset>,
-    /// The `<asset>.sha256` sidecar, when present.
+    /// The `<prefix>-<triple>.sha256` sidecar, when present.
     pub checksum_asset: Option<ReleaseAsset>,
     pub install_method: InstallMethod,
 }

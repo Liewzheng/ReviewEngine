@@ -18,6 +18,31 @@ const CODE_QUALITY_KEYS: &[&str] = &["score", "summary", "findings"];
 /// Keys that mark an ArchitectureLead response as schema-conforming.
 const ARCHITECTURE_LEAD_KEYS: &[&str] = &["score", "summary", "risk_areas", "guidance", "focus_modules"];
 
+/// Temperature for repo-review scoring calls (architecture / code_quality).
+/// Deterministic-first: scoring is not generation, so it runs cold at 0.
+/// Hard cap [`SCORING_TEMPERATURE_MAX`] — any future raise beyond it
+/// reintroduces the score drift the rubric anchoring removed.
+const SCORING_TEMPERATURE: f32 = 0.0;
+
+/// Upper bound ever allowed for a scoring-call temperature.
+const SCORING_TEMPERATURE_MAX: f32 = 0.2;
+
+/// Per-call temperature override for scoring calls: clone the fallback
+/// chain with the scoring temperature applied. The caller's configs — and
+/// the global default (0.3) — are untouched; only these scoring calls run
+/// cold. Applied once in [`call_scoring`], so both experts and every
+/// concurrent sample inherit it.
+fn scoring_configs(configs: &[crate::models::LLMConfig]) -> Vec<crate::models::LLMConfig> {
+    configs
+        .iter()
+        .cloned()
+        .map(|mut c| {
+            c.temperature = SCORING_TEMPERATURE.clamp(0.0, SCORING_TEMPERATURE_MAX);
+            c
+        })
+        .collect()
+}
+
 /// Parse an LLM expert's YAML response into a [`serde_yaml_ng::Value`].
 ///
 /// Mirrors `crate::output::parser`'s extraction strategy: strip code fences
@@ -94,6 +119,185 @@ fn truncate_excerpt(raw: &str) -> String {
     excerpt.replace('\n', "\\n")
 }
 
+// ─── Score sampling ──────────────────────────
+
+/// Median of a sample set: the middle score after sorting, or the
+/// round-half-up mean of the two middle scores for an even count. Returns
+/// `None` for an empty set (all samples failed).
+fn median_score(samples: &[u8]) -> Option<u8> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let mid = sorted.len() / 2;
+    if sorted.len() % 2 == 1 {
+        Some(sorted[mid])
+    } else {
+        Some(((u16::from(sorted[mid - 1]) + u16::from(sorted[mid])).div_ceil(2)) as u8)
+    }
+}
+
+/// Effective sample count from config. `0` is meaningless and treated as
+/// `1` — the single-call status quo.
+fn scoring_sample_count(config: Option<&crate::models::AppConfig>) -> usize {
+    config.map(|c| c.scoring.score_samples).unwrap_or(1).max(1)
+}
+
+/// Outcome of the (possibly sampled) scoring call shared by both LLM
+/// experts.
+#[derive(Debug)]
+struct ScoringCall {
+    /// Response content to parse summary/findings from. With sampling, this
+    /// is the lower-middle sample's response (by score ordering); without,
+    /// the single call's response. Either way it is one real model
+    /// response, so summary/findings stay coherent with a genuine output.
+    content: String,
+    /// `Some(median)` when sampling was active — the score to report.
+    /// `None` means "parse the score from `content`" (single-call path).
+    median: Option<u8>,
+    /// Raw successful sample scores in completion order; `Some` only when
+    /// sampling was active.
+    samples: Option<Vec<u8>>,
+}
+
+/// Run an expert's scoring call, optionally sampling `n` times concurrently
+/// and reporting the median (`scoring.score_samples`).
+///
+/// Sampling semantics:
+/// - all N calls run CONCURRENTLY (never serially);
+/// - a sample counts only when the call succeeds AND parses to a genuine
+///   `score` — empty / unparseable / schema-drifted responses are dropped
+///   (each drop is warn-logged);
+/// - if every sample fails this returns `Err`, which the orchestration
+///   layer turns into the explicit flagged fallback score — exactly the
+///   same landing path as a failed single call;
+/// - with an even number of surviving samples the reported median is the
+///   round-half-up mean of the two middle scores, while the content comes
+///   from the lower-middle sample (deterministic).
+async fn call_scoring(
+    llm: &LLMClient,
+    configs: &[crate::models::LLMConfig],
+    system: &str,
+    user: &str,
+    n: usize,
+    expert: &str,
+    expected_keys: &[&str],
+) -> Result<ScoringCall> {
+    // Per-call temperature override: scoring runs cold. Cloning keeps the
+    // caller's fallback chain — and the global default — untouched.
+    let overridden = scoring_configs(configs);
+    let configs = overridden.as_slice();
+
+    if n <= 1 {
+        let response = llm.complete_with_fallback(configs, system, user).await?;
+        return Ok(ScoringCall {
+            content: response.content,
+            median: None,
+            samples: None,
+        });
+    }
+
+    let calls: Vec<_> = (0..n)
+        .map(|_| llm.complete_with_fallback(configs, system, user))
+        .collect();
+    let results = futures::future::join_all(calls).await;
+
+    let mut scored: Vec<(u8, String)> = Vec::new();
+    for result in results {
+        match result {
+            Ok(response) => {
+                let value = parse_expert_yaml(expert, &response.content, expected_keys);
+                match value["score"].as_u64() {
+                    Some(raw) => scored.push((raw.min(100) as u8, response.content)),
+                    None => tracing::warn!(
+                        expert_name = expert,
+                        "scoring sample dropped: no genuine score in response"
+                    ),
+                }
+            }
+            Err(e) => tracing::warn!(
+                expert_name = expert,
+                error = %e,
+                "scoring sample dropped: call failed"
+            ),
+        }
+    }
+    if scored.is_empty() {
+        anyhow::bail!("all {n} scoring samples failed for expert '{expert}'");
+    }
+
+    let samples: Vec<u8> = scored.iter().map(|(s, _)| *s).collect();
+    // `samples` mirrors `scored`, which is non-empty past the bail above, so
+    // a median always exists; the error arm is defensive, not reachable.
+    let median = match median_score(&samples) {
+        Some(median) => median,
+        None => anyhow::bail!("no usable scoring samples for expert '{expert}'"),
+    };
+    // Deterministic representative: lower-middle by score.
+    scored.sort_by_key(|(s, _)| *s);
+    let representative = scored[(scored.len() - 1) / 2].1.clone();
+    Ok(ScoringCall {
+        content: representative,
+        median: Some(median),
+        samples: Some(samples),
+    })
+}
+
+/// Append the deterministic repo-facts block to a user prompt. Shared by
+/// both LLM experts; no-op on the local-only path (`facts_block: None`),
+/// where no LLM prompt is built anyway. The block ends with a trailing
+/// newline (see [`crate::repo::experts::facts::RepoFacts::to_prompt_block`]).
+fn append_facts_block(user: &mut String, facts_block: Option<&str>) {
+    if let Some(facts) = facts_block {
+        user.push_str("\n\n## Repository Facts (deterministic static analysis)\n");
+        user.push_str(facts);
+    }
+}
+
+/// Build the Architecture Lead user prompt: repo overview, language
+/// breakdown, file tree, plus the deterministic facts block when present.
+/// Extracted from `evaluate` so the prompt shape is testable without an LLM.
+fn architecture_user_prompt(ctx: &RepoContext) -> String {
+    // Build file tree and stats overview
+    let file_tree: Vec<String> = ctx
+        .entries
+        .iter()
+        .filter(|e| !e.is_binary && !e.is_generated)
+        .map(|e| {
+            let in_reports = e.path.contains("/review_reports/");
+            if in_reports {
+                return String::new();
+            }
+            format!("{} ({} LOC, {})", e.path, e.loc, e.language)
+        })
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let lang_summary: Vec<String> = ctx
+        .stats
+        .languages
+        .iter()
+        .map(|(name, st)| format!("{}: {} files, {} LOC", name, st.files, st.loc))
+        .collect();
+
+    let mut user = format!(
+        "## Repository File Tree\n\
+         Total files: {} (source), {} total LOC, {} languages\n\n\
+         ## Language Breakdown\n\
+         {}\n\n\
+         ## File Tree\n\
+         {}",
+        file_tree.len(),
+        ctx.stats.total_loc,
+        ctx.stats.languages.len(),
+        lang_summary.join("\n"),
+        file_tree.join("\n"),
+    );
+    append_facts_block(&mut user, ctx.facts_block.as_deref());
+    user
+}
+
 /// Architecture Lead: Pass 1 expert that examines the file tree and produces a
 /// high-level assessment of the repository structure and risks.
 pub struct ArchitectureLead;
@@ -101,7 +305,11 @@ pub struct ArchitectureLead;
 #[async_trait]
 impl RepoExpert for ArchitectureLead {
     fn name(&self) -> &str {
-        "architecture_lead"
+        // Canonical area name shared with `DEFAULT_WEIGHTS` and the report
+        // pipeline (`convert_scores` extracts the lead summary under this
+        // exact key). Naming this expert anything else silently drops the
+        // lead summary from the report.
+        "architecture"
     }
     fn weight(&self) -> u8 {
         15
@@ -113,49 +321,34 @@ impl RepoExpert for ArchitectureLead {
     async fn evaluate(&self, ctx: &RepoContext, llm: Option<&LLMClient>) -> Result<ExpertScore> {
         let llm = llm.ok_or_else(|| anyhow::anyhow!("ArchitectureLead requires LLM"))?;
 
-        // Build file tree and stats overview
-        let file_tree: Vec<String> = ctx
-            .entries
-            .iter()
-            .filter(|e| !e.is_binary && !e.is_generated)
-            .map(|e| {
-                let in_reports = e.path.contains("/review_reports/");
-                if in_reports {
-                    return String::new();
-                }
-                format!("{} ({} LOC, {})", e.path, e.loc, e.language)
-            })
-            .filter(|s| !s.is_empty())
-            .collect();
-
-        let lang_summary: Vec<String> = ctx
-            .stats
-            .languages
-            .iter()
-            .map(|(name, st)| format!("{}: {} files, {} LOC", name, st.files, st.loc))
-            .collect();
-
         let system = templates::ARCHITECTURE_LEAD_SYSTEM_TEMPLATE;
+        let user = architecture_user_prompt(ctx);
 
-        let user = format!(
-            "## Repository File Tree\n\
-             Total files: {} (source), {} total LOC, {} languages\n\n\
-             ## Language Breakdown\n\
-             {}\n\n\
-             ## File Tree\n\
-             {}",
-            file_tree.len(),
-            ctx.stats.total_loc,
-            ctx.stats.languages.len(),
-            lang_summary.join("\n"),
-            file_tree.join("\n"),
-        );
+        let n = scoring_sample_count(ctx.config.as_deref());
+        let call = call_scoring(
+            llm,
+            &ctx.llm_configs,
+            system,
+            &user,
+            n,
+            "architecture",
+            ARCHITECTURE_LEAD_KEYS,
+        )
+        .await?;
 
-        let response = llm.complete_with_fallback(&ctx.llm_configs, system, &user).await?;
-
-        // Parse YAML response
-        let value = parse_expert_yaml("architecture_lead", &response.content, ARCHITECTURE_LEAD_KEYS);
-        let score = value["score"].as_u64().unwrap_or(70).min(100) as u8;
+        // Parse YAML response. A missing score (unparseable / drifted /
+        // empty response) means the 70 below is a synthetic fallback —
+        // flag it so reports do not present it as a model assessment. Under
+        // sampling the median is always a genuine model score.
+        let value = parse_expert_yaml("architecture", &call.content, ARCHITECTURE_LEAD_KEYS);
+        let score_raw = value["score"].as_u64();
+        let (score, fallback) = match call.median {
+            Some(median) => (median, false),
+            None => match score_raw {
+                Some(raw) => (raw.min(100) as u8, false),
+                None => (super::LLM_FALLBACK_SCORE, true),
+            },
+        };
         let summary = value["summary"]
             .as_str()
             .unwrap_or("Architecture assessment completed")
@@ -169,6 +362,9 @@ impl RepoExpert for ArchitectureLead {
             score,
             summary,
             details,
+            fallback,
+            evaluated_loc: Some(ctx.stats.total_loc as u64),
+            samples: call.samples,
         })
     }
 }
@@ -183,6 +379,24 @@ fn render_code_quality_system(module: &str, lang: &str, naming_hint: &str, error
         .replace("{{ lang }}", lang)
         .replace("{{ naming_hint }}", naming_hint)
         .replace("{{ error_hint }}", error_hint)
+}
+
+/// Build the CodeQuality user prompt: module header, concatenated file
+/// contents, plus the deterministic facts block when present. Extracted for
+/// testability (no LLM needed).
+fn code_quality_user_prompt(ctx: &RepoContext, module_name: &str, first_lang: &str, source_files: &[String]) -> String {
+    let mut user = format!(
+        "## Module: {module} ({lang})\n\
+         Files in this module: {count}\n\n\
+         ## Code\n\
+         {code}",
+        module = module_name,
+        lang = first_lang,
+        count = ctx.entries.len(),
+        code = source_files.join("\n\n---\n\n"),
+    );
+    append_facts_block(&mut user, ctx.facts_block.as_deref());
+    user
 }
 
 /// CodeQuality: Pass 2 expert that evaluates code quality for a specific chunk.
@@ -236,22 +450,29 @@ impl RepoExpert for CodeQuality {
         let profile = crate::language::get_profile(first_lang, app_config);
 
         let system = render_code_quality_system(module_name, first_lang, &profile.naming_hint, &profile.error_hint);
+        let user = code_quality_user_prompt(ctx, module_name, first_lang, &source_files);
 
-        let user = format!(
-            "## Module: {module} ({lang})\n\
-             Files in this module: {count}\n\n\
-             ## Code\n\
-             {code}",
-            module = module_name,
-            lang = first_lang,
-            count = ctx.entries.len(),
-            code = source_files.join("\n\n---\n\n"),
-        );
+        let n = scoring_sample_count(ctx.config.as_deref());
+        let call = call_scoring(
+            llm,
+            &ctx.llm_configs,
+            &system,
+            &user,
+            n,
+            "code_quality",
+            CODE_QUALITY_KEYS,
+        )
+        .await?;
 
-        let response = llm.complete_with_fallback(&ctx.llm_configs, &system, &user).await?;
-
-        let value = parse_expert_yaml("code_quality", &response.content, CODE_QUALITY_KEYS);
-        let score = value["score"].as_u64().unwrap_or(70).min(100) as u8;
+        let value = parse_expert_yaml("code_quality", &call.content, CODE_QUALITY_KEYS);
+        let score_raw = value["score"].as_u64();
+        let (score, fallback) = match call.median {
+            Some(median) => (median, false),
+            None => match score_raw {
+                Some(raw) => (raw.min(100) as u8, false),
+                None => (super::LLM_FALLBACK_SCORE, true),
+            },
+        };
         let summary = value["summary"]
             .as_str()
             .unwrap_or("Code quality assessment completed")
@@ -269,6 +490,11 @@ impl RepoExpert for CodeQuality {
             score,
             summary,
             details,
+            fallback,
+            // Real LOC of this chunk, so the aggregator can LOC-weight the
+            // merge with truth instead of the findings-count heuristic.
+            evaluated_loc: Some(ctx.entries.iter().map(|e| e.loc as u64).sum()),
+            samples: call.samples,
         })
     }
 }
@@ -540,7 +766,9 @@ findings:
     fn test_architecture_lead_metadata() {
         let expert = ArchitectureLead;
         assert_eq!(expert.weight(), 15);
-        assert_eq!(expert.name(), "architecture_lead");
+        // Canonical area name: `convert_scores` keys the lead summary off
+        // "architecture" and `DEFAULT_WEIGHTS` lists the same name.
+        assert_eq!(expert.name(), "architecture");
         assert!(expert.requires_llm());
     }
 
@@ -550,5 +778,285 @@ findings:
         assert_eq!(expert.weight(), 10);
         assert_eq!(expert.name(), "code_quality");
         assert!(expert.requires_llm());
+    }
+
+    // ─── facts-block injection ─────
+
+    fn prompt_ctx(facts_block: Option<String>) -> RepoContext {
+        RepoContext {
+            entries: vec![],
+            stats: crate::repo::RepoStats::default(),
+            llm_configs: vec![],
+            config: None,
+            facts_block,
+        }
+    }
+
+    #[test]
+    fn test_architecture_prompt_injects_facts_block() {
+        let ctx = prompt_ctx(Some("repo_facts:\n  test_files: 3\n".to_string()));
+        let prompt = architecture_user_prompt(&ctx);
+        assert!(prompt.contains("## Repository Facts (deterministic static analysis)"));
+        assert!(prompt.contains("repo_facts:"));
+        assert!(prompt.contains("test_files: 3"));
+    }
+
+    #[test]
+    fn test_code_quality_prompt_injects_facts_block() {
+        let ctx = prompt_ctx(Some(
+            "repo_facts:\n  ci_configs:\n    - \".gitlab-ci.yml\"\n".to_string(),
+        ));
+        let prompt = code_quality_user_prompt(&ctx, "auth", "Rust", &["// code".to_string()]);
+        assert!(prompt.contains("## Repository Facts (deterministic static analysis)"));
+        assert!(prompt.contains("repo_facts:"));
+        assert!(prompt.contains(".gitlab-ci.yml"));
+    }
+
+    #[test]
+    fn test_prompts_omit_facts_block_when_absent() {
+        // Local-only path (`facts_block: None`): no residue in either prompt.
+        let ctx = prompt_ctx(None);
+        assert!(!architecture_user_prompt(&ctx).contains("repo_facts"));
+        assert!(!code_quality_user_prompt(&ctx, "m", "Rust", &[]).contains("repo_facts"));
+    }
+
+    #[test]
+    fn test_fully_annotated_python_facts_reach_prompt_verbatim() {
+        // The anti-"Missing type hints" chain: static full-annotation
+        // coverage of 1.00 must be visible verbatim in the scored prompt.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let py = dir.path().join("a.py");
+        std::fs::write(&py, "def f(x: int) -> int:\n    return x\n").expect("write fixture");
+        let entries = vec![crate::repo::FileEntry {
+            path: py.to_string_lossy().into_owned(),
+            language: "Python".to_string(),
+            loc: 2,
+            is_binary: false,
+            is_generated: false,
+        }];
+        let block = crate::repo::experts::facts::compute(&entries).to_prompt_block();
+        assert!(block.contains("full_param_annotation_coverage: 1.00"));
+
+        let ctx = prompt_ctx(Some(block));
+        let prompt = code_quality_user_prompt(&ctx, "m", "Python", &[]);
+        assert!(prompt.contains("full_param_annotation_coverage: 1.00"));
+        let arch_prompt = architecture_user_prompt(&ctx);
+        assert!(arch_prompt.contains("full_param_annotation_coverage: 1.00"));
+    }
+
+    // ─── score sampling ─────
+
+    #[test]
+    fn test_median_score_odd_even_empty() {
+        assert_eq!(median_score(&[]), None);
+        assert_eq!(median_score(&[80]), Some(80));
+        assert_eq!(median_score(&[70, 90, 80]), Some(80));
+        // Even count: round-half-up mean of the two middle scores.
+        assert_eq!(median_score(&[70, 80, 80, 91]), Some(80));
+        assert_eq!(median_score(&[70, 71]), Some(71)); // 70.5 rounds up
+        assert_eq!(median_score(&[70, 72]), Some(71));
+        // Input order does not matter.
+        assert_eq!(median_score(&[95, 40, 60]), Some(60));
+    }
+
+    #[test]
+    fn test_scoring_sample_count_defaults_and_guards() {
+        assert_eq!(scoring_sample_count(None), 1);
+        let config: crate::models::AppConfig = toml::from_str("").unwrap();
+        assert_eq!(scoring_sample_count(Some(&config)), 1);
+        // 0 is meaningless: treated as the single-call status quo.
+        let config: crate::models::AppConfig = toml::from_str("[scoring]\nscore_samples = 0\n").unwrap();
+        assert_eq!(scoring_sample_count(Some(&config)), 1);
+        let config: crate::models::AppConfig = toml::from_str("[scoring]\nscore_samples = 5\n").unwrap();
+        assert_eq!(scoring_sample_count(Some(&config)), 5);
+    }
+
+    use crate::llm::provider::{CompletionParams, CompletionResult, LLMProvider, ProviderRegistry};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    /// Mock provider serving scripted response bodies in poll order (the
+    /// last body repeats). Tracks peak in-flight concurrency so tests can
+    /// prove sampling is concurrent, and records the temperature of every
+    /// request so tests can prove the scoring override reaches the wire.
+    struct ScriptedProvider {
+        bodies: Vec<String>,
+        calls: AtomicUsize,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+        temperatures: Arc<std::sync::Mutex<Vec<f32>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LLMProvider for ScriptedProvider {
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        async fn complete(&self, _params: &CompletionParams) -> Result<CompletionResult> {
+            self.temperatures.lock().unwrap().push(_params.temperature);
+            // Assign the body at first poll (join_all polls in input order,
+            // so this is deterministic) BEFORE parking on the timer.
+            let i = self.calls.fetch_add(1, Ordering::SeqCst).min(self.bodies.len() - 1);
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            // Park so concurrent samples overlap; under `start_paused` the
+            // timer auto-advances once every sample is in flight.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(CompletionResult {
+                content: self.bodies[i].clone(),
+                total_tokens: 1,
+                model: "mock".to_string(),
+            })
+        }
+    }
+
+    fn mock_client(bodies: Vec<String>) -> (LLMClient, Arc<AtomicUsize>, Arc<std::sync::Mutex<Vec<f32>>>) {
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let temperatures = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut registry = ProviderRegistry::new();
+        registry.register(Box::new(ScriptedProvider {
+            bodies,
+            calls: AtomicUsize::new(0),
+            in_flight: in_flight.clone(),
+            peak: peak.clone(),
+            temperatures: temperatures.clone(),
+        }));
+        (LLMClient::new().with_registry(Arc::new(registry)), peak, temperatures)
+    }
+
+    fn mock_configs() -> Vec<crate::models::LLMConfig> {
+        vec![crate::models::LLMConfig {
+            provider: "mock".to_string(),
+            model: "mock-model".to_string(),
+            api_key: "k".to_string(),
+            api_base: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        }]
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sampling_runs_concurrently_and_reports_median() {
+        let bodies = vec![
+            "score: 70\nsummary: \"a\"\nfindings: []".to_string(),
+            "score: 90\nsummary: \"b\"\nfindings: []".to_string(),
+            "score: 80\nsummary: \"c\"\nfindings: []".to_string(),
+        ];
+        let (client, peak, _temps) = mock_client(bodies);
+        let call = call_scoring(
+            &client,
+            &mock_configs(),
+            "sys",
+            "user",
+            3,
+            "code_quality",
+            CODE_QUALITY_KEYS,
+        )
+        .await
+        .unwrap();
+        // join_all preserves input order; scores land in poll order.
+        assert_eq!(call.samples, Some(vec![70, 90, 80]));
+        assert_eq!(call.median, Some(80));
+        assert_eq!(peak.load(Ordering::SeqCst), 3, "samples must overlap, not run serially");
+        // Representative content is the lower-middle sample's real response.
+        assert!(call.content.contains("summary: \"c\""));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sampling_drops_unparseable_and_scoreless_samples() {
+        let bodies = vec![
+            "score: 90\nsummary: \"good\"\nfindings: []".to_string(),
+            "this is not yaml at all".to_string(), // unparseable → dropped
+            "summary: \"no score here\"\nfindings: []".to_string(), // schema-conforming but no score → dropped
+            "score: 70\nsummary: \"also good\"\nfindings: []".to_string(),
+        ];
+        let (client, _peak, _temps) = mock_client(bodies);
+        let call = call_scoring(
+            &client,
+            &mock_configs(),
+            "sys",
+            "user",
+            4,
+            "code_quality",
+            CODE_QUALITY_KEYS,
+        )
+        .await
+        .unwrap();
+        assert_eq!(call.samples, Some(vec![90, 70]));
+        assert_eq!(call.median, Some(80));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_sampling_all_failed_is_error_for_fallback_path() {
+        // No registry → direct HTTP to an unreachable endpoint (connection
+        // refused, offline, fail-fast). All samples fail → Err, which the
+        // orchestration layer turns into the explicit flagged fallback.
+        let client = LLMClient::new();
+        let configs = vec![crate::models::LLMConfig {
+            provider: "openai".to_string(),
+            model: "unreachable".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: "http://127.0.0.1:1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        }];
+        let err = call_scoring(
+            &client,
+            &configs,
+            "sys",
+            "user",
+            3,
+            "architecture",
+            ARCHITECTURE_LEAD_KEYS,
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("all 3 scoring samples failed"));
+    }
+
+    // ─── scoring temperature override ─────
+
+    #[test]
+    fn test_scoring_configs_runs_cold_and_preserves_input() {
+        let mk = |temperature: f32| crate::models::LLMConfig {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            api_key: "k".to_string(),
+            api_base: "https://example.com".to_string(),
+            max_tokens: 4096,
+            temperature,
+            disable_thinking: None,
+        };
+        let configs = vec![mk(0.3), mk(0.9)];
+        let overridden = scoring_configs(&configs);
+        assert!(overridden.iter().all(|c| c.temperature == 0.0));
+        // The caller's chain keeps its temperatures — the override is
+        // per-call, not a mutation of shared state.
+        assert_eq!(configs[0].temperature, 0.3);
+        assert_eq!(configs[1].temperature, 0.9);
+        // The cap invariant: scoring temperature never exceeds 0.2.
+        assert!(SCORING_TEMPERATURE <= SCORING_TEMPERATURE_MAX);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_scoring_calls_reach_provider_at_zero_temperature() {
+        let bodies = vec!["score: 80\nsummary: \"a\"\nfindings: []".to_string()];
+        let (client, _peak, temps) = mock_client(bodies);
+        let mut configs = mock_configs();
+        configs[0].temperature = 0.9; // loud non-zero input to prove the override
+        let call = call_scoring(&client, &configs, "sys", "user", 3, "code_quality", CODE_QUALITY_KEYS)
+            .await
+            .unwrap();
+        assert_eq!(call.median, Some(80));
+        let temps = temps.lock().unwrap();
+        assert_eq!(temps.len(), 3, "every sample is its own provider call");
+        assert!(temps.iter().all(|&t| t == 0.0), "scoring must run cold: {temps:?}");
+        // Global default untouched: the original config keeps 0.9.
+        assert_eq!(configs[0].temperature, 0.9);
     }
 }

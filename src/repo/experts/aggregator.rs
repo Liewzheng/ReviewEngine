@@ -71,7 +71,12 @@ pub fn aggregate(scores: Vec<ExpertScore>, app_config: Option<&AppConfig>) -> Ag
             let mut merged_details = Vec::new();
 
             for s in &group {
-                let chunk_loc = estimate_loc(&s.details);
+                // Prefer the chunk's REAL LOC (reported by the evaluating
+                // expert). The findings-count heuristic below is only a
+                // last resort for scores with no LOC attached — on its own
+                // it inverts the weighting: more findings ⇒ bigger weight,
+                // so the noisiest chunk would dominate the average.
+                let chunk_loc = s.evaluated_loc.unwrap_or_else(|| estimate_loc(&s.details));
                 total_weighted += (s.score as u64) * chunk_loc;
                 total_loc += chunk_loc;
                 merged_details.extend(filter_noise(s.details.clone()));
@@ -97,12 +102,43 @@ pub fn aggregate(scores: Vec<ExpertScore>, app_config: Option<&AppConfig>) -> Ag
                 .unwrap_or_else(|| format!("{} chunks evaluated, avg score {}", group.len(), avg_score));
 
             all_findings.extend(merged_details.iter().cloned());
+            // The merged score is an explicit fallback only when EVERY chunk
+            // fell back — one genuine chunk assessment makes the aggregate a
+            // genuine (if degraded) assessment. Partial fallbacks stay visible
+            // through the per-chunk WARN lines emitted by the caller.
+            let merged_fallback = group.iter().all(|s| s.fallback);
+            // Sum the real chunk LOCs when known; `None` only if no chunk
+            // reported one (then the per-chunk merge above used the
+            // findings-count heuristic throughout).
+            let merged_loc: Option<u64> = {
+                let locs: Vec<u64> = group.iter().filter_map(|s| s.evaluated_loc).collect();
+                if locs.is_empty() {
+                    None
+                } else {
+                    Some(locs.iter().sum())
+                }
+            };
+            // Concatenate raw sample scores across chunks when sampling was
+            // active — they are the full evidence base of the merged score.
+            let merged_samples: Option<Vec<u8>> = if group.iter().any(|s| s.samples.is_some()) {
+                Some(
+                    group
+                        .iter()
+                        .flat_map(|s| s.samples.clone().unwrap_or_default())
+                        .collect(),
+                )
+            } else {
+                None
+            };
             merged_scores.push(ExpertScore {
                 expert_name: name,
                 weight,
                 score: avg_score,
                 summary: best_summary,
                 details: merged_details,
+                fallback: merged_fallback,
+                evaluated_loc: merged_loc,
+                samples: merged_samples,
             });
         }
     }
@@ -197,9 +233,13 @@ fn effort_rank(effort: &str) -> u8 {
     }
 }
 
+/// Last-resort LOC estimate for a chunk score that carries no
+/// `evaluated_loc` (legacy callers and any link in the chain that cannot
+/// obtain the real LOC). Deliberately kept for those cases only: the
+/// findings count is NOT a chunk-size proxy — a noisy chunk produces more
+/// findings per LOC, so weighting by it over-weights exactly the worst
+/// chunks. Real LOC, when available, always wins (see the merge loop).
 fn estimate_loc(details: &[ScoreItem]) -> u64 {
-    // Rough LOC estimate: each chunk typically has 200-2000 LOC
-    // We use the number of findings as a proxy for chunk size
     (details.len() * 200).max(100) as u64
 }
 
@@ -315,6 +355,9 @@ mod tests {
             score,
             summary: summary.to_string(),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }
     }
 
@@ -421,6 +464,74 @@ mod tests {
         // Dedup should leave only 2 unique findings (duplicate issue + unique)
         // But both chunks have separate details; dedup happens after merging
         assert_eq!(result.all_findings.len(), 2);
+    }
+
+    // ─── real-LOC weighting (evaluated_loc) ─────
+
+    #[test]
+    fn test_aggregate_multi_chunk_prefers_real_loc_over_heuristic() {
+        // Same finding count (1 each), very different real sizes: the big
+        // chunk must dominate. Heuristic would weight them equally (70).
+        let mut big = make_score("code_quality", 90, 10, "big", vec![make_item("low", "Nit")]);
+        big.evaluated_loc = Some(1000);
+        let mut small = make_score("code_quality", 50, 10, "small", vec![make_item("high", "Bug")]);
+        small.evaluated_loc = Some(100);
+        let result = aggregate(vec![big, small], None);
+        // (90*1000 + 50*100) / 1100 = 86.36 → 86
+        assert_eq!(result.scores[0].score, 86);
+    }
+
+    #[test]
+    fn test_aggregate_multi_chunk_mixed_loc_falls_back_to_heuristic_per_chunk() {
+        // Chunk A reports real LOC, chunk B does not: B alone uses the
+        // findings-count heuristic (2 findings → 400), A keeps its real 300.
+        let mut a = make_score("code_quality", 90, 10, "a", vec![]);
+        a.evaluated_loc = Some(300);
+        let b = make_score(
+            "code_quality",
+            50,
+            10,
+            "b",
+            vec![make_item("medium", "X"), make_item("low", "Y")],
+        );
+        let result = aggregate(vec![a, b], None);
+        // (90*300 + 50*400) / 700 = 67.14 → 67
+        assert_eq!(result.scores[0].score, 67);
+    }
+
+    #[test]
+    fn test_aggregate_multi_chunk_merges_loc_and_samples() {
+        let mut a = make_score("code_quality", 80, 10, "a", vec![]);
+        a.evaluated_loc = Some(1000);
+        a.samples = Some(vec![75, 85]);
+        let mut b = make_score("code_quality", 60, 10, "b", vec![]);
+        b.evaluated_loc = Some(100);
+        b.samples = Some(vec![60]);
+        let result = aggregate(vec![a, b], None);
+        let cq = &result.scores[0];
+        assert_eq!(cq.evaluated_loc, Some(1100));
+        assert_eq!(cq.samples, Some(vec![75, 85, 60]));
+        // (80*1000 + 60*100) / 1100 = 78.18 → 78
+        assert_eq!(cq.score, 78);
+    }
+
+    #[test]
+    fn test_aggregate_multi_chunk_fallback_only_when_every_chunk_fell_back() {
+        let mut a = make_score("code_quality", 70, 10, "a", vec![]);
+        a.fallback = true;
+        let mut b = make_score("code_quality", 70, 10, "b", vec![]);
+        b.fallback = true;
+        let result = aggregate(vec![a, b], None);
+        assert!(result.scores[0].fallback, "all-fallback group must stay flagged");
+
+        let genuine = make_score("code_quality", 80, 10, "a", vec![]);
+        let mut fell_back = make_score("code_quality", 70, 10, "b", vec![]);
+        fell_back.fallback = true;
+        let result = aggregate(vec![genuine, fell_back], None);
+        assert!(
+            !result.scores[0].fallback,
+            "one genuine chunk makes the aggregate a genuine (degraded) assessment"
+        );
     }
 
     // ─── lead-consolidator integration ──────────

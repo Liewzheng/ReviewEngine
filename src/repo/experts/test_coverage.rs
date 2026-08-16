@@ -180,6 +180,9 @@ impl RepoExpert for TestCoverage {
                 if has_inline_tests { "yes" } else { "no" },
             ),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         })
     }
 }

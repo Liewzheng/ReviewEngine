@@ -117,6 +117,9 @@ impl RepoExpert for CodeOrganization {
                 source_count, avg, large_count
             ),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         })
     }
 }
@@ -193,6 +196,9 @@ impl RepoExpert for Security {
             score,
             summary: format!("{} security findings", finding_count),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         })
     }
 }
@@ -321,6 +327,9 @@ impl RepoExpert for Documentation {
                 comment_ratio * 100.0
             ),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         })
     }
 }
@@ -390,6 +399,9 @@ impl RepoExpert for Dependency {
             score,
             summary: format!("{} dependencies from Cargo.lock", dep_count),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         })
     }
 }
@@ -541,6 +553,9 @@ impl RepoExpert for CodeStyle {
             score,
             summary,
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         })
     }
 }
@@ -572,6 +587,7 @@ mod tests {
             stats,
             llm_configs: Vec::new(),
             config: None,
+            facts_block: None,
         }
     }
 

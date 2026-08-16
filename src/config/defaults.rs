@@ -56,6 +56,7 @@ pub fn merge_default(user: AppConfig) -> Result<AppConfig> {
             display_weighted_score: user.scoring.display_weighted_score,
             penalties: user.scoring.penalties,
             consensus_threshold: user.scoring.consensus_threshold,
+            score_samples: user.scoring.score_samples,
             risk_thresholds: user.scoring.risk_thresholds,
         },
         review_experts: {

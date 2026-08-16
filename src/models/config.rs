@@ -209,6 +209,18 @@ pub struct ScoringConfig {
     /// Consensus threshold for high-confidence findings.
     #[serde(default = "default_consensus_threshold")]
     pub consensus_threshold: u8,
+    /// Number of concurrent score samples per repo-review LLM expert call
+    /// (architecture / code_quality). `1` (default) keeps the single-call
+    /// behavior unchanged. `N > 1` issues N scoring calls CONCURRENTLY (not
+    /// serially), drops failed or score-less samples, and reports the median
+    /// score; the raw sample scores and their min/max are recorded in the
+    /// expert's output (`samples`, `sample_min`, `sample_max`). When every
+    /// sample fails, the expert falls back exactly as a failed single call
+    /// does (explicit, flagged fallback score). Beware the multiplicative
+    /// concurrency: effective in-flight LLM calls peak at
+    /// `max_concurrent_llm_calls` × `score_samples`.
+    #[serde(default = "default_score_samples")]
+    pub score_samples: usize,
     /// Risk level thresholds based on score ranges.
     #[serde(default)]
     pub risk_thresholds: RiskThresholdConfig,
@@ -358,6 +370,7 @@ impl Default for ScoringConfig {
             display_weighted_score: true,
             penalties: PenaltyConfig::default(),
             consensus_threshold: default_consensus_threshold(),
+            score_samples: default_score_samples(),
             risk_thresholds: RiskThresholdConfig::default(),
         }
     }
@@ -456,6 +469,9 @@ fn default_true() -> bool {
 }
 fn default_consensus_threshold() -> u8 {
     70
+}
+fn default_score_samples() -> usize {
+    1
 }
 
 fn default_max_tokens() -> u32 {
@@ -596,6 +612,7 @@ name = "minimal"
         assert!(config.scoring.display_individual_scores);
         assert!(config.scoring.display_weighted_score);
         assert_eq!(config.scoring.consensus_threshold, 70);
+        assert_eq!(config.scoring.score_samples, 1);
         assert_eq!(config.scoring.penalties.critical, 30);
         assert_eq!(config.scoring.penalties.high, 15);
         assert_eq!(config.scoring.penalties.medium, 5);
@@ -615,6 +632,7 @@ name = "minimal"
 [scoring]
 enabled = false
 consensus_threshold = 80
+score_samples = 3
 
 [scoring.penalties]
 critical = 50
@@ -635,6 +653,7 @@ healthy_min = 85
 
         assert!(!config.scoring.enabled);
         assert_eq!(config.scoring.consensus_threshold, 80);
+        assert_eq!(config.scoring.score_samples, 3);
         assert_eq!(config.scoring.penalties.critical, 50);
         assert_eq!(config.scoring.penalties.high, 25);
         assert_eq!(config.scoring.penalties.medium, 10);

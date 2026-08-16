@@ -46,6 +46,48 @@ pub(crate) const CONTEXT_BOUNDARY_BLOCK: &str = context_boundary_block!();
 #[allow(dead_code)]
 pub(crate) const CONTEXT_BOUNDARY_BLOCK_REPO: &str = context_boundary_block_repo!();
 
+/// The score-band rubric for repo-review experts, as a macro so the same
+/// literal can be inlined into multiple `const` templates via `concat!`
+/// (same idiom as [`context_boundary_block_repo!`]). A bare `score: 0-100`
+/// field was the main source of ±5 score drift between runs; the bands
+/// anchor the score to observable conditions aligned with each template's
+/// criteria, and the model must justify the chosen band in `summary`.
+macro_rules! score_band_rubric {
+    () => {
+        r###"SCORING RUBRIC — anchor `score` to exactly one band:
+- 90-100: Excellent. All evaluated criteria hold; no material issues found, at most trivial nits.
+- 75-89: Good. Criteria mostly hold; a few minor or moderate issues, none of them severe.
+- 60-74: At risk. One or more significant issues a maintainer should address soon; criteria partially violated.
+- 0-59: Poor. Multiple severe issues or fundamental problems; criteria broadly violated.
+Decide the band from the evidence FIRST, then pick a precise score within that band. In `summary`, state the chosen band and the concrete evidence that placed the score there."###
+    };
+}
+
+/// Score-band rubric inlined into [`CODE_QUALITY_SYSTEM_TEMPLATE`] and
+/// [`ARCHITECTURE_LEAD_SYSTEM_TEMPLATE`]. The const itself is the
+/// programmatic interface used by tests (see [`CONTEXT_BOUNDARY_BLOCK_REPO`]).
+#[allow(dead_code)]
+pub(crate) const SCORE_BAND_RUBRIC: &str = score_band_rubric!();
+
+/// The repo-facts grounding contract for repo-review experts, as a macro so
+/// the same literal is inlined into both scoring templates via `concat!`.
+/// The user message carries a `repo_facts` block computed by deterministic
+/// static analysis; this sentence makes it ground truth so the model cannot
+/// contradict observable reality (e.g. claiming "missing type hints" on a
+/// fully annotated Python codebase, or "no CI" when `.gitlab-ci.yml` was
+/// detected).
+macro_rules! repo_facts_contract {
+    () => {
+        r###"REPO FACTS: The user message includes a `repo_facts` block computed by deterministic static analysis of this repository. Those facts are ground truth — your assessment, findings, and score MUST NOT contradict them. Only aspects NOT covered by `repo_facts` may be judged from code evidence."###
+    };
+}
+
+/// Repo-facts grounding contract inlined into [`CODE_QUALITY_SYSTEM_TEMPLATE`]
+/// and [`ARCHITECTURE_LEAD_SYSTEM_TEMPLATE`] (see [`SCORE_BAND_RUBRIC`] for
+/// why inlining goes through the macro).
+#[allow(dead_code)]
+pub(crate) const REPO_FACTS_CONTRACT: &str = repo_facts_contract!();
+
 pub(crate) const REVIEW_SYSTEM_TEMPLATE: &str = concat!(
     r###"
 You are a code review expert.
@@ -392,6 +434,11 @@ Analyze the file tree and structure below. Focus on:
 - Whether the directory structure matches the domain boundaries
 - Missing architectural patterns (tests, CI, config)
 
+"###,
+    score_band_rubric!(),
+    repo_facts_contract!(),
+    r###"
+
 Output a concise YAML assessment. Base your score on observable structure:
 ```yaml
 summary: "Overall assessment of the repository architecture"
@@ -432,6 +479,11 @@ Evaluate based on these criteria:
 - **Error handling**: {{ error_hint }}
 - **Complexity**: Functions under 50 lines, no deep nesting
 - **Documentation**: Public API has clear docstrings, complex logic is explained
+
+"###,
+    score_band_rubric!(),
+    repo_facts_contract!(),
+    r###"
 
 IMPORTANT:
 - Output findings ONLY if you have concrete evidence in the code below
@@ -555,6 +607,44 @@ mod tests {
     #[test]
     fn test_code_quality_template_requests_confidence() {
         assert!(CODE_QUALITY_SYSTEM_TEMPLATE.contains("confidence: 0-10"));
+    }
+
+    // ─── Score-band rubric anchoring ─────
+
+    #[test]
+    fn test_score_band_rubric_inlined_in_repo_templates() {
+        // Both scoring templates must carry the identical rubric literal —
+        // one source of truth, no drift between experts.
+        assert!(CODE_QUALITY_SYSTEM_TEMPLATE.contains(SCORE_BAND_RUBRIC));
+        assert!(ARCHITECTURE_LEAD_SYSTEM_TEMPLATE.contains(SCORE_BAND_RUBRIC));
+    }
+
+    #[test]
+    fn test_score_band_rubric_bands_and_summary_contract() {
+        for band in ["90-100", "75-89", "60-74", "0-59"] {
+            assert!(SCORE_BAND_RUBRIC.contains(band), "rubric missing band {band}");
+        }
+        // The model must justify the chosen band in `summary`.
+        assert!(SCORE_BAND_RUBRIC.contains("state the chosen band"));
+        assert!(SCORE_BAND_RUBRIC.contains("`summary`"));
+        // Band choice precedes the precise score (anti-anchoring order).
+        assert!(SCORE_BAND_RUBRIC.contains("Decide the band from the evidence FIRST"));
+    }
+
+    // ─── Repo-facts grounding contract ─────
+
+    #[test]
+    fn test_repo_facts_contract_inlined_in_repo_templates() {
+        // Both scoring templates must carry the identical contract literal.
+        assert!(CODE_QUALITY_SYSTEM_TEMPLATE.contains(REPO_FACTS_CONTRACT));
+        assert!(ARCHITECTURE_LEAD_SYSTEM_TEMPLATE.contains(REPO_FACTS_CONTRACT));
+        // The contract names the block, its origin, and the non-contradiction rule.
+        assert!(REPO_FACTS_CONTRACT.contains("`repo_facts`"));
+        assert!(REPO_FACTS_CONTRACT.contains("deterministic static analysis"));
+        assert!(REPO_FACTS_CONTRACT.contains("MUST NOT contradict"));
+        // Aspects beyond the facts remain judgeable — the contract must not
+        // gag the model entirely.
+        assert!(REPO_FACTS_CONTRACT.contains("NOT covered"));
     }
 
     // ─── P0: missing-check exception inside modified functions ─────

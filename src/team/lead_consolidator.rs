@@ -656,6 +656,7 @@ mod tests {
                     note: 0,
                 },
                 consensus_threshold: 70,
+                score_samples: 1,
                 risk_thresholds: RiskThresholdConfig {
                     critical_max: 30,
                     high_max: 50,

@@ -38,6 +38,11 @@ pub struct RepoContext {
     pub llm_configs: Vec<crate::models::LLMConfig>,
     /// Resolved application configuration (for language profiles).
     pub config: Option<std::sync::Arc<crate::models::AppConfig>>,
+    /// Rendered [`facts::RepoFacts::to_prompt_block`] output, computed once
+    /// per review over the FULL entry set (never per chunk) and shared with
+    /// every LLM expert prompt. `None` on the local-only path, where no LLM
+    /// prompt is built.
+    pub facts_block: Option<String>,
 }
 
 // ─── ExpertScore ─────────────────────────────
@@ -55,6 +60,20 @@ pub struct ExpertScore {
     pub summary: String,
     /// Detailed findings and observations.
     pub details: Vec<ScoreItem>,
+    /// `true` when `score` is an explicit fallback rather than a genuine
+    /// assessment — e.g. the LLM call failed, the response could not be
+    /// parsed, or a static expert errored. Fallback scores must stay visible
+    /// in reports instead of silently masquerading as model output.
+    pub fallback: bool,
+    /// Real LOC this expert evaluated (sum of entry LOCs), when known. The
+    /// aggregator prefers this over its findings-count heuristic when
+    /// LOC-weighting multi-chunk merges. `None` means "unknown — use the
+    /// heuristic".
+    pub evaluated_loc: Option<u64>,
+    /// Raw per-sample scores when score sampling was active
+    /// (`scoring.score_samples > 1`); the reported `score` is their median.
+    /// `None` when sampling was disabled (the default).
+    pub samples: Option<Vec<u8>>,
 }
 
 /// A single finding or observation within an expert score.
@@ -113,6 +132,14 @@ pub const STATIC_WEIGHT_SUM: u8 = 75;
 
 /// Total weight when all experts (including LLM) are active.
 pub const FULL_WEIGHT_SUM: u8 = 100;
+
+/// Score used when an LLM expert cannot produce a genuine assessment —
+/// the call failed after all retries, or the response was empty,
+/// unparseable, or schema-drifted. Every use must be paired with
+/// [`ExpertScore::fallback`] `= true` at the layer that builds the
+/// [`ExpertScore`], so reports can tell synthetic scores from model
+/// output instead of silently masquerading as one.
+pub(crate) const LLM_FALLBACK_SCORE: u8 = 70;
 
 // ─── YAML parsing helper ─────────────────────
 

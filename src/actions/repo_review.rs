@@ -105,6 +105,23 @@ pub struct ExpertScoreOutput {
     pub score: u8,
     pub summary: String,
     pub details: Vec<ScoreItemDetail>,
+    /// `true` when `score` is an explicit fallback (LLM call failed after all
+    /// retries, the response was unparseable, or a static expert errored) —
+    /// not a genuine assessment. Fallback experts still occupy their weight
+    /// in the total, so consumers need this flag to interpret the score.
+    #[serde(default)]
+    pub fallback: bool,
+    /// Raw per-sample scores when `scoring.score_samples > 1` was active for
+    /// this expert; `score` is their median. Absent when sampling was
+    /// disabled (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<u8>>,
+    /// Smallest sample score; present exactly when `samples` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_min: Option<u8>,
+    /// Largest sample score; present exactly when `samples` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_max: Option<u8>,
 }
 
 /// Run the 6 static experts and produce a weighted score.
@@ -123,13 +140,23 @@ async fn run_static_experts(ctx: &RepoContext) -> Vec<ExpertScore> {
         match e.evaluate(ctx, None).await {
             Ok(s) => scores.push(s),
             Err(err) => {
+                // Never drop a failed expert silently: the score must land so
+                // the weight normalisation keeps its shape, and the fallback
+                // flag keeps the synthetic 50 visible in the report.
                 tracing::warn!("Expert {} failed: {:?}", e.name(), err);
+                eprintln!(
+                    "WARN: static expert '{}' failed: {err:#}; recording explicit fallback score",
+                    e.name()
+                );
                 scores.push(ExpertScore {
                     expert_name: e.name().to_string(),
                     weight: e.weight(),
                     score: 50,
                     summary: format!("Evaluation failed: {err}"),
                     details: Vec::new(),
+                    fallback: true,
+                    evaluated_loc: None,
+                    samples: None,
                 });
             }
         }
@@ -164,12 +191,20 @@ fn convert_scores(scores: &[ExpertScore]) -> ConvertedScores {
         if s.expert_name == "architecture" {
             lead_summary = Some(s.summary.clone());
         }
+        let (sample_min, sample_max) = match &s.samples {
+            Some(samples) if !samples.is_empty() => (samples.iter().min().copied(), samples.iter().max().copied()),
+            _ => (None, None),
+        };
         expert_scores.push(ExpertScoreOutput {
             name: s.expert_name.clone(),
             weight: s.weight,
             score: s.score,
             summary: s.summary.clone(),
             details,
+            fallback: s.fallback,
+            samples: s.samples.clone(),
+            sample_min,
+            sample_max,
         });
     }
     ConvertedScores {
@@ -385,6 +420,8 @@ pub async fn run_local_repo_review(
         stats,
         llm_configs: vec![],
         config,
+        // No LLM prompt is built on the local-only path — no facts to inject.
+        facts_block: None,
     };
 
     // Run static experts
@@ -433,11 +470,15 @@ pub async fn run_repo_review(
     // Run static experts
     let scanner = crate::repo::RepoScanner::new(local_path);
     let stats = scanner.compute_stats(entries);
+    // Deterministic repo facts: computed once over the FULL entry set (never
+    // per chunk) and shared with every LLM expert prompt via `facts_block`.
+    let facts_block = Some(crate::repo::experts::facts::compute(entries).to_prompt_block());
     let ctx = RepoContext {
         entries: entries.to_vec(),
         stats,
         llm_configs: llm_configs.to_vec(),
         config,
+        facts_block,
     };
     let mut scores = run_static_experts(&ctx).await;
 
@@ -472,7 +513,29 @@ pub async fn run_repo_review(
                 tracing::info!("Architecture Lead scored {}", s.score);
                 scores.push(s);
             }
-            Err(e) => tracing::warn!("Architecture Lead failed: {:?}", e),
+            Err(e) => {
+                // Results must land: a bare `tracing::warn!` here used to
+                // drop the expert from the report entirely — total_experts
+                // fell back to the 6 static ones and the total score was
+                // normalised over 75 instead of 100, with no trace in the
+                // JSON. Record an explicit, flagged fallback score instead.
+                tracing::warn!("Architecture Lead failed: {:?}", e);
+                eprintln!(
+                    "WARN: LLM expert 'architecture' failed after all retries: {e:#}; \
+                     recording explicit fallback score ({})",
+                    experts::LLM_FALLBACK_SCORE
+                );
+                scores.push(ExpertScore {
+                    expert_name: arch_lead.name().to_string(),
+                    weight: arch_lead.weight(),
+                    score: experts::LLM_FALLBACK_SCORE,
+                    summary: format!("LLM architecture assessment unavailable: {e}"),
+                    details: Vec::new(),
+                    fallback: true,
+                    evaluated_loc: Some(ctx.stats.total_loc as u64),
+                    samples: None,
+                });
+            }
         }
 
         // ── Pass 2: Chunk-based CodeQuality ──
@@ -503,7 +566,9 @@ pub async fn run_repo_review(
 
         // Evaluate chunks concurrently (bounded by the semaphore), one future
         // per chunk. `join_all` polls them together and returns results in
-        // input order, keeping chunk scores deterministic.
+        // input order, keeping chunk scores deterministic. Every chunk
+        // returns an `ExpertScore` — a failed chunk yields an explicit,
+        // flagged fallback, never a dropped `None`.
         let tasks: Vec<_> = chunks
             .iter()
             .enumerate()
@@ -514,12 +579,15 @@ pub async fn run_repo_review(
                 let review_id = review_id.to_string();
                 let llm_configs = llm_configs.to_vec();
                 let config = ctx.config.clone();
+                let facts_block = ctx.facts_block.clone();
                 async move {
                     let _permit = match semaphore.acquire_owned().await {
                         Ok(permit) => permit,
                         Err(e) => {
+                            // Practically unreachable (the semaphore is never
+                            // closed), but the chunk must still land.
                             tracing::warn!("Chunk {} semaphore acquire failed: {:?}", chunk.module, e);
-                            return None;
+                            return chunk_fallback_score(chunk, format!("scheduler unavailable: {e}"));
                         }
                     };
                     tracing::info!(
@@ -543,16 +611,25 @@ pub async fn run_repo_review(
                         stats: chunk_stats,
                         llm_configs,
                         config,
+                        facts_block,
                     };
 
                     let result = match llm_experts::CodeQuality.evaluate(&chunk_ctx, Some(llm_client)).await {
                         Ok(s) => {
                             tracing::info!("Chunk {} scored {}", chunk.module, s.score);
-                            Some(s)
+                            s
                         }
                         Err(e) => {
+                            // Same swallow fix as Pass 1: land the result,
+                            // flag it, warn on stderr.
                             tracing::warn!("Chunk {} failed: {:?}", chunk.module, e);
-                            None
+                            eprintln!(
+                                "WARN: LLM expert 'code_quality' chunk '{}' failed after all retries: {e:#}; \
+                                 recording explicit fallback score ({})",
+                                chunk.module,
+                                experts::LLM_FALLBACK_SCORE
+                            );
+                            chunk_fallback_score(chunk, format!("LLM assessment unavailable: {e}"))
                         }
                     };
 
@@ -576,8 +653,8 @@ pub async fn run_repo_review(
             })
             .collect();
 
-        let chunk_results: Vec<Option<ExpertScore>> = futures::future::join_all(tasks).await;
-        scores.extend(chunk_results.into_iter().flatten());
+        let chunk_results: Vec<ExpertScore> = futures::future::join_all(tasks).await;
+        scores.extend(chunk_results);
 
         // Complete llm_enhance stage
         if let Some(ref map) = progress_map {
@@ -644,6 +721,25 @@ pub async fn run_repo_review(
     crate::progress::complete_repo_progress(progress_map.as_ref(), review_id);
 
     Ok(output)
+}
+
+/// Build the explicit fallback score for a failed CodeQuality chunk.
+///
+/// The score lands in the report (flagged `fallback`) instead of vanishing,
+/// so the aggregate keeps the code_quality weight and consumers can see
+/// that this chunk was not genuinely assessed. `evaluated_loc` uses the
+/// chunk's true LOC so the LOC-weighted merge still weights it correctly.
+fn chunk_fallback_score(chunk: &crate::repo::experts::chunk::CodeChunk, reason: String) -> ExpertScore {
+    ExpertScore {
+        expert_name: "code_quality".to_string(),
+        weight: llm_experts::CodeQuality.weight(),
+        score: experts::LLM_FALLBACK_SCORE,
+        summary: format!("Module {}: {reason}", chunk.module),
+        details: Vec::new(),
+        fallback: true,
+        evaluated_loc: Some(chunk.total_loc as u64),
+        samples: None,
+    }
 }
 
 /// Remove verification-dropped findings from the code_quality chunk scores.
@@ -982,6 +1078,9 @@ mod tests {
             score: 80,
             summary: "Architecture looks good".to_string(),
             details: vec![],
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         assert_eq!(conv.expert_scores.len(), 1);
@@ -998,6 +1097,9 @@ mod tests {
             score: 70,
             summary: "Good code".to_string(),
             details: vec![],
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         assert!(conv.lead_summary.is_none());
@@ -1022,6 +1124,9 @@ mod tests {
             score: 60,
             summary: "Some issues".to_string(),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         assert_eq!(conv.expert_scores[0].details.len(), 1);
@@ -1044,6 +1149,9 @@ mod tests {
                 score: 85,
                 summary: "Lead summary".to_string(),
                 details: vec![],
+                fallback: false,
+                evaluated_loc: None,
+                samples: None,
             },
             ExpertScore {
                 expert_name: "code_quality".to_string(),
@@ -1051,6 +1159,9 @@ mod tests {
                 score: 70,
                 summary: "Quality report".to_string(),
                 details: vec![],
+                fallback: false,
+                evaluated_loc: None,
+                samples: None,
             },
         ];
         let conv = convert_scores(&scores);
@@ -1220,6 +1331,9 @@ mod tests {
             score: 70,
             summary: "".to_string(),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         let d = &conv.expert_scores[0].details[0];
@@ -1284,6 +1398,10 @@ mod tests {
                 detail("low", "Low issue"),
                 detail("info", "Info note"),
             ],
+            fallback: false,
+            samples: None,
+            sample_min: None,
+            sample_max: None,
         };
         let items = build_action_items(&[expert]);
         assert_eq!(items.len(), 2);
@@ -1319,6 +1437,10 @@ mod tests {
             score,
             summary: String::new(),
             details: vec![],
+            fallback: false,
+            samples: None,
+            sample_min: None,
+            sample_max: None,
         }
     }
 
@@ -1472,6 +1594,9 @@ action_items:
             score: 70,
             summary: String::new(),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }
     }
 
@@ -1495,6 +1620,9 @@ action_items:
                 score: 80,
                 summary: String::new(),
                 details: vec![item("Static finding", Some("src/c.rs"))],
+                fallback: false,
+                evaluated_loc: None,
+                samples: None,
             },
         ];
         let kept: Vec<Finding> = vec![
@@ -1579,5 +1707,134 @@ action_items:
         let output = minimal_output();
         let md = render_repo_review_output(&output, "markdown", false).unwrap();
         assert!(!md.contains("Dropped by verification"));
+    }
+
+    // ── LLM failure fallback (regression: silently dropped LLM scores) ──
+
+    #[test]
+    fn test_convert_scores_propagates_fallback_flag() {
+        let scores = vec![ExpertScore {
+            expert_name: "architecture".to_string(),
+            weight: 15,
+            score: experts::LLM_FALLBACK_SCORE,
+            summary: "LLM architecture assessment unavailable: boom".to_string(),
+            details: vec![],
+            fallback: true,
+            evaluated_loc: Some(1234),
+            samples: None,
+        }];
+        let conv = convert_scores(&scores);
+        assert!(conv.expert_scores[0].fallback);
+        // A flagged architecture fallback still feeds the lead summary slot —
+        // the report must show *why* there is no genuine assessment.
+        assert!(conv.lead_summary.as_deref().unwrap().contains("unavailable"));
+        assert_eq!(conv.expert_scores[0].samples, None);
+    }
+
+    #[test]
+    fn test_convert_scores_propagates_samples_min_max() {
+        let scores = vec![ExpertScore {
+            expert_name: "code_quality".to_string(),
+            weight: 10,
+            score: 80,
+            summary: "s".to_string(),
+            details: vec![],
+            fallback: false,
+            evaluated_loc: Some(500),
+            samples: Some(vec![70, 90, 80]),
+        }];
+        let conv = convert_scores(&scores);
+        assert_eq!(conv.expert_scores[0].samples, Some(vec![70, 90, 80]));
+        assert_eq!(conv.expert_scores[0].sample_min, Some(70));
+        assert_eq!(conv.expert_scores[0].sample_max, Some(90));
+        // The sampling evidence serializes into the JSON contract; absent
+        // when sampling was disabled.
+        let json = serde_json::to_value(&conv.expert_scores[0]).unwrap();
+        assert_eq!(json["sample_min"], serde_json::json!(70));
+        assert_eq!(json["sample_max"], serde_json::json!(90));
+        let plain = score_output("x", 80, 10);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("samples").is_none());
+        assert!(json.get("sample_min").is_none());
+        assert_eq!(json["fallback"], serde_json::json!(false));
+    }
+
+    /// Every LLM call failing (unreachable endpoint) must still produce
+    /// architecture + code_quality entries, flagged `fallback`, with the
+    /// weight sum back at 100 — the old code dropped them on the floor and
+    /// normalised over the 75 static-only weight.
+    ///
+    /// The endpoint is `127.0.0.1:1` (connection refused): fails fast,
+    /// offline, non-retriable. `start_paused` makes any retry backoff
+    /// instantaneous should the error text ever classify as retriable.
+    #[tokio::test(start_paused = true)]
+    async fn test_run_repo_review_llm_failure_lands_visible_fallbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for i in 0..4 {
+            std::fs::write(src.join(format!("m{i}.rs")), format!("pub fn f{i}() -> u8 {{ {i} }}\n")).unwrap();
+        }
+        let root_str = root.to_str().unwrap();
+        let scanner = crate::repo::RepoScanner::new(root_str);
+        let entries = scanner.scan().unwrap();
+        assert_eq!(entries.len(), 4);
+
+        let llm_configs = vec![LLMConfig {
+            provider: "openai".to_string(),
+            model: "unreachable-model".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: "http://127.0.0.1:1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        }];
+        let client = crate::llm::client::LLMClient::new();
+
+        let output = run_repo_review(&client, &llm_configs, root_str, &entries, None, "test-rr", None)
+            .await
+            .unwrap();
+
+        // 6 static + architecture + code_quality: nothing swallowed.
+        assert_eq!(output.overview.total_experts, 8);
+        let weight_sum: u32 = output.expert_scores.iter().map(|s| s.weight as u32).sum();
+        assert_eq!(weight_sum, 100);
+
+        let arch = output
+            .expert_scores
+            .iter()
+            .find(|s| s.name == "architecture")
+            .expect("architecture expert must appear in the report");
+        assert!(arch.fallback, "failed LLM call must be flagged as fallback");
+        assert!(arch.summary.contains("unavailable"));
+
+        let cq = output
+            .expert_scores
+            .iter()
+            .find(|s| s.name == "code_quality")
+            .expect("code_quality expert must appear in the report");
+        assert!(cq.fallback, "failed LLM call must be flagged as fallback");
+
+        // Lead summary slot carries the fallback reason, not `None`.
+        let lead = output
+            .overview
+            .lead_summary
+            .as_deref()
+            .expect("lead_summary must not be swallowed");
+        assert!(lead.contains("unavailable"));
+
+        // The fallback flags survive JSON serialisation — the contract a
+        // consumer uses to tell whether LLM experts genuinely scored.
+        let json = serde_json::to_value(&output).unwrap();
+        let arch_json = json["expert_scores"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "architecture")
+            .unwrap()
+            .clone();
+        assert_eq!(arch_json["fallback"], serde_json::json!(true));
+        assert_eq!(arch_json["score"], serde_json::json!(experts::LLM_FALLBACK_SCORE));
     }
 }

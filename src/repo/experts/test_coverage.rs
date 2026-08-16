@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use super::facts::is_test_file;
 use super::{ExpertScore, RepoContext, RepoExpert, ScoreItem};
 use crate::llm::client::LLMClient;
 
@@ -53,28 +54,6 @@ impl RepoExpert for TestCoverage {
         let mut test_loc: usize = 0;
         let mut test_file_count: usize = 0;
         let mut has_inline_tests = false;
-
-        // Test file naming conventions across languages:
-        //   Rust:    *_test.rs, tests/*.rs
-        //   Python:  test_*.py, *_test.py, tests/*.py
-        //   JS/TS:   *.test.js, *.spec.js, __tests__/*.js
-        //   Go:      *_test.go
-        //   Java:    *Test.java, src/test/*
-        let is_test_file = |name: &str, path: &str| -> bool {
-            name.ends_with("_test.rs")
-                || name.ends_with("_test.py")
-                || name.starts_with("test_")
-                || name.ends_with(".test.js")
-                || name.ends_with(".spec.js")
-                || name.ends_with(".test.ts")
-                || name.ends_with(".spec.ts")
-                || name.ends_with("_test.go")
-                || name.ends_with("Test.java")
-                || path.contains("/tests/")
-                || path.contains("__tests__")
-                || path.contains("/test/")
-                || path.contains("/spec/")
-        };
 
         for entry in all_files {
             let content = match std::fs::read_to_string(&entry.path) {

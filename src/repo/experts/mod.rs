@@ -6,7 +6,8 @@
 //! LLM configurations. Submodules supply concrete implementations:
 //! `static_experts` for synchronous rule checks, `llm_experts` for
 //! AI-powered analysis, `aggregator` for merging results, `chunk` for
-//! splitting large repos, and `context` for building expert context.
+//! splitting large repos, `context` for building expert context, and
+//! `facts` for deterministic repository facts injected into prompts.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ use async_trait::async_trait;
 pub mod aggregator;
 pub mod chunk;
 pub mod context;
+pub mod facts;
 pub mod llm_experts;
 pub mod static_experts;
 pub mod test_coverage;

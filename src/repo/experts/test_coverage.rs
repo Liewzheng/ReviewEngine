@@ -208,14 +208,18 @@ impl RepoExpert for TestCoverage {
 /// Whether a file is a CI configuration that runs tests.
 ///
 /// A file is a CI candidate when its path matches a well-known CI location
-/// (`.gitlab-ci.yml`, `.github/workflows/`, `Jenkinsfile`), or when it is a
-/// YAML file whose content mentions both "test" and "script". Either way the
-/// content must mention "test". The file is read at most once.
+/// (`.gitlab-ci.yml`, `.github/workflows/`, `.travis.yml`,
+/// `.circleci/config.yml`, `azure-pipelines.yml`, `Jenkinsfile`), or when it
+/// is a YAML file whose content mentions both "test" and "script". Either
+/// way the content must mention "test". The file is read at most once.
 fn is_ci_test_file(path: &str) -> bool {
     let content = std::fs::read_to_string(path).ok();
-    // Accept both .gitlab-ci.yml and ./ci/some.yaml patterns
+    // Accept both well-known CI paths and ./ci/some.yaml patterns
     let is_ci = path.contains(".gitlab-ci.yml")
         || path.contains(".github/workflows/")
+        || path.contains(".travis.yml")
+        || path.contains(".circleci/config.yml")
+        || path.contains("azure-pipelines.yml")
         || path.contains("Jenkinsfile")
         || (path.ends_with(".yaml") || path.ends_with(".yml"))
             && content.as_deref().map_or(false, |c| c.contains("test"))
@@ -264,5 +268,53 @@ mod tests {
         // But content without "test" is still rejected.
         let path = write_file(&dir, ".github/workflows/ci.yml", "on: push\njobs: {}\n");
         assert!(!is_ci_test_file(&path));
+    }
+
+    #[test]
+    fn travis_circleci_azure_paths_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, ".travis.yml", "script:\n  - cargo test\n");
+        assert!(is_ci_test_file(&path), ".travis.yml should be a CI path");
+        let path = write_file(&dir, ".circleci/config.yml", "steps:\n  - run: cargo test\n");
+        assert!(is_ci_test_file(&path), ".circleci/config.yml should be a CI path");
+        let path = write_file(&dir, "azure-pipelines.yml", "steps:\n  - script: cargo test\n");
+        assert!(is_ci_test_file(&path), "azure-pipelines.yml should be a CI path");
+    }
+
+    /// The new CI paths keep the existing semantics: content must still
+    /// mention "test", otherwise the file is not a CI *test* file.
+    #[test]
+    fn new_ci_paths_still_require_test_in_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, ".travis.yml", "script:\n  - cargo build\n");
+        assert!(!is_ci_test_file(&path));
+        let path = write_file(&dir, ".circleci/config.yml", "jobs:\n  build:\n    steps: []\n");
+        assert!(!is_ci_test_file(&path));
+        let path = write_file(&dir, "azure-pipelines.yml", "steps:\n  - task: Publish@1\n");
+        assert!(!is_ci_test_file(&path));
+    }
+
+    /// End-to-end regression (feedback B): a `.gitlab-ci.yml` with a test
+    /// step must survive the scanner's dotfile filter (i.e. appear in the
+    /// scan entries) and then be judged a CI test file.
+    #[test]
+    fn scanned_gitlab_ci_yml_is_detected_as_ci_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["init", "--initial-branch=main"])
+            .status()
+            .expect("git init failed to run");
+        assert!(status.success());
+        std::fs::write(dir.path().join(".gitlab-ci.yml"), "stages:\n  - test\n").unwrap();
+
+        let scanner = crate::repo::RepoScanner::new(dir.path().to_str().unwrap());
+        let entries = scanner.scan().unwrap();
+        let ci = entries
+            .iter()
+            .find(|e| e.path.ends_with(".gitlab-ci.yml"))
+            .expect(".gitlab-ci.yml should be in scan entries");
+        assert!(is_ci_test_file(&ci.path));
     }
 }

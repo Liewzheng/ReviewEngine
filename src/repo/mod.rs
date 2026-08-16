@@ -201,6 +201,13 @@ impl RepoScanner {
                 }
 
                 let abs = self.root.join(&rel);
+                // The worktree is the source of truth: `git ls-files
+                // --cached` reads the index, which still lists files deleted
+                // from the worktree but not yet staged (`rm` without
+                // `git rm`). Skip anything absent on disk.
+                if !abs.exists() {
+                    continue;
+                }
                 if abs.is_dir() {
                     continue;
                 }
@@ -263,12 +270,16 @@ impl RepoScanner {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let path_str = path.to_string_lossy().to_string();
 
-        // Skip hidden files, but keep common config files
+        // Skip hidden files, but keep common config files — including CI
+        // configs (`.gitlab-ci.yml`, `.travis.yml`), which the test-coverage
+        // expert inspects for CI test steps.
         if name.starts_with('.')
             && name != ".gitignore"
             && name != ".editorconfig"
             && name != ".rustfmt.toml"
             && name != ".clippy.toml"
+            && name != ".gitlab-ci.yml"
+            && name != ".travis.yml"
         {
             return None;
         }
@@ -289,13 +300,13 @@ impl RepoScanner {
             || path_str.contains("/generated/")
             || path_str.contains("/review_reports/");
 
-        // Count lines and detect generated markers in content
-        let loc = if let Some(content) = std::fs::read_to_string(path).ok() {
-            is_generated = is_generated || self.is_generated_content(&content);
-            content.lines().count()
-        } else {
-            0
-        };
+        // Count lines and detect generated markers in content. A file that
+        // cannot be read (e.g. deleted from the worktree after enumeration,
+        // or an unreadable permission) is skipped entirely instead of being
+        // reported as a phantom 0-LOC entry.
+        let content = std::fs::read_to_string(path).ok()?;
+        is_generated = is_generated || self.is_generated_content(&content);
+        let loc = content.lines().count();
 
         Some(FileEntry {
             path: path_str,
@@ -428,6 +439,20 @@ mod tests {
         run(&["init", "--initial-branch=main"]);
         run(&["config", "user.email", "test@example.com"]);
         run(&["config", "user.name", "Test User"]);
+    }
+
+    fn commit_all(path: &Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git command {:?} failed", args);
+        };
+        run(&["add", "-A"]);
+        run(&["commit", "-m", "test commit"]);
     }
 
     #[test]
@@ -638,5 +663,106 @@ mod tests {
             err.to_string().contains("Repository path does not exist"),
             "unexpected error: {err:?}"
         );
+    }
+
+    /// Regression (feedback A): `git ls-files --cached` reads the index, so a
+    /// file deleted from the worktree but not yet staged (`rm` without
+    /// `git rm`) was scanned as a phantom 0-LOC entry. The worktree is the
+    /// source of truth — the file must not appear in the scan results.
+    #[test]
+    fn scan_skips_file_deleted_from_worktree_but_still_in_index() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("kept.rs"), "fn kept() {}\n").unwrap();
+        std::fs::write(dir.path().join("gone.rs"), "fn gone() {}\n").unwrap();
+        commit_all(dir.path());
+
+        // Delete from the worktree only; the index still lists the file.
+        std::fs::remove_file(dir.path().join("gone.rs")).unwrap();
+
+        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
+        let entries = scanner.scan().unwrap();
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+
+        assert!(
+            paths.iter().any(|p| p.ends_with("kept.rs")),
+            "kept.rs should be scanned: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with("gone.rs")),
+            "gone.rs is deleted from the worktree and must not be scanned: {paths:?}"
+        );
+    }
+
+    /// Regression (feedback B): CI configs were dropped by the dotfile
+    /// filter and never reached the scan results. `.gitlab-ci.yml` and
+    /// `.travis.yml` are whitelisted, and dot-directories like `.circleci/`
+    /// are descended into, so their configs become scan entries.
+    #[test]
+    fn scan_includes_ci_config_files() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join(".gitlab-ci.yml"), "stages:\n  - test\n").unwrap();
+        std::fs::write(dir.path().join(".travis.yml"), "script: cargo test\n").unwrap();
+        std::fs::create_dir_all(dir.path().join(".circleci")).unwrap();
+        std::fs::write(
+            dir.path().join(".circleci/config.yml"),
+            "jobs:\n  test:\n    steps: []\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join(".hidden.rs"), "fn hidden() {}\n").unwrap();
+
+        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
+        let entries = scanner.scan().unwrap();
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+
+        assert!(
+            paths.iter().any(|p| p.ends_with(".gitlab-ci.yml")),
+            ".gitlab-ci.yml should be scanned: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with(".travis.yml")),
+            ".travis.yml should be scanned: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with(".circleci/config.yml")),
+            ".circleci/config.yml should be scanned: {paths:?}"
+        );
+        assert!(
+            !paths.iter().any(|p| p.ends_with(".hidden.rs")),
+            "non-whitelisted dotfiles stay excluded: {paths:?}"
+        );
+    }
+
+    /// Same as above for the non-Git fallback: `scan_dir` must descend into
+    /// dot-directories (only names in `ignore_patterns` are pruned).
+    #[test]
+    fn scan_dir_descends_into_dot_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".circleci")).unwrap();
+        std::fs::write(dir.path().join(".circleci/config.yml"), "jobs: {}\n").unwrap();
+        std::fs::write(dir.path().join(".gitlab-ci.yml"), "stages:\n  - test\n").unwrap();
+
+        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
+        let entries = scanner.scan().unwrap();
+        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
+
+        assert!(
+            paths.iter().any(|p| p.ends_with(".circleci/config.yml")),
+            ".circleci/config.yml should be scanned: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.ends_with(".gitlab-ci.yml")),
+            ".gitlab-ci.yml should be scanned: {paths:?}"
+        );
+    }
+
+    /// Contract: an unreadable/missing file yields `None`, not a 0-LOC entry.
+    #[test]
+    fn classify_file_returns_none_for_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ghost.rs"); // never created on disk
+        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
+        assert!(scanner.classify_file(&path).is_none());
     }
 }

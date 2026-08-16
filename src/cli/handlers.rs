@@ -1011,6 +1011,9 @@ pub async fn run_repo_review_local_or_enhanced(
 
     // The verification pass only runs on the LLM-enhanced path.
     let verification_enabled = !llm_configs.is_empty() && config.report.verification_pass;
+    // Captured before `config` is shadowed by the Arc below: the unified
+    // output sink double-writes a timestamped copy into the reports dir.
+    let output_dir = config.output_dir.clone();
     let config = Some(std::sync::Arc::new(config.clone()));
     let result = if llm_configs.is_empty() {
         // Local-only analysis (no LLM)
@@ -1033,10 +1036,10 @@ pub async fn run_repo_review_local_or_enhanced(
     };
 
     let text = review_engine::actions::repo_review::render_repo_review_output(&result, format, verification_enabled)?;
-    match output {
-        Some(path) => std::fs::write(path, &text)?,
-        None => println!("{}", text),
-    }
+    // Unified sink, same as the MR review paths: no --output prints to stdout
+    // AND saves a timestamped copy into the reports dir (default runs land on
+    // disk); --output writes the explicit file plus the same timestamped copy.
+    write_report_text(&text, format, output, Some(&output_dir))?;
     Ok(())
 }
 
@@ -1124,6 +1127,65 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
     })
 }
 
+/// Persist `text` as a timestamped report under `output_dir` (the default
+/// reports directory) and return the file path. Shared by both `--output`
+/// branches so every run — explicit file or stdout — leaves a copy in the
+/// reports directory.
+fn save_timestamped_report(text: &str, format: &str, output_dir: &str) -> Result<PathBuf> {
+    let dir = std::path::Path::new(output_dir);
+    // Validate output_dir to prevent directory traversal
+    for component in dir.components() {
+        if let std::path::Component::ParentDir = component {
+            anyhow::bail!("output_dir must not contain '..'");
+        }
+    }
+    if !dir.exists() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let ext = match format {
+        "markdown" | "aggregated-markdown" => "md",
+        _ => "json",
+    };
+    let now = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("review_{}.{}", now, ext);
+    let filepath = dir.join(&filename);
+    std::fs::write(&filepath, text)?;
+    Ok(filepath)
+}
+
+/// Unified sink for rendered report text.
+///
+/// * `--output <file>`: write the explicit file (path validated against `..`
+///   traversal) AND the same content to a timestamped file under
+///   `output_dir`.
+/// * no `--output`: print to stdout, plus the same timestamped copy.
+///
+/// The timestamped copy is skipped only when `output_dir` is `None`.
+fn write_report_text(text: &str, format: &str, output: &Option<String>, output_dir: Option<&str>) -> Result<()> {
+    match output {
+        Some(path) => {
+            // Explicit --output: validate path to prevent directory traversal
+            let path = std::path::Path::new(path);
+            for component in path.components() {
+                if let std::path::Component::ParentDir = component {
+                    anyhow::bail!("--output path must not contain '..'");
+                }
+            }
+            std::fs::create_dir_all(path.parent().unwrap_or(path))?;
+            std::fs::write(path, text)?;
+        }
+        None => {
+            // No explicit output: print to stdout
+            println!("{}", text);
+        }
+    }
+    if let Some(dir) = output_dir {
+        let filepath = save_timestamped_report(text, format, dir)?;
+        eprintln!("Report saved to {}", filepath.display());
+    }
+    Ok(())
+}
+
 fn write_output(
     result: &ReviewOutput,
     format: &str,
@@ -1140,47 +1202,7 @@ fn write_output(
         format_output(result, format, verification_enabled)?
     };
 
-    match output {
-        Some(path) => {
-            // Explicit --output: validate path to prevent directory traversal
-            let path = std::path::Path::new(path);
-            for component in path.components() {
-                if let std::path::Component::ParentDir = component {
-                    anyhow::bail!("--output path must not contain '..'");
-                }
-            }
-            std::fs::create_dir_all(path.parent().unwrap_or(path))?;
-            std::fs::write(path, &text)?;
-        }
-        None => {
-            // No explicit output: print to stdout
-            println!("{}", text);
-            // And save to default directory if configured
-            if let Some(dir) = output_dir {
-                let dir = std::path::Path::new(dir);
-                // Validate output_dir to prevent directory traversal
-                for component in dir.components() {
-                    if let std::path::Component::ParentDir = component {
-                        anyhow::bail!("output_dir must not contain '..'");
-                    }
-                }
-                if !dir.exists() {
-                    std::fs::create_dir_all(dir)?;
-                }
-                let ext = match format {
-                    "markdown" | "aggregated-markdown" => "md",
-                    _ => "json",
-                };
-                let now = chrono::Local::now().format("%Y%m%d_%H%M%S");
-                let filename = format!("review_{}.{}", now, ext);
-                let filepath = dir.join(&filename);
-                std::fs::write(&filepath, &text)?;
-                eprintln!("Report saved to {}", filepath.display());
-            }
-        } // None
-    } // match output
-
-    Ok(())
+    write_report_text(&text, format, output, output_dir)
 }
 
 /// Watch a config file for changes and log a warning when modified.
@@ -2015,5 +2037,159 @@ mod tests {
         assert!(out.contains("\"consolidated\""));
         assert!(out.contains("\"score\": 72"));
         assert!(out.contains("\"risk_level\": \"Medium\""));
+    }
+}
+
+#[cfg(test)]
+mod report_output_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use tempfile::tempdir;
+
+    fn test_config(output_dir: &str) -> AppConfig {
+        AppConfig {
+            project: None,
+            report: Default::default(),
+            review_experts: Default::default(),
+            commands: Default::default(),
+            scoring: Default::default(),
+            llm: vec![],
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            output_dir: output_dir.to_string(),
+            diff: Default::default(),
+            rate_limit: Default::default(),
+            languages: Default::default(),
+        }
+    }
+
+    fn saved_files(dir: &Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.path()).collect();
+        files.sort();
+        files
+    }
+
+    #[test]
+    fn write_report_text_output_also_saves_timestamped_copy() {
+        let dir = tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        let reports_str = reports.to_string_lossy().to_string();
+        let explicit = dir.path().join("custom.md");
+        write_report_text(
+            "# hello",
+            "markdown",
+            &Some(explicit.to_string_lossy().to_string()),
+            Some(&reports_str),
+        )
+        .unwrap();
+
+        assert_eq!(std::fs::read_to_string(&explicit).unwrap(), "# hello");
+        let saved = saved_files(&reports);
+        assert_eq!(saved.len(), 1, "exactly one timestamped copy: {saved:?}");
+        let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("review_") && name.ends_with(".md"), "{name}");
+        assert_eq!(
+            std::fs::read_to_string(&saved[0]).unwrap(),
+            "# hello",
+            "timestamped copy holds the same content as the --output file"
+        );
+    }
+
+    #[test]
+    fn write_report_text_default_run_saves_timestamped_copy() {
+        let dir = tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        let reports_str = reports.to_string_lossy().to_string();
+        write_report_text("{\"ok\":true}", "json", &None, Some(&reports_str)).unwrap();
+        let saved = saved_files(&reports);
+        assert_eq!(saved.len(), 1, "{saved:?}");
+        let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("review_") && name.ends_with(".json"), "{name}");
+        assert_eq!(std::fs::read_to_string(&saved[0]).unwrap(), "{\"ok\":true}");
+    }
+
+    #[test]
+    fn write_report_text_without_output_dir_writes_only_explicit_file() {
+        let dir = tempdir().unwrap();
+        let explicit = dir.path().join("only.md");
+        write_report_text("x", "markdown", &Some(explicit.to_string_lossy().to_string()), None).unwrap();
+        assert_eq!(saved_files(dir.path()), vec![explicit]);
+    }
+
+    #[test]
+    fn write_report_text_rejects_parent_dir_traversal() {
+        let dir = tempdir().unwrap();
+        let reports_str = dir.path().join("reports").to_string_lossy().to_string();
+        let err = write_report_text("x", "markdown", &Some("../evil.md".to_string()), Some(&reports_str)).unwrap_err();
+        assert!(err.to_string().contains("must not contain '..'"), "{err}");
+        let err = write_report_text("x", "markdown", &None, Some("../evil-reports")).unwrap_err();
+        assert!(err.to_string().contains("must not contain '..'"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn repo_review_default_run_lands_on_disk() {
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let reports = tempdir().unwrap();
+        let config = test_config(&reports.path().to_string_lossy());
+
+        run_repo_review_local_or_enhanced(
+            repo.path().to_str().unwrap(),
+            &[],
+            "json",
+            &None,
+            None,
+            "test-rr-default",
+            &config,
+        )
+        .await
+        .unwrap();
+
+        let saved = saved_files(reports.path());
+        assert_eq!(
+            saved.len(),
+            1,
+            "default run must write one timestamped report: {saved:?}"
+        );
+        let name = saved[0].file_name().unwrap().to_string_lossy().to_string();
+        assert!(name.starts_with("review_") && name.ends_with(".json"), "{name}");
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&saved[0]).unwrap()).unwrap();
+        assert!(value["overview"]["health_score"].is_number());
+        assert!(
+            value["metadata"]["tree_hash"].is_string(),
+            "provenance metadata must be in the saved report"
+        );
+    }
+
+    #[tokio::test]
+    async fn repo_review_output_double_writes_timestamped_copy() {
+        let repo = tempdir().unwrap();
+        std::fs::write(repo.path().join("main.rs"), "fn main() {}\n").unwrap();
+        let out_root = tempdir().unwrap();
+        let explicit = out_root.path().join("report.json");
+        let reports = out_root.path().join("reports");
+        let config = test_config(&reports.to_string_lossy());
+        let output = Some(explicit.to_string_lossy().to_string());
+
+        run_repo_review_local_or_enhanced(
+            repo.path().to_str().unwrap(),
+            &[],
+            "json",
+            &output,
+            None,
+            "test-rr-double",
+            &config,
+        )
+        .await
+        .unwrap();
+
+        assert!(explicit.exists(), "--output file must be written");
+        let saved = saved_files(&reports);
+        assert_eq!(saved.len(), 1, "--output must also drop a timestamped copy: {saved:?}");
+        assert_eq!(
+            std::fs::read_to_string(&saved[0]).unwrap(),
+            std::fs::read_to_string(&explicit).unwrap(),
+            "timestamped copy and --output file hold identical content"
+        );
     }
 }

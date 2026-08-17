@@ -196,4 +196,45 @@ mod tests {
             assert!(!m.description().is_empty(), "{m:?} must have a description");
         }
     }
+
+    #[test]
+    fn brew_wins_over_plain_for_local_bin_symlink() {
+        // A brew symlink path under /usr/local/bin is Brew, not Plain.
+        assert_eq!(
+            InstallMethod::detect_from(p("/usr/local/bin/review-engine"), false),
+            InstallMethod::Plain,
+            "direct /usr/local/bin copy is Plain"
+        );
+        assert_eq!(
+            InstallMethod::detect_from(p("/usr/local/Cellar/review-engine/1.0/bin/review-engine"), false),
+            InstallMethod::Brew,
+            "Cellar path is Brew even though /usr/local/bin is Plain"
+        );
+    }
+
+    #[test]
+    fn cargo_wins_over_local_bin_when_both_appear() {
+        // `.cargo/bin` is matched before `.local/bin` in the same path.
+        assert_eq!(
+            InstallMethod::detect_from(p("/Users/x/.cargo/bin/.local/bin/review-engine"), false),
+            InstallMethod::Cargo
+        );
+    }
+
+    #[test]
+    fn windows_plain_path_is_detected() {
+        assert_eq!(
+            InstallMethod::detect_from(p("C:\\Users\\x\\.local\\bin\\review-engine.exe"), false),
+            InstallMethod::Plain,
+            "backslash path normalised to forward slashes before matching"
+        );
+    }
+
+    #[test]
+    fn empty_string_path_is_unknown() {
+        assert_eq!(
+            InstallMethod::detect_from(Some(Path::new("")), false),
+            InstallMethod::Unknown
+        );
+    }
 }

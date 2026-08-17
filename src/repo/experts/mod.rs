@@ -259,3 +259,120 @@ pub fn weighted_total(scores: &[ExpertScore]) -> (u8, crate::models::RiskLevel) 
 
     (score, risk)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::RiskLevel;
+
+    fn score(name: &str, score: u8, weight: u8) -> ExpertScore {
+        ExpertScore {
+            expert_name: name.to_string(),
+            weight,
+            score,
+            summary: String::new(),
+            details: Vec::new(),
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
+        }
+    }
+
+    #[test]
+    fn weighted_total_blends_scores_by_weight() {
+        // 50/50 split of 90 and 10 → exactly 50.
+        let (score, risk) = weighted_total(&[score("a", 90, 50), score("b", 10, 50)]);
+        assert_eq!(score, 50);
+        assert_eq!(risk, RiskLevel::High, "50 falls in 41–60 High band");
+    }
+
+    #[test]
+    fn weighted_total_high_score_is_healthy() {
+        let (score, risk) = weighted_total(&[score("a", 100, 100)]);
+        assert_eq!(score, 100);
+        assert_eq!(risk, RiskLevel::Healthy);
+    }
+
+    #[test]
+    fn weighted_total_single_expert_returns_its_score() {
+        let (score, risk) = weighted_total(&[score("a", 30, 20)]);
+        assert_eq!(score, 30);
+        assert_eq!(risk, RiskLevel::Critical, "30 ≤ 40 → Critical");
+    }
+
+    #[test]
+    fn weighted_total_uneven_weights_favor_heavier_expert() {
+        // (90, weight 80) + (10, weight 20) → 0.8*90 + 0.2*10 = 74.
+        let (score, risk) = weighted_total(&[score("a", 90, 80), score("b", 10, 20)]);
+        assert_eq!(score, 74);
+        assert_eq!(risk, RiskLevel::Medium, "74 falls in 61–80 Medium band");
+    }
+
+    #[test]
+    fn weighted_total_empty_scores_returns_zero_critical() {
+        let (score, risk) = weighted_total(&[]);
+        assert_eq!(score, 0);
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn weighted_total_zero_total_weight_returns_zero() {
+        let (score, risk) = weighted_total(&[score("a", 80, 0), score("b", 90, 0)]);
+        assert_eq!(score, 0);
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn weighted_total_rounds_half_up() {
+        // (95, w50) + (90, w50) = 92.5 → rounds to 93.
+        let (score, _) = weighted_total(&[score("a", 95, 50), score("b", 90, 50)]);
+        assert_eq!(score, 93);
+    }
+
+    #[test]
+    fn score_item_defaults_are_empty_and_fileless() {
+        let item = ScoreItem::default();
+        assert_eq!(item.severity, "");
+        assert_eq!(item.message, "");
+        assert_eq!(item.file, None);
+        assert_eq!(item.confidence, None);
+    }
+
+    #[test]
+    fn expert_score_fields_are_preserved_through_clone() {
+        let details = vec![ScoreItem {
+            severity: "high".to_string(),
+            message: "missing bounds check".to_string(),
+            ..Default::default()
+        }];
+        let original = ExpertScore {
+            expert_name: "security".to_string(),
+            weight: 15,
+            score: 42,
+            summary: "found 1 issue".to_string(),
+            details,
+            fallback: true,
+            evaluated_loc: Some(1234),
+            samples: Some(vec![40, 45]),
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.expert_name, "security");
+        assert_eq!(cloned.weight, 15);
+        assert_eq!(cloned.score, 42);
+        assert!(cloned.fallback);
+        assert_eq!(cloned.evaluated_loc, Some(1234));
+        assert_eq!(cloned.samples, Some(vec![40, 45]));
+        assert_eq!(cloned.details[0].severity, "high");
+        assert_eq!(cloned.details[0].message, "missing bounds check");
+    }
+
+    #[test]
+    fn weighted_total_ignores_fallback_scores_only_in_details_not_math() {
+        // Fallback flag does not change the math: both scores count.
+        let mut a = score("a", 100, 50);
+        a.fallback = true;
+        let (score, risk) = weighted_total(&[a, score("b", 50, 50)]);
+        assert_eq!(score, 75);
+        assert_eq!(risk, RiskLevel::Medium);
+    }
+}

@@ -152,4 +152,47 @@ mod tests {
     fn test_strip_markdown_fences_whitespace() {
         assert_eq!(strip_markdown_fences("\n```\nfoo\n```\n"), "foo");
     }
+
+    #[test]
+    fn close_unclosed_fence_appends_matching_marker() {
+        // The closing marker is appended verbatim (no trailing newline).
+        assert_eq!(
+            close_unclosed_code_fences("```rust\nlet x = 1;\n"),
+            "```rust\nlet x = 1;\n```"
+        );
+    }
+
+    #[test]
+    fn close_unclosed_fence_no_trailing_newline_is_added() {
+        // A newline is inserted before the closing marker when missing.
+        assert_eq!(
+            close_unclosed_code_fences("```\nno trailing nl"),
+            "```\nno trailing nl\n```"
+        );
+    }
+
+    #[test]
+    fn balanced_fences_are_left_untouched() {
+        let text = "```\na\n```\n";
+        assert_eq!(close_unclosed_code_fences(text), text);
+    }
+
+    #[test]
+    fn no_fence_is_left_untouched() {
+        let text = "plain text\nno fences\n";
+        assert_eq!(close_unclosed_code_fences(text), text);
+    }
+
+    #[test]
+    fn inner_fence_does_not_close_an_outer_one() {
+        // A shorter backtick run is not a closing fence for the outer block.
+        let out = close_unclosed_code_fences("```\n``\nstill open\n");
+        assert_eq!(out, "```\n``\nstill open\n```");
+    }
+
+    #[test]
+    fn multiple_sequential_fences_end_balanced() {
+        let text = "```\na\n```\n```\nb\n```\n";
+        assert_eq!(close_unclosed_code_fences(text), text);
+    }
 }

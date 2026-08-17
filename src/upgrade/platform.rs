@@ -161,4 +161,59 @@ mod tests {
         assert!(win.is_windows());
         assert!(!mac.is_windows());
     }
+
+    #[test]
+    fn unsupported_platform_is_a_hard_error() {
+        assert!(asset_spec_for("freebsd", "x86_64").is_err());
+        assert!(asset_spec_for("macos", "riscv64").is_err());
+        assert!(asset_spec_for("linux", "s390x").is_err());
+        let err = asset_spec_for("plan9", "x86_64").unwrap_err().to_string();
+        assert!(
+            err.contains("no release asset"),
+            "error should name the platform, got: {err}"
+        );
+    }
+
+    #[test]
+    fn asset_name_uses_prefix_triple_and_archive_ext() {
+        let spec = asset_spec_for("linux", "x86_64").unwrap();
+        assert_eq!(
+            spec.asset_name("review-engine"),
+            "review-engine-x86_64-unknown-linux-gnu.tar.gz"
+        );
+        let win = asset_spec_for("windows", "x86_64").unwrap();
+        assert_eq!(
+            win.asset_name("review-engine"),
+            "review-engine-x86_64-pc-windows-msvc.zip"
+        );
+    }
+
+    #[test]
+    fn checksum_name_has_no_archive_extension() {
+        let spec = asset_spec_for("macos", "aarch64").unwrap();
+        assert_eq!(
+            spec.checksum_name("review-engine"),
+            "review-engine-aarch64-apple-darwin.sha256"
+        );
+        // Checksum sidecar must NOT carry the .tar.gz / .zip archive extension.
+        assert!(!spec.checksum_name("review-engine").contains("tar.gz"));
+        assert!(!spec.checksum_name("review-engine").contains(".zip"));
+    }
+
+    #[test]
+    fn is_windows_reflects_the_archive_format() {
+        assert!(asset_spec_for("windows", "x86_64").unwrap().is_windows());
+        assert!(asset_spec_for("windows", "aarch64").unwrap().is_windows());
+        assert!(!asset_spec_for("linux", "x86_64").unwrap().is_windows());
+        assert!(!asset_spec_for("macos", "aarch64").unwrap().is_windows());
+    }
+
+    #[test]
+    fn asset_spec_is_copy_and_equatable() {
+        let a = asset_spec_for("linux", "x86_64").unwrap();
+        let b = a;
+        assert_eq!(a, b, "Copy + PartialEq");
+        let c = asset_spec_for("macos", "x86_64").unwrap();
+        assert_ne!(a, c);
+    }
 }

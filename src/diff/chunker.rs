@@ -450,4 +450,40 @@ mod tests {
         assert!(chunks.iter().all(|c| c.files.len() == 1 && c.files[0].hunks.len() == 1));
         assert_eq!(chunks[0].total_chunks, 3);
     }
+
+    #[test]
+    fn test_chunk_by_files_respects_token_budget() {
+        // A 2-line file is larger than a 1-line file; with a tight budget the
+        // larger one must not be split into zero files.
+        let big = make_simple_file("big.rs", vec!["+line one", "+line two", "+line three"]);
+        let chunks = chunk_by_files(std::slice::from_ref(&big), 4);
+        assert!(!chunks.is_empty(), "an oversized file still yields at least one chunk");
+        assert_eq!(chunks[0].files.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_by_hunks_empty_input() {
+        let chunks = chunk_by_hunks(&[], 1000);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn test_chunk_by_hunks_groups_all_hunks() {
+        let file = make_multi_hunk_file("a.rs", vec![vec!["+1"], vec!["+2"]]);
+        let chunks = chunk_by_hunks(&[file], 1000);
+        assert_eq!(chunks.len(), 1, "hunks of one file group into a single chunk");
+        assert_eq!(chunks[0].files.len(), 1);
+    }
+
+    #[test]
+    fn test_chunk_total_chunks_is_consistent() {
+        let files = vec![
+            make_simple_file("a.rs", vec!["+a"]),
+            make_simple_file("b.rs", vec!["+b"]),
+            make_simple_file("c.rs", vec!["+c"]),
+        ];
+        let chunks = chunk_by_files(&files, 1000);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].total_chunks, 1, "single chunk reports total_chunks=1");
+    }
 }

@@ -369,4 +369,53 @@ mod tests {
         assert_eq!(legacy, stateful);
         assert!(stateful.contains("no findings were dropped (7 checked)"));
     }
+
+    #[test]
+    fn capitalize_uppercases_first_char_preserving_rest() {
+        assert_eq!(capitalize("hello"), "Hello");
+        assert_eq!(capitalize("hello world"), "Hello world");
+        assert_eq!(capitalize("ALREADY"), "ALREADY");
+        assert_eq!(capitalize(""), "");
+    }
+
+    #[test]
+    fn capitalize_handles_non_ascii_first_char() {
+        assert_eq!(capitalize("éclair"), "Éclair");
+        assert_eq!(capitalize("ßeta"), "SSeta", "ß uppercases to SS");
+    }
+
+    #[test]
+    fn severity_label_maps_every_variant() {
+        use crate::models::Severity;
+        assert_eq!(severity_label(&Severity::Critical), "CRITICAL");
+        assert_eq!(severity_label(&Severity::High), "HIGH");
+        assert_eq!(severity_label(&Severity::Medium), "MEDIUM");
+        assert_eq!(severity_label(&Severity::Low), "LOW");
+        assert_eq!(severity_label(&Severity::Note), "NOTE");
+    }
+
+    #[test]
+    fn render_expert_markdown_lists_finding_lines() {
+        let findings = vec![
+            make_test_finding(Severity::High, "unsafe unwrap", "src/main.rs"),
+            make_test_finding(Severity::Low, "unused import", "src/lib.rs"),
+        ];
+        let md = render_expert_markdown("security", &findings);
+        assert!(md.contains("## Security Review"));
+        assert!(md.contains("unsafe unwrap"));
+        assert!(md.contains("unused import"));
+        assert!(md.contains("HIGH"));
+    }
+
+    #[test]
+    fn render_aggregated_markdown_orders_high_before_low() {
+        let findings = vec![
+            make_test_finding(Severity::Low, "low item", "a.rs"),
+            make_test_finding(Severity::High, "high item", "b.rs"),
+        ];
+        let md = render_aggregated_markdown(&findings);
+        let high = md.find("high item").unwrap();
+        let low = md.find("low item").unwrap();
+        assert!(high < low, "High-severity findings must be listed first");
+    }
 }

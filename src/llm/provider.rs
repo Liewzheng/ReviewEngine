@@ -512,4 +512,70 @@ mod tests {
         assert!(registry.get("anthropic").is_some());
         assert_eq!(order, vec!["openai", "anthropic"]);
     }
+
+    #[test]
+    fn openai_body_includes_reasoning_effort_when_set() {
+        let params = CompletionParams {
+            model: "o3-mini".to_string(),
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+            }],
+            max_tokens: 100,
+            temperature: 1.0,
+            reasoning_effort: Some("high".to_string()),
+            disable_thinking: None,
+        };
+        let body = build_openai_compatible_body(&params);
+        assert_eq!(body["reasoning_effort"], "high");
+        // No thinking block when disable_thinking is None.
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn openai_body_omits_reasoning_effort_when_absent() {
+        let params = CompletionParams {
+            model: "gpt-4o".to_string(),
+            messages: vec![],
+            max_tokens: 64,
+            temperature: 0.2,
+            reasoning_effort: None,
+            disable_thinking: None,
+        };
+        let body = build_openai_compatible_body(&params);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["max_tokens"], 64);
+        let temp = body["temperature"].as_f64().unwrap();
+        assert!((temp - 0.2).abs() < 1e-6, "temperature must round-trip, got {temp}");
+    }
+
+    #[test]
+    fn openai_body_messages_preserve_role_and_content() {
+        let params = CompletionParams {
+            model: "m".to_string(),
+            messages: vec![
+                Message {
+                    role: "system".to_string(),
+                    content: "be strict".to_string(),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: "review this".to_string(),
+                },
+            ],
+            max_tokens: 1,
+            temperature: 0.0,
+            reasoning_effort: None,
+            disable_thinking: Some(true),
+        };
+        let body = build_openai_compatible_body(&params);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "be strict");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "review this");
+        assert_eq!(body["thinking"]["type"], "disabled");
+    }
 }

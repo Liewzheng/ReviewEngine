@@ -148,4 +148,36 @@ mod tests {
         assert_eq!(v.to_string(), "1.2.3");
         assert_eq!(v.to_string().parse::<Version>().unwrap(), v);
     }
+
+    #[test]
+    fn version_new_exposes_parts() {
+        let v = Version::new(2, 4, 6);
+        assert_eq!(v.major(), 2);
+        assert_eq!(v.minor(), 4);
+        assert_eq!(v.patch(), 6);
+    }
+
+    #[test]
+    fn version_ordering_across_patch_minor_major() {
+        assert!(Version::new(0, 9, 0) > Version::new(0, 8, 99));
+        assert!(Version::new(1, 0, 0) > Version::new(0, 99, 99));
+        assert!(Version::new(0, 0, 1) < Version::new(0, 0, 2));
+        assert_eq!(
+            Version::new(1, 2, 3).cmp(&Version::new(1, 2, 3)),
+            std::cmp::Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn parse_release_tag_variants() {
+        assert_eq!(Version::parse_release_tag("v1.0.0"), Some(Version::new(1, 0, 0)));
+        assert_eq!(Version::parse_release_tag("1.0.0"), Some(Version::new(1, 0, 0)));
+        assert_eq!(Version::parse_release_tag("v10.20.30"), Some(Version::new(10, 20, 30)));
+        assert_eq!(
+            Version::parse_release_tag("V1.0.0"),
+            None,
+            "uppercase V is not accepted"
+        );
+        assert_eq!(Version::parse_release_tag("v1.0.0+meta"), None);
+    }
 }

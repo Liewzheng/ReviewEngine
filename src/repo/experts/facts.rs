@@ -140,6 +140,7 @@ pub fn compute(entries: &[FileEntry]) -> RepoFacts {
 ///   JS/TS:   `*.test.js`, `*.spec.js`, `*.test.ts`, `*.spec.ts`, `__tests__/*`
 ///   Go:      `*_test.go`
 ///   Java:    `*Test.java`, `src/test/*`
+///   Swift:   `*Tests.swift`, `Tests/*` (SwiftPM)
 pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
     name.ends_with("_test.rs")
         || name.ends_with("_test.py")
@@ -150,7 +151,9 @@ pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
         || name.ends_with(".spec.ts")
         || name.ends_with("_test.go")
         || name.ends_with("Test.java")
+        || name.ends_with("Tests.swift")
         || path.contains("/tests/")
+        || path.contains("/Tests/")
         || path.contains("__tests__")
         || path.contains("/test/")
         || path.contains("/spec/")
@@ -466,5 +469,20 @@ def multi(
   source_files: 7
 "#;
         assert_eq!(facts.to_prompt_block(), expected);
+    }
+
+    #[test]
+    fn is_test_file_recognizes_swiftpm_structure() {
+        // SwiftPM convention: `*Tests.swift` files under the uppercase `Tests/`
+        // directory (e.g. `Tests/FooTests/BarTests.swift`).
+        assert!(is_test_file("BarTests.swift", "Tests/FooTests/BarTests.swift"));
+        assert!(is_test_file("FooTests.swift", "Tests/FooTests/FooTests.swift"));
+        // Scanned paths are absolute, so the `Tests/` directory segment also
+        // flags files regardless of the `Tests.swift` suffix.
+        assert!(is_test_file("FooSpec.swift", "/repo/Tests/FooTests/FooSpec.swift"));
+        // Regular Swift source must not be flagged as a test.
+        assert!(!is_test_file("main.swift", "Sources/main.swift"));
+        // Lowercase `tests/` detection is unchanged (no regression).
+        assert!(is_test_file("helpers.py", "/repo/tests/helpers.py"));
     }
 }

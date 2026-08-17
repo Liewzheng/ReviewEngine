@@ -30,6 +30,7 @@ impl RepoExpert for TestCoverage {
                 && !e.path.ends_with("pyproject.toml")
                 && !e.path.ends_with("setup.py")
                 && !e.path.ends_with("package.json")
+                && !e.path.ends_with("Package.swift")
             {
                 return false;
             }
@@ -41,6 +42,9 @@ impl RepoExpert for TestCoverage {
                     return true;
                 }
                 if c.contains("devDependencies") {
+                    return true;
+                }
+                if c.contains(".testTarget(") || c.contains("testTarget") {
                     return true;
                 }
                 if c.contains("pytest") || c.contains("unittest") {
@@ -298,5 +302,48 @@ mod tests {
             .find(|e| e.path.ends_with(".gitlab-ci.yml"))
             .expect(".gitlab-ci.yml should be in scan entries");
         assert!(is_ci_test_file(&ci.path));
+    }
+
+    /// A SwiftPM `Package.swift` declaring `.testTarget(...)` counts as having
+    /// a test framework configured, so SwiftPM repositories are no longer
+    /// reported with "No test framework configured"/"No tests found".
+    #[tokio::test]
+    async fn package_swift_with_test_target_counts_as_dev_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            &dir,
+            "Package.swift",
+            "// swift-tools-version:5.9\n\
+             import PackageDescription\n\
+             let package = Package(\n\
+             \x20   name: \"Foo\",\n\
+             \x20   targets: [.target(name: \"Foo\"), .testTarget(name: \"FooTests\")]\n\
+             )\n",
+        );
+        let ctx = RepoContext {
+            entries: vec![crate::repo::FileEntry {
+                path,
+                language: "Swift".to_string(),
+                loc: 6,
+                is_binary: false,
+                is_generated: false,
+            }],
+            stats: crate::repo::RepoStats::default(),
+            llm_configs: Vec::new(),
+            config: None,
+            facts_block: None,
+        };
+        let score = TestCoverage
+            .evaluate(&ctx, None)
+            .await
+            .expect("evaluate should not fail");
+        assert!(score.summary.contains("dev-deps=yes"), "summary: {}", score.summary);
+        assert!(
+            !score
+                .details
+                .iter()
+                .any(|d| d.message.contains("No test framework configured")),
+            "should not report a missing test framework"
+        );
     }
 }

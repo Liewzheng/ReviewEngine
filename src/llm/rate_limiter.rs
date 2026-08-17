@@ -155,4 +155,67 @@ mod tests {
         let limiter = RateLimiter::new(10, 0, 60);
         assert!(limiter.acquire(1).await.is_err());
     }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_allows_exactly_rpm_requests_in_window() {
+        let limiter = RateLimiter::new(3, 1000, 60);
+        for _ in 0..3 {
+            limiter.acquire(1).await.unwrap();
+        }
+        // The 4th request must wait for the window to roll.
+        let start = Instant::now();
+        limiter.acquire(1).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_tracks_token_sum_not_just_last_request() {
+        let limiter = RateLimiter::new(10, 100, 60);
+        limiter.acquire(60).await.unwrap();
+        // 60 + 50 = 110 > 100 → must wait for expiry.
+        let start = Instant::now();
+        limiter.acquire(50).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_within_token_budget_passes_immediately() {
+        let limiter = RateLimiter::new(10, 100, 60);
+        let start = Instant::now();
+        limiter.acquire(30).await.unwrap();
+        limiter.acquire(30).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO, "60 <= 100 budget, no wait");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acquire_zero_token_count_still_counts_as_a_request() {
+        let limiter = RateLimiter::new(1, 100, 60);
+        limiter.acquire(0).await.unwrap();
+        // RPM is 1, so the next acquire (even with 0 tokens) must wait.
+        let start = Instant::now();
+        limiter.acquire(0).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_secs(60));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_rollover_after_window_seconds_allows_new_requests() {
+        let limiter = RateLimiter::new(1, 100, 60);
+        limiter.acquire(1).await.unwrap();
+        // Advance the clock past the window; the old entry must be pruned.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let start = Instant::now();
+        limiter.acquire(1).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO, "expired entries must not block");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn window_rollover_also_prunes_token_entries() {
+        let limiter = RateLimiter::new(100, 50, 60);
+        limiter.acquire(40).await.unwrap();
+        // Advance so the token entry expires; a fresh 40-token acquire must pass.
+        tokio::time::advance(Duration::from_secs(61)).await;
+        let start = Instant::now();
+        limiter.acquire(40).await.unwrap();
+        assert_eq!(start.elapsed(), Duration::ZERO);
+    }
 }

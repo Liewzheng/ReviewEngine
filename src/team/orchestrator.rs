@@ -1237,4 +1237,94 @@ mod tests {
         let kept_titles: Vec<&str> = reports[0].findings.iter().map(|f| f.title.as_str()).collect();
         assert_eq!(kept_titles, ["missing test", "n+1 query"]);
     }
+
+    // ─── coverage ledger ────────────────────────
+
+    fn diff_hunk(new_start: u32, new_lines: u32) -> DiffHunk {
+        DiffHunk {
+            header: String::new(),
+            old_start: 1,
+            old_lines: 0,
+            new_start,
+            new_lines,
+            lines: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn coverage_ledger_marks_single_line_finding_touched() {
+        let diff_files = vec![("src/a.rs".to_string(), vec![diff_hunk(10, 11)])]; // changed 10..=20
+        let finding = make_categorized_finding("src/a.rs", Some(15), "bug", "correctness");
+        let reports = vec![make_report("security", vec![finding])];
+
+        let ledger = build_coverage_ledger(&diff_files, &reports);
+        assert_eq!(ledger.targets.len(), 1);
+        let target = &ledger.targets[0];
+        assert_eq!(target.touched_ranges, vec![(15, 15)]);
+        assert_eq!(target.touched_by, vec!["security"]);
+        assert_eq!(target.status, crate::coverage::CoverageStatus::Touched);
+    }
+
+    #[test]
+    fn coverage_ledger_clamps_reversed_line_end_to_start() {
+        let diff_files = vec![("src/a.rs".to_string(), vec![diff_hunk(1, 5)])];
+        let mut finding = make_categorized_finding("src/a.rs", Some(3), "range", "correctness");
+        finding.line_end = Some(2); // end < start → clamped to start
+        let reports = vec![make_report("quality", vec![finding])];
+
+        let ledger = build_coverage_ledger(&diff_files, &reports);
+        assert_eq!(ledger.targets[0].touched_ranges, vec![(3, 3)]);
+    }
+
+    #[test]
+    fn coverage_ledger_file_scoped_finding_marks_full_changed_range() {
+        let diff_files = vec![("src/a.rs".to_string(), vec![diff_hunk(10, 11), diff_hunk(30, 5)])];
+        // line: None → the expert is deemed aware of the whole file.
+        let finding = make_categorized_finding("src/a.rs", None, "reviewed", "quality");
+        let reports = vec![make_report("lead", vec![finding])];
+
+        let ledger = build_coverage_ledger(&diff_files, &reports);
+        let target = &ledger.targets[0];
+        assert_eq!(target.changed_ranges, vec![(10, 20), (30, 34)]);
+        assert_eq!(target.touched_ranges, vec![(10, 20), (30, 34)]);
+    }
+
+    #[test]
+    fn coverage_ledger_ignores_finding_for_file_not_in_diff() {
+        let diff_files = vec![("src/a.rs".to_string(), vec![diff_hunk(1, 3)])];
+        let finding = make_categorized_finding("src/other.rs", Some(1), "stray", "quality");
+        let reports = vec![make_report("security", vec![finding])];
+
+        let ledger = build_coverage_ledger(&diff_files, &reports);
+        assert_eq!(ledger.targets.len(), 1);
+        assert!(
+            ledger.targets[0].touched_ranges.is_empty(),
+            "unknown file must not be touched"
+        );
+    }
+
+    #[test]
+    fn coverage_ledger_empty_hunks_produce_no_targets() {
+        let diff_files = vec![
+            ("src/a.rs".to_string(), vec![]),
+            ("src/b.rs".to_string(), vec![diff_hunk(1, 0)]),
+        ];
+        let ledger = build_coverage_ledger(&diff_files, &[]);
+        assert!(ledger.targets.is_empty(), "no changed ranges → no targets");
+    }
+
+    #[test]
+    fn coverage_ledger_merges_overlapping_touches_from_two_experts() {
+        let diff_files = vec![("src/a.rs".to_string(), vec![diff_hunk(1, 20)])];
+        let f1 = make_categorized_finding("src/a.rs", Some(5), "x", "quality");
+        let f2 = make_categorized_finding("src/a.rs", Some(15), "y", "security");
+        let reports = vec![make_report("q", vec![f1]), make_report("s", vec![f2])];
+
+        let ledger = build_coverage_ledger(&diff_files, &reports);
+        let target = &ledger.targets[0];
+        assert_eq!(target.touched_ranges, vec![(5, 5), (15, 15)]);
+        let mut by = target.touched_by.clone();
+        by.sort();
+        assert_eq!(by, vec!["q", "s"]);
+    }
 }

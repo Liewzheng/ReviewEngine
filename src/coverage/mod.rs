@@ -320,4 +320,70 @@ mod tests {
         ledger.mark_touched("a.c", (10, 17), "security");
         assert!(ledger.summary().is_sufficient());
     }
+
+    // ─── pure helpers ──────────────────────────
+
+    #[test]
+    fn hunk_new_range_is_start_to_start_plus_lines_minus_one() {
+        assert_eq!(hunk_new_range(&hunk(10, 8)), Some((10, 17)));
+        assert_eq!(hunk_new_range(&hunk(1, 1)), Some((1, 1)));
+        // Pure-deletion hunks have no new lines to cover.
+        assert_eq!(hunk_new_range(&hunk(5, 0)), None);
+        // Zero new_lines still yields None even with a nonzero start.
+        assert_eq!(hunk_new_range(&hunk(9, 0)), None);
+    }
+
+    #[test]
+    fn hunk_new_range_never_underflows_start() {
+        // new_start 0 + 0 lines would saturate; new_lines 0 → None anyway.
+        assert_eq!(hunk_new_range(&hunk(0, 0)), None);
+        assert_eq!(hunk_new_range(&hunk(0, 1)), Some((0, 0)));
+    }
+
+    #[test]
+    fn overlap_len_counts_shared_inclusive_range() {
+        assert_eq!(overlap_len(10, 20, 10, 20), 11, "identical ranges");
+        assert_eq!(overlap_len(10, 20, 15, 17), 3, "contained");
+        assert_eq!(overlap_len(10, 20, 5, 12), 3, "left overlap");
+        assert_eq!(overlap_len(10, 20, 18, 30), 3, "right overlap");
+        assert_eq!(overlap_len(10, 20, 21, 30), 0, "disjoint (gap of one)");
+        assert_eq!(overlap_len(10, 20, 30, 40), 0, "fully disjoint");
+    }
+
+    #[test]
+    fn overlap_len_single_point_and_reversed_ranges() {
+        assert_eq!(overlap_len(5, 5, 5, 5), 1, "point overlap");
+        assert_eq!(overlap_len(5, 5, 6, 6), 0, "adjacent points do not overlap");
+        // Reversed inputs are not normalised by the caller contract.
+        assert_eq!(overlap_len(20, 10, 10, 20), 0);
+    }
+
+    #[test]
+    fn union_push_merges_overlapping_and_adjacent_ranges() {
+        assert_eq!(union_push(&[(10, 17)], (15, 20)), vec![(10, 20)]);
+        assert_eq!(union_push(&[(10, 17)], (18, 20)), vec![(10, 20)], "adjacent merges");
+        assert_eq!(union_push(&[(10, 17)], (9, 10)), vec![(9, 17)]);
+    }
+
+    #[test]
+    fn union_push_keeps_disjoint_ranges_sorted() {
+        assert_eq!(union_push(&[(1, 2), (10, 12)], (5, 6)), vec![(1, 2), (5, 6), (10, 12)]);
+        // Out-of-order input is re-sorted.
+        assert_eq!(union_push(&[(10, 12), (1, 2)], (5, 6)), vec![(1, 2), (5, 6), (10, 12)]);
+    }
+
+    #[test]
+    fn union_push_empty_input_builds_singleton() {
+        assert_eq!(union_push(&[], (3, 4)), vec![(3, 4)]);
+    }
+
+    #[test]
+    fn union_push_merges_chains_into_one_span() {
+        assert_eq!(
+            union_push(&[(1, 2), (4, 5)], (3, 3)),
+            vec![(1, 5)],
+            "gap of one merges through"
+        );
+        assert_eq!(union_push(&[(1, 2), (4, 5)], (3, 4)), vec![(1, 5)]);
+    }
 }

@@ -161,4 +161,31 @@ mod tests {
         assert_eq!(encoding_for_model("deepseek-chat"), "cl100k_base");
         assert_eq!(encoding_for_model("claude-3-opus"), "cl100k_base");
     }
+
+    #[test]
+    fn test_count_tokens_whitespace_is_handled() {
+        // Empty input is exactly zero; pure whitespace yields only a handful
+        // of BPE tokens (space/tab/newline are real tokens in cl100k_base).
+        assert_eq!(count_tokens("", "gpt-4").unwrap(), 0);
+        let ws = count_tokens("   \n\t ", "gpt-4").unwrap();
+        assert!(ws <= 4, "whitespace alone must not balloon into many tokens, got {ws}");
+    }
+
+    #[test]
+    fn test_count_tokens_with_encoding_explicit() {
+        let tokens = count_tokens_with_encoding("Hello, world!", "cl100k_base").unwrap();
+        assert!(tokens > 0);
+        // An unknown encoding silently falls back to cl100k_base (same as the
+        // model-name path) rather than failing hard.
+        assert!(count_tokens_with_encoding("hi", "no-such-encoding").is_ok());
+    }
+
+    #[test]
+    fn test_count_tokens_monotonic_with_text_length() {
+        let short = count_tokens("short text", "gpt-4").unwrap();
+        let again = count_tokens("short text", "gpt-4").unwrap();
+        let longer = count_tokens("short text and a lot more content to tokenize here", "gpt-4").unwrap();
+        assert_eq!(short, again, "deterministic for identical input");
+        assert!(longer > short, "longer text must tokenize to more tokens");
+    }
 }

@@ -249,4 +249,100 @@ mod tests {
             crate::feedback::fingerprint("src/main.rs", None, "SQL injection", "security")
         );
     }
+
+    fn finding(file: &str, line: Option<u32>, title: &str, category: &str) -> Finding {
+        Finding {
+            file: file.to_string(),
+            line,
+            line_end: None,
+            severity: Severity::High,
+            confidence: 9,
+            category: category.to_string(),
+            title: title.to_string(),
+            summary: String::new(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: String::new(),
+            effort: Effort::Small,
+            expert_name: "security".to_string(),
+            expert_role: String::new(),
+            agrees_with: vec![],
+            references: vec![],
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_deterministic_and_sensitive_to_each_field() {
+        let a = finding("src/main.rs", Some(42), "SQL injection", "security");
+        let b = finding("src/main.rs", Some(42), "SQL injection", "security");
+        assert_eq!(a.fingerprint(), b.fingerprint(), "same finding → same fingerprint");
+
+        // Each distinguishing field changes the fingerprint.
+        assert_ne!(
+            a.fingerprint(),
+            finding("src/other.rs", Some(42), "SQL injection", "security").fingerprint()
+        );
+        assert_ne!(
+            a.fingerprint(),
+            finding("src/main.rs", Some(43), "SQL injection", "security").fingerprint()
+        );
+        assert_ne!(
+            a.fingerprint(),
+            finding("src/main.rs", None, "SQL injection", "security").fingerprint()
+        );
+        assert_ne!(
+            a.fingerprint(),
+            finding("src/main.rs", Some(42), "XSS", "security").fingerprint()
+        );
+        assert_ne!(
+            a.fingerprint(),
+            finding("src/main.rs", Some(42), "SQL injection", "quality").fingerprint()
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_sixteen_hex_chars() {
+        let fp = finding("src/a.rs", Some(1), "t", "c").fingerprint();
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn severity_display_is_lowercase_label() {
+        assert_eq!(Severity::Critical.to_string(), "critical");
+        assert_eq!(Severity::High.to_string(), "high");
+        assert_eq!(Severity::Medium.to_string(), "medium");
+        assert_eq!(Severity::Low.to_string(), "low");
+        assert_eq!(Severity::Note.to_string(), "note");
+    }
+
+    #[test]
+    fn severity_default_is_medium() {
+        assert_eq!(Severity::default(), Severity::Medium);
+    }
+
+    #[test]
+    fn effort_display_is_lowercase_label() {
+        assert_eq!(Effort::Trivial.to_string(), "trivial");
+        assert_eq!(Effort::Small.to_string(), "small");
+        assert_eq!(Effort::Medium.to_string(), "medium");
+        assert_eq!(Effort::Large.to_string(), "large");
+    }
+
+    #[test]
+    fn effort_default_is_small() {
+        assert_eq!(Effort::default(), Effort::Small);
+    }
+
+    #[test]
+    fn finding_round_trips_through_json() {
+        let f = finding("src/main.rs", Some(7), "leak", "security");
+        let json = serde_json::to_string(&f).unwrap();
+        let back: Finding = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.file, f.file);
+        assert_eq!(back.line, f.line);
+        assert_eq!(back.title, f.title);
+        assert_eq!(back.category, f.category);
+        assert_eq!(back.fingerprint(), f.fingerprint());
+    }
 }

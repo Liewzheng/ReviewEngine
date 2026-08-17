@@ -21,17 +21,13 @@ use std::sync::Arc;
 use crate::models::AppConfig;
 use crate::server::AppState;
 
-use super::types::{ConfigValidateRequest, ConfigValidateResponse};
 pub use self::types::UiConfig;
 use self::types::API_KEY_MASK;
+use super::types::{ConfigValidateRequest, ConfigValidateResponse};
 
-pub use self::helpers::{test_config, fetch_models};
-pub use self::put::{put_config, apply_gitlab_runtime_config};
-pub use self::types::{
-    UiAdvancedConfig, UiGitLabConfig, UiLlmConfig, UiLlmProviderConfig, UiRulesConfig,
-};
-
-pub(crate) use self::put::merge_json;
+pub use self::helpers::{fetch_models, test_config};
+pub use self::put::{apply_gitlab_runtime_config, put_config};
+pub use self::types::{UiAdvancedConfig, UiGitLabConfig, UiLlmConfig, UiLlmProviderConfig, UiRulesConfig};
 
 /// A UI-supplied key means "keep the existing one" when it is empty (frontend
 /// "leave blank = unchanged") or carries the mask sentinel `GET /config`

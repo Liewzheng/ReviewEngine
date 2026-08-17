@@ -119,25 +119,51 @@ pub struct UiAdvancedConfig {
     pub debug_mode: bool,
 }
 
-pub(crate) fn default_max_tokens() -> u32 { 4096 }
-pub(crate) fn default_api_base_url() -> String { "https://api.openai.com/v1".to_string() }
-pub(crate) fn default_temperature() -> f32 { 0.7 }
-pub(crate) fn default_timeout_seconds() -> u32 { 60 }
-pub(crate) fn default_retry_attempts() -> u32 { 3 }
-pub(crate) fn default_min_score() -> u32 { 75 }
+pub(crate) fn default_max_tokens() -> u32 {
+    4096
+}
+pub(crate) fn default_api_base_url() -> String {
+    "https://api.openai.com/v1".to_string()
+}
+pub(crate) fn default_temperature() -> f32 {
+    0.7
+}
+pub(crate) fn default_timeout_seconds() -> u32 {
+    60
+}
+pub(crate) fn default_retry_attempts() -> u32 {
+    3
+}
+pub(crate) fn default_min_score() -> u32 {
+    75
+}
 pub(crate) fn default_comment_template() -> String {
     "Code review completed. Overall score: {{score}}/100. {{summary}}".to_string()
 }
 pub(crate) fn default_required_experts() -> Vec<String> {
     vec!["Security".to_string(), "Performance".to_string(), "Quality".to_string()]
 }
-pub(crate) fn default_max_review_duration_seconds() -> u32 { 300 }
-pub(crate) fn default_log_level() -> String { "info".to_string() }
-pub(crate) fn default_log_retention_days() -> u32 { 30 }
-pub(crate) fn default_sse_heartbeat_interval() -> u32 { 15 }
-pub(crate) fn default_max_concurrent_reviews() -> u32 { 5 }
-pub(crate) fn default_request_timeout() -> u32 { 120 }
-pub(crate) fn default_enable_metrics() -> bool { true }
+pub(crate) fn default_max_review_duration_seconds() -> u32 {
+    300
+}
+pub(crate) fn default_log_level() -> String {
+    "info".to_string()
+}
+pub(crate) fn default_log_retention_days() -> u32 {
+    30
+}
+pub(crate) fn default_sse_heartbeat_interval() -> u32 {
+    15
+}
+pub(crate) fn default_max_concurrent_reviews() -> u32 {
+    5
+}
+pub(crate) fn default_request_timeout() -> u32 {
+    120
+}
+pub(crate) fn default_enable_metrics() -> bool {
+    true
+}
 
 impl UiConfig {
     /// Build a `UiConfig` from the backend-native `AppConfig`, filling in

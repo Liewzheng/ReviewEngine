@@ -607,7 +607,10 @@ pub async fn run() -> Result<()> {
 
 /// Spawn the progress bar display task if `--progress` is enabled.
 /// Returns `(progress_map_for_callee, review_id)`.
-pub(crate) fn spawn_progress_if_needed(progress_map: &ProgressMap, cli_progress: bool) -> (Option<ProgressMap>, String) {
+pub(crate) fn spawn_progress_if_needed(
+    progress_map: &ProgressMap,
+    cli_progress: bool,
+) -> (Option<ProgressMap>, String) {
     let review_id = uuid::Uuid::new_v4().to_string();
     let pm = if cli_progress { Some(progress_map.clone()) } else { None };
     if cli_progress {
@@ -651,4 +654,3 @@ async fn display_progress_bar(map: ProgressMap, review_id: String) {
         }
     }
 }
-

@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::server::AppState;
 
-use super::types::{UiConfig, UiGitLabConfig, API_KEY_MASK};
 use super::is_blank_or_masked;
+use super::types::{UiConfig, UiGitLabConfig, API_KEY_MASK};
 
 /// Deep-merge `patch` into `base` (both JSON values), returning the result.
 ///
@@ -76,7 +76,10 @@ pub fn apply_gitlab_runtime_config(
     new_token
 }
 
-pub async fn put_config(State(state): State<Arc<AppState>>, Json(payload): Json<serde_json::Value>) -> impl IntoResponse {
+pub async fn put_config(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
     // Contract: `PUT /config` is a PARTIAL update. Only fields present in the
     // request JSON overwrite the stored config; omitted fields keep their
     // current values. A sparse PUT (e.g. just `{"rules":{"minScore":90}}`)

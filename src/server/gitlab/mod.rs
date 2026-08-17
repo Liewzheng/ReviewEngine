@@ -13,8 +13,8 @@ mod hooks;
 #[cfg(test)]
 mod tests;
 
-pub use handler::GitLabWebhookHandler;
 pub use super::webhook::WebhookHandler;
+pub use handler::GitLabWebhookHandler;
 pub use hooks::{
     dispatch_mr_event, handle_mr_hook, handle_mr_in_progress, handle_note_hook, handle_push_hook,
     note_starts_with_command, parse_mr_hook_payload, spawn_mr_review_task, MrHookPayload,

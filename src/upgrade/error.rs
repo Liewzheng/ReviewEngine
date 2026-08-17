@@ -18,6 +18,7 @@ pub enum UpgradeError {
     #[error("GitHub API returned {status}: {body}")]
     Api { status: u16, body: String },
 
+    /// Filesystem I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
@@ -29,10 +30,11 @@ pub enum UpgradeError {
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(String),
 
+    /// SHA-256 hash mismatch between downloaded asset and its sidecar.
     #[error("checksum mismatch: expected {expected}, computed {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 
-    /// Archive entry path that could escape the extraction root.
+    /// Archive entry path that could escape the extraction root (zip-slip).
     #[error("unsafe archive entry: {0}")]
     UnsafeEntry(String),
 
@@ -46,14 +48,17 @@ pub enum UpgradeError {
 }
 
 impl UpgradeError {
+    /// Construct an `InvalidData` error (malformed input, size mismatch, etc.).
     pub fn invalid_data(msg: impl Into<String>) -> Self {
         Self::InvalidData(msg.into())
     }
 
+    /// Construct an `UnsupportedPlatform` error for missing release assets.
     pub fn unsupported_platform(msg: impl Into<String>) -> Self {
         Self::UnsupportedPlatform(msg.into())
     }
 
+    /// Construct a `ChecksumMismatch` error with expected and actual hashes.
     pub fn checksum_mismatch(expected: impl Into<String>, actual: impl Into<String>) -> Self {
         Self::ChecksumMismatch {
             expected: expected.into(),
@@ -61,14 +66,17 @@ impl UpgradeError {
         }
     }
 
+    /// Construct an `UnsafeEntry` error for zip-slip / path traversal.
     pub fn unsafe_entry(msg: impl Into<String>) -> Self {
         Self::UnsafeEntry(msg.into())
     }
 
+    /// Construct an `Archive` error for corrupt/unreadable archive payloads.
     pub fn archive(msg: impl Into<String>) -> Self {
         Self::Archive(msg.into())
     }
 
+    /// Construct a `NotFound` error for missing releases or assets.
     pub fn not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(msg.into())
     }

@@ -28,11 +28,20 @@ pub use platform::{current_asset_spec, AssetFormat, AssetSpec};
 pub use version::Version;
 
 /// Result of a `check_for_updates` call.
+/// Result of a `check_for_updates` call.
+///
+/// Contains the comparison between the current and latest versions,
+/// the matching release asset for the current platform, and the
+/// detected installation method for upgrade command generation.
 #[derive(Debug, Clone)]
 pub struct UpdateCheck {
+    /// Currently installed version.
     pub current_version: Version,
+    /// Full release metadata from GitHub.
     pub latest_release: Release,
+    /// Latest available stable version.
     pub latest_version: Version,
+    /// `true` when `latest_version > current_version`.
     pub has_update: bool,
     /// `None` when the current platform has no published release asset.
     pub platform: Option<AssetSpec>,
@@ -40,6 +49,7 @@ pub struct UpdateCheck {
     pub asset: Option<ReleaseAsset>,
     /// The `<prefix>-<triple>.sha256` sidecar, when present.
     pub checksum_asset: Option<ReleaseAsset>,
+    /// Detected installation method (brew, cargo, docker, etc.).
     pub install_method: InstallMethod,
 }
 

@@ -8,12 +8,21 @@ use tracing::{error, info};
 
 use crate::models::*;
 
+/// GitLab REST API client for MR operations.
+///
+/// Handles authentication, request dispatch, and response parsing.
+/// Supports fetching MR metadata, diff content, posting inline comments,
+/// and managing MR approval state.
 #[derive(Clone)]
 pub struct Client {
     http: HttpClient,
+    /// GitLab API base URL (e.g. `https://gitlab.com/api/v4`).
     base_url: String,
+    /// URL-encoded project path (e.g. `group%2Fproject`).
     project_path: String,
+    /// Merge request internal ID (iid).
     mr_iid: u32,
+    /// Private token or personal access token for authentication.
     gitlab_token: String,
 }
 

@@ -42,6 +42,9 @@ fn download_client() -> Result<reqwest::Client> {
 /// file name for debuggability; uniqueness comes from pid + nonce. When
 /// `expected_size` is known (from the GitHub API), any deviation — stream
 /// longer than expected or shorter — fails the download.
+///
+/// On failure, the temp file is automatically removed so the caller never
+/// sees a partial file.
 pub async fn download_asset(
     url: &str,
     dest_dir: &Path,

@@ -65,6 +65,11 @@ const IGNORED_PATHS: &[&str] = &[
     "generated/",
 ];
 
+/// Determine whether a diff file should be excluded from review.
+///
+/// Checks against known binary/lock/generated extensions and paths
+/// (`node_modules/`, `target/`, `vendor/`, etc.). Uses case-insensitive
+/// extension matching.
 pub fn should_ignore(file: &DiffFile) -> bool {
     let path = &file.new_path;
 
@@ -80,6 +85,11 @@ pub fn should_ignore(file: &DiffFile) -> bool {
     false
 }
 
+/// Detect the dominant programming language from a set of diff files.
+///
+/// Counts file extensions and returns the language with the most files.
+/// Returns `"Unknown"` when the file list is empty or no recognized
+/// extension is found.
 pub fn detect_language(files: &[DiffFile]) -> String {
     let ext_langs = [
         ("rs", "Rust"),

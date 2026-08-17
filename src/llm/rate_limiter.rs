@@ -4,6 +4,10 @@ use tokio::sync::Mutex;
 use tokio::time::Instant;
 
 /// Async token-bucket rate limiter enforcing per-minute request and token limits.
+///
+/// Tracks both RPM (requests per minute) and TPM (tokens per minute) using
+/// sliding window counters. Callers [`acquire`](Self::acquire) before each
+/// LLM request; the method sleeps until both limits allow the request.
 pub struct RateLimiter {
     inner: Mutex<Inner>,
 }
@@ -19,6 +23,12 @@ struct Inner {
 }
 
 impl RateLimiter {
+    /// Create a new rate limiter with the given RPM, TPM, and window.
+    ///
+    /// # Arguments
+    /// * `max_rpm` - Maximum requests per minute (must be > 0).
+    /// * `max_tpm` - Maximum tokens per minute (must be > 0).
+    /// * `window_seconds` - Rolling window duration in seconds.
     pub fn new(max_rpm: usize, max_tpm: usize, window_seconds: u64) -> Self {
         Self {
             inner: Mutex::new(Inner {

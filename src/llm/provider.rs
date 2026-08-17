@@ -7,25 +7,38 @@ use std::collections::HashMap;
 /// Unified message role for LLM chat completion requests.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
+    /// Message role: `"system"`, `"user"`, or `"assistant"`.
     pub role: String,
+    /// Message body text.
     pub content: String,
 }
 
 /// The unified response from an LLM completion.
 #[derive(Debug, Clone)]
 pub struct CompletionResult {
+    /// The generated text content from the model.
     pub content: String,
+    /// Total tokens consumed (input + output, if available from the provider).
     pub total_tokens: u64,
+    /// Actual model identifier used (may differ from request if provider remapped).
     pub model: String,
 }
 
 /// Parameters for LLM completion requests.
+///
+/// Constructed by [`LLMClient`](super::client::LLMClient) and passed to
+/// the appropriate [`LLMProvider`] for execution.
 #[derive(Debug, Clone)]
 pub struct CompletionParams {
+    /// Model identifier (e.g. `"gpt-4"`, `"claude-3-opus"`).
     pub model: String,
+    /// Conversation messages (system, user, assistant turns).
     pub messages: Vec<Message>,
+    /// Maximum tokens in the generated response.
     pub max_tokens: u32,
+    /// Sampling temperature (0.0 = deterministic, 1.0 = creative).
     pub temperature: f32,
+    /// Reasoning effort hint for o1/o3 models (`"low"`, `"medium"`, `"high"`).
     pub reasoning_effort: Option<String>,
     /// When `Some(true)`, request `"thinking": {"type": "disabled"}` for
     /// reasoning models that would otherwise exhaust `max_tokens` on

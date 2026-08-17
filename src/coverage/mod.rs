@@ -28,9 +28,12 @@ use serde::{Deserialize, Serialize};
 pub const COVERAGE_THRESHOLD: f64 = 0.7;
 
 /// Whether a file target has been touched by any expert finding.
+/// Whether a file target has been touched by any expert finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoverageStatus {
+    /// No expert has yet referenced any line in this file's changed ranges.
     Pending,
+    /// At least one expert finding references lines in this file.
     Touched,
 }
 
@@ -44,6 +47,7 @@ pub struct CoverageTarget {
     pub changed_ranges: Vec<(u32, u32)>,
     /// Union of line ranges touched by expert findings (sorted, merged).
     pub touched_ranges: Vec<(u32, u32)>,
+    /// Current coverage status of this file (pending or touched).
     pub status: CoverageStatus,
     /// Experts whose findings touched this file.
     pub touched_by: Vec<String>,

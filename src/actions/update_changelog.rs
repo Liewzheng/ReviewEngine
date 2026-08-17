@@ -43,15 +43,32 @@ fn parse_changelog_response(response: &str) -> Result<ChangelogOutput> {
             .map(|seq| {
                 seq.iter()
                     .map(|e| ChangelogEntry {
-                        change_type: e["type"].as_str().unwrap_or("changed").to_string(),
-                        description: e["description"].as_str().unwrap_or("").to_string(),
+                        change_type: e["type"]
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                tracing::warn!("changelog entry missing 'type' field; defaulting to 'changed'");
+                                "changed"
+                            })
+                            .to_string(),
+                        description: e["description"]
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                tracing::warn!("changelog entry missing 'description' field");
+                                ""
+                            })
+                            .to_string(),
                         scope: e.get("scope").and_then(|v| v.as_str().map(String::from)),
                     })
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::warn!("changelog response missing 'entries' array; returning empty list");
+                vec![]
+            });
         return Ok(ChangelogOutput { entries });
     }
+    let excerpt: String = response.chars().take(200).collect();
+    tracing::warn!("Failed to parse changelog response as YAML; returning empty entries. Excerpt: {excerpt:?}");
     Ok(ChangelogOutput { entries: vec![] })
 }
 
@@ -74,5 +91,33 @@ entries:
         assert_eq!(output.entries.len(), 2);
         assert_eq!(output.entries[0].change_type, "feat");
         assert_eq!(output.entries[0].scope.as_deref(), Some("auth"));
+    }
+
+    #[test]
+    fn test_parse_changelog_malformed_yaml_returns_empty() {
+        // Truly invalid YAML (not just plain text which parses as a scalar)
+        let bad = "{{invalid yaml}}: [";
+        let output = parse_changelog_response(bad).unwrap();
+        assert!(output.entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_changelog_missing_entries_array() {
+        let yaml = "some_key: some_value\n";
+        let output = parse_changelog_response(yaml).unwrap();
+        assert!(output.entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_changelog_entry_missing_fields() {
+        let yaml = r#"
+entries:
+  - description: "no type field"
+"#;
+        let output = parse_changelog_response(yaml).unwrap();
+        assert_eq!(output.entries.len(), 1);
+        // missing 'type' defaults to "changed"
+        assert_eq!(output.entries[0].change_type, "changed");
+        assert_eq!(output.entries[0].description, "no type field");
     }
 }

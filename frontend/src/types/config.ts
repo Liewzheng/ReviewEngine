@@ -115,7 +115,7 @@ export function createMockConfig(): AppConfig {
       apiToken: 'glpat-xxxxxxxxxxxxxxxxxxxx',
       webhookSecret: 'whsec-xxxxxxxxxxxxxxxx',
       webhookSigningSecret: 'whsec-sign-xxxxxxxxxxxxxxxx',
-      defaultProject: 'my-group/my-project',
+      defaultProject: '',
       mrLabel: 'needs-review',
       autoReview: true,
     },

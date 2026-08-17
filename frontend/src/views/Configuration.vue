@@ -20,12 +20,18 @@
           </el-button>
         </template>
         <template v-else>
-          <el-badge :is-dot="dirty" type="danger">
-            <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
-              <el-icon><Check /></el-icon>
-              <span>{{ $t('common.saveChanges') }}</span>
-            </el-button>
-          </el-badge>
+          <!-- Tooltip explains why Save is disabled; the wrapper span is needed
+               because a disabled button swallows pointer events. -->
+          <el-tooltip :content="$t('config.noChangesToSave')" :disabled="dirty" placement="top">
+            <span class="save-button-wrapper">
+              <el-badge :is-dot="dirty" type="danger">
+                <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
+                  <el-icon><Check /></el-icon>
+                  <span>{{ $t('common.saveChanges') }}</span>
+                </el-button>
+              </el-badge>
+            </span>
+          </el-tooltip>
           <el-button @click="cancelEdit">
             <el-icon><Close /></el-icon>
             <span>{{ $t('common.cancel') }}</span>
@@ -133,12 +139,8 @@
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.gitlab.defaultProject')" prop="gitlab.defaultProject">
-                <el-select v-model="config.gitlab.defaultProject" :disabled="!isEditing" :placeholder="$t('config.gitlab.selectProjectPlaceholder')" clearable style="width: 100%">
-                  <el-option label="my-group/my-project" value="my-group/my-project" />
-                  <el-option label="acme/frontend" value="acme/frontend" />
-                  <el-option label="acme/backend" value="acme/backend" />
-                  <el-option label="infra/terraform" value="infra/terraform" />
-                </el-select>
+                <el-input v-model="config.gitlab.defaultProject" :disabled="!isEditing" clearable :placeholder="$t('config.gitlab.defaultProjectPlaceholder')" />
+                <div v-if="isEditing" class="form-item-help">{{ $t('config.gitlab.defaultProjectHelp') }}</div>
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
@@ -566,11 +568,15 @@
 
     <!-- Mobile Sticky Actions -->
     <div v-if="isEditing" class="mobile-actions">
-      <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
-        <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
-          {{ $t('common.saveChanges') }}
-        </el-button>
-      </el-badge>
+      <el-tooltip :content="$t('config.noChangesToSave')" :disabled="dirty" placement="top">
+        <span class="save-button-wrapper">
+          <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
+            <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
+              {{ $t('common.saveChanges') }}
+            </el-button>
+          </el-badge>
+        </span>
+      </el-tooltip>
       <el-button @click="cancelEdit">{{ $t('common.cancel') }}</el-button>
     </div>
   </div>
@@ -758,6 +764,24 @@ const rules = computed<FormRules>(() => ({
   ],
   'llm.apiBaseUrl': [
     { validator: validateUrl, trigger: 'blur' },
+  ],
+  'gitlab.defaultProject': [
+    {
+      // Free-text project path; empty means "not set", otherwise it must
+      // look like `group/project` (namespace/path, no extra slashes).
+      validator: (_rule: any, value: string, callback: Function) => {
+        if (!value || !value.trim()) {
+          callback()
+          return
+        }
+        if (/^[^\s/]+\/[^\s/]+$/.test(value.trim())) {
+          callback()
+        } else {
+          callback(new Error(t('config.validation.invalidProjectPath')))
+        }
+      },
+      trigger: 'blur',
+    },
   ],
   // The LLM API key shares the same keep-existing semantics as the GitLab
   // token (never echoed by GET /config), so it has no required rule.
@@ -1289,6 +1313,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* Wrapper lets the tooltip hover target survive the disabled save button */
+.save-button-wrapper {
+  display: inline-flex;
 }
 
 /* Skeleton */

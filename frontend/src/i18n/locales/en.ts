@@ -298,8 +298,10 @@ export default {
     refreshed: 'Configuration refreshed',
     notSet: '(not set)',
     revealCountdown: 'Visible for {count}s...',
+    noChangesToSave: 'No changes to save',
     validation: {
       invalidUrl: 'Please enter a valid URL',
+      invalidProjectPath: 'Use the format group/project (e.g. my-group/my-project)',
       title: 'Validation Error',
       tokenMinLength: 'API Token must be at least 10 characters',
       modelRequired: 'Default Model is required',
@@ -327,7 +329,9 @@ export default {
         'Paste the full GitLab 19.0+ signing token (starts with whsec_...)',
       signingHelp: 'Include the whsec_ prefix when pasting the token.',
       defaultProject: 'Default Project',
-      selectProjectPlaceholder: 'Select a project',
+      defaultProjectPlaceholder: 'group/project',
+      defaultProjectHelp:
+        'Full project path including the namespace, e.g. my-group/my-project.',
       mrLabel: 'Merge Request Label',
       autoReview: 'Auto-review enabled',
     },

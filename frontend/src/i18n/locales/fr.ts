@@ -290,8 +290,10 @@ export default {
     refreshed: 'Configuration actualisée',
     notSet: '(non défini)',
     revealCountdown: 'Visible pendant {count} s…',
+    noChangesToSave: 'Aucune modification à enregistrer',
     validation: {
       invalidUrl: 'Veuillez saisir une URL valide',
+      invalidProjectPath: 'Utilisez le format groupe/projet (p. ex. my-group/my-project)',
       title: 'Erreur de validation',
       tokenMinLength: 'Le jeton API doit contenir au moins 10 caractères',
       modelRequired: 'Le modèle par défaut est requis',
@@ -320,7 +322,9 @@ export default {
         'Collez le jeton de signature GitLab 19.0+ complet (commence par whsec_...)',
       signingHelp: 'Incluez le préfixe whsec_ lors du collage du jeton.',
       defaultProject: 'Projet par défaut',
-      selectProjectPlaceholder: 'Sélectionner un projet',
+      defaultProjectPlaceholder: 'group/project',
+      defaultProjectHelp:
+        "Chemin complet du projet incluant l'espace de noms, p. ex. my-group/my-project.",
       mrLabel: 'Étiquette de merge request',
       autoReview: 'Revue automatique activée',
     },

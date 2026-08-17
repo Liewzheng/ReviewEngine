@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.18] - 2026-08-17
+
+### Added
+- **Final adjudication pass for high-severity findings (false-positive reduction)**: after consolidation, each finding at or above `[report] adjudicate_min_severity` (default `high`) is re-examined by the lead model against the **full** cited file read from disk (no 20KB injection cap; >200KB files get the cited region ±200 lines plus a function outline). Verdicts: `confirmed` / `false_positive` / `downgrade` (with mandatory cited lines); false positives are dropped **transparently** into a new `adjudicated_removed` list rendered as an "Adjudicated Away" report section, never silently. A deterministic pre-filter checks whether the finding's quoted evidence actually appears near its cited line and feeds the result to the adjudicator as a hint. Fail-open: LLM/parse/file errors keep the finding unchanged. Disable with `[report] adjudicate = false`. Motivated by a post-release audit of v0.9.17 self-review hallucinations (confident findings contradicted by code the experts couldn't see or misread). New `--progress` stage included. (`src/team/adjudicator.rs`, `src/team/orchestrator.rs`, `src/team/lead_consolidator.rs`, `src/models/config.rs`, `src/config/defaults.rs`, `src/prompt/templates.rs`, `src/progress/mod.rs`, `src/output/team_renderer.rs`)
+
+### Fixed
+- **Configuration page: hardcoded demo GitLab projects removed**: the `defaultProject` select carried four fake demo options (`my-group/my-project`, `acme/*`, `infra/terraform`) and defaulted to one of them; it is now a clearable free-text input with `group/project` pattern validation and an empty default. (`frontend/src/views/Configuration.vue`, `frontend/src/types/config.ts`, `frontend/src/i18n/locales/*`)
+- **Configuration page: disabled Save button now explains itself**: both desktop and mobile save buttons show a "no changes to save" tooltip while disabled (dirty-tracking unchanged). (`frontend/src/views/Configuration.vue`, `frontend/src/i18n/locales/*`)
+
+### Refactored
+- **Configuration view split (1737 → 785 lines, behavior unchanged)**: provider CRUD orchestration extracted to `useProviders.ts`, form model/validation/secret-reveal timers to `useConfigForm.ts`, and the provider/GitLab/LLM sections to `frontend/src/components/Config/` card components. All previously verified defenses preserved verbatim (id-capture before splice, highest-index-first deletes, re-fetch length-mismatch guard, `***` keep semantics). (`frontend/src/views/Configuration.vue`, `frontend/src/composables/`, `frontend/src/components/Config/`)
+
+### Docs
+- **Configuration web UI documented**: `docs/configuration.md` gains a Web UI section — opening the UI (`/#/config`), per-card settings, secret masking/`***` keep semantics, edit mode/dirty tracking/sparse-PUT save behavior, provider delete semantics; `docs/README.md` index updated. (`docs/configuration.md`, `docs/README.md`)
+
 ## [0.9.17] - 2026-08-17
 
 ### Added

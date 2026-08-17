@@ -20,12 +20,18 @@
           </el-button>
         </template>
         <template v-else>
-          <el-badge :is-dot="dirty" type="danger">
-            <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
-              <el-icon><Check /></el-icon>
-              <span>{{ $t('common.saveChanges') }}</span>
-            </el-button>
-          </el-badge>
+          <!-- Tooltip explains why Save is disabled; the wrapper span is needed
+               because a disabled button swallows pointer events. -->
+          <el-tooltip :content="$t('config.noChangesToSave')" :disabled="dirty" placement="top">
+            <span class="save-button-wrapper">
+              <el-badge :is-dot="dirty" type="danger">
+                <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
+                  <el-icon><Check /></el-icon>
+                  <span>{{ $t('common.saveChanges') }}</span>
+                </el-button>
+              </el-badge>
+            </span>
+          </el-tooltip>
           <el-button @click="cancelEdit">
             <el-icon><Close /></el-icon>
             <span>{{ $t('common.cancel') }}</span>
@@ -56,359 +62,37 @@
       @submit.prevent
     >
       <!-- GitLab Card -->
-      <el-card ref="gitlabCardRef" class="config-card">
-        <template #header>
-          <div class="card-header">
-            <el-icon><Link /></el-icon>
-            <span>{{ $t('config.gitlab.title') }}</span>
-          </div>
-        </template>
-        <div class="card-body">
-          <el-row :gutter="20">
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.url')" prop="gitlab.url">
-                <el-input v-model="config.gitlab.url" :disabled="!isEditing" :placeholder="$t('config.gitlab.urlPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('header.apiToken')" prop="gitlab.apiToken">
-                <div v-if="!isEditing" class="readonly-field">
-                  <template v-if="!config.gitlab.apiToken">
-                    <span class="empty-text">{{ $t('config.notSet') }}</span>
-                  </template>
-                  <template v-else-if="!revealed.apiToken">
-                    <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" :aria-label="$t('config.gitlab.revealApiTokenAria')" @click.stop="revealField('apiToken')">
-                      <el-icon><View /></el-icon>
-                    </el-button>
-                  </template>
-                  <template v-else>
-                    <span class="revealed-value">{{ config.gitlab.apiToken }}</span>
-                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.apiToken }) }}</span>
-                  </template>
-                </div>
-                <el-input v-else v-model="config.gitlab.apiToken" :disabled="!isEditing" show-password :placeholder="$t('config.gitlab.apiTokenPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.webhookSecret')" prop="gitlab.webhookSecret">
-                <div v-if="!isEditing" class="readonly-field">
-                  <template v-if="!config.gitlab.webhookSecret">
-                    <span class="empty-text">{{ $t('config.notSet') }}</span>
-                  </template>
-                  <template v-else-if="!revealed.webhookSecret">
-                    <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" :aria-label="$t('config.gitlab.revealWebhookAria')" @click.stop="revealField('webhookSecret')">
-                      <el-icon><View /></el-icon>
-                    </el-button>
-                  </template>
-                  <template v-else>
-                    <span class="revealed-value">{{ config.gitlab.webhookSecret }}</span>
-                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.webhookSecret }) }}</span>
-                  </template>
-                </div>
-                <el-input v-else v-model="config.gitlab.webhookSecret" :disabled="!isEditing" show-password :placeholder="$t('common.optional')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.webhookSigningSecret')" prop="gitlab.webhookSigningSecret">
-                <div v-if="!isEditing" class="readonly-field">
-                  <template v-if="!config.gitlab.webhookSigningSecret">
-                    <span class="empty-text">{{ $t('config.notSet') }}</span>
-                  </template>
-                  <template v-else-if="!revealed.webhookSigningSecret">
-                    <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" :aria-label="$t('config.gitlab.revealSigningAria')" @click.stop="revealField('webhookSigningSecret')">
-                      <el-icon><View /></el-icon>
-                    </el-button>
-                  </template>
-                  <template v-else>
-                    <span class="revealed-value">{{ config.gitlab.webhookSigningSecret }}</span>
-                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.webhookSigningSecret }) }}</span>
-                  </template>
-                </div>
-                <el-input v-else v-model="config.gitlab.webhookSigningSecret" :disabled="!isEditing" show-password :placeholder="$t('config.gitlab.signingPlaceholder')" />
-                <div v-if="isEditing" class="form-item-help">{{ $t('config.gitlab.signingHelp') }}</div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.defaultProject')" prop="gitlab.defaultProject">
-                <el-select v-model="config.gitlab.defaultProject" :disabled="!isEditing" :placeholder="$t('config.gitlab.selectProjectPlaceholder')" clearable style="width: 100%">
-                  <el-option label="my-group/my-project" value="my-group/my-project" />
-                  <el-option label="acme/frontend" value="acme/frontend" />
-                  <el-option label="acme/backend" value="acme/backend" />
-                  <el-option label="infra/terraform" value="infra/terraform" />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.mrLabel')" prop="gitlab.mrLabel">
-                <el-input v-model="config.gitlab.mrLabel" :disabled="!isEditing" placeholder="needs-review" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.autoReview')" prop="gitlab.autoReview">
-                <el-switch v-model="config.gitlab.autoReview" :disabled="!isEditing" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-        </div>
-      </el-card>
+      <GitLabSettingsCard
+        ref="gitlabCardRef"
+        :config="config.gitlab"
+        :is-editing="isEditing"
+        :revealed="revealed"
+        :reveal-countdown="revealCountdown"
+        @reveal="revealField"
+      />
 
       <!-- LLM Card -->
-      <el-card ref="llmCardRef" class="config-card">
-        <template #header>
-          <div class="card-header">
-            <el-icon><Cpu /></el-icon>
-            <span>{{ $t('config.llm.title') }}</span>
-          </div>
-        </template>
-        <div class="card-body">
-          <el-row :gutter="20">
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.apiBaseUrl')" prop="llm.apiBaseUrl">
-                <el-input v-model="config.llm.apiBaseUrl" :disabled="!isEditing" :placeholder="$t('config.llm.apiBasePlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.apiKey')" prop="llm.openaiApiKey">
-                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password :placeholder="$t('config.llm.apiKeyPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.defaultModel')" prop="llm.defaultModel">
-                <el-select
-                  v-model="config.llm.defaultModel"
-                  :disabled="!isEditing"
-                  :loading="modelFetchLoading"
-                  :placeholder="$t('config.llm.selectModelPlaceholder')"
-                  style="width: 100%"
-                >
-                  <el-option
-                    v-for="model in availableModels"
-                    :key="model"
-                    :label="model"
-                    :value="model"
-                  />
-                </el-select>
-                <div v-if="modelFetchError" class="form-item-help error-text">{{ modelFetchError }}</div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.maxTokens')" prop="llm.maxTokens">
-                <el-input-number v-model="config.llm.maxTokens" :disabled="!isEditing" :min="128" :max="8192" :step="128" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.temperature')" prop="llm.temperature">
-                <div class="slider-with-value">
-                  <el-slider v-model="config.llm.temperature" :disabled="!isEditing" :min="0" :max="2" :step="0.1" />
-                  <span class="slider-value">{{ config.llm.temperature }}</span>
-                </div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.timeout')" prop="llm.timeoutSeconds">
-                <el-input-number v-model="config.llm.timeoutSeconds" :disabled="!isEditing" :min="5" :max="300" :step="5" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.retryAttempts')" prop="llm.retryAttempts">
-                <el-input-number v-model="config.llm.retryAttempts" :disabled="!isEditing" :min="0" :max="5" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <div class="test-connection">
-            <el-button :loading="testingConnection" @click="testConnection">
-              <el-icon><Connection /></el-icon>
-              <span>{{ $t('common.testConnection') }}</span>
-            </el-button>
-            <el-tag v-if="testResult" :type="testResult.success ? 'success' : 'danger'" effect="dark">
-              {{ testResult.success ? $t('config.llm.connected', { n: testResult.latencyMs }) : $t('config.llm.testFailed', { error: testResult.error }) }}
-            </el-tag>
-          </div>
-        </div>
-      </el-card>
+      <LlmSettingsCard
+        ref="llmCardRef"
+        :config="config.llm"
+        :is-editing="isEditing"
+        :models="availableModels"
+        :model-fetch-loading="modelFetchLoading"
+        :model-fetch-error="modelFetchError"
+        :testing="testingConnection"
+        :test-result="testResult"
+        @test="testConnection"
+      />
 
       <!-- Additional LLM Providers Card -->
-      <el-card class="config-card additional-providers-card">
-        <template #header>
-          <div class="card-header">
-            <el-icon><Cpu /></el-icon>
-            <span>{{ $t('config.providers.title') }}</span>
-            <div v-if="isEditing" style="margin-left: auto;">
-              <el-button size="small" type="primary" @click="openAddProviderDialog">
-                <el-icon><Plus /></el-icon>
-                {{ $t('config.providers.addBtn') }}
-              </el-button>
-            </div>
-          </div>
-        </template>
-        <div class="card-body">
-          <el-skeleton v-if="providersLoading" :rows="2" animated />
-          <el-empty v-else-if="additionalProviders.length === 0" :description="$t('config.providers.empty')" :image-size="80" />
-          <div v-else class="providers-list">
-            <div
-              v-for="(provider, index) in additionalProviders"
-              :key="provider._key"
-              class="provider-item"
-              :class="{ 'is-expanded': provider._expanded }"
-            >
-              <div class="provider-item-header" @click="toggleProvider(index)">
-                <div class="provider-item-info">
-                  <el-tag size="small">{{ provider.provider }}</el-tag>
-                  <span class="provider-item-model">{{ provider.defaultModel || '—' }}</span>
-                  <span class="provider-item-base">{{ provider.apiBaseUrl }}</span>
-                </div>
-                <div class="provider-item-actions" @click.stop>
-                  <template v-if="isEditing">
-                    <el-button size="small" text @click.stop="toggleProvider(index)">
-                      {{ provider._expanded ? $t('config.providers.collapse') : $t('common.edit') }}
-                    </el-button>
-                    <el-button size="small" text type="danger" @click.stop="confirmDeleteProvider(index)">
-                      <el-icon><Delete /></el-icon>
-                    </el-button>
-                  </template>
-                  <el-icon :class="{ 'rotated-open': provider._expanded }">
-                    <ArrowDown />
-                  </el-icon>
-                </div>
-              </div>
-              <template v-if="provider._expanded">
-                <div v-if="isEditing" class="provider-item-body">
-                  <el-form :model="provider" label-position="top" size="small">
-                    <el-row :gutter="16">
-                      <el-col :xs="24" :sm="12">
-                        <el-form-item :label="$t('config.providers.providerType')">
-                          <el-select v-model="provider.provider" style="width: 100%">
-                            <el-option
-                              v-for="pt in PROVIDER_TYPES"
-                              :key="pt.value"
-                              :label="pt.label"
-                              :value="pt.value"
-                            />
-                          </el-select>
-                        </el-form-item>
-                      </el-col>
-                      <el-col :xs="24" :sm="12">
-                        <el-form-item :label="$t('config.providers.defaultModel')">
-                          <el-input v-model="provider.defaultModel" :placeholder="$t('config.providers.modelPlaceholder')" />
-                        </el-form-item>
-                      </el-col>
-                      <el-col :span="24">
-                        <el-form-item :label="$t('config.providers.apiBaseUrl')">
-                          <el-input v-model="provider.apiBaseUrl" :placeholder="$t('config.providers.apiBasePlaceholder')" />
-                        </el-form-item>
-                      </el-col>
-                      <el-col :span="24">
-                        <el-form-item :label="$t('config.providers.apiKey')">
-                          <el-input v-model="provider.apiKey" show-password :placeholder="$t('config.providers.apiKeyPlaceholder')" />
-                        </el-form-item>
-                      </el-col>
-                      <el-col :xs="12" :sm="6">
-                        <el-form-item :label="$t('config.providers.maxTokens')">
-                          <el-input-number v-model="provider.maxTokens" :min="128" :max="8192" :step="128" style="width: 100%" />
-                        </el-form-item>
-                      </el-col>
-                      <el-col :xs="12" :sm="6">
-                        <el-form-item :label="$t('config.providers.temperature')">
-                          <el-slider v-model="provider.temperature" :min="0" :max="2" :step="0.1" />
-                        </el-form-item>
-                      </el-col>
-                      <el-col :xs="12" :sm="6">
-                        <el-form-item :label="$t('config.providers.timeoutShort')">
-                          <el-input-number v-model="provider.timeout" :min="5" :max="300" :step="5" style="width: 100%" />
-                        </el-form-item>
-                      </el-col>
-                      <el-col :xs="12" :sm="6">
-                        <el-form-item :label="$t('config.providers.retry')">
-                          <el-input-number v-model="provider.retry" :min="0" :max="5" style="width: 100%" />
-                        </el-form-item>
-                      </el-col>
-                    </el-row>
-                  </el-form>
-                </div>
-                <div v-else class="provider-item-body readonly-body">
-                  <el-descriptions :column="2" size="small" border>
-                    <el-descriptions-item :label="$t('config.providers.providerType')">{{ provider.provider }}</el-descriptions-item>
-                    <el-descriptions-item :label="$t('config.providers.defaultModel')">{{ provider.defaultModel || '—' }}</el-descriptions-item>
-                    <el-descriptions-item :label="$t('config.providers.apiBaseUrl')" :span="2">{{ provider.apiBaseUrl }}</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.maxTokens != null" :label="$t('config.providers.maxTokens')">{{ provider.maxTokens }}</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.temperature != null" :label="$t('config.providers.temperature')">{{ formatTemperature(provider.temperature) }}</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.timeout != null" :label="$t('config.providers.timeoutShort')">{{ provider.timeout }}s</el-descriptions-item>
-                    <el-descriptions-item v-if="provider.retry != null" :label="$t('config.providers.retry')">{{ provider.retry }}</el-descriptions-item>
-                  </el-descriptions>
-                </div>
-              </template>
-              <div v-if="provider._isNew && isEditing" class="provider-item-badge">
-                <el-tag size="small" type="warning">{{ $t('config.providers.notSaved') }}</el-tag>
-              </div>
-            </div>
-          </div>
-        </div>
-      </el-card>
-
-      <!-- Add Provider Dialog -->
-      <el-dialog v-model="showAddProviderDialog" :title="$t('config.providers.addDialogTitle')" width="640px" append-to-body>
-        <el-form ref="addProviderFormRef" :model="newProvider" label-position="top" size="default">
-          <el-row :gutter="20">
-            <el-col :span="12">
-              <el-form-item :label="$t('config.providers.providerType')" prop="provider">
-                <el-select v-model="newProvider.provider" style="width: 100%">
-                  <el-option
-                    v-for="pt in PROVIDER_TYPES"
-                    :key="pt.value"
-                    :label="pt.label"
-                    :value="pt.value"
-                  />
-                </el-select>
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item :label="$t('config.providers.defaultModel')">
-                <el-input v-model="newProvider.defaultModel" :placeholder="$t('config.providers.modelPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="24">
-              <el-form-item :label="$t('config.providers.apiBaseUrl')" prop="apiBaseUrl">
-                <el-input v-model="newProvider.apiBaseUrl" :placeholder="$t('config.providers.apiBasePlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="24">
-              <el-form-item :label="$t('config.providers.apiKey')" prop="apiKey">
-                <el-input v-model="newProvider.apiKey" show-password :placeholder="$t('config.providers.apiKeyPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item :label="$t('config.providers.maxTokens')">
-                <el-input-number v-model="newProvider.maxTokens" :min="128" :max="8192" :step="128" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item :label="$t('config.providers.temperature')">
-                <el-slider v-model="newProvider.temperature" :min="0" :max="2" :step="0.1" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item :label="$t('config.providers.timeoutShort')">
-                <el-input-number v-model="newProvider.timeout" :min="5" :max="300" :step="5" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :span="12">
-              <el-form-item :label="$t('config.providers.retryAttempts')">
-                <el-input-number v-model="newProvider.retry" :min="0" :max="5" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-        </el-form>
-        <template #footer>
-          <el-button @click="showAddProviderDialog = false">{{ $t('common.cancel') }}</el-button>
-          <el-button type="primary" :loading="addingProvider" @click="confirmAddProvider">
-            <el-icon><Plus /></el-icon>
-            {{ $t('config.providers.addBtn') }}
-          </el-button>
-        </template>
-      </el-dialog>
+      <ProvidersSection
+        :providers="additionalProviders"
+        :is-editing="isEditing"
+        :loading="providersLoading"
+        @toggle="toggleProvider"
+        @remove="confirmDeleteProvider"
+        @add="addProvider"
+      />
 
       <!-- Review Rules Card -->
       <el-card ref="rulesCardRef" class="config-card">
@@ -470,7 +154,7 @@
                   </el-tag>
                   <el-input
                     v-if="patternInputVisible"
-                    ref="patternInputRef"
+                    :ref="setPatternInputRef"
                     v-model="patternInputValue"
                     size="small"
                     @keyup.enter="addPattern"
@@ -566,18 +250,22 @@
 
     <!-- Mobile Sticky Actions -->
     <div v-if="isEditing" class="mobile-actions">
-      <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
-        <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
-          {{ $t('common.saveChanges') }}
-        </el-button>
-      </el-badge>
+      <el-tooltip :content="$t('config.noChangesToSave')" :disabled="dirty" placement="top">
+        <span class="save-button-wrapper">
+          <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
+            <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
+              {{ $t('common.saveChanges') }}
+            </el-button>
+          </el-badge>
+        </span>
+      </el-tooltip>
       <el-button @click="cancelEdit">{{ $t('common.cancel') }}</el-button>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { onBeforeRouteLeave } from 'vue-router'
 import {
   ArrowDown,
@@ -585,48 +273,70 @@ import {
   Check,
   Close,
   Collection,
-  Connection,
-  Cpu,
-  Delete,
   Edit,
-  Link,
   Plus,
   Refresh,
   Tools,
-  View,
 } from '@element-plus/icons-vue'
-import { ElMessageBox, ElNotification, type FormInstance, type FormRules } from 'element-plus'
+import { ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
-import { type AppConfig } from '../types/config'
-import { addProvider as addProviderApi, deleteProvider as deleteProviderApi, updateProvider as updateProviderApi, getProviders as getProvidersApi } from '../services/llm'
-import { PROVIDER_TYPES } from '../types/llm'
-import type { ProviderEntry, ProviderConfig } from '../types/llm'
+import { useConfigForm } from '../composables/useConfigForm'
+import { useProviders } from '../composables/useProviders'
+import GitLabSettingsCard from '../components/Config/GitLabSettingsCard.vue'
+import LlmSettingsCard from '../components/Config/LlmSettingsCard.vue'
+import ProvidersSection from '../components/Config/ProvidersSection.vue'
 
-// --- Composable ---
+// --- Composables ---
 const { t } = useI18n()
 const cfg = useConfig()
+
+const {
+  config,
+  isEditing,
+  formRef,
+  configDirty,
+  rules,
+  revealed,
+  revealCountdown,
+  revealField,
+  availableModels,
+  modelFetchLoading,
+  modelFetchError,
+  patternInputVisible,
+  patternInputValue,
+  setPatternInputRef,
+  showPatternInput,
+  addPattern,
+  removePattern,
+  enterEditMode,
+  restoreSnapshot,
+  commitSnapshot,
+  loadConfig,
+  refreshConfig,
+  testConnection,
+} = useConfigForm(cfg)
+
+const {
+  additionalProviders,
+  providersLoading,
+  providersDirty,
+  loadProviders,
+  addProvider,
+  toggleProvider,
+  confirmDeleteProvider,
+  resetProviders,
+  saveAdditionalProviders,
+  saveProvidersOnly,
+} = useProviders(isEditing, configDirty)
 
 // --- State ---
 const loading = cfg.loading
 const loadError = computed(() => !!cfg.error.value)
-const isEditing = ref(false)
 const saving = cfg.saving
 const testingConnection = cfg.testing
 const testResult = cfg.testResult
-const formValid = ref(true)
 const showAdvanced = ref(false)
-const formRef = ref<FormInstance>()
-
-const defaultConfig: AppConfig = {
-  gitlab: { url: '', apiToken: '', webhookSecret: '', webhookSigningSecret: '', defaultProject: '', mrLabel: '', autoReview: false },
-  llm: { apiBaseUrl: 'https://api.openai.com/v1', openaiApiKey: '', defaultModel: '', maxTokens: 4096, temperature: 0.7, timeoutSeconds: 60, retryAttempts: 3 },
-  rules: { minScore: 75, blockOnCritical: true, autoCommentOnPass: true, commentTemplate: '', excludedPatterns: [], requiredExperts: [], maxReviewDurationSeconds: 300 },
-  advanced: { logLevel: 'info', logRetentionDays: 30, sseHeartbeatInterval: 15, maxConcurrentReviews: 5, requestTimeout: 120, enableMetrics: true, debugMode: false },
-}
-
-const config = reactive<AppConfig>(defaultConfig)
-const originalConfig = ref<AppConfig | null>(null)
 
 // Card refs for flash animation
 const gitlabCardRef = ref<HTMLElement>()
@@ -634,232 +344,19 @@ const llmCardRef = ref<HTMLElement>()
 const rulesCardRef = ref<HTMLElement>()
 const advancedCardRef = ref<HTMLElement>()
 
-// Reveal state for read-only mode
-const revealed = reactive({
-  apiToken: false,
-  webhookSecret: false,
-  webhookSigningSecret: false,
-})
-const revealCountdown = reactive({
-  apiToken: 0,
-  webhookSecret: 0,
-  webhookSigningSecret: 0,
-})
-const revealTimers = reactive<Record<string, number>>({})
-
-// Tag input state
-const patternInputVisible = ref(false)
-const patternInputValue = ref('')
-const patternInputRef = ref<any>()
-
 // Responsive layout
 const windowWidth = ref(window.innerWidth)
 const labelPosition = computed(() => (windowWidth.value >= 1024 ? 'left' : 'top'))
 
-const modelOptions = ref<string[]>([])
-const modelFetchLoading = ref(false)
-const modelFetchError = ref<string | null>(null)
-const modelFetchTimer = ref<number | null>(null)
-
-// --- Provider Management State ---
-const additionalProviders = ref<ProviderEntry[]>([])
-const showAddProviderDialog = ref(false)
-const addingProvider = ref(false)
-const providersLoading = ref(false)
-const addProviderFormRef = ref<FormInstance>()
-const deletedProviderIds = ref<string[]>([])
-
-// Snapshot of the persisted provider list, used by `dirty` to detect
-// add/edit/delete changes. `_expanded` is pure UI state and is normalized
-// out so expanding a form never marks the page dirty.
-const originalProvidersJson = ref('')
-
-function serializeProviders(list: ProviderEntry[]): string {
-  return JSON.stringify(list.map((p) => ({ ...p, _expanded: false })))
-}
-
-// The backend stores temperature as f32, so the value echoed back as f64 can
-// carry precision noise (e.g. 0.30000001192092896). Display it at the edit
-// slider's 0.1-step precision.
-function formatTemperature(t?: number): string {
-  return t == null ? '—' : t.toFixed(1)
-}
-
-function createNewProvider(): ProviderConfig {
-  return {
-    provider: 'openai',
-    apiKey: '',
-    apiBaseUrl: 'https://api.openai.com/v1',
-    defaultModel: '',
-    maxTokens: 4096,
-    temperature: 0.7,
-    timeout: 60,
-    retry: 3,
-  }
-}
-
-const newProvider = reactive<ProviderConfig>(createNewProvider())
-
 // --- Computed ---
-const availableModels = computed(() => modelOptions.value)
-
-const configDirty = computed(() => {
-  if (!isEditing.value || !originalConfig.value) return false
-  return JSON.stringify(config) !== JSON.stringify(originalConfig.value)
-})
-
-const providersDirty = computed(() => {
-  if (!isEditing.value) return false
-  if (deletedProviderIds.value.length > 0) return true
-  return serializeProviders(additionalProviders.value) !== originalProvidersJson.value
-})
-
 const dirty = computed(() => configDirty.value || providersDirty.value)
 
-// --- Validation ---
-// URL fields are only validated when a value is present: GET /config does not
-// echo every value (e.g. the GitLab URL is never mapped by the backend), so an
-// empty field means "keep the stored value", never a validation error.
-function validateUrl(_rule: any, value: string, callback: Function) {
-  if (!value || !value.trim()) {
-    callback()
-    return
-  }
-  try {
-    new URL(value)
-    callback()
-  } catch {
-    callback(new Error(t('config.validation.invalidUrl')))
-  }
-}
-
-const rules = computed<FormRules>(() => ({
-  'gitlab.url': [
-    // GitLab URL may not be echoed by GET /config (not yet configured, or the
-    // backend does not map it); empty = "keep the stored value", never a
-    // validation error.
-    { validator: validateUrl, trigger: 'blur' },
-  ],
-  'gitlab.apiToken': [
-    {
-      validator: (_rule: any, value: string, callback: Function) => {
-        // GET /config returns the `***` mask when a token is configured; that
-        // sentinel means "keep the stored token" and must never be
-        // length-flagged. An empty value means "clear the token" (explicit
-        // intent), also valid. Only a genuinely new token is length-checked.
-        if (!value || value === '***' || value.length >= 10) {
-          callback()
-          return
-        }
-        callback(new Error(t('config.validation.tokenMinLength')))
-      },
-      trigger: 'blur',
-    },
-  ],
-  'llm.apiBaseUrl': [
-    { validator: validateUrl, trigger: 'blur' },
-  ],
-  // The LLM API key shares the same keep-existing semantics as the GitLab
-  // token (never echoed by GET /config), so it has no required rule.
-  'llm.openaiApiKey': [],
-  'llm.defaultModel': [
-    { required: true, message: t('config.validation.modelRequired'), trigger: 'change' },
-  ],
-  'rules.requiredExperts': [
-    {
-      validator: (_rule: any, value: any, callback: any) => {
-        if (!value || value.length === 0) {
-          callback(new Error(t('config.validation.expertRequired')))
-        } else {
-          callback()
-        }
-      },
-      trigger: 'change',
-    },
-  ],
-}))
-
-// --- Watchers ---
-
-// Backend's documented default trio; used when GET /config returns an empty
-// `requiredExperts` list so the form never starts permanently invalid (the
-// validation rule requires at least one expert). Prefers the currently-enabled
-// experts from the loaded config when the backend provides them.
-const DEFAULT_REQUIRED_EXPERTS = ['Security', 'Performance', 'Quality']
-
-function backfillRequiredExperts() {
-  if (config.rules.requiredExperts.length > 0) return
-  const enabled = (config.experts ?? []).filter((e) => e.enabled).map((e) => e.name)
-  config.rules.requiredExperts = enabled.length > 0 ? enabled : [...DEFAULT_REQUIRED_EXPERTS]
-}
-watch(config, () => {
-  if (isEditing.value && formRef.value) {
-    formRef.value.validate((valid: boolean) => {
-      formValid.value = valid
-    }).catch(() => { formValid.value = false })
-  }
-}, { deep: true })
-
-watch(() => [config.llm.apiBaseUrl, config.llm.openaiApiKey], () => {
-  if (modelFetchTimer.value) {
-    clearTimeout(modelFetchTimer.value)
-  }
-  modelFetchTimer.value = window.setTimeout(() => {
-    loadModels()
-  }, 500)
-})
-
 // --- Methods ---
-async function loadModels() {
-  const apiBase = config.llm.apiBaseUrl.trim()
-  const apiKey = config.llm.openaiApiKey.trim()
-  if (!apiBase || !apiKey) {
-    modelOptions.value = []
-    modelFetchError.value = null
-    return
-  }
-  try {
-    new URL(apiBase)
-  } catch {
-    modelOptions.value = []
-    return
-  }
-  modelFetchLoading.value = true
-  modelFetchError.value = null
-  try {
-    const models = await cfg.fetchModels(apiBase, apiKey)
-    if (cfg.modelsError.value) {
-      modelFetchError.value = cfg.modelsError.value
-      modelOptions.value = []
-    } else {
-      modelOptions.value = models
-      if (!models.includes(config.llm.defaultModel)) {
-        config.llm.defaultModel = models[0] || ''
-      }
-    }
-  } finally {
-    modelFetchLoading.value = false
-  }
-}
-
-function enterEditMode() {
-  originalConfig.value = JSON.parse(JSON.stringify(config))
-  isEditing.value = true
-  formValid.value = true
-}
-
 function cancelEdit() {
-  if (originalConfig.value) {
-    Object.assign(config, originalConfig.value)
-  }
+  restoreSnapshot()
   // Discard unsaved provider edits as well, otherwise they would keep the
   // page dirty the next time edit mode is entered.
-  if (originalProvidersJson.value) {
-    additionalProviders.value = JSON.parse(originalProvidersJson.value)
-  }
-  deletedProviderIds.value = []
-  isEditing.value = false
-  formValid.value = true
+  resetProviders()
 }
 
 async function saveChanges() {
@@ -888,8 +385,7 @@ async function saveChanges() {
   try {
     await cfg.save(JSON.parse(JSON.stringify(config)))
     await saveAdditionalProviders()
-    originalConfig.value = JSON.parse(JSON.stringify(config))
-    isEditing.value = false
+    commitSnapshot()
 
     ElNotification({
       title: t('common.success'),
@@ -919,251 +415,6 @@ async function saveChanges() {
       duration: 5000,
     })
   }
-}
-
-async function refreshConfig() {
-  await cfg.fetch()
-  if (cfg.config.value) {
-    Object.assign(config, cfg.config.value)
-    backfillRequiredExperts()
-  }
-  ElNotification({
-    title: t('config.refreshedTitle'),
-    message: t('config.refreshed'),
-    type: 'info',
-    duration: 2000,
-  })
-}
-
-async function testConnection() {
-  await cfg.test({
-    provider: 'openai',
-    model: config.llm.defaultModel,
-    apiKey: config.llm.openaiApiKey,
-    apiBase: config.llm.apiBaseUrl,
-  })
-}
-
-function revealField(field: 'apiToken' | 'webhookSecret' | 'webhookSigningSecret') {
-  revealed[field] = true
-  revealCountdown[field] = 5
-  if (revealTimers[field]) clearInterval(revealTimers[field])
-  revealTimers[field] = window.setInterval(() => {
-    revealCountdown[field]--
-    if (revealCountdown[field] <= 0) {
-      clearInterval(revealTimers[field])
-      revealed[field] = false
-      delete revealTimers[field]
-    }
-  }, 1000)
-}
-
-// Pattern tag input
-function showPatternInput() {
-  patternInputVisible.value = true
-  nextTick(() => {
-    patternInputRef.value?.focus()
-  })
-}
-
-function addPattern() {
-  const value = patternInputValue.value.trim()
-  if (value && !config.rules.excludedPatterns.includes(value)) {
-    config.rules.excludedPatterns.push(value)
-  }
-  patternInputVisible.value = false
-  patternInputValue.value = ''
-}
-
-function removePattern(index: number) {
-  config.rules.excludedPatterns.splice(index, 1)
-}
-
-// --- Provider Management Methods ---
-async function loadProviders() {
-  providersLoading.value = true
-  try {
-    const resp = await getProvidersApi()
-    additionalProviders.value = (resp.items || []).map((p) => ({
-      provider: p.name || p.id,
-      // The API key is never returned by the backend; leaving it empty
-      // means "unchanged" on update (the backend keeps the stored key).
-      apiKey: '',
-      apiBaseUrl: p.apiBaseUrl ?? '',
-      defaultModel: p.defaultModel ?? '',
-      maxTokens: p.maxTokens ?? 4096,
-      temperature: p.temperature ?? 0.7,
-      timeout: 60,
-      retry: 3,
-      id: p.id,
-      _key: `provider-${p.id}`,
-      _expanded: false,
-      _isNew: false,
-    }))
-  } catch {
-    additionalProviders.value = []
-  } finally {
-    originalProvidersJson.value = serializeProviders(additionalProviders.value)
-    providersLoading.value = false
-  }
-}
-
-function openAddProviderDialog() {
-  Object.assign(newProvider, createNewProvider())
-  showAddProviderDialog.value = true
-}
-
-async function confirmAddProvider() {
-  if (!addProviderFormRef.value) return
-  const valid = await addProviderFormRef.value.validate().catch(() => false)
-  if (!valid) return
-
-  addingProvider.value = true
-  try {
-    const entry: ProviderEntry = {
-      ...(newProvider as ProviderConfig),
-      _key: `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      _expanded: true,
-      _isNew: true,
-    }
-    additionalProviders.value.push(entry)
-    showAddProviderDialog.value = false
-    ElNotification({
-      title: t('config.providers.addedTitle'),
-      message: t('config.providers.addedMessage'),
-      type: 'info',
-      duration: 3000,
-    })
-  } finally {
-    addingProvider.value = false
-  }
-}
-
-function toggleProvider(index: number) {
-  additionalProviders.value[index]._expanded = !additionalProviders.value[index]._expanded
-}
-
-function confirmDeleteProvider(index: number) {
-  const provider = additionalProviders.value[index]
-  ElMessageBox.confirm(
-    t('config.providers.removeConfirm', { name: provider.provider }),
-    t('config.providers.removeTitle'),
-    {
-      confirmButtonText: t('common.remove'),
-      cancelButtonText: t('common.cancel'),
-      type: 'warning',
-    }
-  ).then(() => {
-    if (provider.id) {
-      deletedProviderIds.value.push(provider.id)
-    }
-    additionalProviders.value.splice(index, 1)
-  }).catch(() => { /* cancelled */ })
-}
-
-// Persist only the pending provider add/edit/delete changes, leaving the
-// main config untouched. Exits edit mode when nothing else remains dirty.
-async function saveProvidersOnly() {
-  try {
-    await saveAdditionalProviders()
-    if (!configDirty.value) {
-      isEditing.value = false
-    }
-    ElNotification({
-      title: t('common.success'),
-      message: t('config.providers.saved'),
-      type: 'success',
-      duration: 3000,
-    })
-  } catch {
-    ElNotification({
-      title: t('common.error'),
-      message: t('config.providers.saveFailed'),
-      type: 'error',
-      duration: 5000,
-    })
-  }
-}
-
-// The backend derives a provider's id from its list position (`{provider}-{index}`),
-// so deleting an entry renumbers every provider after it. Return the trailing
-// index portion of an id so deletes can be applied highest-index-first (each
-// id then stays valid until its own deletion).
-function providerIdIndex(id: string): number {
-  const dash = id.lastIndexOf('-')
-  if (dash === -1) return -1
-  const n = Number.parseInt(id.slice(dash + 1), 10)
-  return Number.isNaN(n) ? -1 : n
-}
-
-async function saveAdditionalProviders() {
-  const hadDeletes = deletedProviderIds.value.length > 0
-
-  // Delete removed providers. Deleting highest index first keeps the remaining
-  // ids valid — deleting a lower index first would shift the list and make the
-  // higher, still-pending ids 404 (or worse, delete the wrong provider).
-  const orderedDeletes = [...deletedProviderIds.value].sort((a, b) => providerIdIndex(b) - providerIdIndex(a))
-  for (const id of orderedDeletes) {
-    try {
-      await deleteProviderApi(id)
-    } catch (e) {
-      // A 404 means the provider is already gone — e.g. PUT /config above
-      // rebuilt the provider list before this loop ran. Deletion is
-      // idempotent, so treat "already deleted" as success without logging.
-      const message = e instanceof Error ? e.message : String(e)
-      if (!message.includes('404')) {
-        console.error(`Failed to delete provider ${id}`, e)
-      }
-    }
-  }
-  deletedProviderIds.value = []
-
-  // After any delete the server renumbers the survivors, so the ids we cached
-  // before the delete would 404 on PUT below. Re-fetch and zip the remaining
-  // (previously persisted, still in server order) providers onto the fresh ids.
-  // Newly-added providers are excluded here — they have no server id yet and
-  // are appended via POST later, so they never shift the survivors' order.
-  if (hadDeletes) {
-    const resp = await getProvidersApi()
-    const freshItems = resp.items || []
-    const remaining = additionalProviders.value.filter((p) => p.id && !p._isNew)
-    if (freshItems.length !== remaining.length) {
-      // A delete failed silently or the server list changed underneath us —
-      // abort rather than zip ids onto the wrong providers.
-      throw new Error('Provider list changed while saving; refresh and try again')
-    }
-    remaining.forEach((p, i) => {
-      p.id = freshItems[i].id
-    })
-  }
-
-  // Save (add or update) providers
-  for (const provider of additionalProviders.value) {
-    const payload: ProviderConfig = {
-      provider: provider.provider,
-      apiKey: provider.apiKey,
-      apiBaseUrl: provider.apiBaseUrl,
-      defaultModel: provider.defaultModel || undefined,
-      maxTokens: provider.maxTokens,
-      temperature: provider.temperature,
-      timeout: provider.timeout,
-      retry: provider.retry,
-    }
-    try {
-      if (provider.id && !provider._isNew) {
-        await updateProviderApi(provider.id, payload)
-      } else {
-        const result = await addProviderApi(payload)
-        provider.id = result.id
-        provider._isNew = false
-      }
-    } catch (e) {
-      console.error(`Failed to save provider ${provider.provider}`, e)
-      throw e
-    }
-  }
-  // All deletes/adds/updates succeeded — the current list is now persisted.
-  originalProvidersJson.value = serializeProviders(additionalProviders.value)
 }
 
 // --- Navigation Guard ---
@@ -1205,12 +456,7 @@ function handleResize() {
 onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('resize', handleResize)
-  cfg.fetch().then(() => {
-    if (cfg.config.value) {
-      Object.assign(config, cfg.config.value)
-      backfillRequiredExperts()
-    }
-  })
+  loadConfig()
   loadProviders()
 })
 
@@ -1229,7 +475,6 @@ watch(() => cfg.error.value, (err) => {
 onUnmounted(() => {
   window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('resize', handleResize)
-  Object.values(revealTimers).forEach(clearInterval)
 })
 </script>
 
@@ -1291,6 +536,11 @@ onUnmounted(() => {
   gap: 6px;
 }
 
+/* Wrapper lets the tooltip hover target survive the disabled save button */
+.save-button-wrapper {
+  display: inline-flex;
+}
+
 /* Skeleton */
 .skeleton-container {
   display: flex;
@@ -1346,60 +596,6 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-/* Readonly fields */
-.readonly-field {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 32px;
-  padding: 0 12px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-}
-
-.masked-text {
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  letter-spacing: 2px;
-  flex: 1;
-}
-
-.revealed-value {
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.countdown {
-  font-size: 12px;
-  color: var(--warning);
-  white-space: nowrap;
-}
-
-.empty-text {
-  color: var(--text-secondary);
-  font-style: italic;
-  flex: 1;
-}
-
-/* Helper text below form inputs */
-.form-item-help {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 6px;
-  line-height: 1.4;
-}
-
-.form-item-help.error-text {
-  color: var(--danger);
-}
-
 /* Slider with value */
 .slider-with-value {
   display: flex;
@@ -1443,17 +639,6 @@ onUnmounted(() => {
 }
 .slider-with-value :deep(.el-slider.is-disabled .el-slider__stop) {
   display: none;
-}
-
-/* Test connection */
-.test-connection {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-color);
 }
 
 /* Tag input */
@@ -1596,142 +781,5 @@ onUnmounted(() => {
 .config-card :deep(.el-card__body) {
   max-height: none;
   overflow: visible;
-}
-
-/* --- Additional Providers Card --- */
-.additional-providers-card :deep(.el-card__body) {
-  padding: 16px 20px;
-}
-
-.providers-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.provider-item {
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  background: var(--bg-surface);
-  overflow: hidden;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.provider-item:hover {
-  border-color: var(--brand);
-  box-shadow: 0 0 0 1px var(--brand);
-}
-
-.provider-item.is-expanded {
-  border-color: var(--brand);
-  box-shadow: 0 0 0 1px var(--brand);
-}
-
-.provider-item-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  cursor: pointer;
-  gap: 12px;
-  user-select: none;
-}
-
-.provider-item-header:hover {
-  background: rgba(var(--brand-rgb, 64, 158, 255), 0.04);
-}
-
-.provider-item-info {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-}
-
-.provider-item-model {
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-
-.provider-item-base {
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.provider-item-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-}
-
-.provider-item-actions .el-icon {
-  transition: transform 0.2s ease;
-  color: var(--text-secondary);
-}
-
-.provider-item-actions .el-icon.rotated-open {
-  transform: rotate(180deg);
-}
-
-.provider-item-body {
-  padding: 16px;
-  border-top: 1px solid var(--border-color);
-  animation: slideDown 0.2s ease;
-}
-
-.provider-item-body.readonly-body {
-  padding: 12px 16px;
-}
-
-@keyframes slideDown {
-  from {
-    opacity: 0;
-    max-height: 0;
-  }
-  to {
-    opacity: 1;
-    max-height: 600px;
-  }
-}
-
-.provider-item-body :deep(.el-form-item) {
-  margin-bottom: 12px;
-}
-
-.provider-item-body :deep(.el-form-item__label) {
-  font-size: 12px;
-  padding-bottom: 4px;
-}
-
-.provider-item-body :deep(.el-slider) {
-  margin-top: 8px;
-}
-
-.provider-item-body :deep(.el-descriptions__label) {
-  font-size: 12px;
-  color: var(--text-secondary);
-}
-
-.provider-item-body :deep(.el-descriptions__content) {
-  font-size: 13px;
-}
-
-.provider-item-badge {
-  padding: 6px 16px 10px;
-  display: flex;
-  align-items: center;
-}
-
-/* Add provider dialog */
-:deep(.el-dialog__body) {
-  padding-top: 12px;
 }
 </style>

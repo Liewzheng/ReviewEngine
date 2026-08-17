@@ -23,6 +23,7 @@ use crate::progress::{ProgressMap, ReviewProgress, StageWeight};
 use crate::prompt::PromptEngine;
 
 use crate::output::parser::validate_findings;
+use crate::team::adjudicator;
 use crate::team::lead_consolidator::{ConsolidatedReport, ConsolidatorConfig, FileCoverage};
 use crate::team::verifier::{self, DroppedFinding};
 
@@ -625,6 +626,14 @@ pub(crate) async fn run_experts_inner(
     // Assess large PR and set up chunking if needed
     let (non_aggregators, chunked_mode) = assess_and_chunk_diff(&mut files, experts, config);
 
+    // Lead expert for the adjudication pass's model selection — captured
+    // before `non_aggregators` is consumed by the task-building loops.
+    let lead_for_adjudication = non_aggregators
+        .iter()
+        .find(|e| e.name.to_lowercase().contains("lead"))
+        .or_else(|| non_aggregators.first())
+        .cloned();
+
     // Gather lightweight project context for the lead overview
     let project_context =
         match crate::context::gather_project_context(std::path::Path::new(&mr_info.project_path), base_ref, head_ref) {
@@ -860,7 +869,61 @@ pub(crate) async fn run_experts_inner(
     // hunk-level ledger (changed vs. demonstrably-touched ranges) feeds the
     // coverage-insufficient / unverified marking.
     let coverage_ledger = build_coverage_ledger(&diff_files, &reports);
-    let consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger));
+    let mut consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger));
+
+    // Final adjudication pass (false-positive reduction, phase 3): the
+    // lead-model LLM re-examines each consolidated finding at or above
+    // `adjudicate_min_severity` against the FULL content of the cited file —
+    // bypassing the expert-context and verification byte caps that hid
+    // defensive code from earlier passes. Dropped false positives are
+    // recorded on the report (`adjudicated_removed`), never silent. Runs
+    // after consolidation so each surviving finding is adjudicated exactly
+    // once; fail-open on any infrastructure problem.
+    if config.report.adjudicate && !llm_configs.is_empty() {
+        let min_severity = adjudicator::parse_min_severity(&config.report.adjudicate_min_severity);
+        let candidates = consolidated
+            .findings
+            .iter()
+            .filter(|f| adjudicator::severity_rank(&f.severity) >= adjudicator::severity_rank(&min_severity))
+            .count();
+        // Select the lead/consolidation model role for the adjudicator, as
+        // with the Pass 1 overview; fall back to the full config list.
+        let adjudication_configs: Vec<LLMConfig> = match &lead_for_adjudication {
+            Some(l) => select_llm_config(l, llm_configs),
+            None => llm_configs.to_vec(),
+        };
+        if let Some(ref map) = progress_map {
+            if let Ok(mut p) = map.write() {
+                if let Some(progress) = p.get_mut(review_id) {
+                    progress.set_stage("adjudicate", 0.5, format!("Adjudicating {} findings", candidates));
+                }
+            }
+        }
+        let removed = adjudicator::adjudicate_findings(
+            &mut consolidated.findings,
+            &mr_info.project_path,
+            &adjudication_configs,
+            &min_severity,
+        )
+        .await;
+        info!(
+            "Adjudication pass: examined {} finding(s) at or above {:?}, dropped {}",
+            candidates,
+            min_severity,
+            removed.len()
+        );
+        consolidated.adjudicated_removed = removed;
+    }
+
+    // Adjudication stage is done (ran, skipped, or disabled — the static
+    // stage list must still reach 100%).
+    if let Some(ref map) = progress_map {
+        if let Ok(mut p) = map.write() {
+            if let Some(progress) = p.get_mut(review_id) {
+                progress.complete_stage("adjudicate");
+            }
+        }
+    }
 
     Ok((
         reports,

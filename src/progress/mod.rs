@@ -187,7 +187,12 @@ impl StageWeight {
             StageWeight {
                 name: "expert_review",
                 label: "Expert review",
-                weight: 0.70,
+                weight: 0.66,
+            },
+            StageWeight {
+                name: "adjudicate",
+                label: "Adjudicating findings",
+                weight: 0.04,
             },
             StageWeight {
                 name: "aggregate",
@@ -218,7 +223,12 @@ impl StageWeight {
             StageWeight {
                 name: "expert_review",
                 label: "Expert review (Pass 2)",
-                weight: 0.70,
+                weight: 0.66,
+            },
+            StageWeight {
+                name: "adjudicate",
+                label: "Adjudicating findings",
+                weight: 0.04,
             },
             StageWeight {
                 name: "aggregate",
@@ -363,11 +373,15 @@ mod tests {
 
     #[test]
     fn set_stage_updates_percent_and_recalcs_weighted_overall() {
-        let mut progress = ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr());
+        let weights = StageWeight::small_pr();
+        let mut progress = ReviewProgress::new("rev-1".to_string(), &weights);
 
-        // expert_review carries weight 0.70; a 50% stage → 35% overall.
+        // Expected overall = expert_review's weight × 50%, read from the
+        // actual weight table so a stage rebalance (e.g. adding the
+        // adjudicate stage) never silently stalemates this assertion.
+        let expert_weight = weights.iter().find(|w| w.name == "expert_review").unwrap().weight;
         progress.set_stage("expert_review", 0.5, "2/4 tasks done".to_string());
-        assert!((progress.overall_percent - 35.0).abs() < 1e-9);
+        assert!((progress.overall_percent - expert_weight * 0.5 * 100.0).abs() < 1e-9);
         let stage = progress.stages.iter().find(|s| s.name == "expert_review").unwrap();
         assert_eq!(stage.stage_percent, 0.5);
         assert_eq!(stage.status, ProgressStatus::Running);

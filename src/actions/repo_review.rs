@@ -27,6 +27,52 @@ pub struct RepoReviewOutput {
     /// "ran / skipped" wording in the Markdown appendix.
     #[serde(default)]
     pub verification_ran: bool,
+    /// Provenance of the run that produced this report: what was scanned
+    /// (git SHA / tree hash / source), when, and with which model. Lets a
+    /// consumer trace a report back to the exact snapshot it describes and
+    /// decide whether two reports are comparable before contrasting scores.
+    /// `#[serde(default)]` keeps JSON written before the field existed
+    /// deserializable.
+    #[serde(default)]
+    pub metadata: ReviewMetadata,
+}
+
+/// Provenance metadata for a repo-review report.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ReviewMetadata {
+    /// Git HEAD commit SHA of the scanned worktree; `None` when the scanned
+    /// path is not a Git repository.
+    pub head_sha: Option<String>,
+    /// Stable hash of the scanned file tree: FNV-1a (64-bit, self-contained —
+    /// no hashing dependency) over the sorted path+size+LOC records, rendered
+    /// as 16 lowercase hex chars. Identical scan input always yields the same
+    /// hash; adding / removing a file or changing a file's size or LOC
+    /// changes it.
+    pub tree_hash: String,
+    /// RFC 3339 (UTC) timestamp of when the review ran.
+    pub reviewed_at: String,
+    /// Model identifier: comma-separated `provider/model` pairs when LLM
+    /// experts ran, `"local-only"` on the static-only path.
+    pub model: String,
+    /// Effective `scoring.score_samples` sampling parameter for this run
+    /// (1 = sampling disabled, each expert scored once).
+    pub score_samples: usize,
+    /// One-line description of what was scanned (the local workspace on
+    /// disk).
+    pub scan_source: String,
+}
+
+impl Default for ReviewMetadata {
+    fn default() -> Self {
+        Self {
+            head_sha: None,
+            tree_hash: String::new(),
+            reviewed_at: String::new(),
+            model: "local-only".to_string(),
+            score_samples: 1,
+            scan_source: String::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -105,6 +151,23 @@ pub struct ExpertScoreOutput {
     pub score: u8,
     pub summary: String,
     pub details: Vec<ScoreItemDetail>,
+    /// `true` when `score` is an explicit fallback (LLM call failed after all
+    /// retries, the response was unparseable, or a static expert errored) —
+    /// not a genuine assessment. Fallback experts still occupy their weight
+    /// in the total, so consumers need this flag to interpret the score.
+    #[serde(default)]
+    pub fallback: bool,
+    /// Raw per-sample scores when `scoring.score_samples > 1` was active for
+    /// this expert; `score` is their median. Absent when sampling was
+    /// disabled (the default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples: Option<Vec<u8>>,
+    /// Smallest sample score; present exactly when `samples` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_min: Option<u8>,
+    /// Largest sample score; present exactly when `samples` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sample_max: Option<u8>,
 }
 
 /// Run the 6 static experts and produce a weighted score.
@@ -123,13 +186,23 @@ async fn run_static_experts(ctx: &RepoContext) -> Vec<ExpertScore> {
         match e.evaluate(ctx, None).await {
             Ok(s) => scores.push(s),
             Err(err) => {
+                // Never drop a failed expert silently: the score must land so
+                // the weight normalisation keeps its shape, and the fallback
+                // flag keeps the synthetic 50 visible in the report.
                 tracing::warn!("Expert {} failed: {:?}", e.name(), err);
+                eprintln!(
+                    "WARN: static expert '{}' failed: {err:#}; recording explicit fallback score",
+                    e.name()
+                );
                 scores.push(ExpertScore {
                     expert_name: e.name().to_string(),
                     weight: e.weight(),
                     score: 50,
                     summary: format!("Evaluation failed: {err}"),
                     details: Vec::new(),
+                    fallback: true,
+                    evaluated_loc: None,
+                    samples: None,
                 });
             }
         }
@@ -164,12 +237,20 @@ fn convert_scores(scores: &[ExpertScore]) -> ConvertedScores {
         if s.expert_name == "architecture" {
             lead_summary = Some(s.summary.clone());
         }
+        let (sample_min, sample_max) = match &s.samples {
+            Some(samples) if !samples.is_empty() => (samples.iter().min().copied(), samples.iter().max().copied()),
+            _ => (None, None),
+        };
         expert_scores.push(ExpertScoreOutput {
             name: s.expert_name.clone(),
             weight: s.weight,
             score: s.score,
             summary: s.summary.clone(),
             details,
+            fallback: s.fallback,
+            samples: s.samples.clone(),
+            sample_min,
+            sample_max,
         });
     }
     ConvertedScores {
@@ -264,8 +345,104 @@ fn pick_top_risks(risk_categories: &[RiskCategory]) -> Vec<(String, u8)> {
     top
 }
 
+// ── Provenance helpers ──
+// Every helper here is fail-open: provenance annotates a report, it must
+// never abort one.
+
+/// Return the HEAD commit SHA of the Git repository at `root`, or `None`
+/// when `root` is not a Git repository or `git rev-parse` fails.
+fn git_head_sha(root: &std::path::Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if sha.is_empty() {
+        None
+    } else {
+        Some(sha)
+    }
+}
+
+/// Stable hash of the scanned file tree: FNV-1a (64-bit, self-contained — no
+/// hashing dependency) over the sorted `path / size / LOC` records, rendered
+/// as 16 lowercase hex chars. Paths are normalised relative to `root` so the
+/// hash describes the tree itself, not where it happens to be checked out; a
+/// file whose metadata is unreadable contributes size 0.
+fn tree_hash(entries: &[FileEntry], root: &std::path::Path) -> String {
+    let mut records: Vec<(String, u64, u64)> = entries
+        .iter()
+        .map(|e| {
+            let rel = std::path::Path::new(&e.path)
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| e.path.clone());
+            let size = std::fs::metadata(&e.path).map(|m| m.len()).unwrap_or(0);
+            (rel, size, e.loc as u64)
+        })
+        .collect();
+    records.sort();
+
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = FNV_OFFSET;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    };
+    for (path, size, loc) in &records {
+        feed(path.as_bytes());
+        feed(&[0]);
+        feed(&size.to_le_bytes());
+        feed(&loc.to_le_bytes());
+    }
+    format!("{hash:016x}")
+}
+
+/// Model identifier for provenance: the `provider/model` pair(s) that scored
+/// this run, or `"local-only"` when no LLM was involved.
+fn model_label(llm_configs: &[LLMConfig]) -> String {
+    if llm_configs.is_empty() {
+        "local-only".to_string()
+    } else {
+        llm_configs
+            .iter()
+            .map(|c| format!("{}/{}", c.provider, c.model))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Assemble the provenance record for a review run.
+fn build_metadata(
+    local_path: &str,
+    entries: &[FileEntry],
+    llm_configs: &[LLMConfig],
+    config: Option<&AppConfig>,
+) -> ReviewMetadata {
+    let root = std::path::Path::new(local_path);
+    ReviewMetadata {
+        head_sha: git_head_sha(root),
+        tree_hash: tree_hash(entries, root),
+        reviewed_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        model: model_label(llm_configs),
+        // The same effective sampling parameter the LLM experts resolve
+        // (config value, floored at 1), so a report records whether `score`
+        // is a single evaluation or a sample median.
+        score_samples: config.map(|c| c.scoring.score_samples).unwrap_or(1).max(1),
+        scan_source: format!("local workspace on disk ({local_path})"),
+    }
+}
+
 /// Build a RepoReviewOutput from expert scores for the local-only path.
-fn build_output(scores: &[ExpertScore], stats: &crate::repo::RepoStats) -> RepoReviewOutput {
+fn build_output(scores: &[ExpertScore], stats: &crate::repo::RepoStats, metadata: ReviewMetadata) -> RepoReviewOutput {
     let (health_score, risk_level) = experts::weighted_total(scores);
     let conv = convert_scores(scores);
     let divisor = total_weight_f(&conv.expert_scores);
@@ -302,6 +479,7 @@ fn build_output(scores: &[ExpertScore], stats: &crate::repo::RepoStats) -> RepoR
         conclusion,
         dropped_findings: Vec::new(),
         verification_ran: false,
+        metadata,
     }
 }
 
@@ -311,6 +489,7 @@ fn build_output_from_aggregated(
     stats: &crate::repo::RepoStats,
     dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
     verification_ran: bool,
+    metadata: ReviewMetadata,
 ) -> RepoReviewOutput {
     let (health_score, risk_level) = experts::weighted_total(&agg.scores);
     let conv = convert_scores(&agg.scores);
@@ -348,6 +527,7 @@ fn build_output_from_aggregated(
         conclusion,
         dropped_findings,
         verification_ran,
+        metadata,
     }
 }
 
@@ -370,6 +550,9 @@ pub async fn run_local_repo_review(
     let scanner = RepoScanner::new(local_path);
     let entries = scanner.scan()?;
     let stats = scanner.compute_stats(&entries);
+    // Provenance is captured at scan time so the timestamp, tree hash and
+    // git SHA all describe the same snapshot the experts then scored.
+    let metadata = build_metadata(local_path, &entries, &[], config.as_deref());
 
     // Track scan progress
     if let Some(ref map) = progress_map {
@@ -385,6 +568,8 @@ pub async fn run_local_repo_review(
         stats,
         llm_configs: vec![],
         config,
+        // No LLM prompt is built on the local-only path — no facts to inject.
+        facts_block: None,
     };
 
     // Run static experts
@@ -399,7 +584,7 @@ pub async fn run_local_repo_review(
         }
     }
 
-    let result = build_output(&scores, &ctx.stats);
+    let result = build_output(&scores, &ctx.stats, metadata);
 
     // Mark progress complete
     crate::progress::complete_repo_progress(progress_map.as_ref(), review_id);
@@ -433,11 +618,18 @@ pub async fn run_repo_review(
     // Run static experts
     let scanner = crate::repo::RepoScanner::new(local_path);
     let stats = scanner.compute_stats(entries);
+    // Provenance is captured before the expert passes so the timestamp, tree
+    // hash and git SHA describe the scanned snapshot the experts then scored.
+    let metadata = build_metadata(local_path, entries, llm_configs, config.as_deref());
+    // Deterministic repo facts: computed once over the FULL entry set (never
+    // per chunk) and shared with every LLM expert prompt via `facts_block`.
+    let facts_block = Some(crate::repo::experts::facts::compute(entries).to_prompt_block());
     let ctx = RepoContext {
         entries: entries.to_vec(),
         stats,
         llm_configs: llm_configs.to_vec(),
         config,
+        facts_block,
     };
     let mut scores = run_static_experts(&ctx).await;
 
@@ -472,7 +664,29 @@ pub async fn run_repo_review(
                 tracing::info!("Architecture Lead scored {}", s.score);
                 scores.push(s);
             }
-            Err(e) => tracing::warn!("Architecture Lead failed: {:?}", e),
+            Err(e) => {
+                // Results must land: a bare `tracing::warn!` here used to
+                // drop the expert from the report entirely — total_experts
+                // fell back to the 6 static ones and the total score was
+                // normalised over 75 instead of 100, with no trace in the
+                // JSON. Record an explicit, flagged fallback score instead.
+                tracing::warn!("Architecture Lead failed: {:?}", e);
+                eprintln!(
+                    "WARN: LLM expert 'architecture' failed after all retries: {e:#}; \
+                     recording explicit fallback score ({})",
+                    experts::LLM_FALLBACK_SCORE
+                );
+                scores.push(ExpertScore {
+                    expert_name: arch_lead.name().to_string(),
+                    weight: arch_lead.weight(),
+                    score: experts::LLM_FALLBACK_SCORE,
+                    summary: format!("LLM architecture assessment unavailable: {e}"),
+                    details: Vec::new(),
+                    fallback: true,
+                    evaluated_loc: Some(ctx.stats.total_loc as u64),
+                    samples: None,
+                });
+            }
         }
 
         // ── Pass 2: Chunk-based CodeQuality ──
@@ -503,7 +717,9 @@ pub async fn run_repo_review(
 
         // Evaluate chunks concurrently (bounded by the semaphore), one future
         // per chunk. `join_all` polls them together and returns results in
-        // input order, keeping chunk scores deterministic.
+        // input order, keeping chunk scores deterministic. Every chunk
+        // returns an `ExpertScore` — a failed chunk yields an explicit,
+        // flagged fallback, never a dropped `None`.
         let tasks: Vec<_> = chunks
             .iter()
             .enumerate()
@@ -514,12 +730,15 @@ pub async fn run_repo_review(
                 let review_id = review_id.to_string();
                 let llm_configs = llm_configs.to_vec();
                 let config = ctx.config.clone();
+                let facts_block = ctx.facts_block.clone();
                 async move {
                     let _permit = match semaphore.acquire_owned().await {
                         Ok(permit) => permit,
                         Err(e) => {
+                            // Practically unreachable (the semaphore is never
+                            // closed), but the chunk must still land.
                             tracing::warn!("Chunk {} semaphore acquire failed: {:?}", chunk.module, e);
-                            return None;
+                            return chunk_fallback_score(chunk, format!("scheduler unavailable: {e}"));
                         }
                     };
                     tracing::info!(
@@ -543,16 +762,25 @@ pub async fn run_repo_review(
                         stats: chunk_stats,
                         llm_configs,
                         config,
+                        facts_block,
                     };
 
                     let result = match llm_experts::CodeQuality.evaluate(&chunk_ctx, Some(llm_client)).await {
                         Ok(s) => {
                             tracing::info!("Chunk {} scored {}", chunk.module, s.score);
-                            Some(s)
+                            s
                         }
                         Err(e) => {
+                            // Same swallow fix as Pass 1: land the result,
+                            // flag it, warn on stderr.
                             tracing::warn!("Chunk {} failed: {:?}", chunk.module, e);
-                            None
+                            eprintln!(
+                                "WARN: LLM expert 'code_quality' chunk '{}' failed after all retries: {e:#}; \
+                                 recording explicit fallback score ({})",
+                                chunk.module,
+                                experts::LLM_FALLBACK_SCORE
+                            );
+                            chunk_fallback_score(chunk, format!("LLM assessment unavailable: {e}"))
                         }
                     };
 
@@ -576,8 +804,8 @@ pub async fn run_repo_review(
             })
             .collect();
 
-        let chunk_results: Vec<Option<ExpertScore>> = futures::future::join_all(tasks).await;
-        scores.extend(chunk_results.into_iter().flatten());
+        let chunk_results: Vec<ExpertScore> = futures::future::join_all(tasks).await;
+        scores.extend(chunk_results);
 
         // Complete llm_enhance stage
         if let Some(ref map) = progress_map {
@@ -638,12 +866,31 @@ pub async fn run_repo_review(
 
     // ── Pass 3: Aggregator ──
     let aggregated = crate::repo::experts::aggregator::aggregate(scores, ctx.config.as_deref());
-    let output = build_output_from_aggregated(&aggregated, &ctx.stats, dropped_findings, verification_ran);
+    let output = build_output_from_aggregated(&aggregated, &ctx.stats, dropped_findings, verification_ran, metadata);
 
     // Mark progress complete
     crate::progress::complete_repo_progress(progress_map.as_ref(), review_id);
 
     Ok(output)
+}
+
+/// Build the explicit fallback score for a failed CodeQuality chunk.
+///
+/// The score lands in the report (flagged `fallback`) instead of vanishing,
+/// so the aggregate keeps the code_quality weight and consumers can see
+/// that this chunk was not genuinely assessed. `evaluated_loc` uses the
+/// chunk's true LOC so the LOC-weighted merge still weights it correctly.
+fn chunk_fallback_score(chunk: &crate::repo::experts::chunk::CodeChunk, reason: String) -> ExpertScore {
+    ExpertScore {
+        expert_name: "code_quality".to_string(),
+        weight: llm_experts::CodeQuality.weight(),
+        score: experts::LLM_FALLBACK_SCORE,
+        summary: format!("Module {}: {reason}", chunk.module),
+        details: Vec::new(),
+        fallback: true,
+        evaluated_loc: Some(chunk.total_loc as u64),
+        samples: None,
+    }
 }
 
 /// Remove verification-dropped findings from the code_quality chunk scores.
@@ -742,6 +989,25 @@ pub fn render_repo_review_output(
             // ── Header ──
             md.push_str("# Repository Health Report\n\n");
 
+            // ── Provenance (compact, directly under the title) ──
+            // Everything a consumer needs to trace this report back to the
+            // exact snapshot that produced it.
+            let m = &output.metadata;
+            md.push_str("## Provenance\n");
+            match m.head_sha.as_deref() {
+                Some(sha) => md.push_str(&format!("- **Git HEAD**: `{sha}`\n")),
+                None => md.push_str("- **Git HEAD**: (not a git repository)\n"),
+            }
+            md.push_str(&format!("- **Tree Hash**: `{}`\n", m.tree_hash));
+            md.push_str(&format!("- **Reviewed At**: {}\n", m.reviewed_at));
+            md.push_str(&format!("- **Model**: {}\n", m.model));
+            md.push_str(&format!("- **Score Samples**: {}\n", m.score_samples));
+            md.push_str(&format!("- **Scan Source**: {}\n", m.scan_source));
+            md.push_str(
+                "\n> Scores are a heuristic single-run / sampled assessment of this snapshot; \
+                 compare across runs only against the same Git HEAD SHA and tree hash.\n\n",
+            );
+
             // ── Overview (bullet list, no emoji) ──
             md.push_str("## Overview\n");
             md.push_str(&format!(
@@ -761,9 +1027,15 @@ pub fn render_repo_review_output(
             let mut total_weighted = 0.0_f64;
             for row in &output.overview.score_breakdown {
                 total_weighted += row.weighted_contrib;
+                // A fallback row must not read as a genuine assessment.
+                let fb = if output.expert_scores.iter().any(|s| s.name == row.area && s.fallback) {
+                    " ⚠"
+                } else {
+                    ""
+                };
                 md.push_str(&format!(
-                    "| {} | {}/100 | {}% | {:.1} | {} |\n",
-                    row.area, row.score, row.weight, row.weighted_contrib, row.risk_label
+                    "| {}{} | {}/100 | {}% | {:.1} | {} |\n",
+                    row.area, fb, row.score, row.weight, row.weighted_contrib, row.risk_label
                 ));
             }
             let total_risk = repo_risk_level(output.overview.health_score);
@@ -781,15 +1053,23 @@ pub fn render_repo_review_output(
             // ── Detailed findings per expert ──
             md.push_str("## Detailed Findings\n");
             for s in &output.expert_scores {
-                if s.details.is_empty() {
-                    continue;
-                }
+                // Zero-finding experts still render their header + summary:
+                // skipping them hid fallback scores (which carry no details)
+                // and clean bills of health alike.
+                let fb_marker = if s.fallback { " ⚠ fallback" } else { "" };
                 md.push_str(&format!(
-                    "\n### {} ({}/100) — {} findings\n",
+                    "\n### {} ({}/100){} — {} findings\n",
                     s.name,
                     s.score,
+                    fb_marker,
                     s.details.len()
                 ));
+                if s.fallback {
+                    md.push_str(
+                        "> ⚠ **Fallback** — this score is a placeholder, not a genuine assessment; \
+                         the summary below records why.\n\n",
+                    );
+                }
                 md.push_str(&format!("**Summary**: {}\n\n", s.summary));
                 for d in &s.details {
                     md.push_str(&render_detail(d));
@@ -932,6 +1212,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
             conclusion,
             dropped_findings: vec![],
             verification_ran: false,
+            metadata: ReviewMetadata::default(),
         });
     }
     let overview = ReportOverview {
@@ -957,6 +1238,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
         },
         dropped_findings: vec![],
         verification_ran: false,
+        metadata: ReviewMetadata::default(),
     })
 }
 
@@ -982,6 +1264,9 @@ mod tests {
             score: 80,
             summary: "Architecture looks good".to_string(),
             details: vec![],
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         assert_eq!(conv.expert_scores.len(), 1);
@@ -998,6 +1283,9 @@ mod tests {
             score: 70,
             summary: "Good code".to_string(),
             details: vec![],
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         assert!(conv.lead_summary.is_none());
@@ -1022,6 +1310,9 @@ mod tests {
             score: 60,
             summary: "Some issues".to_string(),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         assert_eq!(conv.expert_scores[0].details.len(), 1);
@@ -1044,6 +1335,9 @@ mod tests {
                 score: 85,
                 summary: "Lead summary".to_string(),
                 details: vec![],
+                fallback: false,
+                evaluated_loc: None,
+                samples: None,
             },
             ExpertScore {
                 expert_name: "code_quality".to_string(),
@@ -1051,6 +1345,9 @@ mod tests {
                 score: 70,
                 summary: "Quality report".to_string(),
                 details: vec![],
+                fallback: false,
+                evaluated_loc: None,
+                samples: None,
             },
         ];
         let conv = convert_scores(&scores);
@@ -1220,6 +1517,9 @@ mod tests {
             score: 70,
             summary: "".to_string(),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }];
         let conv = convert_scores(&scores);
         let d = &conv.expert_scores[0].details[0];
@@ -1284,6 +1584,10 @@ mod tests {
                 detail("low", "Low issue"),
                 detail("info", "Info note"),
             ],
+            fallback: false,
+            samples: None,
+            sample_min: None,
+            sample_max: None,
         };
         let items = build_action_items(&[expert]);
         assert_eq!(items.len(), 2);
@@ -1319,6 +1623,10 @@ mod tests {
             score,
             summary: String::new(),
             details: vec![],
+            fallback: false,
+            samples: None,
+            sample_min: None,
+            sample_max: None,
         }
     }
 
@@ -1365,6 +1673,7 @@ action_items:
             },
             dropped_findings: vec![],
             verification_ran: false,
+            metadata: ReviewMetadata::default(),
         }
     }
 
@@ -1472,6 +1781,9 @@ action_items:
             score: 70,
             summary: String::new(),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         }
     }
 
@@ -1495,6 +1807,9 @@ action_items:
                 score: 80,
                 summary: String::new(),
                 details: vec![item("Static finding", Some("src/c.rs"))],
+                fallback: false,
+                evaluated_loc: None,
+                samples: None,
             },
         ];
         let kept: Vec<Finding> = vec![
@@ -1579,5 +1894,444 @@ action_items:
         let output = minimal_output();
         let md = render_repo_review_output(&output, "markdown", false).unwrap();
         assert!(!md.contains("Dropped by verification"));
+    }
+
+    // ── LLM failure fallback (regression: silently dropped LLM scores) ──
+
+    #[test]
+    fn test_convert_scores_propagates_fallback_flag() {
+        let scores = vec![ExpertScore {
+            expert_name: "architecture".to_string(),
+            weight: 15,
+            score: experts::LLM_FALLBACK_SCORE,
+            summary: "LLM architecture assessment unavailable: boom".to_string(),
+            details: vec![],
+            fallback: true,
+            evaluated_loc: Some(1234),
+            samples: None,
+        }];
+        let conv = convert_scores(&scores);
+        assert!(conv.expert_scores[0].fallback);
+        // A flagged architecture fallback still feeds the lead summary slot —
+        // the report must show *why* there is no genuine assessment.
+        assert!(conv.lead_summary.as_deref().unwrap().contains("unavailable"));
+        assert_eq!(conv.expert_scores[0].samples, None);
+    }
+
+    #[test]
+    fn test_convert_scores_propagates_samples_min_max() {
+        let scores = vec![ExpertScore {
+            expert_name: "code_quality".to_string(),
+            weight: 10,
+            score: 80,
+            summary: "s".to_string(),
+            details: vec![],
+            fallback: false,
+            evaluated_loc: Some(500),
+            samples: Some(vec![70, 90, 80]),
+        }];
+        let conv = convert_scores(&scores);
+        assert_eq!(conv.expert_scores[0].samples, Some(vec![70, 90, 80]));
+        assert_eq!(conv.expert_scores[0].sample_min, Some(70));
+        assert_eq!(conv.expert_scores[0].sample_max, Some(90));
+        // The sampling evidence serializes into the JSON contract; absent
+        // when sampling was disabled.
+        let json = serde_json::to_value(&conv.expert_scores[0]).unwrap();
+        assert_eq!(json["sample_min"], serde_json::json!(70));
+        assert_eq!(json["sample_max"], serde_json::json!(90));
+        let plain = score_output("x", 80, 10);
+        let json = serde_json::to_value(&plain).unwrap();
+        assert!(json.get("samples").is_none());
+        assert!(json.get("sample_min").is_none());
+        assert_eq!(json["fallback"], serde_json::json!(false));
+    }
+
+    /// Every LLM call failing (unreachable endpoint) must still produce
+    /// architecture + code_quality entries, flagged `fallback`, with the
+    /// weight sum back at 100 — the old code dropped them on the floor and
+    /// normalised over the 75 static-only weight.
+    ///
+    /// The endpoint is `127.0.0.1:1` (connection refused): fails fast,
+    /// offline, non-retriable. `start_paused` makes any retry backoff
+    /// instantaneous should the error text ever classify as retriable.
+    #[tokio::test(start_paused = true)]
+    async fn test_run_repo_review_llm_failure_lands_visible_fallbacks() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        for i in 0..4 {
+            std::fs::write(src.join(format!("m{i}.rs")), format!("pub fn f{i}() -> u8 {{ {i} }}\n")).unwrap();
+        }
+        let root_str = root.to_str().unwrap();
+        let scanner = crate::repo::RepoScanner::new(root_str);
+        let entries = scanner.scan().unwrap();
+        assert_eq!(entries.len(), 4);
+
+        let llm_configs = vec![LLMConfig {
+            provider: "openai".to_string(),
+            model: "unreachable-model".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: "http://127.0.0.1:1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        }];
+        let client = crate::llm::client::LLMClient::new();
+
+        let output = run_repo_review(&client, &llm_configs, root_str, &entries, None, "test-rr", None)
+            .await
+            .unwrap();
+
+        // 6 static + architecture + code_quality: nothing swallowed.
+        assert_eq!(output.overview.total_experts, 8);
+        let weight_sum: u32 = output.expert_scores.iter().map(|s| s.weight as u32).sum();
+        assert_eq!(weight_sum, 100);
+
+        let arch = output
+            .expert_scores
+            .iter()
+            .find(|s| s.name == "architecture")
+            .expect("architecture expert must appear in the report");
+        assert!(arch.fallback, "failed LLM call must be flagged as fallback");
+        assert!(arch.summary.contains("unavailable"));
+
+        let cq = output
+            .expert_scores
+            .iter()
+            .find(|s| s.name == "code_quality")
+            .expect("code_quality expert must appear in the report");
+        assert!(cq.fallback, "failed LLM call must be flagged as fallback");
+
+        // Lead summary slot carries the fallback reason, not `None`.
+        let lead = output
+            .overview
+            .lead_summary
+            .as_deref()
+            .expect("lead_summary must not be swallowed");
+        assert!(lead.contains("unavailable"));
+
+        // The fallback flags survive JSON serialisation — the contract a
+        // consumer uses to tell whether LLM experts genuinely scored.
+        let json = serde_json::to_value(&output).unwrap();
+        let arch_json = json["expert_scores"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "architecture")
+            .unwrap()
+            .clone();
+        assert_eq!(arch_json["fallback"], serde_json::json!(true));
+        assert_eq!(arch_json["score"], serde_json::json!(experts::LLM_FALLBACK_SCORE));
+    }
+
+    // ── provenance metadata ──
+
+    fn init_git_repo(path: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git command {:?} failed", args);
+        };
+        run(&["init", "--initial-branch=main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+    }
+
+    fn commit_all(path: &std::path::Path) {
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git command {:?} failed", args);
+        };
+        run(&["add", "-A"]);
+        run(&["commit", "-m", "test commit"]);
+    }
+
+    fn file_entry(path: &str, loc: usize) -> FileEntry {
+        FileEntry {
+            path: path.to_string(),
+            language: "Rust".to_string(),
+            loc,
+            is_binary: false,
+            is_generated: false,
+        }
+    }
+
+    #[test]
+    fn test_tree_hash_deterministic_for_same_input() {
+        let entries = vec![file_entry("repo/src/a.rs", 10), file_entry("repo/src/b.rs", 20)];
+        let root = std::path::Path::new("repo");
+        let h1 = tree_hash(&entries, root);
+        let h2 = tree_hash(&entries, root);
+        assert_eq!(h1, h2, "same input must hash identically");
+        assert_eq!(h1.len(), 16, "16 lowercase hex chars: {h1}");
+        assert!(h1.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Record order must not matter (records are sorted before hashing).
+        let mut shuffled = entries.clone();
+        shuffled.swap(0, 1);
+        assert_eq!(tree_hash(&shuffled, root), h1);
+
+        // Paths are normalised relative to the root: the same tree checked
+        // out elsewhere hashes alike — the hash describes the tree, not the
+        // checkout location.
+        let relocated: Vec<FileEntry> = entries
+            .iter()
+            .map(|e| FileEntry {
+                path: format!("/elsewhere/{}", e.path.trim_start_matches("repo/")),
+                ..e.clone()
+            })
+            .collect();
+        assert_eq!(tree_hash(&relocated, std::path::Path::new("/elsewhere")), h1);
+    }
+
+    #[test]
+    fn test_tree_hash_changes_with_input() {
+        let root = std::path::Path::new("repo");
+        let base = vec![file_entry("repo/src/a.rs", 10), file_entry("repo/src/b.rs", 20)];
+        let h = tree_hash(&base, root);
+
+        let loc_changed = vec![file_entry("repo/src/a.rs", 11), file_entry("repo/src/b.rs", 20)];
+        assert_ne!(tree_hash(&loc_changed, root), h, "a LOC change must change the hash");
+
+        let mut file_added = base.clone();
+        file_added.push(file_entry("repo/src/c.rs", 5));
+        assert_ne!(tree_hash(&file_added, root), h, "an added file must change the hash");
+
+        let renamed = vec![file_entry("repo/src/z.rs", 10), file_entry("repo/src/b.rs", 20)];
+        assert_ne!(tree_hash(&renamed, root), h, "a rename must change the hash");
+    }
+
+    #[test]
+    fn test_tree_hash_size_sensitive_on_disk() {
+        // Sizes come from the filesystem: a content change that keeps the LOC
+        // count identical must still change the hash.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let file = root.join("a.rs");
+        std::fs::write(&file, "fn a() {}\n").unwrap();
+        let entry = || file_entry(&file.to_string_lossy(), 1);
+        let h1 = tree_hash(&[entry()], root);
+        assert_eq!(
+            tree_hash(&[entry()], root),
+            h1,
+            "unchanged disk state must hash identically"
+        );
+
+        std::fs::write(&file, "fn aa() {}\n").unwrap(); // same 1 line, 2 bytes larger
+        assert_ne!(
+            tree_hash(&[entry()], root),
+            h1,
+            "a size-only change must change the hash"
+        );
+    }
+
+    #[test]
+    fn test_git_head_sha_reads_temp_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
+        commit_all(dir.path());
+        let sha = git_head_sha(dir.path()).expect("a git repo must yield its HEAD sha");
+        assert_eq!(sha.len(), 40, "full SHA-1: {sha}");
+        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_git_head_sha_none_for_non_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(git_head_sha(dir.path()).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_run_local_repo_review_populates_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        std::fs::write(dir.path().join("lib.rs"), "pub fn f() -> u8 { 1 }\n").unwrap();
+        commit_all(dir.path());
+        let expected_sha = git_head_sha(dir.path()).unwrap();
+        let root = dir.path().to_str().unwrap();
+
+        let output = run_local_repo_review(root, None, "test-meta", None).await.unwrap();
+        let m = &output.metadata;
+        assert_eq!(m.head_sha.as_deref(), Some(expected_sha.as_str()));
+        assert_eq!(m.tree_hash.len(), 16);
+        assert!(m.tree_hash.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_eq!(m.model, "local-only");
+        assert_eq!(m.score_samples, 1);
+        assert!(m.scan_source.contains("local workspace on disk"), "{}", m.scan_source);
+        assert!(m.scan_source.contains(root), "{}", m.scan_source);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&m.reviewed_at).is_ok(),
+            "reviewed_at must be RFC 3339: {}",
+            m.reviewed_at
+        );
+
+        // The metadata lands in the JSON contract in the existing snake_case style.
+        let json = serde_json::to_value(&output).unwrap();
+        assert_eq!(json["metadata"]["head_sha"], serde_json::json!(expected_sha));
+        assert_eq!(json["metadata"]["model"], serde_json::json!("local-only"));
+        assert_eq!(json["metadata"]["score_samples"], serde_json::json!(1));
+        assert!(json["metadata"]["tree_hash"].is_string());
+        assert!(json["metadata"]["reviewed_at"].is_string());
+        assert!(json["metadata"]["scan_source"].is_string());
+    }
+
+    #[tokio::test]
+    async fn test_run_local_repo_review_metadata_non_git_and_score_samples() {
+        // Non-git root: head_sha stays empty; a configured sampling parameter
+        // is recorded as-is.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("lib.rs"), "pub fn f() -> u8 { 1 }\n").unwrap();
+        let config = AppConfig {
+            project: None,
+            report: Default::default(),
+            review_experts: Default::default(),
+            commands: Default::default(),
+            scoring: ScoringConfig {
+                score_samples: 5,
+                ..Default::default()
+            },
+            llm: vec![],
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            output_dir: String::new(),
+            diff: Default::default(),
+            rate_limit: Default::default(),
+            languages: Default::default(),
+        };
+        let output = run_local_repo_review(
+            dir.path().to_str().unwrap(),
+            None,
+            "test-meta-cfg",
+            Some(std::sync::Arc::new(config)),
+        )
+        .await
+        .unwrap();
+        assert!(output.metadata.head_sha.is_none());
+        assert_eq!(output.metadata.score_samples, 5);
+    }
+
+    #[test]
+    fn test_repo_review_output_deserializes_without_metadata() {
+        // JSON produced before the field existed must still deserialize.
+        let mut value = serde_json::to_value(minimal_output()).unwrap();
+        value.as_object_mut().unwrap().remove("metadata");
+        let de: RepoReviewOutput = serde_json::from_value(value).unwrap();
+        assert!(de.metadata.head_sha.is_none());
+        assert_eq!(de.metadata.model, "local-only");
+        assert_eq!(de.metadata.score_samples, 1);
+    }
+
+    // ── markdown: provenance section ──
+
+    #[test]
+    fn test_render_markdown_provenance_section() {
+        let mut output = minimal_output();
+        output.metadata = ReviewMetadata {
+            head_sha: Some("abc123def".to_string()),
+            tree_hash: "0123456789abcdef".to_string(),
+            reviewed_at: "2026-01-02T03:04:05Z".to_string(),
+            model: "openai/gpt-5".to_string(),
+            score_samples: 3,
+            scan_source: "local workspace on disk (/repo)".to_string(),
+        };
+        let md = render_repo_review_output(&output, "markdown", false).unwrap();
+        // Compact section directly under the title, before the Overview.
+        let title = md.find("# Repository Health Report").unwrap();
+        let prov = md.find("## Provenance").unwrap();
+        let overview = md.find("## Overview").unwrap();
+        assert!(title < prov && prov < overview);
+        assert!(md.contains("- **Git HEAD**: `abc123def`"));
+        assert!(md.contains("- **Tree Hash**: `0123456789abcdef`"));
+        assert!(md.contains("- **Reviewed At**: 2026-01-02T03:04:05Z"));
+        assert!(md.contains("- **Model**: openai/gpt-5"));
+        assert!(md.contains("- **Score Samples**: 3"));
+        assert!(md.contains("- **Scan Source**: local workspace on disk (/repo)"));
+        // Score-nature note: heuristic single-run / sampled assessment,
+        // same SHA + tree hash as the baseline for cross-run comparison.
+        assert!(md.contains("heuristic single-run / sampled assessment"));
+        assert!(md.contains("same Git HEAD SHA and tree hash"));
+    }
+
+    #[test]
+    fn test_render_markdown_provenance_non_git() {
+        let output = minimal_output(); // default metadata: no git repo
+        let md = render_repo_review_output(&output, "markdown", false).unwrap();
+        assert!(md.contains("- **Git HEAD**: (not a git repository)"));
+    }
+
+    // ── markdown: zero-finding experts & fallback annotation ──
+
+    fn expert_output(name: &str, score: u8, summary: &str, fallback: bool) -> ExpertScoreOutput {
+        ExpertScoreOutput {
+            name: name.to_string(),
+            weight: 15,
+            score,
+            summary: summary.to_string(),
+            details: vec![],
+            fallback,
+            samples: None,
+            sample_min: None,
+            sample_max: None,
+        }
+    }
+
+    #[test]
+    fn test_render_markdown_renders_zero_finding_expert_summary() {
+        let mut output = minimal_output();
+        output
+            .expert_scores
+            .push(expert_output("documentation", 95, "Docs are comprehensive", false));
+        let md = render_repo_review_output(&output, "markdown", false).unwrap();
+        // The whole section used to be skipped; the summary line must render.
+        assert!(md.contains("### documentation (95/100) — 0 findings"), "{md}");
+        assert!(md.contains("**Summary**: Docs are comprehensive"), "{md}");
+        // A clean expert is NOT marked as fallback.
+        assert!(!md.contains("### documentation (95/100) ⚠ fallback"), "{md}");
+    }
+
+    #[test]
+    fn test_render_markdown_marks_fallback_experts() {
+        let mut output = minimal_output();
+        output.overview.score_breakdown.push(ScoreRow {
+            area: "architecture".to_string(),
+            score: experts::LLM_FALLBACK_SCORE,
+            weight: 15,
+            weighted_contrib: 10.5,
+            risk_label: repo_risk_level(experts::LLM_FALLBACK_SCORE),
+        });
+        output.expert_scores.push(expert_output(
+            "architecture",
+            experts::LLM_FALLBACK_SCORE,
+            "LLM architecture assessment unavailable: boom",
+            true,
+        ));
+        let md = render_repo_review_output(&output, "markdown", false).unwrap();
+        // Section header + callout carry the ⚠ fallback marker, and the
+        // reason stays visible in the summary line.
+        let header = format!(
+            "### architecture ({}/100) ⚠ fallback — 0 findings",
+            experts::LLM_FALLBACK_SCORE
+        );
+        assert!(md.contains(&header), "{md}");
+        assert!(md.contains("> ⚠ **Fallback**"), "{md}");
+        assert!(
+            md.contains("**Summary**: LLM architecture assessment unavailable: boom"),
+            "{md}"
+        );
+        // The score-breakdown table marks the row too — a placeholder score
+        // must not read as a genuine assessment anywhere in the report.
+        let row = format!("| architecture ⚠ | {}/100 |", experts::LLM_FALLBACK_SCORE);
+        assert!(md.contains(&row), "{md}");
     }
 }

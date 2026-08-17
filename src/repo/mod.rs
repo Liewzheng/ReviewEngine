@@ -201,6 +201,13 @@ impl RepoScanner {
                 }
 
                 let abs = self.root.join(&rel);
+                // The worktree is the source of truth: `git ls-files
+                // --cached` reads the index, which still lists files deleted
+                // from the worktree but not yet staged (`rm` without
+                // `git rm`). Skip anything absent on disk.
+                if !abs.exists() {
+                    continue;
+                }
                 if abs.is_dir() {
                     continue;
                 }
@@ -263,12 +270,16 @@ impl RepoScanner {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         let path_str = path.to_string_lossy().to_string();
 
-        // Skip hidden files, but keep common config files
+        // Skip hidden files, but keep common config files — including CI
+        // configs (`.gitlab-ci.yml`, `.travis.yml`), which the test-coverage
+        // expert inspects for CI test steps.
         if name.starts_with('.')
             && name != ".gitignore"
             && name != ".editorconfig"
             && name != ".rustfmt.toml"
             && name != ".clippy.toml"
+            && name != ".gitlab-ci.yml"
+            && name != ".travis.yml"
         {
             return None;
         }
@@ -289,13 +300,13 @@ impl RepoScanner {
             || path_str.contains("/generated/")
             || path_str.contains("/review_reports/");
 
-        // Count lines and detect generated markers in content
-        let loc = if let Some(content) = std::fs::read_to_string(path).ok() {
-            is_generated = is_generated || self.is_generated_content(&content);
-            content.lines().count()
-        } else {
-            0
-        };
+        // Count lines and detect generated markers in content. A file that
+        // cannot be read (e.g. deleted from the worktree after enumeration,
+        // or an unreadable permission) is skipped entirely instead of being
+        // reported as a phantom 0-LOC entry.
+        let content = std::fs::read_to_string(path).ok()?;
+        is_generated = is_generated || self.is_generated_content(&content);
+        let loc = content.lines().count();
 
         Some(FileEntry {
             path: path_str,
@@ -412,231 +423,4 @@ impl RepoScanner {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn init_git_repo(path: &Path) {
-        let run = |args: &[&str]| {
-            let status = std::process::Command::new("git")
-                .arg("-C")
-                .arg(path)
-                .args(args)
-                .status()
-                .expect("git command failed to run");
-            assert!(status.success(), "git command {:?} failed", args);
-        };
-        run(&["init", "--initial-branch=main"]);
-        run(&["config", "user.email", "test@example.com"]);
-        run(&["config", "user.name", "Test User"]);
-    }
-
-    #[test]
-    fn test_scanner_ignores_node_modules() {
-        let scanner = RepoScanner::new(".");
-        assert!(scanner.is_ignored(Path::new("node_modules")));
-        assert!(scanner.is_ignored(Path::new(".git")));
-        assert!(!scanner.is_ignored(Path::new("src")));
-    }
-
-    #[test]
-    fn test_detect_language() {
-        let scanner = RepoScanner::new(".");
-        assert_eq!(scanner.detect_language("rs"), "Rust");
-        assert_eq!(scanner.detect_language("py"), "Python");
-        assert_eq!(scanner.detect_language("md"), "Documentation");
-    }
-
-    #[test]
-    fn test_is_binary_file() {
-        let scanner = RepoScanner::new(".");
-        assert!(scanner.is_binary_file("png"));
-        assert!(scanner.is_binary_file("pdf"));
-        assert!(!scanner.is_binary_file("rs"));
-    }
-
-    #[test]
-    fn test_compute_stats() {
-        let entries = vec![
-            FileEntry {
-                path: "a.rs".to_string(),
-                language: "Rust".to_string(),
-                loc: 100,
-                is_binary: false,
-                is_generated: false,
-            },
-            FileEntry {
-                path: "b.rs".to_string(),
-                language: "Rust".to_string(),
-                loc: 600,
-                is_binary: false,
-                is_generated: false,
-            },
-            FileEntry {
-                path: "c.py".to_string(),
-                language: "Python".to_string(),
-                loc: 50,
-                is_binary: false,
-                is_generated: false,
-            },
-        ];
-        let scanner = RepoScanner::new(".");
-        let stats = scanner.compute_stats(&entries);
-        assert_eq!(stats.total_files, 3);
-        assert_eq!(stats.total_loc, 750);
-        assert_eq!(stats.languages.get("Rust").unwrap().loc, 700);
-        assert_eq!(stats.large_files.len(), 1);
-    }
-
-    #[test]
-    fn classify_file_detects_binary_files_from_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("logo.png");
-        std::fs::write(&path, "not actually binary").unwrap();
-        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        assert!(scanner.classify_file(&path).is_none());
-    }
-
-    #[test]
-    fn classify_file_detects_generated_files_by_name() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("Cargo.lock");
-        std::fs::write(&path, "dummy lock\n").unwrap();
-        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        let entry = scanner.classify_file(&path).unwrap();
-        assert!(entry.is_generated);
-    }
-
-    #[test]
-    fn classify_file_detects_generated_files_by_content_marker() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("api.pb.rs");
-        std::fs::write(&path, "// Code generated by protoc. DO NOT EDIT.\nstruct Foo;\n").unwrap();
-        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        let entry = scanner.classify_file(&path).unwrap();
-        assert!(entry.is_generated);
-    }
-
-    #[test]
-    fn classify_file_skips_hidden_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".hidden.rs");
-        std::fs::write(&path, "fn main() {}").unwrap();
-        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        assert!(scanner.classify_file(&path).is_none());
-    }
-
-    #[test]
-    fn classify_file_sets_language_by_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("main.rs");
-        std::fs::write(&path, "fn main() {}\n").unwrap();
-        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        let entry = scanner.classify_file(&path).unwrap();
-        assert_eq!(entry.language, "Rust");
-        assert!(!entry.is_binary);
-    }
-
-    #[test]
-    fn is_generated_content_detects_common_markers() {
-        let scanner = RepoScanner::new(".");
-        assert!(scanner.is_generated_content("// Code generated by protoc"));
-        assert!(scanner.is_generated_content("# autogenerated: do not touch"));
-        assert!(scanner.is_generated_content("This file is auto-generated."));
-        assert!(scanner.is_generated_content("Generated by Swagger Codegen."));
-        assert!(scanner.is_generated_content("// DO NOT EDIT manually"));
-        assert!(!scanner.is_generated_content("// Hand-written code"));
-    }
-
-    #[test]
-    fn test_git_repo_respects_gitignore() {
-        let dir = tempfile::tempdir().unwrap();
-        init_git_repo(dir.path());
-
-        std::fs::write(dir.path().join(".gitignore"), "ignored.rs\n").unwrap();
-        std::fs::write(dir.path().join("kept.rs"), "fn main() {}\n").unwrap();
-        std::fs::write(dir.path().join("ignored.rs"), "fn ignored() {}\n").unwrap();
-
-        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        let entries = scanner.scan().unwrap();
-
-        let paths: Vec<&str> = entries.iter().map(|e| e.path.as_str()).collect();
-        assert!(
-            paths.iter().any(|p| p.ends_with("kept.rs")),
-            "kept.rs should be included"
-        );
-        assert!(
-            !paths.iter().any(|p| p.ends_with("ignored.rs")),
-            "ignored.rs should be excluded by .gitignore"
-        );
-    }
-
-    #[test]
-    fn test_scanner_skips_submodules() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        scanner.ignore_patterns.push("submodule".to_string());
-
-        std::fs::create_dir_all(dir.path().join("submodule")).unwrap();
-        std::fs::write(dir.path().join("submodule/foo.rs"), "fn foo() {}\n").unwrap();
-
-        let entries = scanner.scan().unwrap();
-        assert!(
-            !entries.iter().any(|e| e.path.contains("submodule")),
-            "submodule contents should be skipped"
-        );
-    }
-
-    #[test]
-    fn test_scanner_skips_binary_files() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("logo.png"), "not actually binary").unwrap();
-        std::fs::write(dir.path().join("main.rs"), "fn main() {}\n").unwrap();
-
-        let scanner = RepoScanner::new(dir.path().to_str().unwrap());
-        let entries = scanner.scan().unwrap();
-
-        assert!(
-            !entries.iter().any(|e| e.path.ends_with("logo.png")),
-            "binary files should be skipped"
-        );
-        assert!(
-            entries.iter().any(|e| e.path.ends_with("main.rs")),
-            "text files should be included"
-        );
-    }
-
-    #[test]
-    fn test_git_submodules_parsing() {
-        let dir = tempfile::tempdir().unwrap();
-        init_git_repo(dir.path());
-        std::fs::create_dir_all(dir.path().join("nested")).unwrap();
-        std::fs::write(dir.path().join("nested/file.rs"), "fn foo() {}\n").unwrap();
-
-        let submodules = git_submodules(dir.path());
-        assert!(
-            submodules.is_empty(),
-            "repo without submodules should return empty list"
-        );
-    }
-
-    #[test]
-    fn test_path_matches_prefix() {
-        assert!(path_matches_prefix("sub", "sub"));
-        assert!(path_matches_prefix("sub/foo.rs", "sub"));
-        assert!(!path_matches_prefix("subfoo.rs", "sub"));
-        assert!(!path_matches_prefix("other/foo.rs", "sub"));
-    }
-
-    #[test]
-    fn test_scan_nonexistent_path_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist");
-        let scanner = RepoScanner::new(missing.to_str().unwrap());
-
-        let err = scanner.scan().expect_err("scan of a missing path must fail");
-        assert!(
-            err.to_string().contains("Repository path does not exist"),
-            "unexpected error: {err:?}"
-        );
-    }
-}
+mod tests;

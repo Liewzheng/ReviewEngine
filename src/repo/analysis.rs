@@ -40,6 +40,16 @@ fn build_security_regexes() -> Vec<(regex::Regex, &'static str)> {
         .collect()
 }
 
+/// A matched token is a placeholder/example (e.g. `sk-xxxx…xxxx` shipped in
+/// sample config or docs), not a real secret, when the value after any
+/// structural prefix (e.g. the `sk-` of the secret-key pattern) is composed
+/// solely of placeholder characters: `x`/`X`/`*`/`-`/`_`. Real secrets have
+/// entropy; dummy strings like `sk-xxxxxxxxxxxxxxxx` or `****` do not.
+fn is_placeholder_token(token: &str) -> bool {
+    let value = token.strip_prefix("sk-").unwrap_or(token);
+    !value.is_empty() && value.chars().all(|c| matches!(c, 'x' | 'X' | '*' | '-' | '_'))
+}
+
 /// Scan a single text block for security patterns. Exposed for unit testing.
 pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<SecurityFinding> {
     let re_list = build_security_regexes();
@@ -47,13 +57,17 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
 
     for (i, line) in content.lines().enumerate() {
         for (re, desc) in &re_list {
-            if re.is_match(line) {
+            for mat in re.find_iter(line) {
+                if is_placeholder_token(mat.as_str()) {
+                    continue; // example/dummy placeholder, not a real secret
+                }
                 findings.push(SecurityFinding {
                     file: file.to_string(),
                     pattern: desc.to_string(),
                     line: i + 1,
                     severity: "medium".to_string(),
                 });
+                break; // one finding per (line, pattern) is enough
             }
         }
     }
@@ -124,5 +138,33 @@ mod tests {
     fn scan_security_patterns_in_text_returns_empty_for_clean_content() {
         let findings = scan_security_patterns_in_text("main.rs", "fn main() { println!(\"hello\"); }");
         assert!(findings.is_empty());
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_skips_placeholder_secret_key() {
+        // `sk-` + 40 `x`s is a dummy/example token (all placeholder chars),
+        // so it must not be reported as a real secret.
+        let content = format!("{}{}", "sk-", "x".repeat(40));
+        let findings = scan_security_patterns_in_text("config.example.ts", &content);
+        assert!(!findings.iter().any(|f| f.pattern == "Possible secret key"));
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_finds_high_entropy_secret_key() {
+        // A token with diverse chars (upper/lower/digits) after `sk-` is not
+        // a placeholder and must still be reported as a possible secret key.
+        let tail = "Ab3cD5eF7gH9iJ1kL2mN";
+        let content = format!("{}{}", "sk-", tail);
+        let findings = scan_security_patterns_in_text("keys.env", &content);
+        assert!(findings.iter().any(|f| f.pattern == "Possible secret key"));
+    }
+
+    #[test]
+    fn scan_security_patterns_in_text_skips_placeholder_api_key() {
+        // Sample config line with a placeholder value (`openaiApiKey: 'sk-…'`)
+        // must not be reported as a possible API key.
+        let content = format!("openaiApiKey: 'sk-{}'", "x".repeat(40));
+        let findings = scan_security_patterns_in_text("config.ts", &content);
+        assert!(!findings.iter().any(|f| f.pattern == "Possible API key"));
     }
 }

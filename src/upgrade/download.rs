@@ -42,6 +42,9 @@ fn download_client() -> Result<reqwest::Client> {
 /// file name for debuggability; uniqueness comes from pid + nonce. When
 /// `expected_size` is known (from the GitHub API), any deviation — stream
 /// longer than expected or shorter — fails the download.
+///
+/// On failure, the temp file is automatically removed so the caller never
+/// sees a partial file.
 pub async fn download_asset(
     url: &str,
     dest_dir: &Path,
@@ -333,6 +336,48 @@ mod tests {
             std::fs::read_dir(dir.path()).unwrap().count(),
             0,
             "failed verification must leave nothing behind"
+        );
+    }
+
+    #[test]
+    fn temp_path_is_prefixed_with_dot_and_ends_in_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path_for(dir.path(), "review-engine-x86_64.tar.gz");
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with('.'), "hidden temp file: {name}");
+        assert!(name.ends_with(".tmp"), "temp extension: {name}");
+        assert!(name.contains("review-engine-x86_64.tar.gz"));
+        assert_eq!(path.parent(), Some(dir.path()));
+    }
+
+    #[test]
+    fn temp_path_sanitizes_unsafe_asset_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path_for(dir.path(), "weird name/with&specials");
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(!name.contains('/'), "slashes must be replaced, got {name}");
+        assert!(!name.contains('&'), "ampersand must be replaced, got {name}");
+        assert!(name.contains("weird_name_with_specials"), "slugified: {name}");
+    }
+
+    #[test]
+    fn temp_path_is_unique_per_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = temp_path_for(dir.path(), "asset.bin");
+        let b = temp_path_for(dir.path(), "asset.bin");
+        assert_ne!(a, b, "nonce must make each temp path unique");
+        let c = temp_path_for(dir.path(), "other.bin");
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn temp_path_contains_process_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = temp_path_for(dir.path(), "a.bin");
+        let name = path.file_name().unwrap().to_string_lossy();
+        assert!(
+            name.contains(&std::process::id().to_string()),
+            "pid must appear in {name}"
         );
     }
 }

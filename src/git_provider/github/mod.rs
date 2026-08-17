@@ -167,4 +167,18 @@ mod tests {
         let paths = provider.search_code("authenticate").unwrap();
         assert_eq!(paths, vec!["src/auth.rs".to_string()]);
     }
+
+    #[test]
+    fn provider_new_accepts_valid_github_pr_url() {
+        let p = GitHubProvider::new("tok", "https://github.com/owner/repo/pull/123");
+        assert!(p.is_ok(), "valid PR URL must construct");
+    }
+
+    #[test]
+    fn provider_new_rejects_non_pull_urls() {
+        assert!(GitHubProvider::new("tok", "https://github.com/owner/repo").is_err());
+        assert!(GitHubProvider::new("tok", "https://github.com/owner/repo/tree/main").is_err());
+        assert!(GitHubProvider::new("tok", "not a url").is_err());
+        assert!(GitHubProvider::new("tok", "https://gitlab.com/owner/repo/-/merge_requests/1").is_err());
+    }
 }

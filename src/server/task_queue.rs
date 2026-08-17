@@ -3,12 +3,21 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+/// Lifecycle state of a review task in the queue.
+///
+/// Transitions: `Pending` → `Running` → (`Completed` | `Failed`).
+/// `Cancelled` is terminal; once set, the worker's `update` call is a no-op.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskState {
+    /// Task is queued but not yet started (no worker has picked it up).
     Pending,
+    /// A worker has claimed the task and is actively executing the review.
     Running,
+    /// Review completed successfully; `result` contains the JSON report.
     Completed,
+    /// Review failed; `error` contains the failure message.
     Failed,
+    /// Task was cancelled by the user before or during execution.
     Cancelled,
 }
 
@@ -26,9 +35,16 @@ pub struct SourceMeta {
     pub commit_sha: Option<String>,
 }
 
+/// A single review task record stored in the queue.
+///
+/// Created when a review request arrives; mutated as the task progresses
+/// through `Pending` → `Running` → terminal state. Expired entries
+/// (completed >30 min ago) are reaped automatically.
 #[derive(Debug, Clone)]
 pub struct TaskEntry {
+    /// Unique task identifier (UUID v4).
     pub task_id: Uuid,
+    /// Current lifecycle state.
     pub state: TaskState,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub started_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -43,18 +59,35 @@ pub struct TaskEntry {
     pub expert_name: Option<String>, // current active expert
 }
 
+/// A real-time event broadcast to SSE subscribers when a task's state changes.
+///
+/// Broadcast on every state transition. The frontend's queue monitor
+/// listens to these to update its live dashboard.
 #[derive(Debug, Clone)]
 pub struct TaskEvent {
+    /// Task UUID this event pertains to.
     pub task_id: Uuid,
+    /// Current status string: `"pending"`, `"running"`, `"completed"`, `"failed"`, `"cancelled"`.
     pub status: &'static str,
+    /// Event type: `"review.created"`, `"review.started"`, `"review.progress"`, etc.
     pub event: &'static str,
+    /// MR/PR title for display in the dashboard.
     pub mr_title: Option<String>,
+    /// Project or namespace path.
     pub project: Option<String>,
+    /// Completion percentage (0–100, only for `review.progress` events).
     pub progress: Option<u8>,
+    /// Name of the expert currently executing (for progress events).
     pub expert_name: Option<String>,
+    /// Elapsed wall-clock milliseconds since task started.
     pub elapsed_ms: Option<u64>,
 }
 
+/// In-memory task queue backed by `HashMap<Uuid, TaskEntry>`.
+///
+/// Provides concurrency-safe task lifecycle management with automatic
+/// expiry cleanup, broadcast SSE events, pause/resume control, and
+/// configurable concurrency limits.
 #[derive(Clone)]
 pub struct TaskStore {
     inner: Arc<RwLock<HashMap<Uuid, TaskEntry>>>,

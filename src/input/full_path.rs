@@ -110,7 +110,17 @@ pub fn build_path_review_diff(repo_path: &str, dir: &str) -> Result<FullPathRevi
         let bytes = match std::fs::read(&full) {
             Ok(b) => b,
             Err(e) => {
-                anyhow::bail!("failed to read {}: {}", full.display(), e);
+                // The worktree is the source of truth: `git ls-files
+                // --cached` lists files deleted from the worktree but not yet
+                // staged, so a missing/unreadable file must not fail the
+                // whole review. Skip it — the fail-closed "no reviewable
+                // files" check below still guards an empty result.
+                eprintln!(
+                    "warning: review --path skipping unreadable file {}: {e}",
+                    full.display()
+                );
+                skipped.push(format!("{} (unreadable)", rel));
+                continue;
             }
         };
         match String::from_utf8(bytes) {
@@ -517,5 +527,28 @@ mod tests {
             .err()
             .expect("a file path must fail");
         assert!(err.to_string().contains("must name a directory"), "{err}");
+    }
+
+    /// Regression (feedback A): a file deleted from the worktree but still in
+    /// the Git index (deletion not staged) is listed by `git ls-files
+    /// --cached`. It must be skipped with a warning, not fail the review.
+    #[test]
+    fn git_repo_skips_file_deleted_from_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        init_git_repo(dir.path());
+        commit(
+            dir.path(),
+            &[("src/a.rs", "fn a() {}\n"), ("src/gone.rs", "fn gone() {}\n")],
+        );
+        // Delete from the worktree only; the index still lists the file.
+        std::fs::remove_file(dir.path().join("src/gone.rs")).unwrap();
+
+        let review = build_path_review_diff(dir.path().to_str().unwrap(), "src").unwrap();
+        assert_eq!(review.files, vec!["src/a.rs".to_string()]);
+        assert!(
+            !review.diff.contains("gone.rs"),
+            "deleted file must not leak into the diff: {}",
+            review.diff
+        );
     }
 }

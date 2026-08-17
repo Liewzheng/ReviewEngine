@@ -3,11 +3,17 @@ use crate::repo::RepoStats;
 
 /// Global context produced by the Architecture Lead in Pass 1.
 /// Injected into all Pass 2 LLM expert prompts.
+/// Global context produced by the Architecture Lead in Pass 1.
+/// Injected into all Pass 2 LLM expert prompts.
 #[derive(Debug, Clone)]
 pub struct RepoGlobalContext {
+    /// One-paragraph summary of the repository's purpose and structure.
     pub summary: String,
+    /// Areas of the codebase flagged as high-risk by the lead reviewer.
     pub risk_areas: Vec<String>,
+    /// Modules or directories that deserve focused attention.
     pub focus_modules: Vec<String>,
+    /// Tailored guidance for domain-specific experts.
     pub expert_guidance: String,
 }
 

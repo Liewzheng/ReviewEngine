@@ -6,7 +6,8 @@
 //! LLM configurations. Submodules supply concrete implementations:
 //! `static_experts` for synchronous rule checks, `llm_experts` for
 //! AI-powered analysis, `aggregator` for merging results, `chunk` for
-//! splitting large repos, and `context` for building expert context.
+//! splitting large repos, `context` for building expert context, and
+//! `facts` for deterministic repository facts injected into prompts.
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -14,6 +15,7 @@ use async_trait::async_trait;
 pub mod aggregator;
 pub mod chunk;
 pub mod context;
+pub mod facts;
 pub mod llm_experts;
 pub mod static_experts;
 pub mod test_coverage;
@@ -36,6 +38,11 @@ pub struct RepoContext {
     pub llm_configs: Vec<crate::models::LLMConfig>,
     /// Resolved application configuration (for language profiles).
     pub config: Option<std::sync::Arc<crate::models::AppConfig>>,
+    /// Rendered [`facts::RepoFacts::to_prompt_block`] output, computed once
+    /// per review over the FULL entry set (never per chunk) and shared with
+    /// every LLM expert prompt. `None` on the local-only path, where no LLM
+    /// prompt is built.
+    pub facts_block: Option<String>,
 }
 
 // ─── ExpertScore ─────────────────────────────
@@ -53,6 +60,20 @@ pub struct ExpertScore {
     pub summary: String,
     /// Detailed findings and observations.
     pub details: Vec<ScoreItem>,
+    /// `true` when `score` is an explicit fallback rather than a genuine
+    /// assessment — e.g. the LLM call failed, the response could not be
+    /// parsed, or a static expert errored. Fallback scores must stay visible
+    /// in reports instead of silently masquerading as model output.
+    pub fallback: bool,
+    /// Real LOC this expert evaluated (sum of entry LOCs), when known. The
+    /// aggregator prefers this over its findings-count heuristic when
+    /// LOC-weighting multi-chunk merges. `None` means "unknown — use the
+    /// heuristic".
+    pub evaluated_loc: Option<u64>,
+    /// Raw per-sample scores when score sampling was active
+    /// (`scoring.score_samples > 1`); the reported `score` is their median.
+    /// `None` when sampling was disabled (the default).
+    pub samples: Option<Vec<u8>>,
 }
 
 /// A single finding or observation within an expert score.
@@ -111,6 +132,14 @@ pub const STATIC_WEIGHT_SUM: u8 = 75;
 
 /// Total weight when all experts (including LLM) are active.
 pub const FULL_WEIGHT_SUM: u8 = 100;
+
+/// Score used when an LLM expert cannot produce a genuine assessment —
+/// the call failed after all retries, or the response was empty,
+/// unparseable, or schema-drifted. Every use must be paired with
+/// [`ExpertScore::fallback`] `= true` at the layer that builds the
+/// [`ExpertScore`], so reports can tell synthetic scores from model
+/// output instead of silently masquerading as one.
+pub(crate) const LLM_FALLBACK_SCORE: u8 = 70;
 
 // ─── YAML parsing helper ─────────────────────
 
@@ -229,4 +258,121 @@ pub fn weighted_total(scores: &[ExpertScore]) -> (u8, crate::models::RiskLevel) 
         crate::scoring::review::score_to_risk_level_with_config(score, &crate::models::RiskThresholdConfig::default());
 
     (score, risk)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::RiskLevel;
+
+    fn score(name: &str, score: u8, weight: u8) -> ExpertScore {
+        ExpertScore {
+            expert_name: name.to_string(),
+            weight,
+            score,
+            summary: String::new(),
+            details: Vec::new(),
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
+        }
+    }
+
+    #[test]
+    fn weighted_total_blends_scores_by_weight() {
+        // 50/50 split of 90 and 10 → exactly 50.
+        let (score, risk) = weighted_total(&[score("a", 90, 50), score("b", 10, 50)]);
+        assert_eq!(score, 50);
+        assert_eq!(risk, RiskLevel::High, "50 falls in 41–60 High band");
+    }
+
+    #[test]
+    fn weighted_total_high_score_is_healthy() {
+        let (score, risk) = weighted_total(&[score("a", 100, 100)]);
+        assert_eq!(score, 100);
+        assert_eq!(risk, RiskLevel::Healthy);
+    }
+
+    #[test]
+    fn weighted_total_single_expert_returns_its_score() {
+        let (score, risk) = weighted_total(&[score("a", 30, 20)]);
+        assert_eq!(score, 30);
+        assert_eq!(risk, RiskLevel::Critical, "30 ≤ 40 → Critical");
+    }
+
+    #[test]
+    fn weighted_total_uneven_weights_favor_heavier_expert() {
+        // (90, weight 80) + (10, weight 20) → 0.8*90 + 0.2*10 = 74.
+        let (score, risk) = weighted_total(&[score("a", 90, 80), score("b", 10, 20)]);
+        assert_eq!(score, 74);
+        assert_eq!(risk, RiskLevel::Medium, "74 falls in 61–80 Medium band");
+    }
+
+    #[test]
+    fn weighted_total_empty_scores_returns_zero_critical() {
+        let (score, risk) = weighted_total(&[]);
+        assert_eq!(score, 0);
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn weighted_total_zero_total_weight_returns_zero() {
+        let (score, risk) = weighted_total(&[score("a", 80, 0), score("b", 90, 0)]);
+        assert_eq!(score, 0);
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn weighted_total_rounds_half_up() {
+        // (95, w50) + (90, w50) = 92.5 → rounds to 93.
+        let (score, _) = weighted_total(&[score("a", 95, 50), score("b", 90, 50)]);
+        assert_eq!(score, 93);
+    }
+
+    #[test]
+    fn score_item_defaults_are_empty_and_fileless() {
+        let item = ScoreItem::default();
+        assert_eq!(item.severity, "");
+        assert_eq!(item.message, "");
+        assert_eq!(item.file, None);
+        assert_eq!(item.confidence, None);
+    }
+
+    #[test]
+    fn expert_score_fields_are_preserved_through_clone() {
+        let details = vec![ScoreItem {
+            severity: "high".to_string(),
+            message: "missing bounds check".to_string(),
+            ..Default::default()
+        }];
+        let original = ExpertScore {
+            expert_name: "security".to_string(),
+            weight: 15,
+            score: 42,
+            summary: "found 1 issue".to_string(),
+            details,
+            fallback: true,
+            evaluated_loc: Some(1234),
+            samples: Some(vec![40, 45]),
+        };
+        let cloned = original.clone();
+        assert_eq!(cloned.expert_name, "security");
+        assert_eq!(cloned.weight, 15);
+        assert_eq!(cloned.score, 42);
+        assert!(cloned.fallback);
+        assert_eq!(cloned.evaluated_loc, Some(1234));
+        assert_eq!(cloned.samples, Some(vec![40, 45]));
+        assert_eq!(cloned.details[0].severity, "high");
+        assert_eq!(cloned.details[0].message, "missing bounds check");
+    }
+
+    #[test]
+    fn weighted_total_ignores_fallback_scores_only_in_details_not_math() {
+        // Fallback flag does not change the math: both scores count.
+        let mut a = score("a", 100, 50);
+        a.fallback = true;
+        let (score, risk) = weighted_total(&[a, score("b", 50, 50)]);
+        assert_eq!(score, 75);
+        assert_eq!(risk, RiskLevel::Medium);
+    }
 }

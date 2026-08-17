@@ -33,3 +33,12 @@
 - 发版：tag → release.yml 12 资产 → `update-formula.yml`（tap）→ brew upgrade → 冒烟。
 - 测试用例：两阶段派工法（写预期与实测分离），CSV 存 git 跟踪的 `tests/cases/`、带版本号。
 - 派工模型：默认 deepseek-v4-flash；视觉/UI 验证派 kimi-code/k3；不用本地模型。
+
+## subagent 派工模型切换：mimo，不要 ds（2026-08-16 用户决策）
+
+**背景**：2026-08-16 v0.9.17 冲刺批次，`opencode-go/deepseek-v4-flash` 通道整晚频繁 terminated / Request timed out（韩述/岑静/严戈多实例反复被掐、前台 resume 也失败），网络恢复后用户明确拍板换模型。
+
+**决策**：
+- **subagent 派工一律走 `xiaomi-token-plan-cn/mimo-v2.5`，不再派 deepseek（ds）模型**。已落实为 `~/.kimi-code/config.toml` 的 `[secondary_model].model = "xiaomi-token-plan-cn/mimo-v2.5"`——所有 `model_preference=secondary` 的队员（默认）自动走 mimo，无需逐次指定。
+- 上面「其他既定流程」里"默认 deepseek-v4-flash"一条以本条为准（该条是旧口径）。
+- 若日后 mimo 通道也不稳，回退方案是 `model: "primary"` 重派，而不是切回 ds。

@@ -45,21 +45,55 @@ fn parse_improve_response(response: &str) -> Result<ImproveOutput> {
             .map(|seq| {
                 seq.iter()
                     .map(|s| CodeSuggestion {
-                        file: s["file"].as_str().unwrap_or("").to_string(),
-                        line: s["line"].as_u64().unwrap_or(0) as u32,
-                        original_code: s["original_code"].as_str().unwrap_or("").to_string(),
-                        improved_code: s["improved_code"].as_str().unwrap_or("").to_string(),
-                        suggestion: s["suggestion"].as_str().unwrap_or("").to_string(),
-                        score: s["score"].as_u64().unwrap_or(5) as u8,
+                        file: s["file"]
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                tracing::warn!("improve suggestion missing 'file' field");
+                                ""
+                            })
+                            .to_string(),
+                        line: s["line"].as_u64().unwrap_or_else(|| {
+                            tracing::warn!("improve suggestion missing 'line' field");
+                            0
+                        }) as u32,
+                        original_code: s["original_code"]
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                tracing::warn!("improve suggestion missing 'original_code' field");
+                                ""
+                            })
+                            .to_string(),
+                        improved_code: s["improved_code"]
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                tracing::warn!("improve suggestion missing 'improved_code' field");
+                                ""
+                            })
+                            .to_string(),
+                        suggestion: s["suggestion"]
+                            .as_str()
+                            .unwrap_or_else(|| {
+                                tracing::warn!("improve suggestion missing 'suggestion' field");
+                                ""
+                            })
+                            .to_string(),
+                        score: s["score"].as_u64().unwrap_or_else(|| {
+                            tracing::warn!("improve suggestion missing 'score' field; defaulting to 5");
+                            5
+                        }) as u8,
                     })
                     .collect()
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                tracing::warn!("improve response missing 'code_suggestions' array; returning empty list");
+                vec![]
+            });
         return Ok(ImproveOutput {
             code_suggestions: suggestions,
         });
     }
-    tracing::warn!("Failed to parse improve response as YAML, returning empty suggestions");
+    let excerpt: String = response.chars().take(200).collect();
+    tracing::warn!("Failed to parse improve response as YAML; returning empty suggestions. Excerpt: {excerpt:?}");
     Ok(ImproveOutput {
         code_suggestions: vec![],
     })
@@ -84,5 +118,33 @@ code_suggestions:
         assert_eq!(output.code_suggestions.len(), 1);
         assert_eq!(output.code_suggestions[0].file, "src/main.rs");
         assert_eq!(output.code_suggestions[0].score, 8);
+    }
+
+    #[test]
+    fn test_parse_improve_malformed_yaml_returns_empty() {
+        let bad = "{{invalid yaml}}: [";
+        let output = parse_improve_response(bad).unwrap();
+        assert!(output.code_suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_improve_missing_suggestions_array() {
+        let yaml = "some_key: some_value\n";
+        let output = parse_improve_response(yaml).unwrap();
+        assert!(output.code_suggestions.is_empty());
+    }
+
+    #[test]
+    fn test_parse_improve_suggestion_missing_fields() {
+        let yaml = r#"
+code_suggestions:
+  - suggestion: "Improve this"
+"#;
+        let output = parse_improve_response(yaml).unwrap();
+        assert_eq!(output.code_suggestions.len(), 1);
+        // missing fields get defaults
+        assert!(output.code_suggestions[0].file.is_empty());
+        assert_eq!(output.code_suggestions[0].line, 0);
+        assert_eq!(output.code_suggestions[0].score, 5);
     }
 }

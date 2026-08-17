@@ -34,6 +34,10 @@ pub enum UpgradeJobState {
 
 impl UpgradeJobState {
     /// States that mean an upgrade is in flight (the single-flight gate).
+    /// States that mean an upgrade is in flight (the single-flight gate).
+    ///
+    /// Only one upgrade job may run at a time; this check prevents
+    /// concurrent download/verify/install cycles.
     pub fn is_running(self) -> bool {
         matches!(
             self,
@@ -43,12 +47,21 @@ impl UpgradeJobState {
 }
 
 /// Snapshot of the current upgrade job for the status endpoint.
+/// Snapshot of the current self-upgrade job for the status endpoint.
+///
+/// Polling `GET /api/v1/system/upgrade/status` returns this struct so
+/// the frontend can display a progress bar and status message.
 #[derive(Debug, Clone)]
 pub struct UpgradeJob {
+    /// Current lifecycle state of the upgrade.
     pub state: UpgradeJobState,
+    /// Human-readable status message (e.g. "Downloading v0.9.17…").
     pub message: String,
+    /// Version currently installed.
     pub current_version: String,
+    /// Target version being upgraded to (if an upgrade is in flight).
     pub target_version: Option<String>,
+    /// When the upgrade job started (for elapsed-time display).
     pub started_at: Option<DateTime<Utc>>,
 }
 

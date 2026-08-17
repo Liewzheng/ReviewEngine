@@ -6,71 +6,120 @@ use uuid::Uuid;
 
 use crate::models::LLMConfig;
 
+/// API response for a review task's current status.
+///
+/// Returned by `GET /api/v1/reviews/{task_id}` and included in list
+/// responses. Contains both the task lifecycle state and MR metadata
+/// for display in the queue monitor dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskStatus {
+    /// Task UUID.
     pub task_id: Uuid,
+    /// Lifecycle state: `"pending"`, `"running"`, `"completed"`, `"failed"`, `"cancelled"`.
     pub status: &'static str,
+    /// ISO 8601 timestamp when the task was created.
     pub created_at: String,
+    /// ISO 8601 timestamp when the task completed (if done).
     pub completed_at: Option<String>,
+    /// Wall-clock milliseconds from creation to completion.
     pub duration_ms: Option<u64>,
+    /// Review report JSON (populated on completion).
     pub result: Option<serde_json::Value>,
+    /// Error message (populated on failure).
     pub error: Option<String>,
-    // MR metadata fields (added for frontend integration)
+    /// MR/PR title from the source metadata.
     pub mr_title: Option<String>,
+    /// Project or namespace path.
     pub project: Option<String>,
+    /// Repository name.
     pub repository: Option<String>,
+    /// Source branch name.
     pub branch: Option<String>,
+    /// Target (base) branch name.
     pub target_branch: Option<String>,
+    /// MR/PR author display name.
     pub author_name: Option<String>,
+    /// Author avatar URL for the dashboard.
     pub author_avatar_url: Option<String>,
+    /// GitLab MR web URL (for linking in the dashboard).
     pub gitlab_mr_url: Option<String>,
+    /// Commit SHA of the reviewed diff.
     pub commit_sha: Option<String>,
+    /// Current completion percentage (0–100, only while running).
     pub progress: Option<u8>,
+    /// Name of the expert currently being executed.
     pub expert_name: Option<String>,
 }
 
+/// Incoming review request from the REST API or CLI.
+///
+/// Specifies the review source (GitLab MR URL, local repo path, or
+/// static diff text), optional TOML config override, optional LLM
+/// config overrides, and an optional webhook URL for completion notification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewRequest {
+    /// What to review (MR URL, local path, or raw diff).
     pub source: ReviewSource,
+    /// Optional TOML config override string.
     pub config: Option<String>,
+    /// Optional LLM provider config overrides.
     pub llm_configs: Option<Vec<LLMConfig>>,
     /// Optional webhook URL POSTed once the task completes or fails.
     pub webhook: Option<String>,
 }
 
+/// The source of a code review request (tagged enum).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReviewSource {
+    /// Review a GitLab merge request by URL + token.
     #[serde(rename = "gitlab_mr")]
     GitLabMr { url: String, token: String },
+    /// Review a local Git repository directory.
     #[serde(rename = "local_repo")]
     LocalRepo {
+        /// Path to the local repository.
         path: String,
+        /// Base branch/ref to compare against.
         base: Option<String>,
+        /// Head branch/ref to review.
         head: Option<String>,
     },
+    /// Review a static diff string (for testing / pre-generated diffs).
     #[serde(rename = "static_diff")]
     StaticDiff { diff: String },
 }
 
+/// Request body for TOML config validation (`POST /api/v1/config/validate`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfigValidateRequest {
+    /// Raw TOML configuration string to validate.
     pub body: String,
 }
 
+/// Response from config validation indicating validity and expert count.
 #[derive(Debug, Clone, Serialize)]
 pub struct ConfigValidateResponse {
+    /// Whether the config parsed and validated successfully.
     pub valid: bool,
+    /// Number of enabled experts found in the config (if valid).
     pub experts_count: Option<usize>,
+    /// Validation error messages (empty when valid).
     pub errors: Vec<String>,
 }
 
+/// Summary of an expert definition for the experts list API.
 #[derive(Debug, Clone, Serialize)]
 pub struct ExpertSummary {
+    /// Expert name (key in the config TOML).
     pub name: String,
+    /// Expert role description.
     pub role: String,
+    /// Expert display title.
     pub title: String,
+    /// Trigger word or phrase that activates this expert.
     pub trigger: String,
+    /// Whether this expert is enabled in the current config.
     pub enabled: bool,
 }
 

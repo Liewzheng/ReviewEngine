@@ -80,9 +80,15 @@ pub fn builtin_default(name: &str) -> LanguageProfile {
                 "__tests__".to_string(),
             ],
             style_configs: vec![
-                ".prettierrc".to_string(),
+                "eslint.config.js".to_string(),
+                "eslint.config.mjs".to_string(),
+                "eslint.config.cjs".to_string(),
+                "eslint.config.ts".to_string(),
                 ".eslintrc".to_string(),
                 ".eslintrc.json".to_string(),
+                "prettier.config.js".to_string(),
+                ".prettierrc.json".to_string(),
+                ".prettierrc".to_string(),
             ],
             naming_hint: "camelCase for functions/variables, PascalCase for classes, UPPER_CASE for constants"
                 .to_string(),
@@ -162,4 +168,113 @@ pub fn all_comment_prefixes(profile: &LanguageProfile) -> Vec<String> {
     all.sort();
     all.dedup();
     all
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{
+        AppConfig, DiffConfig, LanguageProfile, LanguagesConfig, RateLimitConfig, ReportConfig, ScoringConfig,
+    };
+
+    /// Minimal `AppConfig` with no language overrides (mirrors the
+    /// construction used by `models::config` tests).
+    fn empty_config() -> AppConfig {
+        AppConfig {
+            project: None,
+            report: ReportConfig::default(),
+            review_experts: Default::default(),
+            commands: Default::default(),
+            scoring: ScoringConfig::default(),
+            llm: Vec::new(),
+            output_dir: String::new(),
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            diff: DiffConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            languages: LanguagesConfig::default(),
+        }
+    }
+
+    fn rust_override() -> LanguageProfile {
+        LanguageProfile {
+            name: "Rust".to_string(),
+            comment_prefixes: vec!["#![custom]".to_string()],
+            ..LanguageProfile::default()
+        }
+    }
+
+    #[test]
+    fn builtin_default_rust_carries_rust_conventions() {
+        let profile = builtin_default("Rust");
+        assert_eq!(profile.name, "Rust");
+        assert_eq!(profile.comment_prefixes, vec!["//"]);
+        assert!(profile.doc_prefixes.contains(&"///".to_string()));
+        assert!(profile.test_patterns.contains(&"_test.rs".to_string()));
+        assert!(!profile.style_configs.is_empty());
+        assert!(!profile.naming_hint.is_empty());
+        assert!(!profile.error_hint.is_empty());
+    }
+
+    #[test]
+    fn builtin_default_aliases_map_to_a_canonical_profile() {
+        for alias in ["C++", "CPlusPlus"] {
+            let profile = builtin_default(alias);
+            assert_eq!(profile.name, "C++");
+            assert!(profile.test_patterns.iter().any(|p| p.contains("_test.cpp")));
+        }
+        for alias in ["JavaScript", "TypeScript"] {
+            let profile = builtin_default(alias);
+            assert_eq!(profile.name, "JavaScript");
+            assert!(profile.test_patterns.iter().any(|p| p.contains(".spec.ts")));
+        }
+    }
+
+    #[test]
+    fn builtin_default_unknown_language_gets_generic_fallback() {
+        let profile = builtin_default("Zig");
+        assert_eq!(profile.name, "Zig");
+        assert_eq!(profile.comment_prefixes, vec!["//"]);
+        assert_eq!(profile.test_patterns, vec!["/tests/"]);
+    }
+
+    #[test]
+    fn get_profile_without_config_falls_back_to_builtin() {
+        let profile = get_profile("Python", None);
+        assert_eq!(profile.name, "Python");
+        assert_eq!(profile.comment_prefixes, vec!["#"]); // Python uses `#`
+    }
+
+    #[test]
+    fn get_profile_merges_non_empty_overrides_onto_builtin() {
+        let mut config = empty_config();
+        config.languages.profiles.insert("Rust".to_string(), rust_override());
+
+        let profile = get_profile("Rust", Some(&config));
+        // Non-empty override field wins…
+        assert_eq!(profile.comment_prefixes, vec!["#![custom]"]);
+        // …while untouched fields fall back to the built-in defaults.
+        assert!(profile.doc_prefixes.contains(&"///".to_string()));
+        assert!(profile.test_patterns.contains(&"_test.rs".to_string()));
+    }
+
+    #[test]
+    fn get_profile_empty_override_keeps_the_builtin() {
+        let mut config = empty_config();
+        config
+            .languages
+            .profiles
+            .insert("Rust".to_string(), LanguageProfile::default());
+
+        let profile = get_profile("Rust", Some(&config));
+        assert_eq!(profile.comment_prefixes, builtin_default("Rust").comment_prefixes);
+        assert_eq!(profile.test_patterns, builtin_default("Rust").test_patterns);
+    }
+
+    #[test]
+    fn all_comment_prefixes_returns_sorted_deduplicated_union() {
+        let profile = builtin_default("Rust"); // inline ["//"], doc ["///", "//!"]
+                                               // Byte-lexicographic order: "//" < "//!" < "///".
+        assert_eq!(all_comment_prefixes(&profile), vec!["//", "//!", "///"]);
+    }
 }

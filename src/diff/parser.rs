@@ -338,4 +338,71 @@ mod tests {
         let files = parse_unified_diff(&huge_diff);
         assert!(files.is_empty());
     }
+
+    // ─── pure header helpers ───────────────────
+
+    #[test]
+    fn test_parse_hunk_header_full_counts() {
+        assert_eq!(parse_hunk_header("@@ -10,8 +20,11 @@ fn main()"), (10, 8, 20, 11));
+        assert_eq!(parse_hunk_header("@@ -0,0 +1,3 @@"), (0, 0, 1, 3));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_missing_count_defaults_to_one() {
+        assert_eq!(parse_hunk_header("@@ -5 +6 @@"), (5, 1, 6, 1));
+    }
+
+    #[test]
+    fn test_parse_hunk_header_tolerates_garbage() {
+        assert_eq!(parse_hunk_header("@@ not a header @@"), (0, 1, 0, 1));
+        // Empty line → the "-0,0" default splits into ["0","0"], so counts are 0.
+        assert_eq!(parse_hunk_header(""), (0, 0, 0, 0));
+        // A non-numeric count field falls back to the absent-field default 1.
+        assert_eq!(parse_hunk_header("@@ -x,y +1,1 @@"), (0, 1, 1, 1));
+    }
+
+    #[test]
+    fn test_parse_path_from_diff_header_extracts_new_path() {
+        assert_eq!(parse_path_from_diff_header("diff --git a/foo.rs b/bar.rs"), "bar.rs");
+        assert_eq!(parse_path_from_diff_header("diff --git a/x.rs b/x.rs"), "x.rs");
+        assert_eq!(
+            parse_path_from_diff_header("diff --git a/src/mod/a.rs b/src/mod/b.rs"),
+            "src/mod/b.rs"
+        );
+    }
+
+    #[test]
+    fn test_parse_path_from_diff_header_real_deleted_file_format() {
+        // Real unified diffs keep the same path on both sides; the `+++ /dev/null`
+        // marker (handled by parse_unified_diff) signals deletion.
+        assert_eq!(parse_path_from_diff_header("diff --git a/gone.rs b/gone.rs"), "gone.rs");
+    }
+
+    #[test]
+    fn test_parse_path_from_diff_header_short_or_unsafe_returns_unknown() {
+        assert_eq!(parse_path_from_diff_header("short"), "unknown");
+        // The selected (new) path is what gets validated; a traversal in the
+        // old-path slot does not change the chosen new path.
+        assert_eq!(parse_path_from_diff_header("diff --git a/../evil b/x.rs"), "x.rs");
+        // A traversal in the NEW path slot is rejected.
+        assert_eq!(parse_path_from_diff_header("diff --git a/x.rs b/../evil"), "");
+    }
+
+    #[test]
+    fn test_is_safe_diff_path_accepts_legal_filenames() {
+        assert!(is_safe_diff_path("src/main.rs"));
+        assert!(is_safe_diff_path("foo..bar.rs"), "double-dot filename is legal");
+        assert!(is_safe_diff_path("a/b/c"));
+    }
+
+    #[test]
+    fn test_is_safe_diff_path_rejects_escape_forms() {
+        assert!(!is_safe_diff_path(""));
+        assert!(!is_safe_diff_path("/abs"));
+        assert!(!is_safe_diff_path("~/home"));
+        assert!(!is_safe_diff_path("a/../b"), "parent segment");
+        assert!(!is_safe_diff_path("a\\b"), "backslash");
+        assert!(!is_safe_diff_path("a:b"), "colon");
+        assert!(!is_safe_diff_path("a\0b"), "NUL byte");
+    }
 }

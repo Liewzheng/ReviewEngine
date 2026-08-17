@@ -1,7 +1,11 @@
 use crate::models::{DiffFile, DiffLineKind};
 
-/// Compress deletion-only hunks into a compact list format.
-/// Returns (kept_files, deleted_files_list).
+/// Compress deletion-only files into a compact list.
+///
+/// Files where every hunk contains only `Delete` lines (i.e. the entire
+/// file was removed) are extracted into a path list rather than sent to
+/// experts as full diffs. This saves token budget on large deletions.
+/// Returns `(kept_files, deleted_file_paths)`.
 pub fn compress_deletions(files: Vec<DiffFile>) -> (Vec<DiffFile>, Vec<String>) {
     let mut kept = Vec::new();
     let mut deleted = Vec::new();
@@ -21,7 +25,10 @@ pub fn compress_deletions(files: Vec<DiffFile>) -> (Vec<DiffFile>, Vec<String>) 
     (kept, deleted)
 }
 
-/// Sort files by primary language group, then by change size descending.
+/// Sort diff files by primary language group, then by change size descending.
+///
+/// Groups files by language (detected from extension) so experts review
+/// related code together; within each group, larger changes come first.
 pub fn sort_files_by_language_and_size(files: &mut Vec<DiffFile>) {
     files.sort_by(|a, b| {
         let lang_a = detect_language_from_diff_path(&a.new_path);
@@ -34,7 +41,11 @@ pub fn sort_files_by_language_and_size(files: &mut Vec<DiffFile>) {
     });
 }
 
-/// Detect primary language from file path.
+/// Detect the primary programming language from a file path extension.
+///
+/// Returns a static string label (e.g. `"Rust"`, `"Python"`, `"Go"`).
+/// Unrecognized extensions return `"Other"`. TypeScript/JSX/TSX are
+/// grouped under `"TypeScript"`.
 pub fn detect_language_from_diff_path(path: &str) -> &'static str {
     let ext = std::path::Path::new(path)
         .extension()

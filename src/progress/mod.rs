@@ -331,3 +331,171 @@ pub fn complete_repo_progress(progress_map: Option<&ProgressMap>, review_id: &st
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    fn weights_sum_to_one(weights: &[StageWeight]) {
+        let total: f64 = weights.iter().map(|w| w.weight).sum();
+        assert!((total - 1.0).abs() < 1e-9, "weights sum to {}, not 1.0", total);
+    }
+
+    #[test]
+    fn new_progress_starts_running_at_zero_with_pending_stages() {
+        let weights = StageWeight::small_pr();
+        let progress = ReviewProgress::new("rev-1".to_string(), &weights);
+
+        assert_eq!(progress.review_id, "rev-1");
+        assert_eq!(progress.status, ProgressStatus::Running);
+        assert_eq!(progress.overall_percent, 0.0);
+        assert!(progress.completed_at.is_none());
+        assert!(progress.error.is_none());
+        assert!(!progress.created_at.is_empty());
+        assert_eq!(progress.stages.len(), weights.len());
+        for stage in &progress.stages {
+            assert_eq!(stage.status, ProgressStatus::Pending);
+            assert_eq!(stage.stage_percent, 0.0);
+            assert!(stage.detail.is_empty());
+        }
+    }
+
+    #[test]
+    fn set_stage_updates_percent_and_recalcs_weighted_overall() {
+        let mut progress = ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr());
+
+        // expert_review carries weight 0.70; a 50% stage → 35% overall.
+        progress.set_stage("expert_review", 0.5, "2/4 tasks done".to_string());
+        assert!((progress.overall_percent - 35.0).abs() < 1e-9);
+        let stage = progress.stages.iter().find(|s| s.name == "expert_review").unwrap();
+        assert_eq!(stage.stage_percent, 0.5);
+        assert_eq!(stage.status, ProgressStatus::Running);
+        assert_eq!(stage.detail, "2/4 tasks done");
+    }
+
+    #[test]
+    fn set_stage_clamps_percent_into_0_1() {
+        let mut progress = ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr());
+
+        progress.set_stage("parse", 2.0, String::new());
+        let parse = progress.stages.iter().find(|s| s.name == "parse").unwrap();
+        assert_eq!(parse.stage_percent, 1.0);
+
+        progress.set_stage("parse", -1.0, String::new());
+        let parse = progress.stages.iter().find(|s| s.name == "parse").unwrap();
+        assert_eq!(parse.stage_percent, 0.0);
+    }
+
+    #[test]
+    fn set_stage_unknown_name_is_ignored_without_panicking() {
+        let mut progress = ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr());
+        progress.set_stage("no_such_stage", 1.0, String::new());
+        assert_eq!(progress.overall_percent, 0.0);
+        assert_eq!(progress.stages.len(), StageWeight::small_pr().len());
+    }
+
+    #[test]
+    fn complete_stage_marks_100_percent_and_accumulates_overall() {
+        let mut progress = ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr());
+        progress.complete_stage("parse"); // weight 0.05
+        progress.complete_stage("lead_overview"); // weight 0.15
+        assert!((progress.overall_percent - 20.0).abs() < 1e-9);
+        let parse = progress.stages.iter().find(|s| s.name == "parse").unwrap();
+        assert_eq!(parse.stage_percent, 1.0);
+        assert_eq!(parse.status, ProgressStatus::Completed);
+    }
+
+    #[test]
+    fn mark_failed_records_error_and_status() {
+        let mut progress = ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr());
+        progress.mark_failed("LLM call failed".to_string());
+        assert_eq!(progress.status, ProgressStatus::Failed);
+        assert_eq!(progress.error.as_deref(), Some("LLM call failed"));
+    }
+
+    #[test]
+    fn mark_completed_finalizes_all_stages_at_100() {
+        let mut progress = ReviewProgress::new("rev-1".to_string(), &StageWeight::large_pr());
+        progress.mark_completed();
+
+        assert_eq!(progress.status, ProgressStatus::Completed);
+        assert_eq!(progress.overall_percent, 100.0);
+        assert!(progress.completed_at.is_some());
+        assert!(progress.stages.iter().all(|s| s.status == ProgressStatus::Completed));
+        assert!(progress.stages.iter().all(|s| s.stage_percent == 1.0));
+    }
+
+    #[test]
+    fn stage_weight_definitions_all_sum_to_one() {
+        weights_sum_to_one(&StageWeight::small_pr());
+        weights_sum_to_one(&StageWeight::large_pr());
+        weights_sum_to_one(&StageWeight::repo_review());
+    }
+
+    #[test]
+    fn update_expert_progress_increments_done_counter_and_pct() {
+        let map = new_progress_map();
+        map.write().unwrap().insert(
+            "rev-1".to_string(),
+            ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr()),
+        );
+        let completed = AtomicUsize::new(0);
+
+        update_expert_progress(Some(&map), "rev-1", &completed, 4);
+        let progress = map.read().unwrap().get("rev-1").unwrap().clone();
+        let stage = progress.stages.iter().find(|s| s.name == "expert_review").unwrap();
+        assert!((stage.stage_percent - 0.25).abs() < 1e-9);
+        assert_eq!(stage.detail, "1/4 tasks done");
+
+        update_expert_progress(Some(&map), "rev-1", &completed, 4);
+        let progress = map.read().unwrap().get("rev-1").unwrap().clone();
+        let stage = progress.stages.iter().find(|s| s.name == "expert_review").unwrap();
+        assert!((stage.stage_percent - 0.5).abs() < 1e-9);
+        assert_eq!(stage.detail, "2/4 tasks done");
+        assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn progress_helpers_are_noops_without_a_map_or_unknown_review() {
+        let completed = AtomicUsize::new(0);
+        update_expert_progress(None, "rev-1", &completed, 4);
+        assert_eq!(completed.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let map = new_progress_map();
+        complete_progress(Some(&map), "missing-review");
+        mark_report_complete(Some(&map), "missing-review");
+        mark_aggregate_complete(Some(&map), "missing-review");
+        complete_repo_progress(Some(&map), "missing-review");
+        assert!(map.read().unwrap().is_empty());
+    }
+
+    #[test]
+    fn complete_progress_finishes_the_review() {
+        let map = new_progress_map();
+        map.write().unwrap().insert(
+            "rev-1".to_string(),
+            ReviewProgress::new("rev-1".to_string(), &StageWeight::small_pr()),
+        );
+
+        complete_progress(Some(&map), "rev-1");
+        let progress = map.read().unwrap().get("rev-1").unwrap().clone();
+        assert_eq!(progress.status, ProgressStatus::Completed);
+        assert_eq!(progress.overall_percent, 100.0);
+        assert!(progress.completed_at.is_some());
+    }
+
+    #[test]
+    fn complete_repo_progress_finishes_the_repo_review() {
+        let map = new_progress_map();
+        map.write().unwrap().insert(
+            "repo-1".to_string(),
+            ReviewProgress::new("repo-1".to_string(), &StageWeight::repo_review()),
+        );
+
+        complete_repo_progress(Some(&map), "repo-1");
+        let progress = map.read().unwrap().get("repo-1").unwrap().clone();
+        assert_eq!(progress.status, ProgressStatus::Completed);
+        assert_eq!(progress.overall_percent, 100.0);
+    }
+}

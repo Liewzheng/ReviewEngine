@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
+use super::facts::is_test_file;
 use super::{ExpertScore, RepoContext, RepoExpert, ScoreItem};
 use crate::llm::client::LLMClient;
 
@@ -29,6 +30,7 @@ impl RepoExpert for TestCoverage {
                 && !e.path.ends_with("pyproject.toml")
                 && !e.path.ends_with("setup.py")
                 && !e.path.ends_with("package.json")
+                && !e.path.ends_with("Package.swift")
             {
                 return false;
             }
@@ -42,6 +44,9 @@ impl RepoExpert for TestCoverage {
                 if c.contains("devDependencies") {
                     return true;
                 }
+                if c.contains(".testTarget(") || c.contains("testTarget") {
+                    return true;
+                }
                 if c.contains("pytest") || c.contains("unittest") {
                     return true;
                 }
@@ -53,28 +58,6 @@ impl RepoExpert for TestCoverage {
         let mut test_loc: usize = 0;
         let mut test_file_count: usize = 0;
         let mut has_inline_tests = false;
-
-        // Test file naming conventions across languages:
-        //   Rust:    *_test.rs, tests/*.rs
-        //   Python:  test_*.py, *_test.py, tests/*.py
-        //   JS/TS:   *.test.js, *.spec.js, __tests__/*.js
-        //   Go:      *_test.go
-        //   Java:    *Test.java, src/test/*
-        let is_test_file = |name: &str, path: &str| -> bool {
-            name.ends_with("_test.rs")
-                || name.ends_with("_test.py")
-                || name.starts_with("test_")
-                || name.ends_with(".test.js")
-                || name.ends_with(".spec.js")
-                || name.ends_with(".test.ts")
-                || name.ends_with(".spec.ts")
-                || name.ends_with("_test.go")
-                || name.ends_with("Test.java")
-                || path.contains("/tests/")
-                || path.contains("__tests__")
-                || path.contains("/test/")
-                || path.contains("/spec/")
-        };
 
         for entry in all_files {
             let content = match std::fs::read_to_string(&entry.path) {
@@ -201,6 +184,9 @@ impl RepoExpert for TestCoverage {
                 if has_inline_tests { "yes" } else { "no" },
             ),
             details,
+            fallback: false,
+            evaluated_loc: None,
+            samples: None,
         })
     }
 }
@@ -208,14 +194,18 @@ impl RepoExpert for TestCoverage {
 /// Whether a file is a CI configuration that runs tests.
 ///
 /// A file is a CI candidate when its path matches a well-known CI location
-/// (`.gitlab-ci.yml`, `.github/workflows/`, `Jenkinsfile`), or when it is a
-/// YAML file whose content mentions both "test" and "script". Either way the
-/// content must mention "test". The file is read at most once.
+/// (`.gitlab-ci.yml`, `.github/workflows/`, `.travis.yml`,
+/// `.circleci/config.yml`, `azure-pipelines.yml`, `Jenkinsfile`), or when it
+/// is a YAML file whose content mentions both "test" and "script". Either
+/// way the content must mention "test". The file is read at most once.
 fn is_ci_test_file(path: &str) -> bool {
     let content = std::fs::read_to_string(path).ok();
-    // Accept both .gitlab-ci.yml and ./ci/some.yaml patterns
+    // Accept both well-known CI paths and ./ci/some.yaml patterns
     let is_ci = path.contains(".gitlab-ci.yml")
         || path.contains(".github/workflows/")
+        || path.contains(".travis.yml")
+        || path.contains(".circleci/config.yml")
+        || path.contains("azure-pipelines.yml")
         || path.contains("Jenkinsfile")
         || (path.ends_with(".yaml") || path.ends_with(".yml"))
             && content.as_deref().map_or(false, |c| c.contains("test"))
@@ -264,5 +254,96 @@ mod tests {
         // But content without "test" is still rejected.
         let path = write_file(&dir, ".github/workflows/ci.yml", "on: push\njobs: {}\n");
         assert!(!is_ci_test_file(&path));
+    }
+
+    #[test]
+    fn travis_circleci_azure_paths_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, ".travis.yml", "script:\n  - cargo test\n");
+        assert!(is_ci_test_file(&path), ".travis.yml should be a CI path");
+        let path = write_file(&dir, ".circleci/config.yml", "steps:\n  - run: cargo test\n");
+        assert!(is_ci_test_file(&path), ".circleci/config.yml should be a CI path");
+        let path = write_file(&dir, "azure-pipelines.yml", "steps:\n  - script: cargo test\n");
+        assert!(is_ci_test_file(&path), "azure-pipelines.yml should be a CI path");
+    }
+
+    /// The new CI paths keep the existing semantics: content must still
+    /// mention "test", otherwise the file is not a CI *test* file.
+    #[test]
+    fn new_ci_paths_still_require_test_in_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(&dir, ".travis.yml", "script:\n  - cargo build\n");
+        assert!(!is_ci_test_file(&path));
+        let path = write_file(&dir, ".circleci/config.yml", "jobs:\n  build:\n    steps: []\n");
+        assert!(!is_ci_test_file(&path));
+        let path = write_file(&dir, "azure-pipelines.yml", "steps:\n  - task: Publish@1\n");
+        assert!(!is_ci_test_file(&path));
+    }
+
+    /// End-to-end regression (feedback B): a `.gitlab-ci.yml` with a test
+    /// step must survive the scanner's dotfile filter (i.e. appear in the
+    /// scan entries) and then be judged a CI test file.
+    #[test]
+    fn scanned_gitlab_ci_yml_is_detected_as_ci_test() {
+        let dir = tempfile::tempdir().unwrap();
+        let status = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["init", "--initial-branch=main"])
+            .status()
+            .expect("git init failed to run");
+        assert!(status.success());
+        std::fs::write(dir.path().join(".gitlab-ci.yml"), "stages:\n  - test\n").unwrap();
+
+        let scanner = crate::repo::RepoScanner::new(dir.path().to_str().unwrap());
+        let entries = scanner.scan().unwrap();
+        let ci = entries
+            .iter()
+            .find(|e| e.path.ends_with(".gitlab-ci.yml"))
+            .expect(".gitlab-ci.yml should be in scan entries");
+        assert!(is_ci_test_file(&ci.path));
+    }
+
+    /// A SwiftPM `Package.swift` declaring `.testTarget(...)` counts as having
+    /// a test framework configured, so SwiftPM repositories are no longer
+    /// reported with "No test framework configured"/"No tests found".
+    #[tokio::test]
+    async fn package_swift_with_test_target_counts_as_dev_deps() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_file(
+            &dir,
+            "Package.swift",
+            "// swift-tools-version:5.9\n\
+             import PackageDescription\n\
+             let package = Package(\n\
+             \x20   name: \"Foo\",\n\
+             \x20   targets: [.target(name: \"Foo\"), .testTarget(name: \"FooTests\")]\n\
+             )\n",
+        );
+        let ctx = RepoContext {
+            entries: vec![crate::repo::FileEntry {
+                path,
+                language: "Swift".to_string(),
+                loc: 6,
+                is_binary: false,
+                is_generated: false,
+            }],
+            stats: crate::repo::RepoStats::default(),
+            llm_configs: Vec::new(),
+            config: None,
+            facts_block: None,
+        };
+        let score = TestCoverage
+            .evaluate(&ctx, None)
+            .await
+            .expect("evaluate should not fail");
+        assert!(score.summary.contains("dev-deps=yes"), "summary: {}", score.summary);
+        assert!(
+            !score
+                .details
+                .iter()
+                .any(|d| d.message.contains("No test framework configured")),
+            "should not report a missing test framework"
+        );
     }
 }

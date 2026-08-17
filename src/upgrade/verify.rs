@@ -26,14 +26,14 @@ const MAX_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 /// Upper bound for the declared uncompressed size of a single zip entry.
 const MAX_ENTRY_UNCOMPRESSED: u64 = 1024 * 1024 * 1024;
 
-/// Lowercase hex SHA-256 of `data`.
+/// Compute lowercase hex SHA-256 of `data`.
 pub fn data_sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data);
     hex::encode(hasher.finalize())
 }
 
-/// Lowercase hex SHA-256 of a file's contents (streamed, no whole-file load).
+/// Compute lowercase hex SHA-256 of a file's contents (streamed, no whole-file load).
 pub fn file_sha256_hex(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)?;
     let mut hasher = Sha256::new();
@@ -68,6 +68,8 @@ pub fn parse_sha256_line(line: &str) -> Result<(String, String)> {
 }
 
 /// Verify that `path`'s SHA-256 matches `expected_hex` (case-insensitive).
+///
+/// Returns `Ok(())` on match; `Err(UpgradeError::ChecksumMismatch)` otherwise.
 pub fn verify_file_sha256(path: &Path, expected_hex: &str) -> Result<()> {
     let expected = normalize_hex(expected_hex)?;
     let actual = file_sha256_hex(path)?;

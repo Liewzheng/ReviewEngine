@@ -1,6 +1,9 @@
 use crate::models::{DiffFile, DiffHunk};
 
-/// Render a single DiffFile as a diff text string.
+/// Render a single [`DiffFile`] back into unified-diff text.
+///
+/// Produces the standard `diff --git a/... b/...` header followed by
+/// each hunk's header line and individual diff lines.
 pub fn render_file_diff(file: &DiffFile) -> String {
     let mut out = format!("diff --git a/{} b/{}\n", file.old_path, file.new_path);
     for hunk in &file.hunks {
@@ -14,7 +17,10 @@ pub fn render_file_diff(file: &DiffFile) -> String {
     out
 }
 
-/// Render a single DiffHunk as a diff text string.
+/// Render a single [`DiffHunk`] into text (header + lines, no file header).
+///
+/// Useful for injecting individual hunks into expert prompts when
+/// token budgets require splitting a file's diff across multiple calls.
 pub fn render_hunk(hunk: &DiffHunk) -> String {
     let mut out = hunk.header.clone();
     out.push('\n');

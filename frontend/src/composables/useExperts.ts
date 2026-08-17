@@ -3,11 +3,24 @@ import { getExperts, updateExpert } from '../services/experts';
 import { i18n } from '../i18n';
 import type { Expert } from '../types/expert';
 
+/**
+ * Composable for managing expert definitions and their configurations.
+ *
+ * Provides the expert list, computed helpers for enabled experts and
+ * total weight, and methods to fetch/update expert settings.
+ */
 export function useExperts() {
+  /** All expert definitions from the server. */
   const experts = ref<Expert[]>([]);
+  /** True while the expert list is being fetched. */
   const loading = ref(false);
+  /** Last error message. */
   const error = ref<string | null>(null);
 
+  /**
+   * Fetch the full expert list from the server.
+   * Populates `experts.value` on success.
+   */
   async function fetch() {
     loading.value = true;
     error.value = null;
@@ -22,6 +35,12 @@ export function useExperts() {
     }
   }
 
+  /**
+   * Update a single expert's configuration.
+   * @param id - Expert identifier.
+   * @param data - Fields to update (enabled, weight).
+   * @returns The updated expert definition.
+   */
   async function update(id: string, data: { enabled?: boolean; weight?: number }) {
     error.value = null;
     try {
@@ -37,7 +56,9 @@ export function useExperts() {
     }
   }
 
+  /** Experts that are currently enabled. */
   const enabledExperts = computed(() => experts.value.filter((e) => e.enabled));
+  /** Sum of weights for all enabled experts. */
   const totalWeight = computed(() => experts.value.reduce((sum, e) => sum + (e.enabled ? e.weight : 0), 0));
 
   return {

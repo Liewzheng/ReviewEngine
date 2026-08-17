@@ -36,6 +36,7 @@ pub const FEEDBACK_PATH_ENV: &str = "REVIEW_FEEDBACK_PATH";
 pub const UNKNOWN_CATEGORY: &str = "unknown";
 
 /// User verdict on a single finding.
+/// User verdict on a single finding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Verdict {
@@ -63,6 +64,7 @@ pub struct FindingFeedback {
     pub created_at: DateTime<Utc>,
 }
 
+/// Aggregated feedback statistics for one category (or overall).
 /// Aggregated feedback statistics for one category (or overall).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CategoryStats {

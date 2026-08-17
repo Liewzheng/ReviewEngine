@@ -8,12 +8,21 @@ use tracing::{error, info};
 
 use crate::models::*;
 
+/// GitLab REST API client for MR operations.
+///
+/// Handles authentication, request dispatch, and response parsing.
+/// Supports fetching MR metadata, diff content, posting inline comments,
+/// and managing MR approval state.
 #[derive(Clone)]
 pub struct Client {
     http: HttpClient,
+    /// GitLab API base URL (e.g. `https://gitlab.com/api/v4`).
     base_url: String,
+    /// URL-encoded project path (e.g. `group%2Fproject`).
     project_path: String,
+    /// Merge request internal ID (iid).
     mr_iid: u32,
+    /// Private token or personal access token for authentication.
     gitlab_token: String,
 }
 
@@ -711,6 +720,60 @@ mod tests {
     fn test_parse_blob_search_paths_tolerates_garbage() {
         assert!(parse_blob_search_paths(&json!({"unexpected": true}), 20).is_empty());
         assert!(parse_blob_search_paths(&json!([{"no_path": 1}]), 20).is_empty());
+    }
+
+    #[test]
+    fn test_encode_project_path_escapes_each_slash() {
+        assert_eq!(encode_project_path("group/project"), "group%2Fproject");
+        assert_eq!(encode_project_path("a/b/c"), "a%2Fb%2Fc");
+        assert_eq!(encode_project_path("single"), "single");
+        assert_eq!(encode_project_path(""), "");
+    }
+
+    #[test]
+    fn test_encode_file_path_preserves_safe_chars_and_encodes_rest() {
+        assert_eq!(encode_file_path("src/main.rs"), "src%2Fmain.rs");
+        assert_eq!(encode_file_path("a b/c#.rs"), "a%20b%2Fc%23.rs");
+        assert_eq!(encode_file_path("plain.rs"), "plain.rs");
+        // Unreserved chars stay; spaces, slashes and non-ASCII are percent-encoded.
+        assert_eq!(encode_file_path("_~-."), "_~-.");
+        assert_eq!(encode_file_path("x y"), "x%20y");
+    }
+
+    #[test]
+    fn test_validate_repo_file_path_rejects_traversal_forms() {
+        assert!(validate_repo_file_path("src/main.rs").is_ok());
+        assert!(validate_repo_file_path("a/b/c.rs").is_ok());
+        assert!(validate_repo_file_path("..").is_err());
+        assert!(validate_repo_file_path("../secret").is_err());
+        assert!(validate_repo_file_path("a/../b").is_err());
+        assert!(validate_repo_file_path("/etc/passwd").is_err());
+        assert!(validate_repo_file_path("~/key").is_err());
+        assert!(validate_repo_file_path("").is_err());
+    }
+
+    #[test]
+    fn test_parse_blob_search_paths_skips_missing_path_and_non_string() {
+        let value = json!([
+            {"path": "src/a.rs"},
+            {"path": 42},
+            {},
+            {"path": "src/b.rs"}
+        ]);
+        assert_eq!(
+            parse_blob_search_paths(&value, 20),
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn test_parse_blob_search_paths_limit_zero_still_yields_first() {
+        // The cap is checked AFTER pushing, so limit 0 behaves like limit 1:
+        // at least one path is returned when any exists.
+        let value = json!([{"path": "src/a.rs"}]);
+        assert_eq!(parse_blob_search_paths(&value, 0), vec!["src/a.rs".to_string()]);
+        let value = json!([{"path": "src/a.rs"}, {"path": "src/b.rs"}]);
+        assert_eq!(parse_blob_search_paths(&value, 1), vec!["src/a.rs".to_string()]);
     }
 
     // ─── fetch_file_raw ───────────────────────────

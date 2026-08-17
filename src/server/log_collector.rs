@@ -11,12 +11,18 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::sync::broadcast;
 
+/// A parsed log entry ready for API consumption and SSE broadcast.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LogEntry {
+    /// Unique identifier for this log entry (UUID v4).
     pub id: String,
+    /// ISO 8601 timestamp when the log was recorded.
     pub timestamp: String,
+    /// Log level: `INFO`, `WARN`, `ERROR`, `DEBUG`, or `TRACE`.
     pub level: String,
+    /// Human-readable log message text.
     pub message: String,
+    /// Optional structured metadata (request ID, duration, review ID, expert ID).
     pub metadata: Option<LogMetadata>,
 }
 
@@ -35,6 +41,13 @@ pub struct LogMetadata {
     pub expert_id: Option<String>,
 }
 
+/// In-memory log collector with ring buffer, SSE broadcast, and NDJSON persistence.
+///
+/// Captures tracing output via [`LogWriter`] (a `std::io::Write` impl),
+/// parses both JSON and plain-text log lines, and maintains a ring buffer
+/// of the last 1000 entries. Entries are broadcast via
+/// `tokio::sync::broadcast` for real-time SSE streaming and appended to
+/// an NDJSON file for persistence across restarts.
 pub struct LogCollector {
     buffer: Vec<u8>,
     entries: Vec<LogEntry>,
@@ -208,6 +221,10 @@ fn infer_level_from_line(line: &str) -> String {
     "INFO".to_string()
 }
 
+/// `std::io::Write` adapter that feeds bytes into a [`LogCollector`].
+///
+/// Used as the `tracing` subscriber's writer so all tracing output is
+/// captured into the collector's ring buffer and broadcast channel.
 pub struct LogWriter {
     collector: Arc<Mutex<LogCollector>>,
 }
@@ -242,6 +259,10 @@ use std::sync::OnceLock;
 
 static GLOBAL_COLLECTOR: OnceLock<Arc<Mutex<LogCollector>>> = OnceLock::new();
 
+/// Initialise the global log collector with the default NDJSON path.
+///
+/// Returns the shared `Arc<Mutex<LogCollector>>` and stores it in the
+/// process-global `OnceLock`. Subsequent calls return the same instance.
 pub fn init_global_collector() -> Arc<Mutex<LogCollector>> {
     init_global_collector_with_path(default_ndjson_path())
 }
@@ -252,6 +273,10 @@ pub fn init_global_collector_with_path(path: Option<PathBuf>) -> Arc<Mutex<LogCo
     collector
 }
 
+/// Retrieve the global log collector instance, if initialised.
+///
+/// Returns `None` when the collector has not been set up (e.g. unit tests
+/// that skip `init_global_collector`).
 pub fn get_global_collector() -> Option<Arc<Mutex<LogCollector>>> {
     GLOBAL_COLLECTOR.get().cloned()
 }

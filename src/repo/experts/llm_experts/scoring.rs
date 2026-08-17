@@ -7,8 +7,7 @@ pub(crate) const EXCERPT_MAX_BYTES: usize = 300;
 pub(crate) const CODE_QUALITY_KEYS: &[&str] = &["score", "summary", "findings"];
 
 /// Keys that mark an ArchitectureLead response as schema-conforming.
-pub(crate) const ARCHITECTURE_LEAD_KEYS: &[&str] =
-    &["score", "summary", "risk_areas", "guidance", "focus_modules"];
+pub(crate) const ARCHITECTURE_LEAD_KEYS: &[&str] = &["score", "summary", "risk_areas", "guidance", "focus_modules"];
 
 pub(crate) const SCORING_TEMPERATURE: f32 = 0.0;
 pub(crate) const SCORING_TEMPERATURE_MAX: f32 = 0.2;

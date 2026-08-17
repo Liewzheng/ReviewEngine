@@ -4,9 +4,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use super::scoring::{append_facts_block, call_scoring, parse_expert_yaml, scoring_sample_count, CODE_QUALITY_KEYS};
-use crate::repo::experts::{ExpertScore, RepoContext, RepoExpert};
 use crate::llm::client::LLMClient;
 use crate::prompt::templates;
+use crate::repo::experts::{ExpertScore, RepoContext, RepoExpert};
 
 pub(crate) fn render_code_quality_system(module: &str, lang: &str, naming_hint: &str, error_hint: &str) -> String {
     templates::CODE_QUALITY_SYSTEM_TEMPLATE
@@ -16,7 +16,12 @@ pub(crate) fn render_code_quality_system(module: &str, lang: &str, naming_hint: 
         .replace("{{ error_hint }}", error_hint)
 }
 
-pub(crate) fn code_quality_user_prompt(ctx: &RepoContext, module_name: &str, first_lang: &str, source_files: &[String]) -> String {
+pub(crate) fn code_quality_user_prompt(
+    ctx: &RepoContext,
+    module_name: &str,
+    first_lang: &str,
+    source_files: &[String],
+) -> String {
     let mut user = format!(
         "## Module: {module} ({lang})\n\
          Files in this module: {count}\n\n\

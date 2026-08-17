@@ -3,10 +3,12 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use super::scoring::{append_facts_block, call_scoring, parse_expert_yaml, scoring_sample_count, ARCHITECTURE_LEAD_KEYS};
-use crate::repo::experts::{ExpertScore, RepoContext, RepoExpert};
+use super::scoring::{
+    append_facts_block, call_scoring, parse_expert_yaml, scoring_sample_count, ARCHITECTURE_LEAD_KEYS,
+};
 use crate::llm::client::LLMClient;
 use crate::prompt::templates;
+use crate::repo::experts::{ExpertScore, RepoContext, RepoExpert};
 
 pub(crate) fn architecture_user_prompt(ctx: &RepoContext) -> String {
     let file_tree: Vec<String> = ctx

@@ -135,7 +135,8 @@ pub fn compute(entries: &[FileEntry]) -> RepoFacts {
 ///
 /// Language-agnostic heuristics, shared with the test-coverage expert so
 /// both count exactly the same files:
-///   Rust:    `*_test.rs`, `tests/*.rs`
+///   Rust:    `*_test.rs`, `tests/*.rs`, sibling `tests.rs` / `*_tests.rs`
+///            (the `#[cfg(test)] mod tests;` split-file convention)
 ///   Python:  `test_*.py`, `*_test.py`, `tests/*.py`
 ///   JS/TS:   `*.test.js`, `*.spec.js`, `*.test.ts`, `*.spec.ts`, `__tests__/*`
 ///   Go:      `*_test.go`
@@ -143,6 +144,8 @@ pub fn compute(entries: &[FileEntry]) -> RepoFacts {
 ///   Swift:   `*Tests.swift`, `Tests/*` (SwiftPM)
 pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
     name.ends_with("_test.rs")
+        || name == "tests.rs"
+        || name.ends_with("_tests.rs")
         || name.ends_with("_test.py")
         || name.starts_with("test_")
         || name.ends_with(".test.js")
@@ -506,6 +509,13 @@ def multi(
             ("helper.ts", "src/spec/helper.ts", true),
             // "/spec/" needs the trailing slash; "/specs/" is a different dir.
             ("helper.ts", "src/specs/helper.ts", false),
+            // Sibling `tests.rs` (the `#[cfg(test)] mod tests;` split-file
+            // convention used by large modules) and its `_tests.rs` variants.
+            ("tests.rs", "src/output/parser/tests.rs", true),
+            ("middleware_tests.rs", "src/server/auth/middleware_tests.rs", true),
+            ("findings_tests.rs", "src/output/parser/findings_tests.rs", true),
+            // `test.rs` (no `s`) is not the convention; `_test.rs` already matched.
+            ("contest.rs", "src/contest.rs", false),
         ];
         for (name, path, expected) in cases {
             assert_eq!(is_test_file(name, path), *expected, "name={name} path={path}");

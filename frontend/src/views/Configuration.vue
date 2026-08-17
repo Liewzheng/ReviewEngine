@@ -62,175 +62,27 @@
       @submit.prevent
     >
       <!-- GitLab Card -->
-      <el-card ref="gitlabCardRef" class="config-card">
-        <template #header>
-          <div class="card-header">
-            <el-icon><Link /></el-icon>
-            <span>{{ $t('config.gitlab.title') }}</span>
-          </div>
-        </template>
-        <div class="card-body">
-          <el-row :gutter="20">
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.url')" prop="gitlab.url">
-                <el-input v-model="config.gitlab.url" :disabled="!isEditing" :placeholder="$t('config.gitlab.urlPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('header.apiToken')" prop="gitlab.apiToken">
-                <div v-if="!isEditing" class="readonly-field">
-                  <template v-if="!config.gitlab.apiToken">
-                    <span class="empty-text">{{ $t('config.notSet') }}</span>
-                  </template>
-                  <template v-else-if="!revealed.apiToken">
-                    <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" :aria-label="$t('config.gitlab.revealApiTokenAria')" @click.stop="revealField('apiToken')">
-                      <el-icon><View /></el-icon>
-                    </el-button>
-                  </template>
-                  <template v-else>
-                    <span class="revealed-value">{{ config.gitlab.apiToken }}</span>
-                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.apiToken }) }}</span>
-                  </template>
-                </div>
-                <el-input v-else v-model="config.gitlab.apiToken" :disabled="!isEditing" show-password :placeholder="$t('config.gitlab.apiTokenPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.webhookSecret')" prop="gitlab.webhookSecret">
-                <div v-if="!isEditing" class="readonly-field">
-                  <template v-if="!config.gitlab.webhookSecret">
-                    <span class="empty-text">{{ $t('config.notSet') }}</span>
-                  </template>
-                  <template v-else-if="!revealed.webhookSecret">
-                    <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" :aria-label="$t('config.gitlab.revealWebhookAria')" @click.stop="revealField('webhookSecret')">
-                      <el-icon><View /></el-icon>
-                    </el-button>
-                  </template>
-                  <template v-else>
-                    <span class="revealed-value">{{ config.gitlab.webhookSecret }}</span>
-                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.webhookSecret }) }}</span>
-                  </template>
-                </div>
-                <el-input v-else v-model="config.gitlab.webhookSecret" :disabled="!isEditing" show-password :placeholder="$t('common.optional')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.webhookSigningSecret')" prop="gitlab.webhookSigningSecret">
-                <div v-if="!isEditing" class="readonly-field">
-                  <template v-if="!config.gitlab.webhookSigningSecret">
-                    <span class="empty-text">{{ $t('config.notSet') }}</span>
-                  </template>
-                  <template v-else-if="!revealed.webhookSigningSecret">
-                    <span class="masked-text">••••••••••••</span>
-                    <el-button size="small" :aria-label="$t('config.gitlab.revealSigningAria')" @click.stop="revealField('webhookSigningSecret')">
-                      <el-icon><View /></el-icon>
-                    </el-button>
-                  </template>
-                  <template v-else>
-                    <span class="revealed-value">{{ config.gitlab.webhookSigningSecret }}</span>
-                    <span class="countdown">{{ $t('config.revealCountdown', { count: revealCountdown.webhookSigningSecret }) }}</span>
-                  </template>
-                </div>
-                <el-input v-else v-model="config.gitlab.webhookSigningSecret" :disabled="!isEditing" show-password :placeholder="$t('config.gitlab.signingPlaceholder')" />
-                <div v-if="isEditing" class="form-item-help">{{ $t('config.gitlab.signingHelp') }}</div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.defaultProject')" prop="gitlab.defaultProject">
-                <el-input v-model="config.gitlab.defaultProject" :disabled="!isEditing" clearable :placeholder="$t('config.gitlab.defaultProjectPlaceholder')" />
-                <div v-if="isEditing" class="form-item-help">{{ $t('config.gitlab.defaultProjectHelp') }}</div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.mrLabel')" prop="gitlab.mrLabel">
-                <el-input v-model="config.gitlab.mrLabel" :disabled="!isEditing" placeholder="needs-review" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.gitlab.autoReview')" prop="gitlab.autoReview">
-                <el-switch v-model="config.gitlab.autoReview" :disabled="!isEditing" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-        </div>
-      </el-card>
+      <GitLabSettingsCard
+        ref="gitlabCardRef"
+        :config="config.gitlab"
+        :is-editing="isEditing"
+        :revealed="revealed"
+        :reveal-countdown="revealCountdown"
+        @reveal="revealField"
+      />
 
       <!-- LLM Card -->
-      <el-card ref="llmCardRef" class="config-card">
-        <template #header>
-          <div class="card-header">
-            <el-icon><Cpu /></el-icon>
-            <span>{{ $t('config.llm.title') }}</span>
-          </div>
-        </template>
-        <div class="card-body">
-          <el-row :gutter="20">
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.apiBaseUrl')" prop="llm.apiBaseUrl">
-                <el-input v-model="config.llm.apiBaseUrl" :disabled="!isEditing" :placeholder="$t('config.llm.apiBasePlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.apiKey')" prop="llm.openaiApiKey">
-                <el-input v-model="config.llm.openaiApiKey" :disabled="!isEditing" show-password :placeholder="$t('config.llm.apiKeyPlaceholder')" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.defaultModel')" prop="llm.defaultModel">
-                <el-select
-                  v-model="config.llm.defaultModel"
-                  :disabled="!isEditing"
-                  :loading="modelFetchLoading"
-                  :placeholder="$t('config.llm.selectModelPlaceholder')"
-                  style="width: 100%"
-                >
-                  <el-option
-                    v-for="model in availableModels"
-                    :key="model"
-                    :label="model"
-                    :value="model"
-                  />
-                </el-select>
-                <div v-if="modelFetchError" class="form-item-help error-text">{{ modelFetchError }}</div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.maxTokens')" prop="llm.maxTokens">
-                <el-input-number v-model="config.llm.maxTokens" :disabled="!isEditing" :min="128" :max="8192" :step="128" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.temperature')" prop="llm.temperature">
-                <div class="slider-with-value">
-                  <el-slider v-model="config.llm.temperature" :disabled="!isEditing" :min="0" :max="2" :step="0.1" />
-                  <span class="slider-value">{{ config.llm.temperature }}</span>
-                </div>
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.timeout')" prop="llm.timeoutSeconds">
-                <el-input-number v-model="config.llm.timeoutSeconds" :disabled="!isEditing" :min="5" :max="300" :step="5" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-            <el-col :xs="24" :sm="12">
-              <el-form-item :label="$t('config.llm.retryAttempts')" prop="llm.retryAttempts">
-                <el-input-number v-model="config.llm.retryAttempts" :disabled="!isEditing" :min="0" :max="5" style="width: 100%" />
-              </el-form-item>
-            </el-col>
-          </el-row>
-          <div class="test-connection">
-            <el-button :loading="testingConnection" @click="testConnection">
-              <el-icon><Connection /></el-icon>
-              <span>{{ $t('common.testConnection') }}</span>
-            </el-button>
-            <el-tag v-if="testResult" :type="testResult.success ? 'success' : 'danger'" effect="dark">
-              {{ testResult.success ? $t('config.llm.connected', { n: testResult.latencyMs }) : $t('config.llm.testFailed', { error: testResult.error }) }}
-            </el-tag>
-          </div>
-        </div>
-      </el-card>
+      <LlmSettingsCard
+        ref="llmCardRef"
+        :config="config.llm"
+        :is-editing="isEditing"
+        :models="availableModels"
+        :model-fetch-loading="modelFetchLoading"
+        :model-fetch-error="modelFetchError"
+        :testing="testingConnection"
+        :test-result="testResult"
+        @test="testConnection"
+      />
 
       <!-- Additional LLM Providers Card -->
       <ProvidersSection
@@ -421,20 +273,18 @@ import {
   Check,
   Close,
   Collection,
-  Connection,
-  Cpu,
   Edit,
-  Link,
   Plus,
   Refresh,
   Tools,
-  View,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
 import { useConfigForm } from '../composables/useConfigForm'
 import { useProviders } from '../composables/useProviders'
+import GitLabSettingsCard from '../components/Config/GitLabSettingsCard.vue'
+import LlmSettingsCard from '../components/Config/LlmSettingsCard.vue'
 import ProvidersSection from '../components/Config/ProvidersSection.vue'
 
 // --- Composables ---
@@ -746,60 +596,6 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
-/* Readonly fields */
-.readonly-field {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 32px;
-  padding: 0 12px;
-  background: var(--bg-surface);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  font-size: 14px;
-}
-
-.masked-text {
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  letter-spacing: 2px;
-  flex: 1;
-}
-
-.revealed-value {
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 13px;
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.countdown {
-  font-size: 12px;
-  color: var(--warning);
-  white-space: nowrap;
-}
-
-.empty-text {
-  color: var(--text-secondary);
-  font-style: italic;
-  flex: 1;
-}
-
-/* Helper text below form inputs */
-.form-item-help {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 6px;
-  line-height: 1.4;
-}
-
-.form-item-help.error-text {
-  color: var(--danger);
-}
-
 /* Slider with value */
 .slider-with-value {
   display: flex;
@@ -843,17 +639,6 @@ onUnmounted(() => {
 }
 .slider-with-value :deep(.el-slider.is-disabled .el-slider__stop) {
   display: none;
-}
-
-/* Test connection */
-.test-connection {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 12px;
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border-color);
 }
 
 /* Tag input */

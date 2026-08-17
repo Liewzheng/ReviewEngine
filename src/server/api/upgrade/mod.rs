@@ -18,8 +18,7 @@ use std::sync::Arc;
 
 use crate::server::AppState;
 
-pub(crate) use self::start::start_upgrade_inner;
-pub(crate) use self::task::{run_upgrade_task, resolve_install_dir, UpgradeMode};
+// Internal re-exports are used by sub-modules, not outside this crate.
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()

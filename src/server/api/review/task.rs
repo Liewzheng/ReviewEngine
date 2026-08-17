@@ -1,7 +1,7 @@
-use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 use crate::server::api::types::{
     ExpertResultDetail, ReviewDetail, ReviewDetailAuthor, ReviewListItem, ReviewSource, TaskStatus,
 };
+use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 
 pub(crate) fn task_status_str(state: &TaskState) -> &'static str {
     match state {
@@ -147,9 +147,9 @@ pub(crate) fn source_meta_from_request(source: &ReviewSource) -> SourceMeta {
     }
 }
 
-use serde::Deserialize;
 use crate::server::task_queue::TaskStore;
 use crate::server::AppState;
+use serde::Deserialize;
 use std::sync::Arc;
 
 #[derive(Deserialize)]

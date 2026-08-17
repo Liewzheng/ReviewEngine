@@ -1,5 +1,5 @@
 use crate::server::api::types::ReviewSource;
-use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState, TaskStore};
+use crate::server::task_queue::{SourceMeta, TaskState, TaskStore};
 use crate::server::AppState;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -7,12 +7,9 @@ use axum::response::IntoResponse;
 use std::sync::Arc;
 use uuid::Uuid;
 
+use super::handlers::{delete_review, get_review, list_reviews, rerun_review};
 use super::resolve::{resolve_source, MAX_STATIC_DIFF_BYTES};
-use super::task::{
-    build_review_detail, build_review_list_item, merge_camel_case_fields, source_meta_from_request,
-    task_status_str, task_to_status, ListParams,
-};
-use super::handlers::{submit_review, get_review, list_reviews, delete_review, rerun_review};
+use super::task::{task_to_status, ListParams};
 
 #[tokio::test]
 async fn test_resolve_source_static_diff_within_limit() {
@@ -267,7 +264,8 @@ async fn test_rerun_returns_new_task_id() {
 
     let new_entry = store.get(new_id).await.expect("new task must exist");
     assert_eq!(new_entry.state, TaskState::Pending);
-    let replayed: crate::server::api::types::ReviewRequest = serde_json::from_value(new_entry.request.unwrap()).unwrap();
+    let replayed: crate::server::api::types::ReviewRequest =
+        serde_json::from_value(new_entry.request.unwrap()).unwrap();
     assert!(
         matches!(replayed.source, ReviewSource::StaticDiff { .. }),
         "rerun must replay the original source parameters"

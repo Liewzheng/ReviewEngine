@@ -11,7 +11,7 @@ use crate::server::state::UpgradeJobState;
 use crate::server::AppState;
 use crate::upgrade::InstallMethod;
 
-use super::check::{cached_at_str, refresh_check};
+use super::check::refresh_check;
 use super::task::{resolve_install_dir, run_upgrade_task, UpgradeMode};
 
 pub(crate) fn set_job(state: &AppState, job_state: UpgradeJobState, message: impl Into<String>) {

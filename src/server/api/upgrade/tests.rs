@@ -1,14 +1,11 @@
+use super::start::validate_origin;
 use super::task::{
-    check_response, current_exe_name, find_dist_root, install_method_str, replace_frontend_dist,
-    resolve_install_dir, resolve_frontend_dir, exit_after_upgrade_enabled, UpgradeMode,
+    current_exe_name, exit_after_upgrade_enabled, find_dist_root, install_method_str, replace_frontend_dist,
+    resolve_frontend_dir, resolve_install_dir,
 };
-use super::start::{validate_origin, set_job};
-use super::check::cached_at_str;
-use crate::server::state::{UpgradeCache, UpgradeJobState};
 use crate::server::AppState;
-use crate::upgrade::{InstallMethod, Release, UpdateCheck, Version};
+use crate::upgrade::{InstallMethod, Release};
 use axum::http::HeaderMap;
-use chrono::Utc;
 use std::path::PathBuf;
 
 #[test]
@@ -73,7 +70,11 @@ fn origin_cross_site_rejected() {
     ] {
         let err = validate_origin(&headers_with(Some(origin), Some(host))).expect_err("must reject");
         let status = err.status();
-        assert_eq!(status, axum::http::StatusCode::FORBIDDEN, "origin {origin} vs host {host}");
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "origin {origin} vs host {host}"
+        );
     }
     assert!(validate_origin(&headers_with(Some("http://evil.example"), None)).is_err());
 }
@@ -171,7 +172,8 @@ fn replace_frontend_dist_keeps_live_dir_on_mount_point_semantics() {
 
     assert_eq!(before.dev(), after.dev(), "live dir device must not change");
     assert_eq!(
-        before.ino(), after.ino(),
+        before.ino(),
+        after.ino(),
         "live dir inode must not change — the directory itself must never be renamed/replaced (EBUSY on a mount point)"
     );
     assert!(live.join("index.html").exists());

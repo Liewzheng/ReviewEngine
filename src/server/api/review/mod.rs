@@ -17,7 +17,6 @@ use std::sync::Arc;
 use crate::server::AppState;
 
 pub(crate) use self::task::{task_status_str, task_to_status};
-pub(crate) use self::resolve::resolve_source;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()

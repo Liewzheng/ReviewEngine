@@ -7,19 +7,12 @@ use axum::{
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::server::log_collector::{push_global_entry, LogMetadata};
-use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState, TaskStore};
+use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 use crate::server::AppState;
 
+use super::super::types::ReviewRequest;
 use super::task::enqueue_review;
-use super::resolve::run_review;
-use super::task::{
-    build_review_detail, build_review_list_item, merge_camel_case_fields, source_meta_from_request,
-    task_status_str, task_to_status, ListParams,
-};
-use super::super::types::{
-    ExpertResultDetail, ReviewDetail, ReviewDetailAuthor, ReviewListItem, ReviewRequest, ReviewSource, TaskStatus,
-};
+use super::task::{build_review_detail, build_review_list_item, merge_camel_case_fields, task_to_status, ListParams};
 
 pub(crate) async fn submit_review(
     State(state): State<Arc<AppState>>,
@@ -65,10 +58,7 @@ pub(crate) async fn submit_review(
     (StatusCode::ACCEPTED, Json(status)).into_response()
 }
 
-pub(crate) async fn get_review(
-    State(state): State<Arc<AppState>>,
-    Path(task_id): Path<Uuid>,
-) -> impl IntoResponse {
+pub(crate) async fn get_review(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
     let store = match &state.task_store {
         Some(s) => s,
         None => {
@@ -95,10 +85,7 @@ pub(crate) async fn get_review(
     }
 }
 
-pub(crate) async fn rerun_review(
-    State(state): State<Arc<AppState>>,
-    Path(task_id): Path<Uuid>,
-) -> impl IntoResponse {
+pub(crate) async fn rerun_review(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
     let store = match &state.task_store {
         Some(s) => s.clone(),
         None => {
@@ -231,10 +218,7 @@ pub(crate) async fn list_reviews(
     .into_response()
 }
 
-pub(crate) async fn delete_review(
-    State(state): State<Arc<AppState>>,
-    Path(task_id): Path<Uuid>,
-) -> impl IntoResponse {
+pub(crate) async fn delete_review(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
     let store = match &state.task_store {
         Some(s) => s,
         None => {

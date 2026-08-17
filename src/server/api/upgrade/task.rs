@@ -2,11 +2,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::server::state::{UpgradeCache, UpgradeJobState};
+use crate::server::state::UpgradeJobState;
 use crate::server::AppState;
-use crate::upgrade::{
-    current_asset_spec, download, find_asset, find_checksum_asset, platform, verify, UpdateCheck, UpgradeError,
-};
+use crate::upgrade::{download, find_checksum_asset, platform, verify, UpdateCheck, UpgradeError};
 
 use super::start::set_job;
 

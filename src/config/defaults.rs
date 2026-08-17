@@ -50,15 +50,7 @@ pub fn merge_default(user: AppConfig) -> Result<AppConfig> {
             cmds.extend(user.commands);
             cmds
         },
-        scoring: ScoringConfig {
-            enabled: user.scoring.enabled,
-            display_individual_scores: user.scoring.display_individual_scores,
-            display_weighted_score: user.scoring.display_weighted_score,
-            penalties: user.scoring.penalties,
-            consensus_threshold: user.scoring.consensus_threshold,
-            score_samples: user.scoring.score_samples,
-            risk_thresholds: user.scoring.risk_thresholds,
-        },
+        scoring: user.scoring,
         review_experts: {
             let mut experts = default.review_experts;
             experts.extend(user.review_experts);
@@ -403,5 +395,69 @@ critical_max = 25
     fn test_load_embedded_default() {
         let cfg = load_embedded_default().unwrap();
         assert!(cfg.review_experts.contains_key("lead"));
+    }
+
+    /// Verify that `merge_default` passes through the user's scoring
+    /// config without losing any fields.  If a new field is added to
+    /// `ScoringConfig`, this test ensures it is preserved through merge.
+    #[test]
+    fn test_merge_default_scoring_preserves_all_fields() {
+        let user_toml = r#"
+[scoring]
+enabled = false
+display_individual_scores = false
+display_weighted_score = false
+consensus_threshold = 90
+score_samples = 3
+
+[scoring.penalties]
+critical = 40
+high = 20
+medium = 10
+low = 2
+note = 1
+
+[scoring.risk_thresholds]
+critical_max = 35
+high_max = 55
+medium_max = 75
+low_max = 90
+healthy_min = 85
+"#;
+        let user = parse_toml(user_toml).unwrap();
+        let merged = merge_default(user).unwrap();
+        // Every field must survive the merge intact
+        assert!(!merged.scoring.enabled);
+        assert!(!merged.scoring.display_individual_scores);
+        assert!(!merged.scoring.display_weighted_score);
+        assert_eq!(merged.scoring.consensus_threshold, 90);
+        assert_eq!(merged.scoring.score_samples, 3);
+        assert_eq!(merged.scoring.penalties.critical, 40);
+        assert_eq!(merged.scoring.penalties.high, 20);
+        assert_eq!(merged.scoring.penalties.medium, 10);
+        assert_eq!(merged.scoring.penalties.low, 2);
+        assert_eq!(merged.scoring.penalties.note, 1);
+        assert_eq!(merged.scoring.risk_thresholds.critical_max, 35);
+        assert_eq!(merged.scoring.risk_thresholds.high_max, 55);
+        assert_eq!(merged.scoring.risk_thresholds.medium_max, 75);
+        assert_eq!(merged.scoring.risk_thresholds.low_max, 90);
+        assert_eq!(merged.scoring.risk_thresholds.healthy_min, 85);
+    }
+
+    /// When user provides only partial scoring, defaults fill the rest.
+    #[test]
+    fn test_merge_default_scoring_partial_preserves_defaults() {
+        let user_toml = r#"
+[scoring]
+enabled = false
+"#;
+        let user = parse_toml(user_toml).unwrap();
+        let merged = merge_default(user).unwrap();
+        assert!(!merged.scoring.enabled);
+        // Defaults for unmentioned fields
+        assert!(merged.scoring.display_individual_scores);
+        assert!(merged.scoring.display_weighted_score);
+        assert_eq!(merged.scoring.consensus_threshold, 70);
+        assert_eq!(merged.scoring.score_samples, 1);
     }
 }

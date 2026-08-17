@@ -1,11 +1,8 @@
-use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
 
-use super::types::UiConfig;
-
 #[derive(Debug, serde::Deserialize)]
-pub(crate) struct TestConfigRequest {
+pub struct TestConfigRequest {
     provider: String,
     model: String,
     api_key: String,
@@ -42,7 +39,7 @@ pub async fn test_config(Json(body): Json<TestConfigRequest>) -> impl axum::resp
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub(crate) struct ModelsRequest {
+pub struct ModelsRequest {
     api_base: String,
     api_key: String,
 }

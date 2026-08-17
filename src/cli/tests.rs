@@ -1,9 +1,8 @@
 use super::app::cli_command;
 use super::app::spawn_progress_if_needed;
 use super::commands::{Cli, Commands};
-use super::*;
 use anyhow::Result;
-use clap::{CommandFactory, FromArgMatches};
+use clap::FromArgMatches;
 use review_engine::progress::new_progress_map;
 
 #[test]

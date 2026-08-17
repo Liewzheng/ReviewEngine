@@ -6,4 +6,4 @@ mod tests;
 #[cfg(feature = "cli")]
 pub mod handlers;
 
-pub use app::{cli_command, run};
+pub use app::run;

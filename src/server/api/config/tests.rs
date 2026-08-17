@@ -3,7 +3,6 @@ use super::mask_secrets;
 use super::put_config;
 use super::types::API_KEY_MASK;
 use super::*;
-use crate::server::api::types::{ConfigValidateRequest, ConfigValidateResponse};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use clap::{CommandFactory, FromArgMatches, Parser};
+use clap::{CommandFactory, FromArgMatches};
 use review_engine::models::*;
 use review_engine::progress::{new_progress_map, ProgressMap, ProgressStatus};
 use std::io::Write;

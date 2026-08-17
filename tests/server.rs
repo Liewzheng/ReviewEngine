@@ -1,6 +1,5 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
-use std::net::TcpListener;
 use std::process::{Child, Command};
 use std::time::{Duration, Instant};
 
@@ -8,11 +7,30 @@ fn bin_path() -> String {
     std::env::var("CARGO_BIN_EXE_review-engine").unwrap_or_else(|_| "target/debug/review-engine".to_string())
 }
 
+/// Monotonic per-process port allocator.
+///
+/// The previous implementation bound `127.0.0.1:0`, read the assigned port,
+/// then dropped the listener — a TOCTOU race under `--test-threads > 1`: the
+/// just-freed port could be handed to another concurrently-spawning test
+/// before this test's server bound it, so the loser's `serve` exited with
+/// "Address already in use" and `wait_for_server` timed out.
+///
+/// Instead, each caller is handed a strictly unique port from an atomic
+/// counter, so no two tests in this process can ever collide. Two more
+/// properties make the ports safe to use directly:
+///
+/// - The range 21000..=28999 sits below both macOS (49152) and Linux (32768)
+///   ephemeral ranges, so the kernel never hands these ports to outbound
+///   sockets or other processes.
+/// - We deliberately do NOT "check" a port by binding it first: on macOS,
+///   bind-then-close followed by an immediate rebind from another thread or
+///   process can fail with `EADDRINUSE` even when the port is free, which was
+///   a second flake source. The atomic counter makes the check unnecessary.
 fn find_free_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind to find free port");
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT_PORT: AtomicU32 = AtomicU32::new(0);
+    let n = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+    21000 + (n % 8000) as u16
 }
 
 struct ServerGuard {
@@ -24,6 +42,35 @@ impl Drop for ServerGuard {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Guard for a manually-spawned `serve` child that is expected to exit on its
+/// own (the docker-upgrade "restart trigger" test). Unlike [`ServerGuard`], it
+/// must NOT kill the child during the happy path — the test polls
+/// [`UpgradeChildGuard::try_wait`] until the child exits naturally. But if the
+/// test panics before that (e.g. bootstrap fails), Drop kills the child so a
+/// failed run never leaks a server that would hold its port and break the next
+/// run's allocation.
+struct UpgradeChildGuard {
+    child: Option<Child>,
+}
+
+impl UpgradeChildGuard {
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match &mut self.child {
+            Some(c) => c.try_wait(),
+            None => Ok(None),
+        }
+    }
+}
+
+impl Drop for UpgradeChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut c) = self.child.take() {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 }
 
@@ -2559,21 +2606,25 @@ async fn upgrade_docker_exits_zero_after_successful_upgrade() {
 
     // Spawn manually (not via ServerGuard): the child is expected to exit on
     // its own, which ServerGuard's Drop would mask by killing it.
-    let mut child = Command::new(bin_path())
-        .arg("serve")
-        .arg("--bind")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .env("HOME", temp_home.path())
-        .env("REVIEW_UPGRADE_API_BASE", &api_base)
-        .env("REVIEW_UPGRADE_METHOD", "docker")
-        .env("REVIEW_UPGRADE_INSTALL_DIR", install_dir.path())
-        .env("REVIEW_UPGRADE_FRONTEND_DIR", frontend_dir.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to spawn review-engine serve (docker exit test)");
+    let mut child = UpgradeChildGuard {
+        child: Some(
+            Command::new(bin_path())
+                .arg("serve")
+                .arg("--bind")
+                .arg("127.0.0.1")
+                .arg("--port")
+                .arg(port.to_string())
+                .env("HOME", temp_home.path())
+                .env("REVIEW_UPGRADE_API_BASE", &api_base)
+                .env("REVIEW_UPGRADE_METHOD", "docker")
+                .env("REVIEW_UPGRADE_INSTALL_DIR", install_dir.path())
+                .env("REVIEW_UPGRADE_FRONTEND_DIR", frontend_dir.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("failed to spawn review-engine serve (docker exit test)"),
+        ),
+    };
 
     wait_for_server(port).await;
 
@@ -2605,7 +2656,8 @@ async fn upgrade_docker_exits_zero_after_successful_upgrade() {
         frontend_dir.path().join("index.html").exists(),
         "frontend dist must be replaced with index.html"
     );
-    let _ = child.wait();
+    // Reap the already-exited child so the guard's Drop has nothing to kill.
+    let _ = child.child.take().map(|mut c| c.wait());
 }
 
 /// `POST /upgrade` for brew/cargo installs is refused (400) with the correct

@@ -80,9 +80,15 @@ pub fn builtin_default(name: &str) -> LanguageProfile {
                 "__tests__".to_string(),
             ],
             style_configs: vec![
-                ".prettierrc".to_string(),
+                "eslint.config.js".to_string(),
+                "eslint.config.mjs".to_string(),
+                "eslint.config.cjs".to_string(),
+                "eslint.config.ts".to_string(),
                 ".eslintrc".to_string(),
                 ".eslintrc.json".to_string(),
+                "prettier.config.js".to_string(),
+                ".prettierrc.json".to_string(),
+                ".prettierrc".to_string(),
             ],
             naming_hint: "camelCase for functions/variables, PascalCase for classes, UPPER_CASE for constants"
                 .to_string(),

@@ -423,6 +423,26 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
         }
     }
 
+    // Adjudication transparency: high-severity findings the final
+    // adjudication pass dropped as false positives, with the adjudicator's
+    // reason — recorded, never silent.
+    if !consolidated.adjudicated_removed.is_empty() {
+        out.push_str("### 🧑‍⚖️ Adjudicated Away (false positives)\n\n");
+        for dropped in &consolidated.adjudicated_removed {
+            let f = &dropped.finding;
+            let line = f.line.map_or(String::new(), |l| format!(":{}", l));
+            out.push_str(&format!(
+                "- ~~**{}** `{}`{} — {}~~\n  - **Adjudicator**: {}\n",
+                f.severity,
+                f.file,
+                line,
+                close_unclosed_code_fences(&f.title),
+                close_unclosed_code_fences(&dropped.reason),
+            ));
+        }
+        out.push('\n');
+    }
+
     out
 }
 

@@ -391,6 +391,28 @@ critical_max = 25
 
     // ─── load_embedded_default ───────────────────
 
+    /// Report adjudication fields: serde defaults fill them when the user
+    /// config omits them, and explicit user values survive the merge
+    /// (`merge_default` passes `report` through wholesale).
+    #[test]
+    fn test_merge_default_report_adjudication_fields() {
+        let merged = merge_default(parse_toml("").unwrap()).unwrap();
+        assert!(merged.report.adjudicate);
+        assert_eq!(merged.report.adjudicate_min_severity, "high");
+
+        let user = parse_toml(
+            r#"
+[report]
+adjudicate = false
+adjudicate_min_severity = "critical"
+"#,
+        )
+        .unwrap();
+        let merged = merge_default(user).unwrap();
+        assert!(!merged.report.adjudicate);
+        assert_eq!(merged.report.adjudicate_min_severity, "critical");
+    }
+
     #[test]
     fn test_load_embedded_default() {
         let cfg = load_embedded_default().unwrap();

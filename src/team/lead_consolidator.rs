@@ -90,6 +90,12 @@ pub struct ConsolidatedReport {
     /// (coverage debt), and an insufficient ratio contributes to `unverified`.
     #[serde(default)]
     pub coverage: Option<crate::coverage::CoverageSummary>,
+    /// High-severity findings dropped by the final adjudication pass as false
+    /// positives, each with the adjudicator's reason (transparency — drops are
+    /// recorded, never silent). Empty when adjudication was disabled or
+    /// confirmed everything.
+    #[serde(default)]
+    pub adjudicated_removed: Vec<crate::team::verifier::DroppedFinding>,
 }
 
 /// A conflict between two or more experts on the same issue.
@@ -226,6 +232,7 @@ impl ConsolidatorConfig {
             reviewed_files: coverage.reviewed_files,
             unreviewed_files: coverage.unreviewed_files.clone(),
             coverage: coverage_summary,
+            adjudicated_removed: Vec::new(),
         }
     }
 

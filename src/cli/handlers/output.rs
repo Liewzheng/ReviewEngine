@@ -224,6 +224,7 @@ mod tests {
             reviewed_files: 0,
             unreviewed_files: vec![],
             coverage: None,
+            adjudicated_removed: vec![],
         }
     }
 

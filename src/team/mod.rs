@@ -8,6 +8,7 @@
 //! expert reports into a single cohesive output. [`TeamReport`] and
 //! [`ExpertMetrics`] capture the final results.
 
+pub mod adjudicator;
 pub mod lead_consolidator;
 pub mod orchestrator;
 pub mod verifier;

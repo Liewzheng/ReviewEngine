@@ -98,6 +98,19 @@ pub struct ReportConfig {
     /// Maximum bytes of referenced file content injected into the verification prompt.
     #[serde(default = "default_verification_max_file_bytes")]
     pub verification_max_file_bytes: usize,
+    /// If `true`, a final adjudication pass runs after lead consolidation:
+    /// each finding at or above `adjudicate_min_severity` is re-examined by the
+    /// lead-model LLM against the FULL content of the cited file (bypassing the
+    /// context-injection byte caps), and findings the actual code disproves are
+    /// dropped with a recorded reason (`adjudicated_removed` on the report).
+    /// Fail-open: LLM or parsing errors keep the finding unchanged. On by default.
+    #[serde(default = "default_adjudicate")]
+    pub adjudicate: bool,
+    /// Minimum severity a finding must have to be sent to the adjudication
+    /// pass: "critical", "high" (default), "medium", "low", or "note".
+    /// Unrecognized values fall back to "high" with a warning.
+    #[serde(default = "default_adjudicate_min_severity")]
+    pub adjudicate_min_severity: String,
     /// If `true`, findings previously marked as false positives via the
     /// feedback API (matched by stable fingerprint) are filtered out of
     /// subsequent reviews, after the verification pass and before lead
@@ -385,6 +398,8 @@ impl Default for ReportConfig {
             drop_low_confidence: false,
             verification_pass: false,
             verification_max_file_bytes: 20000,
+            adjudicate: true,
+            adjudicate_min_severity: default_adjudicate_min_severity(),
             feedback_filtering: true,
         }
     }
@@ -456,6 +471,12 @@ fn default_verification_pass() -> bool {
 }
 fn default_verification_max_file_bytes() -> usize {
     20000
+}
+fn default_adjudicate() -> bool {
+    true
+}
+fn default_adjudicate_min_severity() -> String {
+    "high".to_string()
 }
 fn default_feedback_filtering() -> bool {
     true
@@ -710,6 +731,8 @@ low_max = 85
         assert!(!config.report.drop_low_confidence);
         assert!(!config.report.verification_pass);
         assert_eq!(config.report.verification_max_file_bytes, 20000);
+        assert!(config.report.adjudicate);
+        assert_eq!(config.report.adjudicate_min_severity, "high");
     }
 
     #[test]
@@ -723,6 +746,8 @@ min_confidence = 7
 drop_low_confidence = true
 verification_pass = true
 verification_max_file_bytes = 50000
+adjudicate = false
+adjudicate_min_severity = "critical"
 "#,
         )
         .unwrap();
@@ -733,5 +758,7 @@ verification_max_file_bytes = 50000
         assert!(config.report.drop_low_confidence);
         assert!(config.report.verification_pass);
         assert_eq!(config.report.verification_max_file_bytes, 50000);
+        assert!(!config.report.adjudicate);
+        assert_eq!(config.report.adjudicate_min_severity, "critical");
     }
 }

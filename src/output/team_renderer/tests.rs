@@ -156,6 +156,7 @@ fn make_consolidated(score: u8, risk_level: RiskLevel, tl_dr: &str) -> Consolida
         reviewed_files: 0,
         unreviewed_files: vec![],
         coverage: None,
+        adjudicated_removed: vec![],
     }
 }
 
@@ -319,6 +320,26 @@ fn test_render_lead_summary_no_ledger_skips_hunk_section() {
     let md = render_lead_summary(&consolidated);
     assert!(!md.contains("Hunk Coverage"));
     assert!(md.contains("Risk Level: healthy"));
+}
+
+#[test]
+fn test_render_lead_summary_lists_adjudicated_removed() {
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "1 high found by 3 reviewers.");
+    consolidated.adjudicated_removed = vec![crate::team::verifier::DroppedFinding {
+        finding: make_test_finding(Severity::Critical, "src/session.rs"),
+        reason: "guard present at lines 1099-1134".to_string(),
+    }];
+    let md = render_lead_summary(&consolidated);
+    assert!(md.contains("Adjudicated Away"));
+    assert!(md.contains("src/session.rs"));
+    assert!(md.contains("guard present at lines 1099-1134"));
+}
+
+#[test]
+fn test_render_lead_summary_no_adjudications_skips_section() {
+    let consolidated = make_consolidated(85, RiskLevel::LowMedium, "1 high found by 3 reviewers.");
+    let md = render_lead_summary(&consolidated);
+    assert!(!md.contains("Adjudicated Away"));
 }
 
 // ── render_expert_section (parse error + raw dump) ─────────────

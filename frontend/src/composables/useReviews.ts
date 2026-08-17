@@ -4,12 +4,28 @@ import { i18n } from '../i18n';
 import type { ReviewsListResponse } from '../services/reviews';
 import type { ReviewDetail, HistoryFilters } from '../types/history';
 
+/**
+ * Composable for the Review History page.
+ *
+ * Manages the paginated review list, review detail selection,
+ * and review operations (delete, rerun).
+ */
 export function useReviews() {
+  /** Paginated review list response (null before first load). */
   const data = ref<ReviewsListResponse | null>(null);
+  /** Currently selected review detail (null when no review is selected). */
   const selectedReview = ref<ReviewDetail | null>(null);
+  /** True while a fetch operation is in progress. */
   const loading = ref(false);
+  /** Last error message. */
   const error = ref<string | null>(null);
 
+  /**
+   * Fetch a paginated list of reviews matching the given filters.
+   * @param filters - Search/filter criteria (status, project, date range).
+   * @param page - Page number (1-based).
+   * @param perPage - Items per page.
+   */
   async function fetchReviews(filters: HistoryFilters, page: number = 1, perPage: number = 20) {
     loading.value = true;
     error.value = null;
@@ -23,6 +39,10 @@ export function useReviews() {
     }
   }
 
+  /**
+   * Fetch full details for a single review by ID.
+   * @param id - Review UUID.
+   */
   async function fetchReview(id: string) {
     loading.value = true;
     error.value = null;
@@ -36,6 +56,10 @@ export function useReviews() {
     }
   }
 
+  /**
+   * Delete a review by ID.
+   * @param id - Review UUID to delete.
+   */
   async function removeReview(id: string) {
     error.value = null;
     try {
@@ -64,6 +88,11 @@ export function useReviews() {
     return e instanceof Error ? e.message : i18n.global.t('errors.unknown');
   }
 
+  /**
+   * Re-run a previous review with the same parameters.
+   * @param id - Review UUID to re-run.
+   * @returns The new review task ID on success.
+   */
   async function rerun(id: string) {
     error.value = null;
     try {
@@ -74,7 +103,9 @@ export function useReviews() {
     }
   }
 
+  /** Current page of review items. */
   const items = computed(() => data.value?.items ?? []);
+  /** Total number of reviews matching the current filters. */
   const total = computed(() => data.value?.total ?? 0);
 
   return {

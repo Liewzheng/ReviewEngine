@@ -19,6 +19,8 @@ const API_STATUS_TO_DISPLAY: Record<string, ReviewStatus> = {
  * Normalize a raw API status string for display. Unknown/absent values pass
  * through as text rather than rendering blank; a truly absent status falls
  * back to `queued` so the label is never raw "undefined".
+ * @param status - Raw status string from the API response.
+ * @returns Normalized ReviewStatus for UI display.
  */
 export function normalizeStatus(status: string | null | undefined): ReviewStatus {
   if (!status) return 'queued';

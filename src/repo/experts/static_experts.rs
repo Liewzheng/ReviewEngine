@@ -411,15 +411,23 @@ impl RepoExpert for Dependency {
 /// Normalise a style-config file name to a per-tool key, so that aliases
 /// configuring the same tool collapse into one check: `rustfmt.toml` and
 /// `.rustfmt.toml` both map to `rustfmt`, `.eslintrc` and `.eslintrc.json`
-/// to `eslintrc`. Leading dots are stripped, then the part before the
-/// first remaining dot is taken, lower-cased.
+/// to `eslint`. Leading dots are stripped, then the part before the first
+/// remaining dot is taken, lower-cased; finally the legacy `eslintrc*` and
+/// `prettierrc*` families are folded onto their modern flat-config key
+/// (`eslint`, `prettier`) so a repo shipping only `eslint.config.js` is
+/// recognised as configuring the same tool as one shipping `.eslintrc`.
 fn style_tool_key(config_file: &str) -> String {
-    config_file
+    let key = config_file
         .trim_start_matches('.')
         .split('.')
         .next()
         .unwrap_or(config_file)
-        .to_ascii_lowercase()
+        .to_ascii_lowercase();
+    match key.as_str() {
+        "eslintrc" => "eslint".to_string(),
+        "prettierrc" => "prettier".to_string(),
+        _ => key,
+    }
 }
 
 /// Static expert that evaluates code style configuration.
@@ -782,5 +790,61 @@ mod tests {
             "the only finding should be the missing mypy config: {}",
             score.details[0].message
         );
+    }
+
+    #[test]
+    fn style_tool_key_folds_modern_flat_config_aliases() {
+        // Modern eslint flat configs (`eslint.config.*`) and the legacy
+        // `.eslintrc*` family configure the same tool and must collapse to
+        // one group key; ditto `prettier.config.*` / `.prettierrc*`.
+        for modern in [
+            "eslint.config.js",
+            "eslint.config.mjs",
+            "eslint.config.cjs",
+            "eslint.config.ts",
+        ] {
+            assert_eq!(style_tool_key(modern), "eslint", "{modern}");
+        }
+        for legacy in [".eslintrc", ".eslintrc.json", ".eslintrc.cjs", ".eslintrc.yaml"] {
+            assert_eq!(style_tool_key(legacy), "eslint", "{legacy}");
+        }
+        for modern in [
+            "prettier.config.js",
+            "prettier.config.mjs",
+            "prettier.config.cjs",
+            "prettier.config.ts",
+        ] {
+            assert_eq!(style_tool_key(modern), "prettier", "{modern}");
+        }
+        for legacy in [".prettierrc", ".prettierrc.json", ".prettierrc.yaml", ".prettierrc.js"] {
+            assert_eq!(style_tool_key(legacy), "prettier", "{legacy}");
+        }
+        // Unrelated tools keep their own keys; .editorconfig stays distinct.
+        assert_eq!(style_tool_key(".editorconfig"), "editorconfig");
+        assert_eq!(style_tool_key("rustfmt.toml"), "rustfmt");
+        assert_eq!(style_tool_key("clippy.toml"), "clippy");
+    }
+
+    #[tokio::test]
+    async fn code_style_recognises_modern_eslint_prettier_configs() {
+        // A JS/TS repo configured only with the modern flat config names
+        // (exactly what the frontend now ships) must score 100: the
+        // eslint group is satisfied by `eslint.config.js` and the prettier
+        // group by `prettier.config.js` — no legacy `.eslintrc` needed.
+        let context = ctx(vec![
+            entry("src/main.ts", "TypeScript", 10),
+            entry("src/App.vue", "Vue", 20),
+            entry(".editorconfig", "Other", 5),
+            entry("eslint.config.js", "Config", 3),
+            entry("prettier.config.js", "Config", 3),
+        ]);
+        let score = evaluate(&CodeStyle, &context).await;
+        assert_eq!(score.score, 100, "summary: {}", score.summary);
+        assert!(
+            score.details.is_empty(),
+            "no findings expected, got: {:?}",
+            score.details.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+        assert!(score.summary.contains("3/3"), "summary: {}", score.summary);
     }
 }

@@ -154,8 +154,10 @@ pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
         || name.ends_with("Tests.swift")
         || path.contains("/tests/")
         || path.contains("/Tests/")
+        || path.starts_with("tests/")
         || path.contains("__tests__")
         || path.contains("/test/")
+        || path.starts_with("test/")
         || path.contains("/spec/")
 }
 
@@ -484,5 +486,115 @@ def multi(
         assert!(!is_test_file("main.swift", "Sources/main.swift"));
         // Lowercase `tests/` detection is unchanged (no regression).
         assert!(is_test_file("helpers.py", "/repo/tests/helpers.py"));
+    }
+
+    #[test]
+    fn is_test_file_matches_documented_conventions() {
+        let cases: &[(&str, &str, bool)] = &[
+            ("foo_test.rs", "src/foo_test.rs", true),
+            ("utils.rs", "src/utils.rs", false),
+            ("test_utils.py", "src/test_utils.py", true),
+            ("utils.py", "src/utils.py", false),
+            ("app.test.ts", "src/app.test.ts", true),
+            ("utils.spec.js", "src/utils.spec.js", true),
+            ("utils_test.go", "pkg/utils_test.go", true),
+            ("FooTest.java", "src/FooTest.java", true),
+            // Only the *Test.java suffix counts, not any file with "Test" in it.
+            ("TestFoo.java", "src/TestFoo.java", false),
+            ("helper.py", "tests/helper.py", true),
+            ("helper.ts", "src/__tests__/helper.ts", true),
+            ("helper.ts", "src/spec/helper.ts", true),
+            // "/spec/" needs the trailing slash; "/specs/" is a different dir.
+            ("helper.ts", "src/specs/helper.ts", false),
+        ];
+        for (name, path, expected) in cases {
+            assert_eq!(is_test_file(name, path), *expected, "name={name} path={path}");
+        }
+    }
+
+    #[test]
+    fn is_ci_config_recognizes_well_known_ci_paths() {
+        let cases: &[(&str, bool)] = &[
+            (".gitlab-ci.yml", true),
+            ("Jenkinsfile", true),
+            ("azure-pipelines.yml", true),
+            (".github/workflows/ci.yml", true),
+            (".github/workflows/deploy.yaml", true),
+            ("sub/.github/workflows/ci.yml", true),
+            (".circleci/config.yml", true),
+            ("sub/.circleci/config.yml", true),
+            (".buildkite/pipeline.yml", true),
+            ("src/main.rs", false),
+            (".github/CODEOWNERS", false),
+        ];
+        for (path, expected) in cases {
+            assert_eq!(is_ci_config(path), *expected, "path={path}");
+        }
+    }
+
+    #[test]
+    fn analyse_python_defs_counts_unterminated_signature_at_eof() {
+        // Malformed input: the multi-line `def` never gets its trailing `:`,
+        // but the heuristic still records it instead of dropping the count.
+        let stats = analyse_python_defs("def f(\n    a: int\n    b: str");
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.return_annotated, 0);
+        // No closing `)` means an empty (vacuously annotated) param list.
+        assert_eq!(stats.fully_param_annotated, 1);
+    }
+
+    #[test]
+    fn analyse_python_defs_caps_runaway_signatures_at_64_lines() {
+        let mut content = String::from("def f(\n");
+        for i in 0..100 {
+            content.push_str(&format!("    p{i}: int,\n"));
+        }
+        let stats = analyse_python_defs(&content);
+        // Exactly one def is recorded; the 64-line cap terminates the scan
+        // instead of growing the accumulator forever.
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.return_annotated, 0);
+    }
+
+    #[test]
+    fn record_signature_skips_star_and_slash_separator_markers() {
+        // `*` and `/` are PEP 484/570 parameter separators, not real params;
+        // both annotated params still make the signature fully annotated.
+        let stats = analyse_python_defs("def f(*, a: int, /, b: int) -> None:\n    pass\n");
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.return_annotated, 1);
+        assert_eq!(stats.fully_param_annotated, 1);
+    }
+
+    #[test]
+    fn record_signature_varargs_count_as_unannotated() {
+        // `*args` / `**kwargs` carry no annotation and must mark the
+        // signature as NOT fully annotated.
+        let stats = analyse_python_defs("def g(a: int, *args, **kwargs) -> None:\n    pass\n");
+        assert_eq!(stats.total, 1);
+        assert_eq!(stats.return_annotated, 1);
+        assert_eq!(stats.fully_param_annotated, 0);
+    }
+
+    #[test]
+    fn split_top_level_commas_respects_brackets_and_quotes() {
+        let parts = split_top_level_commas("a: dict[str, int], b: str = \"x,y\", c: str = r\"p,q\"");
+        // Whitespace around the separators is preserved; `record_signature`
+        // trims each token before inspecting it.
+        assert_eq!(
+            parts,
+            vec![
+                "a: dict[str, int]".to_string(),
+                " b: str = \"x,y\"".to_string(),
+                " c: str = r\"p,q\"".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_top_level_commas_ignores_escaped_quotes() {
+        // A backslash-escaped quote inside a string must not terminate it.
+        let parts = split_top_level_commas("x: str = \"a\\\"b\", y: int");
+        assert_eq!(parts, vec!["x: str = \"a\\\"b\"".to_string(), " y: int".to_string()]);
     }
 }

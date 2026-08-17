@@ -3,7 +3,8 @@ use std::time::{Duration, Instant};
 
 use super::upgrade::build_fake_release_tar;
 use super::{
-    bin_path, bootstrap_authed_client, find_free_port, spawn_server_inner_with_env, wait_for_server, API_TOKEN,
+    bin_path, bootstrap_authed_client, find_free_port, spawn_server_inner_with_env, wait_for_server, UpgradeChildGuard,
+    API_TOKEN,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -318,22 +319,28 @@ async fn upgrade_docker_exits_zero_after_successful_upgrade() {
     let port = find_free_port();
 
     // Spawn manually (not via ServerGuard): the child is expected to exit on
-    // its own, which ServerGuard's Drop would mask by killing it.
-    let mut child = Command::new(bin_path())
-        .arg("serve")
-        .arg("--bind")
-        .arg("127.0.0.1")
-        .arg("--port")
-        .arg(port.to_string())
-        .env("HOME", temp_home.path())
-        .env("REVIEW_UPGRADE_API_BASE", &api_base)
-        .env("REVIEW_UPGRADE_METHOD", "docker")
-        .env("REVIEW_UPGRADE_INSTALL_DIR", install_dir.path())
-        .env("REVIEW_UPGRADE_FRONTEND_DIR", frontend_dir.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("failed to spawn review-engine serve (docker exit test)");
+    // its own, which ServerGuard's Drop would mask by killing it. Wrap it in
+    // UpgradeChildGuard so a panicking test still kills the child instead of
+    // leaking a server that would hold this port and break the next run.
+    let mut child = UpgradeChildGuard {
+        child: Some(
+            Command::new(bin_path())
+                .arg("serve")
+                .arg("--bind")
+                .arg("127.0.0.1")
+                .arg("--port")
+                .arg(port.to_string())
+                .env("HOME", temp_home.path())
+                .env("REVIEW_UPGRADE_API_BASE", &api_base)
+                .env("REVIEW_UPGRADE_METHOD", "docker")
+                .env("REVIEW_UPGRADE_INSTALL_DIR", install_dir.path())
+                .env("REVIEW_UPGRADE_FRONTEND_DIR", frontend_dir.path())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("failed to spawn review-engine serve (docker exit test)"),
+        ),
+    };
 
     wait_for_server(port).await;
 
@@ -365,5 +372,6 @@ async fn upgrade_docker_exits_zero_after_successful_upgrade() {
         frontend_dir.path().join("index.html").exists(),
         "frontend dist must be replaced with index.html"
     );
-    let _ = child.wait();
+    // Reap the already-exited child so the guard's Drop has nothing to kill.
+    let _ = child.child.take().map(|mut c| c.wait());
 }

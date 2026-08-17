@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.9.17] - 2026-08-17
+
+### Added
+- **Report provenance metadata + unified report persistence**: every repo-review report now carries `ReviewMetadata` — git HEAD SHA (fail-open), a stable FNV-1a tree hash over sorted path+size+loc, an RFC 3339 timestamp, the model id (or local-only), `score_samples`, and the scan source; the markdown report gains a compact Provenance section plus a score-nature note (scores are comparable across runs only against the same SHA+tree hash). Zero-finding experts now render their summary line instead of being skipped, fallback experts get ⚠ markers in headings/tables plus a callout line, `--output` dual-writes a timestamped copy into the reports dir, and the default `repo_review` run now lands on disk too. (`src/actions/repo_review.rs`, `src/output/renderer.rs`, `src/output/markdown.rs`, `src/cli/handlers/`)
+- **Static `RepoFacts` layer for LLM prompt grounding**: `src/repo/experts/facts.rs` computes deterministic static facts (Python annotation coverage, CI configs, test/source counts) from the scanned file entries and injects them into both LLM expert prompts with a MUST-NOT-contradict contract; parser-free heuristics with documented limits, `None` (not 0) when no Python defs exist. `test_coverage` now uses facts as the single source for `is_test_file`. (`src/repo/experts/facts.rs`, `src/repo/experts/mod.rs`)
+- **Optional score sampling for LLM experts**: `[scoring] score_samples` (default 1, unchanged behavior) — N>1 samples run concurrently, the median wins, and samples/min/max are recorded; scoring calls run at temperature 0 via a per-call config override. (`src/repo/experts/llm_experts/`, `src/config/defaults.rs`)
+- **Modern eslint/prettier flat-config recognition + frontend lint scaffolding**: the code_style expert recognizes flat `eslint.config.*` / `prettier.config.*` layouts, and the frontend gains its own eslint+prettier config scaffolding. (`src/repo/experts/static_experts/code_style.rs`, `frontend/eslint.config.js`, `frontend/prettier.config.js`)
+
+### Changed
+- **Normalized code_style scoring**: score = satisfied/applicable × 100 over `.editorconfig` + per-language style-tool groups (alias-aware, exact basename match) — 100 is now reachable for single-language repos, and every missing item emits a note finding with a concrete remediation. (`src/repo/experts/static_experts/code_style.rs`)
+- **Rubric-anchored LLM scoring**: score bands (90–100 / 75–89 / 60–74 / <60) are inlined into the architecture and code_quality prompts via a `score_band_rubric!` macro, and the model must justify its band in the summary. (`src/repo/experts/llm_experts/`)
+
+### Fixed
+- **Worktree-truth scanning + CI dotfile detection**: `scan()` skips paths absent on disk (`git ls-files --cached` lists worktree-deleted-but-unstaged files, previously reported as 0-LOC phantoms); unreadable files return `None` instead of 0-LOC entries; the dotfile whitelist admits `.gitlab-ci.yml` / `.travis.yml` so the test-coverage expert actually sees them, `.circleci/` dirs descend normally, and `is_ci_test_file` recognizes `.travis.yml`, `.circleci/config.yml`, and `azure-pipelines.yml`. Full-path review skips an unreadable file with a WARN instead of aborting the whole review (empty-result bail preserved, fail-closed). (`src/repo/mod.rs`, `src/repo/experts/test_coverage.rs`, `src/input/full_path.rs`)
+- **LLM expert scores land explicitly — never silently dropped**: Pass1/Pass2 LLM call failures previously took the Err arm and pushed no score at all, so reports silently scored 6 static experts over 75 weights (and an `architecture_lead` name mismatch dropped `lead_summary`). Every failure now lands a flagged fallback (`fallback: true`, `LLM_FALLBACK_SCORE`) plus a stderr WARN; `total_experts` is always 8 and weights always sum to 100. (`src/actions/repo_review.rs`, `src/repo/experts/llm_experts/`)
+- **Config `merge_default` scoring simplified**: the field-by-field merge was fragile against struct drift; the scoring section now merges as a whole. (`src/config/defaults.rs`)
+- **Warn on improve/changelog parse fallbacks**: `improve` and `update_changelog` previously fell back silently when the LLM response failed to parse; they now log a WARN. (`src/actions/improve.rs`, `src/actions/update_changelog.rs`)
+- **Test-ratio detection broadened**: the test_coverage expert recognizes the sibling `tests.rs` / `*_tests.rs` split-file convention and the SwiftPM test structure (`Tests/` dir, `Package.swift` `testTarget`). (`src/repo/experts/test_coverage.rs`)
+- **Security scanner skips placeholder secrets**: example/placeholder values no longer fire the secret-pattern scanner. (`src/repo/experts/static_experts/security.rs`)
+- **Server test suite de-flaked**: port allocation and child-process leaks in the server suite are fixed. (`tests/server/`)
+
+### Refactored
+- **Large-file splits into submodules (no behavior change)**: `gitlab.rs` → `gitlab/{handler,hooks,tests}`, `cli/mod.rs` + `handlers.rs` → `cli/{app,commands,handlers/*}`, `server/api/{config,review,upgrade}.rs` → per-endpoint submodules, `llm/client.rs` and `repo/experts/llm_experts.rs` → per-concern submodules, `static_experts.rs` → per-expert submodules; large test bodies moved to sibling `tests.rs` modules across diff/output/team/repo/git_provider/server/auth. All clippy warnings after the splits fixed; `cargo test` green throughout. (`src/cli/`, `src/server/`, `src/llm/`, `src/repo/experts/`, `tests/`)
+- **Dependency slimming — 9 crates dropped**: unused `similar` removed; `axum-server` switched `tls-rustls` → `tls-rustls-no-provider` (drops the aws-lc-rs/aws-lc-sys build chain — cmake, dunce, fs_extra, jobserver, pkg-config — with the ring provider installed explicitly in `server::serve`); `zip` switched `deflate` → `deflate-flate2` + `flate2` (drops zopfli). `cargo tree` 641 → 621 lines. (`Cargo.toml`, `Cargo.lock`, `src/server/mod.rs`)
+
+### Docs
+- **Extensive doc comments**: doc comments added to public API items across 19 Rust modules, and JSDoc comments added to the frontend types, composables, and services. (`src/**`, `frontend/src/**`)
+
 ## [0.9.16] - 2026-08-12
 
 ### Fixed

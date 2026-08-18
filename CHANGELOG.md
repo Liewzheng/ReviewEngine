@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.20] - 2026-08-18
+
+### Added
+- **models.dev provider catalog (no more hand-maintained presets)**: review-engine now consumes the [models.dev](https://models.dev) catalog (`api.json`, hundreds of providers) with a tolerant typed parser, 24h in-memory TTL + disk cache at `~/.config/review-engine/models-dev-cache.json` (env override `REVIEW_MODELS_DEV_CACHE`, API base override `REVIEW_MODELS_DEV_API_BASE`), stale-cache fallback when the network fails. New endpoints: `GET /api/v1/catalog/providers` (only providers exposing a base API URL, name-sorted, with `api_base`/`env`/`doc`/`model_count`) and `GET /api/v1/catalog/providers/{id}/models` (context/output limits, reasoning/tool_call flags). (`src/catalog/`, `src/server/api/catalog.rs`, `src/server/state.rs`)
+- **CLI `init` interactive provider picker**: the previously DeepSeek-hardcoded LLM section now offers a curated shortlist (openai/anthropic/deepseek/google/xai/mistralai/groq/openrouter/ollama, presence-filtered) plus a "Browse all N providers…" type-to-filter select, a model picker with context limits, API-key entry that offers the provider's documented env var (e.g. `DEEPSEEK_API_KEY`) without printing it, and writes a ready-to-use `[[llm]]` block with normalized `/v1` base URL. Offline falls back to the legacy template flow. (`src/actions/init.rs`, `src/cli/app.rs`)
+- **Web Add Provider dialog backed by the catalog**: filterable provider select (name, id, model count) replacing the hardcoded preset list, auto-filled `apiBaseUrl`, API-key placeholder from the provider's env var, docs link, and a model select fed by the catalog (context limits shown); "Custom" option and full manual fallback preserved, with a warning banner + legacy presets if the catalog is unavailable. (`frontend/src/components/Config/ProvidersSection.vue`, `frontend/src/composables/useCatalog.ts`, `frontend/src/services/catalog.ts`, `frontend/src/types/catalog.ts`, i18n ×6)
+
 ## [0.9.19] - 2026-08-17
 
 ### Fixed

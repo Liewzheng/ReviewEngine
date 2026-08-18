@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.19] - 2026-08-17
+
+### Fixed
+- **Release workflow "Upload Frontend Dist" failed on v0.9.18 (package-lock out of sync)**: the v0.9.17 frontend lint scaffolding added eslint/prettier devDependencies to `frontend/package.json` without re-syncing `package-lock.json`, so `npm ci` in the release job failed with EUSAGE (missing `@eslint/js`, `@vue/eslint-config-typescript`, `eslint` lock entries). The lockfile is regenerated and `npm ci` now runs clean. (`frontend/package-lock.json`)
+- **Security Audit workflow failed on main push ("Resource not accessible by integration")**: `rustsec/audit-check` needs `issues: write` to open issues for findings; the workflow only granted `contents: read`, so the post step errored even with zero vulnerabilities. `issues: write` added. (`.github/workflows/audit.yml`)
+
 ## [0.9.18] - 2026-08-17
 
 ### Added

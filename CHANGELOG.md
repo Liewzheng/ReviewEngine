@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.21] - 2026-08-18
+
+### Fixed
+- **Catalog fetch is now single-flight (High self-review finding)**: `resolve_catalog` previously let every concurrent request independently fetch models.dev on cache miss/expiry (thundering herd, 15s timeout each). `CatalogStore` gains a fetch mutex with double-check-after-lock: concurrent requests share one upstream fetch. Covered by a wiremock test proving 8 concurrent resolves hit upstream exactly once. (`src/server/api/catalog.rs`, `src/server/state.rs`)
+- **Catalog disk cache bounded**: writes >10MB are skipped (warn, fetch still succeeds); reads >50MB are refused — protects disk and memory against a malicious/corrupt upstream payload. (`src/catalog/mod.rs`)
+- **Init prints a plaintext-key hint**: when the API key comes from an env var, `init` still writes it (runtime does not resolve per-provider env vars) but now prints a post-init hint preferring `LLM_CONFIG` env / `--llm-config` on shared machines. (`src/actions/init.rs`)
+
+### Changed
+- **Adjudicator downgrades documentation-only findings**: findings citing `docs/` paths or markdown files are downgraded to medium/note unless the claimed defect lives in executable code or shipped configuration the document embeds — design opinions about documents are not code defects. (`src/prompt/templates.rs`)
+
+### Docs
+- **REST API design security revision**: credentials moved out of request bodies — GitLab token for `gitlab_mr` now goes via an `X-Gitlab-Token` header (`Authorization: Bearer` is already occupied by API auth), with server-side config fallback and never echoed; new "Webhook 回调 URL 校验（SSRF 防护）" subsection (https-only, link-local/metadata rejection incl. DNS-resolved and redirect targets, optional host allowlist, enqueue-time 400); config masking semantics documented. (`docs/rest-api.md`)
+
 ## [0.9.20] - 2026-08-18
 
 ### Added

@@ -365,6 +365,11 @@ export default {
       saveOnlyBtn: '僅儲存提供者',
       removeTitle: '移除提供者',
       removeConfirm: '移除「{name}」提供者？',
+      customProvider: '自訂',
+      catalogUnavailable: '提供者目錄不可用——已改用內建預設清單。',
+      modelsCount: '{count} 個模型',
+      viewDocs: '文件',
+      modelsFallback: '模型清單不可用——請手動輸入模型 ID。',
     },
     rules: {
       title: '審查規則',

@@ -371,6 +371,13 @@ export default {
       saveOnlyBtn: 'Enregistrer uniquement les fournisseurs',
       removeTitle: 'Supprimer le fournisseur',
       removeConfirm: 'Supprimer le fournisseur « {name} » ?',
+      customProvider: 'Personnalisé',
+      catalogUnavailable:
+        'Catalogue des fournisseurs indisponible — utilisation de la liste prédéfinie intégrée.',
+      modelsCount: '{count} modèles',
+      viewDocs: 'Documentation',
+      modelsFallback:
+        'Liste des modèles indisponible — saisissez manuellement l’identifiant du modèle.',
     },
     rules: {
       title: 'Règles de revue',

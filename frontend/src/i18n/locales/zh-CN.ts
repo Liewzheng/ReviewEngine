@@ -365,6 +365,11 @@ export default {
       saveOnlyBtn: '仅保存提供商',
       removeTitle: '移除提供商',
       removeConfirm: '移除“{name}”提供商？',
+      customProvider: '自定义',
+      catalogUnavailable: '提供商目录不可用——已改用内置预设列表。',
+      modelsCount: '{count} 个模型',
+      viewDocs: '文档',
+      modelsFallback: '模型列表不可用——请手动输入模型 ID。',
     },
     rules: {
       title: '评审规则',

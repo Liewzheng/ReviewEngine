@@ -367,6 +367,11 @@ export default {
       saveOnlyBtn: '제공자만 저장',
       removeTitle: '제공자 제거',
       removeConfirm: '“{name}” 제공자를 제거하시겠습니까?',
+      customProvider: '사용자 지정',
+      catalogUnavailable: '제공자 카탈로그를 사용할 수 없습니다 — 기본 사전 설정 목록을 사용합니다.',
+      modelsCount: '모델 {count}개',
+      viewDocs: '문서',
+      modelsFallback: '모델 목록을 사용할 수 없습니다 — 모델 ID를 직접 입력하세요.',
     },
     rules: {
       title: '리뷰 규칙',

@@ -5,13 +5,38 @@ use crate::team::orchestrator;
 
 pub(crate) const MAX_STATIC_DIFF_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 
+/// Request header carrying the GitLab upstream credential for `gitlab_mr`
+/// reviews (docs/rest-api.md §1 凭证传输). Distinct from the API auth header
+/// (`Authorization: Bearer` / `X-API-Key`) and from the same-named header on
+/// the inbound `/webhook/gitlab` route, where it carries the webhook secret.
+pub(crate) const GITLAB_TOKEN_HEADER: &str = "x-gitlab-token";
+
+/// Resolve the GitLab upstream credential for a review request.
+///
+/// Precedence (docs/rest-api.md §1): the `X-Gitlab-Token` request header
+/// wins; when absent/blank the server-side configured token is used — the
+/// GitLab runtime config seeded at startup from `--gitlab-token` /
+/// `GITLAB_TOKEN` and mutable via `PUT /api/v1/config`. Returns `None` when
+/// neither source yields a token; callers turn that into a `400`.
+pub(crate) fn resolve_gitlab_token(header: Option<&str>) -> Option<String> {
+    if let Some(t) = header.map(str::trim).filter(|t| !t.is_empty()) {
+        return Some(t.to_string());
+    }
+    crate::server::gitlab::gitlab_runtime()
+        .read()
+        .ok()
+        .map(|rt| rt.token.trim().to_string())
+        .filter(|t| !t.is_empty())
+}
+
 pub(crate) async fn run_review(
     source: ReviewSource,
+    gitlab_token: Option<String>,
     cfg: &Option<Arc<crate::models::AppConfig>>,
     config_toml: Option<String>,
     llm_configs: Vec<crate::models::LLMConfig>,
 ) -> anyhow::Result<(serde_json::Value, String)> {
-    let diff_raw = resolve_source(source, cfg).await?;
+    let diff_raw = resolve_source(source, gitlab_token, cfg).await?;
 
     let config_source = config_toml.map(crate::models::ConfigSource::Inline);
     let app_config = crate::config::resolve_config(config_source).await?;
@@ -46,10 +71,21 @@ pub(crate) async fn run_review(
 
 pub(crate) async fn resolve_source(
     source: ReviewSource,
+    gitlab_token: Option<String>,
     _config: &Option<Arc<crate::models::AppConfig>>,
 ) -> anyhow::Result<String> {
     match source {
-        ReviewSource::GitLabMr { url, token } => {
+        ReviewSource::GitLabMr { url } => {
+            // Defense in depth: submit/rerun handlers already enforce the
+            // credential rule with a 400; a missing token here means the
+            // handler contract was bypassed.
+            let token = gitlab_token
+                .filter(|t| !t.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "GitLab token required for gitlab_mr reviews: pass the X-Gitlab-Token header or configure a server-side GitLab token"
+                    )
+                })?;
             let client = crate::git_provider::gitlab::client::Client::new(&token, &url)?;
             let diff = client.fetch_diff().await?;
             Ok(diff)

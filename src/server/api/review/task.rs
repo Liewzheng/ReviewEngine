@@ -169,8 +169,13 @@ pub(crate) async fn enqueue_review(
     store: &TaskStore,
     request: crate::server::api::types::ReviewRequest,
     request_json: serde_json::Value,
+    gitlab_token: Option<String>,
 ) -> uuid::Uuid {
     let source_meta = source_meta_from_request(&request.source);
+    // `request_json` is serialized from the credential-free `ReviewRequest`
+    // struct: the GitLab token travels only in the `gitlab_token` parameter
+    // (resolved from the X-Gitlab-Token header / server config) and is never
+    // persisted into the task store, so rerun re-resolves it at rerun time.
     let task_id = store.create_with_request(Some(source_meta), Some(request_json)).await;
     let store_clone = store.clone();
     let source = request.source;
@@ -200,7 +205,7 @@ pub(crate) async fn enqueue_review(
             }),
         );
 
-        match super::resolve::run_review(source, &cfg, config_toml, llm_configs).await {
+        match super::resolve::run_review(source, gitlab_token, &cfg, config_toml, llm_configs).await {
             Ok((value, summary)) => {
                 crate::server::log_collector::push_global_entry(
                     "INFO",

@@ -261,12 +261,15 @@ impl Drop for GitLabRuntimeGuard {
 /// Every `put_config` call writes the global GitLab runtime (an empty
 /// submitted `apiToken` clears it), so any test that drives `put_config`
 /// races with the others on `gl_rt.token` — including `gitlab_api_token_mask_round_trip`,
-/// whose keep/clear/replace assertions read that same global.
+/// whose keep/clear/replace assertions read that same global, and the
+/// credential-resolution tests in `api::review::tests`.
 ///
-/// Invariant: **every test that calls `put_config` MUST take this lock**
-/// (async-aware, so it can be held across the awaited handlers). The
-/// `get_config`-only tests never write the runtime and do not take it.
-static GITLAB_RUNTIME_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// Invariant: **every test that calls `put_config` or otherwise mutates the
+/// runtime MUST take this lock** (async-aware, so it can be held across the
+/// awaited handlers). The lock is shared crate-wide via
+/// [`crate::server::gitlab::RUNTIME_TEST_LOCK`]. The `get_config`-only tests
+/// never write the runtime and do not take it.
+use crate::server::gitlab::RUNTIME_TEST_LOCK as GITLAB_RUNTIME_LOCK;
 
 fn gitlab_runtime_token() -> String {
     crate::server::gitlab::gitlab_runtime().read().unwrap().token.clone()

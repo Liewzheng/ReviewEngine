@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.22] - 2026-08-18
+
+### Security
+- **BREAKING (API): GitLab token moved out of the review request body**: `POST /api/v1/reviews` no longer accepts `source.token` — a body token is now rejected with `400` (fail-closed, value never echoed). The token travels via the `X-Gitlab-Token` header, falling back to the server-side configured token (`PUT /config` / `--gitlab-token` / `GITLAB_TOKEN`); neither → `400`. The token is never persisted in the TaskStore — rerun re-resolves credentials (rerun header → server config). GitLab runtime init now runs unconditionally at `serve` startup so the env/flag fallback works without webhook setup. Aligns the code with the revised `docs/rest-api.md`. (`src/server/api/types.rs`, `src/server/api/review/`, `src/cli/app.rs`)
+- **Webhook callback URL SSRF validation at enqueue time**: callback URLs are now validated when the review is submitted (invalid → `400`, no longer silently skipped at send time). `https` required for public hosts; `http` only for loopback/private targets (127/8, ::1, 10/8, 172.16/12, 192.168/16, fc00::/7). Link-local/metadata ranges (169.254.0.0/16 incl. 169.254.169.254, 0.0.0.0/8, fe80::/10, multicast/broadcast) are always blocked — checked against the literal host IP, exotic IPv4 spellings (normalized), and all DNS-resolved addresses (fail-closed on DNS failure). At send time redirects are never followed and the URL is re-validated (DNS may have changed since enqueue). (`src/server/api/callback.rs`)
+
 ## [0.9.21] - 2026-08-18
 
 ### Fixed

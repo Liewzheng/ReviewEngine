@@ -9,6 +9,7 @@ mod health;
 mod llm;
 mod llm_configs;
 mod repo_scan;
+mod reviews;
 mod tls;
 mod upgrade;
 mod upgrade_docker;

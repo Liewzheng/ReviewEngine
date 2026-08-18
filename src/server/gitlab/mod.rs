@@ -61,3 +61,11 @@ pub fn init_gitlab_runtime(handler: &GitLabWebhookHandler) {
     let mut rt = gitlab_runtime().write().unwrap();
     *rt = GitLabRuntimeConfig::from_handler(handler);
 }
+
+/// Cross-module test lock serializing mutations of the global GitLab runtime
+/// config. Every `#[cfg(test)]` module that writes `gitlab_runtime()` (e.g.
+/// `api::config::tests`, `api::review::tests`) MUST hold this lock for the
+/// whole mutation window and restore the prior value afterwards, or tests in
+/// different modules of the same test binary race on the shared global.
+#[cfg(test)]
+pub(crate) static RUNTIME_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());

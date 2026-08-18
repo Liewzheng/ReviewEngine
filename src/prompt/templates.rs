@@ -627,11 +627,11 @@ Mandatory rules:
   at all and the claim is otherwise plausible, prefer downgrade over
   false_positive.
 - If the finding's cited file is documentation (a `docs/` path, `*.md`,
-  `*.mdx`, or similar prose), verdict downgrade with new_severity medium or
-  note — design opinions about documents are not code defects. Exception:
-  the claimed defect lives in executable code or shipped configuration the
-  document embeds (e.g. a broken config sample users copy verbatim); judge
-  those on their merits.
+  `*.mdx`, or similar prose), verdict downgrade with
+  new_severity medium or note — design opinions about documents are not
+  code defects. Exception: the claimed defect lives in executable code or
+  shipped configuration the document embeds (e.g. a broken config sample
+  users copy verbatim); judge those on their merits.
 
 Respond with ONLY a YAML code block, one entry per finding index:
 ```yaml

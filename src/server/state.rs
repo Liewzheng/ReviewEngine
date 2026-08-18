@@ -105,14 +105,21 @@ pub struct CatalogCache {
 /// refresh cycles.
 pub struct CatalogStore {
     /// The cached catalog plus its fetch timestamp; the TTL gate lives in
-    /// the catalog handlers.
+    /// the catalog handlers. Never held across an `.await`.
     pub cache: RwLock<Option<CatalogCache>>,
+    /// Single-flight gate for network refreshes: concurrent requests that
+    /// find the cache expired queue here behind one fetch instead of each
+    /// hitting models.dev independently (thundering herd). A Tokio mutex
+    /// because it is held across the async fetch; waiters re-check the cache
+    /// after acquiring it in case a competitor already refreshed.
+    pub fetch_lock: tokio::sync::Mutex<()>,
 }
 
 impl CatalogStore {
     pub fn new() -> Self {
         Self {
             cache: RwLock::new(None),
+            fetch_lock: tokio::sync::Mutex::new(()),
         }
     }
 }

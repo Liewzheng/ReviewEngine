@@ -2,20 +2,21 @@ use crate::server::api::types::ReviewSource;
 use crate::server::task_queue::{SourceMeta, TaskState, TaskStore};
 use crate::server::AppState;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
+use axum::Json;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::handlers::{delete_review, get_review, list_reviews, rerun_review};
-use super::resolve::{resolve_source, MAX_STATIC_DIFF_BYTES};
+use super::handlers::{delete_review, get_review, list_reviews, rerun_review, submit_review};
+use super::resolve::{resolve_gitlab_token, resolve_source, GITLAB_TOKEN_HEADER, MAX_STATIC_DIFF_BYTES};
 use super::task::{task_to_status, ListParams};
 
 #[tokio::test]
 async fn test_resolve_source_static_diff_within_limit() {
     let diff = "diff content".to_string();
     let source = ReviewSource::StaticDiff { diff: diff.clone() };
-    let result = resolve_source(source, &None).await;
+    let result = resolve_source(source, None, &None).await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap(), diff);
 }
@@ -24,7 +25,7 @@ async fn test_resolve_source_static_diff_within_limit() {
 async fn test_resolve_source_static_diff_exceeds_limit() {
     let diff = "x".repeat(MAX_STATIC_DIFF_BYTES + 1);
     let source = ReviewSource::StaticDiff { diff };
-    let result = resolve_source(source, &None).await;
+    let result = resolve_source(source, None, &None).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("exceeds maximum size"));
@@ -37,7 +38,7 @@ async fn test_resolve_source_local_repo_nonexistent_path() {
         base: None,
         head: None,
     };
-    let result = resolve_source(source, &None).await;
+    let result = resolve_source(source, None, &None).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("does not exist"));
@@ -58,7 +59,7 @@ async fn test_resolve_source_local_repo_invalid_base_ref() {
         base: Some("--help".to_string()),
         head: None,
     };
-    let result = resolve_source(source, &None).await;
+    let result = resolve_source(source, None, &None).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("must not start with '-'"));
@@ -68,12 +69,30 @@ async fn test_resolve_source_local_repo_invalid_base_ref() {
 async fn test_resolve_source_gitlab_mr_invalid_url() {
     let source = ReviewSource::GitLabMr {
         url: "not-a-valid-url".to_string(),
-        token: "test-token".to_string(),
     };
-    let result = resolve_source(source, &None).await;
+    let result = resolve_source(source, Some("test-token".to_string()), &None).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("Invalid MR URL format"));
+}
+
+#[tokio::test]
+async fn test_resolve_source_gitlab_mr_requires_token() {
+    // Defense in depth: even if a handler contract is bypassed, the resolver
+    // refuses a gitlab_mr review without any credential.
+    let source = ReviewSource::GitLabMr {
+        url: "https://gitlab.com/owner/repo/-/merge_requests/1".to_string(),
+    };
+    let result = resolve_source(source, None, &None).await;
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("GitLab token required"), "unexpected error: {err}");
+
+    let source = ReviewSource::GitLabMr {
+        url: "https://gitlab.com/owner/repo/-/merge_requests/1".to_string(),
+    };
+    let result = resolve_source(source, Some("   ".to_string()), &None).await;
+    assert!(result.is_err(), "a blank token must be rejected");
 }
 
 #[tokio::test]
@@ -91,7 +110,7 @@ async fn test_resolve_source_local_repo_invalid_head_ref() {
         base: Some("main".to_string()),
         head: Some("; echo evil".to_string()),
     };
-    let result = resolve_source(source, &None).await;
+    let result = resolve_source(source, None, &None).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("forbidden shell metacharacters"));
@@ -255,7 +274,9 @@ async fn test_rerun_returns_new_task_id() {
         )
         .await;
 
-    let resp = rerun_review(State(state), Path(original_id)).await.into_response();
+    let resp = rerun_review(State(state), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
     assert_eq!(resp.status(), StatusCode::ACCEPTED, "rerun must return 202");
     let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -290,7 +311,7 @@ async fn test_rerun_rejects_still_running_task() {
     let queued_id = store
         .create_with_request(Some(SourceMeta::default()), Some(request_json.clone()))
         .await;
-    let resp = rerun_review(State(state.clone()), Path(queued_id))
+    let resp = rerun_review(State(state.clone()), Path(queued_id), HeaderMap::new())
         .await
         .into_response();
     assert_eq!(resp.status(), StatusCode::CONFLICT, "queued task rerun must be 409");
@@ -302,7 +323,9 @@ async fn test_rerun_rejects_still_running_task() {
         .create_with_request(Some(SourceMeta::default()), Some(request_json))
         .await;
     store.update(running_id, TaskState::Running, None, None).await;
-    let resp = rerun_review(State(state), Path(running_id)).await.into_response();
+    let resp = rerun_review(State(state), Path(running_id), HeaderMap::new())
+        .await
+        .into_response();
     assert_eq!(resp.status(), StatusCode::CONFLICT, "running task rerun must be 409");
     let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -443,4 +466,346 @@ async fn test_absent_metadata_is_null_in_both_naming_schemes() {
     assert!(item["mrTitle"].is_null(), "list mrTitle must be null");
     assert!(item["author"]["name"].is_null(), "list author.name must be null");
     assert!(item["durationMs"].is_null(), "list durationMs must be null");
+}
+
+// ─── credential transport (docs/rest-api.md §1) ─────────────────
+
+/// Snapshot/restore guard for the global GitLab runtime token. Combined with
+/// the crate-wide [`crate::server::gitlab::RUNTIME_TEST_LOCK`] this keeps the
+/// shared global from leaking between parallel test modules.
+struct GitLabRuntimeGuard(crate::server::gitlab::GitLabRuntimeConfig);
+
+impl GitLabRuntimeGuard {
+    fn new() -> Self {
+        Self(crate::server::gitlab::gitlab_runtime().read().unwrap().clone())
+    }
+}
+
+impl Drop for GitLabRuntimeGuard {
+    fn drop(&mut self) {
+        let mut rt = crate::server::gitlab::gitlab_runtime().write().unwrap();
+        *rt = self.0.clone();
+    }
+}
+
+fn gitlab_mr_body() -> serde_json::Value {
+    serde_json::json!({
+        // Deliberately invalid: the enqueued task fails fast at client
+        // construction (no network) — the handler contract is what is tested.
+        "source": {"type": "gitlab_mr", "url": "not-a-valid-url"}
+    })
+}
+
+fn headers_with_gitlab_token(token: &str) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(GITLAB_TOKEN_HEADER, HeaderValue::from_str(token).unwrap());
+    headers
+}
+
+async fn response_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
+    let status = resp.status();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    (status, json)
+}
+
+#[tokio::test]
+async fn submit_gitlab_mr_with_header_token_returns_202() {
+    let state = state_with_store();
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(gitlab_mr_body())),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "header token must be accepted, got {json}"
+    );
+    assert!(json["task_id"].is_string());
+}
+
+#[tokio::test]
+async fn submit_gitlab_mr_with_body_token_returns_400() {
+    let state = state_with_store();
+    let mut body = gitlab_mr_body();
+    body["source"]["token"] = serde_json::json!("glpat-body-token");
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(body)))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "body token must be rejected, got {json}"
+    );
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.contains("X-Gitlab-Token"),
+        "error must point at the header transport: {error}"
+    );
+    assert!(
+        !error.contains("glpat-body-token"),
+        "the submitted credential must never be echoed: {error}"
+    );
+    // Fail-closed also applies when a valid header accompanies the body token.
+    let state = state_with_store();
+    let mut body = gitlab_mr_body();
+    body["source"]["token"] = serde_json::json!(serde_json::Value::Null);
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(body)),
+    )
+    .await
+    .into_response();
+    let (status, _) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "a `token` key must be rejected even when null and a header is present"
+    );
+}
+
+#[tokio::test]
+async fn submit_gitlab_mr_without_any_token_returns_400() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = String::new();
+
+    let state = state_with_store();
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(gitlab_mr_body())))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "missing credential must be 400, got {json}"
+    );
+    assert!(
+        json["error"].as_str().unwrap().contains("X-Gitlab-Token"),
+        "error must explain the credential rule: {json}"
+    );
+}
+
+#[tokio::test]
+async fn submit_gitlab_mr_falls_back_to_server_config_token() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-server-config".to_string();
+
+    let state = state_with_store();
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(gitlab_mr_body())))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "server-side configured token must satisfy the credential rule, got {json}"
+    );
+}
+
+#[tokio::test]
+async fn gitlab_token_resolution_precedence() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-config".to_string();
+
+    // Header wins over the server-side configured token.
+    assert_eq!(
+        resolve_gitlab_token(Some("glpat-header")),
+        Some("glpat-header".to_string())
+    );
+    // Missing / blank / whitespace header falls back to the config token.
+    assert_eq!(resolve_gitlab_token(None), Some("glpat-config".to_string()));
+    assert_eq!(resolve_gitlab_token(Some("")), Some("glpat-config".to_string()));
+    assert_eq!(resolve_gitlab_token(Some("   ")), Some("glpat-config".to_string()));
+
+    // Neither present → None (callers return 400).
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = String::new();
+    assert_eq!(resolve_gitlab_token(None), None);
+    assert_eq!(resolve_gitlab_token(Some("")), None);
+}
+
+#[tokio::test]
+async fn gitlab_token_is_never_persisted_in_task_store() {
+    let state = state_with_store();
+    let store = state.task_store.clone().unwrap();
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-persistence-secret"),
+        Ok(Json(gitlab_mr_body())),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    let entry = store.get(task_id).await.expect("task must be stored");
+    let persisted = serde_json::to_string(&entry.request).unwrap();
+    assert!(
+        !persisted.contains("glpat-persistence-secret"),
+        "the credential must not be persisted: {persisted}"
+    );
+    assert!(
+        !persisted.contains("\"token\""),
+        "the stored request must carry no token field: {persisted}"
+    );
+    // The stored request still replays the non-credential parameters.
+    let replayed: crate::server::api::types::ReviewRequest = serde_json::from_value(entry.request.unwrap()).unwrap();
+    assert!(matches!(replayed.source, ReviewSource::GitLabMr { .. }));
+}
+
+// ─── rerun credential re-resolution ─────────────────────────────
+
+/// Store a completed gitlab_mr task whose persisted request carries no
+/// credential (the only possible shape after submit-time stripping).
+async fn completed_gitlab_mr_task(state: &Arc<AppState>) -> Uuid {
+    let store = state.task_store.clone().unwrap();
+    let id = store
+        .create_with_request(Some(SourceMeta::default()), Some(gitlab_mr_body()))
+        .await;
+    store
+        .update(id, TaskState::Failed, None, Some("boom".to_string()))
+        .await;
+    id
+}
+
+#[tokio::test]
+async fn rerun_reresolves_token_from_header() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = String::new();
+
+    let state = state_with_store();
+    let original_id = completed_gitlab_mr_task(&state).await;
+
+    let resp = rerun_review(
+        State(state),
+        Path(original_id),
+        headers_with_gitlab_token("glpat-rerun-token"),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "rerun with header must pass, got {json}");
+}
+
+#[tokio::test]
+async fn rerun_falls_back_to_server_config_token() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-config".to_string();
+
+    let state = state_with_store();
+    let original_id = completed_gitlab_mr_task(&state).await;
+
+    let resp = rerun_review(State(state), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "rerun must fall back to the server-side configured token, got {json}"
+    );
+}
+
+#[tokio::test]
+async fn rerun_without_any_token_returns_400() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = String::new();
+
+    let state = state_with_store();
+    let store = state.task_store.clone().unwrap();
+    let original_id = completed_gitlab_mr_task(&state).await;
+
+    let resp = rerun_review(State(state), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "rerun without credential must be 400, got {json}"
+    );
+    assert!(
+        json["error"].as_str().unwrap().contains("X-Gitlab-Token"),
+        "error must explain the credential rule: {json}"
+    );
+
+    let entry = store.get(original_id).await.unwrap();
+    assert_eq!(entry.state, TaskState::Failed, "the original task must be untouched");
+}
+
+// ─── webhook SSRF validation at enqueue time ────────────────────
+
+#[tokio::test]
+async fn submit_rejects_invalid_webhook_urls_with_400() {
+    let cases = [
+        // Cloud metadata / link-local — blocked under both schemes.
+        "https://169.254.169.254/latest/meta-data",
+        "http://169.254.169.254/hook",
+        // Unspecified address.
+        "http://0.0.0.0:9000/hook",
+        // IPv6 link-local.
+        "http://[fe80::1]/hook",
+        // http to a public host requires the loopback/private exemption.
+        "http://93.184.216.34/hook",
+        // Non-http(s) schemes.
+        "ftp://example.com/hook",
+        "file:///etc/passwd",
+        "gopher://127.0.0.1/",
+        // Unparseable.
+        "not-a-url",
+    ];
+    for webhook in cases {
+        let state = state_with_store();
+        let mut body = serde_json::json!({"source": {"type": "static_diff", "diff": "d"}});
+        body["webhook"] = serde_json::json!(webhook);
+        let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(body)))
+            .await
+            .into_response();
+        let (status, json) = response_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "webhook {webhook} must be rejected with 400, got {json}"
+        );
+        let error = json["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("invalid webhook url:"),
+            "error must carry the documented prefix: {error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn submit_accepts_loopback_webhook() {
+    let state = state_with_store();
+    // gitlab_mr + header: the enqueued task fails fast at client
+    // construction, then the callback POST to an unused loopback port fails
+    // closed (connection refused) — no external network in this test.
+    let mut body = gitlab_mr_body();
+    body["webhook"] = serde_json::json!("http://127.0.0.1:9/hook");
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(body)),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "loopback http webhook must pass enqueue validation, got {json}"
+    );
 }

@@ -270,23 +270,28 @@ pub async fn run() -> Result<()> {
             let webhook_secret = gitlab_webhook_secret
                 .or_else(|| std::env::var("GITLAB_WEBHOOK_SECRET").ok())
                 .unwrap_or_default();
-            if !webhook_secret.is_empty() || signing_secret.is_some() {
-                handlers.push(Arc::new(review_engine::server::gitlab::GitLabWebhookHandler::new(
+            // Always initialise the global GitLab runtime config from the
+            // startup CLI/env values — even when no webhook secret is
+            // configured: the REST API's `gitlab_mr` credential fallback
+            // (docs/rest-api.md §1, used when the request carries no
+            // `X-Gitlab-Token` header) reads the token from the runtime, so
+            // `--gitlab-token` / `GITLAB_TOKEN` must land there regardless
+            // of webhook setup.
+            review_engine::server::gitlab::init_gitlab_runtime(
+                &review_engine::server::gitlab::GitLabWebhookHandler::new(
                     webhook_secret.clone(),
                     signing_secret.clone(),
                     dispatcher.clone(),
                     gitlab_token.clone(),
+                ),
+            );
+            if !webhook_secret.is_empty() || signing_secret.is_some() {
+                handlers.push(Arc::new(review_engine::server::gitlab::GitLabWebhookHandler::new(
+                    webhook_secret,
+                    signing_secret,
+                    dispatcher.clone(),
+                    gitlab_token,
                 )));
-                // Initialise the global GitLab runtime config so UI changes
-                // propagate to the running handler without restart.
-                review_engine::server::gitlab::init_gitlab_runtime(
-                    &review_engine::server::gitlab::GitLabWebhookHandler::new(
-                        webhook_secret,
-                        signing_secret,
-                        dispatcher.clone(),
-                        gitlab_token,
-                    ),
-                );
             }
             if let Some((tok, secret)) = github_token
                 .or_else(|| std::env::var("GITHUB_TOKEN").ok())

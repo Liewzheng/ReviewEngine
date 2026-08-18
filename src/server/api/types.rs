@@ -56,6 +56,12 @@ pub struct TaskStatus {
 /// Specifies the review source (GitLab MR URL, local repo path, or
 /// static diff text), optional TOML config override, optional LLM
 /// config overrides, and an optional webhook URL for completion notification.
+///
+/// Security contract (docs/rest-api.md §1 凭证传输): the request body must
+/// never carry credentials. The GitLab upstream token for `gitlab_mr`
+/// travels in the `X-Gitlab-Token` request header and is resolved by the
+/// submit/rerun handlers; it is never part of this struct, so it can never
+/// be persisted into the `TaskStore` or echoed in a response.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReviewRequest {
     /// What to review (MR URL, local path, or raw diff).
@@ -65,6 +71,7 @@ pub struct ReviewRequest {
     /// Optional LLM provider config overrides.
     pub llm_configs: Option<Vec<LLMConfig>>,
     /// Optional webhook URL POSTed once the task completes or fails.
+    /// Must pass the SSRF validation in `crate::server::api::callback`.
     pub webhook: Option<String>,
 }
 
@@ -72,9 +79,10 @@ pub struct ReviewRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ReviewSource {
-    /// Review a GitLab merge request by URL + token.
+    /// Review a GitLab merge request by URL. The GitLab API token is NOT
+    /// part of the body — it is carried by the `X-Gitlab-Token` header.
     #[serde(rename = "gitlab_mr")]
-    GitLabMr { url: String, token: String },
+    GitLabMr { url: String },
     /// Review a local Git repository directory.
     #[serde(rename = "local_repo")]
     LocalRepo {

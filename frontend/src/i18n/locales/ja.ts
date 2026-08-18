@@ -368,6 +368,11 @@ export default {
       saveOnlyBtn: 'プロバイダーのみ保存',
       removeTitle: 'プロバイダーを削除',
       removeConfirm: 'プロバイダー「{name}」を削除しますか？',
+      customProvider: 'カスタム',
+      catalogUnavailable: 'プロバイダーカタログを利用できません — 組み込みのプリセットリストを使用します。',
+      modelsCount: '{count} モデル',
+      viewDocs: 'ドキュメント',
+      modelsFallback: 'モデル一覧を取得できません — モデル ID を手動で入力してください。',
     },
     rules: {
       title: 'レビュールール',

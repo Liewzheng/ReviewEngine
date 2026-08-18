@@ -9,12 +9,16 @@ import {
 } from '../services/llm';
 import type { ProviderEntry, ProviderConfig } from '../types/llm';
 
-/** Create a blank provider form model pre-filled with the OpenAI defaults. */
+/**
+ * Create a blank provider form model: `custom` type with empty fields, so the
+ * Add Provider dialog starts neutral and lets the catalog picker drive any
+ * auto-fill once a catalog provider is selected.
+ */
 export function createNewProvider(): ProviderConfig {
   return {
-    provider: 'openai',
+    provider: 'custom',
     apiKey: '',
-    apiBaseUrl: 'https://api.openai.com/v1',
+    apiBaseUrl: '',
     defaultModel: '',
     maxTokens: 4096,
     temperature: 0.7,

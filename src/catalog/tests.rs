@@ -241,6 +241,68 @@ fn disk_cache_missing_or_corrupt_yields_none() {
 }
 
 #[test]
+fn write_disk_cache_refuses_oversized_payload() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("cache.json");
+
+    // A catalog whose serialized form exceeds the 10MB write cap.
+    let mut catalog = Catalog::new();
+    let mut provider = CatalogProvider {
+        id: "p".to_string(),
+        name: "P".to_string(),
+        api: Some("https://p.example".to_string()),
+        ..Default::default()
+    };
+    provider.models.insert(
+        "m".to_string(),
+        CatalogModel {
+            id: "m".to_string(),
+            name: "x".repeat(11 * 1024 * 1024),
+            ..Default::default()
+        },
+    );
+    catalog.insert("p".to_string(), provider);
+
+    // Refusal is graceful: Ok(()) so the producing fetch still succeeds…
+    write_disk_cache(&path, &catalog).expect("oversized write must be skipped, not an error");
+    // …but nothing lands on disk, and no temp file is left behind.
+    assert!(!path.exists(), "oversized payload must not be written");
+    assert!(!path.with_extension("tmp").exists(), "no temp file may be left behind");
+}
+
+#[test]
+fn load_disk_cache_refuses_oversized_file() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("cache.json");
+
+    // A sparse file just over the 50MB read cap (set_len avoids real I/O).
+    let file = std::fs::File::create(&path).expect("create cache file");
+    file.set_len(50 * 1024 * 1024 + 1).expect("set file length");
+    drop(file);
+
+    assert!(load_disk_cache(&path).is_none(), "oversized cache file must be refused");
+}
+
+#[test]
+fn disk_cache_at_the_caps_still_behaves() {
+    let dir = tempfile::tempdir().expect("temp dir");
+
+    // A payload comfortably under the write cap still round-trips.
+    let path = dir.path().join("ok.json");
+    let catalog: Catalog = serde_json::from_value(catalog_json()).expect("catalog parses");
+    write_disk_cache(&path, &catalog).expect("write cache");
+    assert!(load_disk_cache(&path).is_some(), "under-cap cache must load");
+
+    // A file exactly at the read cap is not refused by the size gate (it
+    // then fails JSON parsing — the size check is `>`, not `>=`).
+    let at_cap = dir.path().join("at-cap.json");
+    let file = std::fs::File::create(&at_cap).expect("create cache file");
+    file.set_len(50 * 1024 * 1024).expect("set file length");
+    drop(file);
+    assert!(load_disk_cache(&at_cap).is_none(), "zero-filled file is unparseable");
+}
+
+#[test]
 fn cache_path_honors_env_override() {
     let _env_lock = ENV_LOCK.blocking_lock();
     let saved = std::env::var(CACHE_PATH_ENV).ok();

@@ -66,24 +66,37 @@ related:
 |------|------|------|
 | `source.type` | `"gitlab_mr"` \| `"local_repo"` \| `"static_diff"` | 输入源类型 |
 | `source.url` | `string` | GitLab MR URL（仅 `gitlab_mr`） |
-| `source.token` | `string` | GitLab token（仅 `gitlab_mr`） |
 | `source.path` | `string` | 本地仓库路径（仅 `local_repo`） |
 | `source.base` | `string` | base ref（仅 `local_repo`，默认 `main`） |
 | `source.head` | `string` | head ref（仅 `local_repo`） |
 | `source.diff` | `string` | 原始 diff 文本（仅 `static_diff`） |
 | `config` | `string` | 可选 TOML 配置，覆盖默认 |
 | `llm_configs` | `LLMConfig[]` | 可选 LLM 配置覆盖 |
-| `webhook` | `string` | 可选回调 URL，完成后 POST 结果 |
+| `webhook` | `string` | 可选回调 URL，完成后 POST 结果；必须通过下方「Webhook 回调 URL 校验」 |
+
+> **凭证传输（安全要求）**：请求体**不得**携带任何敏感 token。`gitlab_mr` 所需的 GitLab
+> token 必须通过请求头 `X-Gitlab-Token` 传输（原 `source.token` 字段已移除）；该头承载
+> GitLab 上游凭证，与 §7 的 API 鉴权头 `Authorization: Bearer` / `X-API-Key` 相互独立，
+> 同一请求可同时携带两者（注意区分：`/webhook/gitlab` 入站回调上的同名头承载的是 webhook
+> secret，与此处含义不同，两者互不影响）。请求头缺失时，服务端回退使用服务器侧已配置的
+> GitLab token（§3 配置 / CLI `--gitlab-token` / 环境变量 `GITLAB_TOKEN`）；两者都缺失时
+> 返回 `400`。token 永远不会在响应或日志中返回（遵循 `***` 掩码约定，见 §3）。
+> `llm_configs` 中的 `api_key` 同属敏感字段：只允许经 §7 已认证的 `/api/v1` 通道提交，
+> 同样不得回显。
 
 #### `POST /api/v1/reviews`
 
 ```
 Request:
+  POST /api/v1/reviews
+  Authorization: Bearer review_a1b2...    # §7 API token（非 loopback 绑定时必需）
+  X-Gitlab-Token: glpat-xxx               # GitLab 上游凭证（仅 gitlab_mr；不得写入请求体）
+  Content-Type: application/json
+
 {
   "source": {
     "type": "gitlab_mr",
-    "url": "https://gitlab.com/owner/repo/-/merge_requests/23",
-    "token": "glpat-xxx"
+    "url": "https://gitlab.com/owner/repo/-/merge_requests/23"
   },
   "config": null,
   "llm_configs": [],
@@ -205,6 +218,8 @@ Response 400: { "error": "task not found or cannot be cancelled" }
 
 用原任务的请求参数（source / config / llm_configs / webhook）重新创建任务并排入队列，返回新任务 id；原任务记录不变。
 
+存储的请求参数不含 GitLab token（凭证走 `X-Gitlab-Token` 请求头，不随请求参数落存储）；rerun 时按同一凭证传输规则重新解析——调用方可重新携带该头，否则回退服务器侧已配置的 GitLab token。
+
 ```
 Response 202:
 {
@@ -221,6 +236,14 @@ Response 422: { "error": "stored request parameters are not replayable" }
 - `409`：任务仍处于 `pending` / `running`
 - `409`：原任务未保存请求参数（不可回放）
 - `422`：保存的请求参数无法反序列化为 `ReviewRequest`（参数不可回放）
+
+#### Webhook 回调 URL 校验（SSRF 防护）
+
+`webhook` 字段让服务端在任务完成后向调用方指定的任意 URL 主动发起 POST，相当于一个由 API 调用方控制的服务端出站请求，是典型的 SSRF 攻击面：不加限制时，攻击者既可把任务结果（含 findings 摘要）外发到恶意端点，也可借服务端身份探测内网拓扑、访问云厂商元数据接口（如 `169.254.169.254`）。因此服务端**必须**在入队前校验回调 URL，校验失败即拒绝整个请求（`400` + `{"error": "invalid webhook url: ..."}`），不得静默忽略：
+
+1. **Scheme 白名单**：仅允许 `https`。`http` 仅当部署方显式声明为 loopback / 内网部署时放行（目标须为 `127.0.0.0/8`、`::1`、`10.0.0.0/8`、`172.16.0.0/12`、`192.168.0.0/16` 等 loopback / 私有地址）；`file:`、`ftp:`、`gopher:` 等其余 scheme 一律拒绝。
+2. **链路本地 / 元数据地址拒绝**：目标 IP（含域名解析结果，防 DNS rebinding 指向内网）不得落在 link-local 段 `169.254.0.0/16`（含云元数据地址 `169.254.169.254`）、`0.0.0.0/8`、IPv6 `fe80::/10` 等保留段；跟随重定向时对重定向后的地址须重新校验。
+3. **可选 host 白名单**：部署方可配置回调 host 白名单（例如仅允许企业内部网关域名）；配置后白名单外的 host 一律拒绝。
 
 ---
 
@@ -285,6 +308,8 @@ Response 404:   // task_id 不存在
 #### `GET /api/v1/config`
 
 返回当前生效的配置（UI 兼容的 `UiConfig` 结构，camelCase 字段）。
+
+敏感字段永不回显真实值：已配置的 GitLab `apiToken` 与 LLM `apiKey` 一律以 `***` 掩码返回。`PUT /api/v1/config` 时：LLM key 传空串或 `***` 均表示「保持现有值」；GitLab token 传 `***` 表示保持，传空串表示显式清除。
 
 #### `PUT /api/v1/config`
 
@@ -1020,9 +1045,10 @@ X-API-Key: review_a1b2c3d4e5f6g7h8i9j0k1l2m3n4o5p
 
 ### 与 GitLab webhook 的关系
 
-已有独立的 `X-Gitlab-Token` 校验（`src/server/gitlab.rs`），两者不冲突：
-- GitLab webhook → `X-Gitlab-Token` header（硬编码）
-- API 请求 → `Authorization: Bearer` / `X-API-Key`（用户配置的 token）
+已有独立的 `X-Gitlab-Token` 校验（`src/server/gitlab.rs`），三者不冲突：
+- GitLab webhook → `X-Gitlab-Token` header（硬编码 webhook secret）
+- API 请求 → `Authorization: Bearer` / `X-API-Key`（用户配置的 API token）
+- `POST /api/v1/reviews`（`gitlab_mr`）→ `X-Gitlab-Token` header（GitLab 上游 API 凭证，见 §1 凭证传输要求；与 webhook secret 同名不同义，按路由区分）
 
 ```toml
 [dependencies]

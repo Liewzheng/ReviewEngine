@@ -626,6 +626,12 @@ Mandatory rules:
 - If the file content is unavailable or the finding cannot be located in it
   at all and the claim is otherwise plausible, prefer downgrade over
   false_positive.
+- If the finding's cited file is documentation (a `docs/` path, `*.md`,
+  `*.mdx`, or similar prose), verdict downgrade with
+  new_severity medium or note — design opinions about documents
+  are not code defects. Exception: the claimed defect lives in
+  executable code or shipped configuration the document embeds (e.g. a
+  broken config sample users copy verbatim); judge those on their merits.
 
 Respond with ONLY a YAML code block, one entry per finding index:
 ```yaml
@@ -762,6 +768,28 @@ mod tests {
             tpl.contains("pre-existing code the diff did not touch"),
             "the diff-external suppression must be preserved"
         );
+    }
+
+    // ─── Adjudicator: docs-type findings ─────
+
+    #[test]
+    fn test_adjudicator_template_downgrades_docs_findings() {
+        let tpl = ADJUDICATOR_SYSTEM_TEMPLATE;
+        assert!(tpl.contains("documentation"), "adjudicator must name the docs rule");
+        assert!(
+            tpl.contains("docs/") && tpl.contains("*.md"),
+            "the rule must scope itself to docs paths and markdown files"
+        );
+        assert!(
+            tpl.contains("not code defects"),
+            "the rule must state that design opinions about documents are not code defects"
+        );
+        assert!(
+            tpl.contains("new_severity medium or note"),
+            "the downgrade target must be medium or note"
+        );
+        // Executable code / shipped config embedded in docs stays judgeable.
+        assert!(tpl.contains("executable code or shipped configuration"));
     }
 
     #[test]

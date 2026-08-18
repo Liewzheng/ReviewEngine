@@ -76,6 +76,17 @@ pub const CACHE_PATH_ENV: &str = "REVIEW_MODELS_DEV_CACHE";
 /// Disk cache filename under `~/.config/review-engine/`.
 const CACHE_FILE_NAME: &str = "models-dev-cache.json";
 
+/// Serialized-size cap for disk-cache writes: a pathological or hostile
+/// upstream document must not fill the user's disk. Writes over the cap are
+/// skipped with a warning — caching is best-effort, so the fetch that
+/// produced the data still succeeds.
+const MAX_CACHE_WRITE_BYTES: usize = 10 * 1024 * 1024;
+
+/// File-size cap for disk-cache reads: the whole file is read into memory
+/// before parsing, so an implausibly large cache file is refused up front
+/// instead of being slurped.
+const MAX_CACHE_READ_BYTES: u64 = 50 * 1024 * 1024;
+
 /// The parsed catalog: provider id → provider entry.
 pub type Catalog = BTreeMap<String, CatalogProvider>;
 
@@ -198,8 +209,18 @@ pub fn default_cache_path() -> Option<PathBuf> {
 }
 
 /// Load the disk cache. Missing files yield `None`; corrupt files are
-/// ignored with a warn log (mirrors `feedback::load_entries`).
+/// ignored with a warn log (mirrors `feedback::load_entries`). Files larger
+/// than [`MAX_CACHE_READ_BYTES`] are refused before reading to protect
+/// memory, and ignored with a warn log like any other unusable cache.
 pub fn load_disk_cache(path: &Path) -> Option<DiskCache> {
+    let size = std::fs::metadata(path).ok()?.len();
+    if size > MAX_CACHE_READ_BYTES {
+        tracing::warn!(
+            "Catalog: ignoring oversized cache file {} ({size} bytes exceeds the {MAX_CACHE_READ_BYTES}-byte cap)",
+            path.display()
+        );
+        return None;
+    }
     let content = std::fs::read_to_string(path).ok()?;
     match serde_json::from_str(&content) {
         Ok(cache) => Some(cache),
@@ -212,13 +233,23 @@ pub fn load_disk_cache(path: &Path) -> Option<DiskCache> {
 
 /// Persist the catalog to `path` atomically via a temp file + rename, so a
 /// crash mid-write never leaves a truncated cache behind (mirrors
-/// `feedback::write_entries_atomic`).
+/// `feedback::write_entries_atomic`). Payloads larger than
+/// [`MAX_CACHE_WRITE_BYTES`] are refused: the write is skipped with a warn
+/// log and `Ok(())` is returned, so a refused cache never fails the fetch.
 pub fn write_disk_cache(path: &Path, catalog: &Catalog) -> std::io::Result<()> {
     let cache = DiskCache {
         fetched_at: Utc::now(),
         providers: catalog.clone(),
     };
     let json = serde_json::to_string(&cache).map_err(std::io::Error::other)?;
+    if json.len() > MAX_CACHE_WRITE_BYTES {
+        tracing::warn!(
+            "Catalog: skipping disk cache write to {} ({} bytes exceeds the {MAX_CACHE_WRITE_BYTES}-byte cap)",
+            path.display(),
+            json.len()
+        );
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }

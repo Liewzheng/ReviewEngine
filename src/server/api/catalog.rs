@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::catalog::{self, Catalog, CatalogClient, CatalogModel, CatalogProvider, CatalogSource};
-use crate::server::state::CatalogCache;
+use crate::server::state::{CatalogCache, CatalogStore};
 use crate::server::AppState;
 
 /// In-memory TTL for the catalog — models.dev updates are not urgent, and
@@ -44,19 +44,38 @@ fn bad_gateway(e: &crate::catalog::CatalogError) -> (StatusCode, Json<serde_json
     )
 }
 
+/// Return the in-memory catalog while it is still within the TTL. The read
+/// guard is dropped before this function returns — it is never held across
+/// an `.await`.
+fn fresh_cached(store: &CatalogStore) -> Option<Arc<Catalog>> {
+    let cache = store.cache.read().unwrap();
+    cache.as_ref().and_then(|c| {
+        if c.cached_at + CATALOG_CACHE_TTL > Utc::now() {
+            Some(c.catalog.clone())
+        } else {
+            None
+        }
+    })
+}
+
 /// Resolve the catalog through the cache layers described in the module docs.
 async fn resolve_catalog(state: &AppState) -> Result<Arc<Catalog>, (StatusCode, Json<serde_json::Value>)> {
     // 1. Fresh in-memory cache.
-    {
-        let cache = state.catalog.cache.read().unwrap();
-        if let Some(c) = cache.as_ref() {
-            if c.cached_at + CATALOG_CACHE_TTL > Utc::now() {
-                return Ok(c.catalog.clone());
-            }
-        }
+    if let Some(catalog) = fresh_cached(&state.catalog) {
+        return Ok(catalog);
     }
 
-    // 2. Network fetch, with disk-cache fallback handled inside.
+    // 2. Single-flight: exactly one request fetches from the network;
+    //    concurrent requests on an expired cache queue on the fetch lock.
+    let _fetch_guard = state.catalog.fetch_lock.lock().await;
+
+    // 3. Double-check: a competitor may have refreshed while we queued.
+    if let Some(catalog) = fresh_cached(&state.catalog) {
+        return Ok(catalog);
+    }
+
+    // 4. Network fetch, with disk-cache fallback handled inside. The cache
+    //    RwLock is not held across the network call — only the fetch lock.
     let client = CatalogClient::from_env().map_err(|e| bad_gateway(&e))?;
     let cache_path = catalog::default_cache_path();
     match catalog::fetch_or_disk_fallback(&client, cache_path.as_deref()).await {
@@ -75,7 +94,7 @@ async fn resolve_catalog(state: &AppState) -> Result<Arc<Catalog>, (StatusCode, 
             Ok(catalog)
         }
         Err(e) => {
-            // 3. Last resort: an expired in-memory entry beats an error.
+            // 5. Last resort: an expired in-memory entry beats an error.
             let stale = state.catalog.cache.read().unwrap().as_ref().map(|c| c.catalog.clone());
             match stale {
                 Some(catalog) => {
@@ -420,5 +439,87 @@ mod tests {
         let cache = state.catalog.cache.read().unwrap();
         let age = Utc::now() - cache.as_ref().unwrap().cached_at;
         assert!(age < ChronoDuration::minutes(1));
+    }
+
+    // ─── single-flight ──────────────────────────────────────────
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_expired_cache_fetches_upstream_exactly_once() {
+        // Mutates process env — must not interleave with other catalog tests.
+        let _env_lock = crate::catalog::ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        // A slow upstream widens the race window: without the fetch lock all
+        // N requests would pile onto the mock instead of queueing behind one.
+        Mock::given(method("GET"))
+            .and(path("/api.json"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(test_catalog_json())
+                    .set_delay(Duration::from_millis(250)),
+            )
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("cache.json");
+        let _env = EnvGuard::set(&server.uri(), &cache_path);
+
+        // Empty in-memory cache: every request would independently fetch
+        // without the single-flight gate.
+        let state = Arc::new(AppState::new(vec![]));
+        const N: usize = 8;
+        let mut handles = Vec::with_capacity(N);
+        for _ in 0..N {
+            let state = state.clone();
+            handles.push(tokio::spawn(async move { resolve_catalog(&state).await }));
+        }
+        for handle in handles {
+            let catalog = handle.await.expect("task panicked").expect("resolve must succeed");
+            assert!(catalog.contains_key("deepseek"));
+        }
+
+        let received = server.received_requests().await.expect("request recording enabled");
+        assert_eq!(
+            received.len(),
+            1,
+            "single-flight must collapse {N} concurrent refreshes into one upstream request"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_request_serves_competitor_refresh_without_network() {
+        // Mutates process env — must not interleave with other catalog tests.
+        let _env_lock = crate::catalog::ENV_LOCK.lock().await;
+        let server = MockServer::start().await;
+        let dir = tempfile::tempdir().expect("temp dir");
+        let cache_path = dir.path().join("cache.json");
+        let _env = EnvGuard::set(&server.uri(), &cache_path);
+
+        let state = Arc::new(AppState::new(vec![]));
+
+        // Hold the fetch lock so the resolve below queues behind it, then
+        // simulate the competitor's refresh landing before the guard drops.
+        let guard = state.catalog.fetch_lock.lock().await;
+        let queued_state = state.clone();
+        let queued = tokio::spawn(async move { resolve_catalog(&queued_state).await });
+
+        tokio::task::yield_now().await;
+        *state.catalog.cache.write().unwrap() = Some(CatalogCache {
+            catalog: Arc::new(test_catalog()),
+            cached_at: Utc::now(),
+        });
+        drop(guard);
+
+        let catalog = queued
+            .await
+            .expect("task panicked")
+            .expect("double-check must serve the fresh cache");
+        assert!(catalog.contains_key("deepseek"));
+
+        let received = server.received_requests().await.expect("request recording enabled");
+        assert!(
+            received.is_empty(),
+            "a request that finds a fresh cache after the fetch lock must not hit the network"
+        );
     }
 }

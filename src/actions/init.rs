@@ -155,14 +155,14 @@ const CURATED_PROVIDER_IDS: &[&str] = &[
 ];
 
 /// Prompt the user for LLM configuration.
-async fn prompt_llm() -> Result<(String, String)> {
+async fn prompt_llm() -> Result<LlmPromptOutcome> {
     section("LLM (AI Review)");
     let enable_llm = Confirm::new("Enable LLM-based AI review? (skip for local-only static analysis)")
         .with_default(true)
         .prompt()?;
 
     if !enable_llm {
-        return Ok((String::new(), "disabled".to_string()));
+        return Ok(LlmPromptOutcome::new(String::new(), "disabled".to_string()));
     }
 
     println!("  Fetching provider catalog from models.dev…");
@@ -245,9 +245,64 @@ fn render_llm_block(provider: &str, model: &str, api_base: &str, api_key: Option
     )
 }
 
+/// Outcome of the LLM prompt section: the rendered TOML block, the summary
+/// note, and hints printed after the config file is written.
+struct LlmPromptOutcome {
+    /// The `[[llm]]` TOML block (empty when LLM is disabled or deferred).
+    block: String,
+    /// One-line summary shown in the configuration summary.
+    note: String,
+    /// Hints printed after the config file is written (e.g. plaintext-key
+    /// warning).
+    post_init_hints: Vec<String>,
+}
+
+impl LlmPromptOutcome {
+    fn new(block: String, note: String) -> Self {
+        Self {
+            block,
+            note,
+            post_init_hints: Vec::new(),
+        }
+    }
+}
+
+/// Where an API key entered the init flow from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ApiKeySource {
+    /// Read from a provider environment variable (e.g. `DEEPSEEK_API_KEY`)
+    /// after the user confirmed. Carries the variable's name.
+    Env(String),
+    /// Typed in at the prompt.
+    Manual,
+}
+
+/// Post-init hint shown when an env-var key was written to the config file
+/// in plaintext. review-engine does not resolve per-provider env vars (e.g.
+/// `DEEPSEEK_API_KEY`) into `[[llm]]` entries at runtime — only the
+/// `LLM_CONFIG` JSON env var and `--llm-config` supply credentials outside
+/// the config file — so the key must be written for the config to work, but
+/// shared machines should prefer the runtime channels.
+fn plaintext_key_hint(env_var: &str) -> String {
+    format!(
+        "The API key from {env_var} was written to the config file in plaintext. \
+         On shared machines, prefer removing the api_key line and passing credentials \
+         via the LLM_CONFIG env var or --llm-config at runtime."
+    )
+}
+
+/// One-line configuration-summary note for the chosen provider/model.
+fn llm_note(provider_name: &str, model: &str, api_key: &Option<(String, ApiKeySource)>) -> String {
+    match api_key {
+        Some((_, ApiKeySource::Env(var))) => format!("{provider_name} / {model} (key from {var})"),
+        Some(_) => format!("{provider_name} / {model}"),
+        None => format!("{provider_name} / {model} (API key pending)"),
+    }
+}
+
 /// Catalog-backed interactive flow: pick provider → model → API key, then
 /// render the `[[llm]]` block.
-fn prompt_llm_from_catalog(providers: &[&CatalogProvider]) -> Result<(String, String)> {
+fn prompt_llm_from_catalog(providers: &[&CatalogProvider]) -> Result<LlmPromptOutcome> {
     let provider = select_catalog_provider(providers)?;
 
     let models = catalog::sorted_models(provider);
@@ -263,12 +318,17 @@ fn prompt_llm_from_catalog(providers: &[&CatalogProvider]) -> Result<(String, St
     let api_base = catalog::normalize_api_base(provider.npm.as_deref(), provider.api.as_deref().unwrap_or_default());
     let api_key = prompt_api_key(provider.env.first().map(String::as_str))?;
 
-    let block = render_llm_block(&provider.id, &model, &api_base, api_key.as_deref());
-    let note = match &api_key {
-        Some(_) => format!("{} / {}", provider.name, model),
-        None => format!("{} / {} (API key pending)", provider.name, model),
-    };
-    Ok((block, note))
+    let block = render_llm_block(
+        &provider.id,
+        &model,
+        &api_base,
+        api_key.as_ref().map(|(key, _)| key.as_str()),
+    );
+    let mut outcome = LlmPromptOutcome::new(block, llm_note(&provider.name, &model, &api_key));
+    if let Some((_, ApiKeySource::Env(var))) = &api_key {
+        outcome.post_init_hints.push(plaintext_key_hint(var));
+    }
+    Ok(outcome)
 }
 
 /// Pick a provider: curated shortlist first, "Browse all…" escapes to the
@@ -322,8 +382,10 @@ fn select_catalog_model(models: &[&CatalogModel]) -> Result<String> {
 
 /// Resolve the API key: offer the provider's canonical env var when set
 /// (never printing the value), otherwise free-text entry. `None` means the
-/// user deferred credentials to runtime.
-fn prompt_api_key(env_var: Option<&str>) -> Result<Option<String>> {
+/// user deferred credentials to runtime. The returned [`ApiKeySource`]
+/// records whether the value came from the environment, so the caller can
+/// warn when a plaintext env key lands in the config file.
+fn prompt_api_key(env_var: Option<&str>) -> Result<Option<(String, ApiKeySource)>> {
     if let Some(var) = env_var {
         if let Ok(value) = std::env::var(var) {
             if !value.is_empty() {
@@ -333,7 +395,7 @@ fn prompt_api_key(env_var: Option<&str>) -> Result<Option<String>> {
                 .with_default(true)
                 .prompt()?;
                 if use_env {
-                    return Ok(Some(value));
+                    return Ok(Some((value, ApiKeySource::Env(var.to_string()))));
                 }
             }
         }
@@ -343,11 +405,15 @@ fn prompt_api_key(env_var: Option<&str>) -> Result<Option<String>> {
         prompt = prompt.with_placeholder(var);
     }
     let key = prompt.prompt()?.trim().to_string();
-    Ok(if key.is_empty() { None } else { Some(key) })
+    Ok(if key.is_empty() {
+        None
+    } else {
+        Some((key, ApiKeySource::Manual))
+    })
 }
 
 /// Offline fallback: the pre-catalog DeepSeek flow, unchanged.
-fn prompt_llm_fallback() -> Result<(String, String)> {
+fn prompt_llm_fallback() -> Result<LlmPromptOutcome> {
     let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
     let api_base = std::env::var("DEEPSEEK_BASE_URL").unwrap_or_default();
     let has_key = !api_key.is_empty();
@@ -365,9 +431,12 @@ fn prompt_llm_fallback() -> Result<(String, String)> {
                  \napi_key = \"{api_key}\"\napi_base = \"{api_base}/v1\"\
                  \nmax_tokens = 4096\ntemperature = 0.3\n\n"
             );
-            Ok((llm_config, "DEEPSEEK_API_KEY configured".to_string()))
+            Ok(LlmPromptOutcome::new(
+                llm_config,
+                "DEEPSEEK_API_KEY configured".to_string(),
+            ))
         } else {
-            Ok((String::new(), "via LLM_CONFIG env".to_string()))
+            Ok(LlmPromptOutcome::new(String::new(), "via LLM_CONFIG env".to_string()))
         }
     } else {
         let llm_config = "\
@@ -380,7 +449,10 @@ fn prompt_llm_fallback() -> Result<(String, String)> {
 max_tokens = 4096\n\
 temperature = 0.3\n\n"
             .to_string();
-        Ok((llm_config, "no API key found, configure manually".to_string()))
+        Ok(LlmPromptOutcome::new(
+            llm_config,
+            "no API key found, configure manually".to_string(),
+        ))
     }
 }
 
@@ -585,7 +657,7 @@ pub async fn run_interactive(local_path: &str) -> Result<()> {
 
     // Prompt for configuration
     let cmd_indices = prompt_commands()?;
-    let (llm_config, llm_note) = prompt_llm().await?;
+    let llm = prompt_llm().await?;
     let selected = prompt_experts()?;
     let weights = compute_weights(&selected)?;
     let (max_findings, large_pr_threshold) = prompt_review_params()?;
@@ -594,7 +666,7 @@ pub async fn run_interactive(local_path: &str) -> Result<()> {
     print_summary(
         &scan.dominant,
         &cmd_indices,
-        &llm_note,
+        &llm.note,
         &selected,
         max_findings,
         large_pr_threshold,
@@ -609,7 +681,7 @@ pub async fn run_interactive(local_path: &str) -> Result<()> {
     let toml = generate_toml(
         &scan.dominant,
         &cmd_indices,
-        &llm_config,
+        &llm.block,
         &selected,
         &weights,
         max_findings,
@@ -618,6 +690,9 @@ pub async fn run_interactive(local_path: &str) -> Result<()> {
 
     std::fs::write(&path, &toml)?;
     println!("  \u{2713} 已生成 {path}");
+    for hint in &llm.post_init_hints {
+        println!("  \u{2139} {hint}");
+    }
 
     Ok(())
 }
@@ -822,6 +897,54 @@ mod tests {
         assert!(block.contains("provider = \"openai\""));
         let parsed: toml::Value = toml::from_str(&block).expect("keyless block must still parse as TOML");
         assert_eq!(parsed["llm"][0]["model"].as_str().unwrap(), "gpt-4o");
+    }
+
+    // ─── env-sourced API key handling ──────────────────────────
+
+    #[test]
+    fn plaintext_key_hint_names_env_var_and_runtime_channels() {
+        let hint = plaintext_key_hint("DEEPSEEK_API_KEY");
+        assert!(hint.contains("DEEPSEEK_API_KEY"), "hint must name the source env var");
+        assert!(
+            hint.contains("plaintext"),
+            "hint must state the key was written in plaintext"
+        );
+        assert!(
+            hint.contains("LLM_CONFIG"),
+            "hint must point at the LLM_CONFIG env channel"
+        );
+        assert!(
+            hint.contains("--llm-config"),
+            "hint must point at the --llm-config flag"
+        );
+    }
+
+    #[test]
+    fn llm_note_distinguishes_key_sources() {
+        let env_key = Some(("sk-live".to_string(), ApiKeySource::Env("DEEPSEEK_API_KEY".to_string())));
+        assert_eq!(
+            llm_note("DeepSeek", "deepseek-chat", &env_key),
+            "DeepSeek / deepseek-chat (key from DEEPSEEK_API_KEY)"
+        );
+
+        let manual_key = Some(("sk-typed".to_string(), ApiKeySource::Manual));
+        assert_eq!(
+            llm_note("DeepSeek", "deepseek-chat", &manual_key),
+            "DeepSeek / deepseek-chat"
+        );
+
+        assert_eq!(
+            llm_note("DeepSeek", "deepseek-chat", &None),
+            "DeepSeek / deepseek-chat (API key pending)"
+        );
+    }
+
+    #[test]
+    fn llm_prompt_outcome_defaults_to_no_hints() {
+        let outcome = LlmPromptOutcome::new("[[llm]]\n".to_string(), "note".to_string());
+        assert_eq!(outcome.block, "[[llm]]\n");
+        assert_eq!(outcome.note, "note");
+        assert!(outcome.post_init_hints.is_empty());
     }
 
     #[test]

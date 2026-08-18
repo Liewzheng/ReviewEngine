@@ -177,25 +177,81 @@
     append-to-body
   >
     <el-form ref="addProviderFormRef" :model="newProvider" label-position="top" size="default">
+      <el-alert
+        v-if="catalogFailed"
+        type="warning"
+        :closable="false"
+        :title="$t('config.providers.catalogUnavailable')"
+        class="catalog-fallback-alert"
+      />
       <el-row :gutter="20">
         <el-col :span="12">
           <el-form-item :label="$t('config.providers.providerType')" prop="provider">
-            <el-select v-model="newProvider.provider" style="width: 100%">
-              <el-option
-                v-for="pt in PROVIDER_TYPES"
-                :key="pt.value"
-                :label="pt.label"
-                :value="pt.value"
-              />
+            <el-select
+              v-model="newProvider.provider"
+              filterable
+              style="width: 100%"
+              @change="onDialogProviderChange"
+            >
+              <el-option :label="$t('config.providers.customProvider')" value="custom" />
+              <template v-if="catalogAvailable">
+                <el-option v-for="p in catalogProviders" :key="p.id" :label="p.name" :value="p.id">
+                  <div class="provider-option">
+                    <span>{{ p.name }}</span>
+                    <span class="provider-option-meta">
+                      {{ p.id }} ·
+                      {{ $t('config.providers.modelsCount', { count: p.model_count }) }}
+                    </span>
+                  </div>
+                </el-option>
+              </template>
+              <template v-else>
+                <el-option
+                  v-for="pt in presetProviderTypes"
+                  :key="pt.value"
+                  :label="pt.label"
+                  :value="pt.value"
+                />
+              </template>
             </el-select>
+            <div v-if="selectedCatalogProvider?.doc" class="form-item-help">
+              <el-link
+                :href="selectedCatalogProvider.doc"
+                target="_blank"
+                rel="noopener noreferrer"
+                type="info"
+              >
+                {{ $t('config.providers.viewDocs') }}
+              </el-link>
+            </div>
           </el-form-item>
         </el-col>
         <el-col :span="12">
           <el-form-item :label="$t('config.providers.defaultModel')">
+            <el-select
+              v-if="modelSelectActive"
+              v-model="newProvider.defaultModel"
+              filterable
+              clearable
+              :loading="modelsLoading"
+              :placeholder="$t('config.providers.modelPlaceholder')"
+              style="width: 100%"
+            >
+              <el-option v-for="m in catalogModels" :key="m.id" :label="m.name" :value="m.id">
+                <div class="provider-option">
+                  <span>{{ m.name }}</span>
+                  <span class="provider-option-meta">{{ m.id }}</span>
+                </div>
+              </el-option>
+            </el-select>
             <el-input
+              v-else
               v-model="newProvider.defaultModel"
               :placeholder="$t('config.providers.modelPlaceholder')"
             />
+            <div v-if="modelsUnavailable" class="form-item-help">
+              {{ $t('config.providers.modelsFallback') }}
+            </div>
           </el-form-item>
         </el-col>
         <el-col :span="24">
@@ -208,11 +264,7 @@
         </el-col>
         <el-col :span="24">
           <el-form-item :label="$t('config.providers.apiKey')" prop="apiKey">
-            <el-input
-              v-model="newProvider.apiKey"
-              show-password
-              :placeholder="$t('config.providers.apiKeyPlaceholder')"
-            />
+            <el-input v-model="newProvider.apiKey" show-password :placeholder="apiKeyPlaceholder" />
           </el-form-item>
         </el-col>
         <el-col :span="12">
@@ -260,12 +312,16 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { computed, reactive, ref } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { ArrowDown, Cpu, Delete, Plus } from '@element-plus/icons-vue';
 import type { FormInstance } from 'element-plus';
 import { PROVIDER_TYPES } from '../../types/llm';
 import type { ProviderConfig, ProviderEntry } from '../../types/llm';
+import type { CatalogModel, CatalogProvider } from '../../types/catalog';
 import { createNewProvider, formatTemperature } from '../../composables/useProviders';
+import { useCatalog } from '../../composables/useCatalog';
+import { fetchCatalogModels } from '../../services/catalog';
 
 defineProps<{
   /** Editable list of additional providers (persisted + newly added). */
@@ -285,14 +341,80 @@ const emit = defineEmits<{
   add: [payload: ProviderConfig];
 }>();
 
+const { t } = useI18n();
+
 const showAddProviderDialog = ref(false);
 const addingProvider = ref(false);
 const addProviderFormRef = ref<FormInstance>();
 const newProvider = reactive<ProviderConfig>(createNewProvider());
 
+// --- models.dev catalog state (Add Provider dialog) ---
+const { catalogProviders, catalogFailed, loadCatalogProviders } = useCatalog();
+/** Catalog entry matching the dialog's selected provider (null for custom/preset). */
+const selectedCatalogProvider = ref<CatalogProvider | null>(null);
+/** Models offered for the selected catalog provider. */
+const catalogModels = ref<CatalogModel[]>([]);
+const modelsLoading = ref(false);
+/** True when the models list could not be loaded — fall back to free-text input. */
+const modelsUnavailable = ref(false);
+// Sequence guard so a slow response for a previously-selected provider never
+// overwrites the models of the current selection.
+let modelsRequestSeq = 0;
+
+/** Catalog options are used once the fetch returned a non-empty list. */
+const catalogAvailable = computed(() => catalogProviders.value.length > 0);
+/** Preset fallback list; `custom` is rendered separately as the first option. */
+const presetProviderTypes = computed(() => PROVIDER_TYPES.filter((pt) => pt.value !== 'custom'));
+/** API key placeholder: the catalog's env var name when known, else the default. */
+const apiKeyPlaceholder = computed(
+  () => selectedCatalogProvider.value?.env?.[0] || t('config.providers.apiKeyPlaceholder')
+);
+/** Show the model picker only for a catalog provider whose models loaded. */
+const modelSelectActive = computed(
+  () => selectedCatalogProvider.value != null && !modelsUnavailable.value
+);
+
 function openAddProviderDialog() {
   Object.assign(newProvider, createNewProvider());
+  selectedCatalogProvider.value = null;
+  catalogModels.value = [];
+  modelsLoading.value = false;
+  modelsUnavailable.value = false;
+  // Invalidate any in-flight models request from a previous dialog session.
+  modelsRequestSeq++;
   showAddProviderDialog.value = true;
+  // Force a retry when the previous attempt failed — a 503 may be transient.
+  void loadCatalogProviders(catalogFailed.value);
+}
+
+/** Handle the dialog's provider select: auto-fill from the catalog entry. */
+function onDialogProviderChange(value: string) {
+  const entry = catalogProviders.value.find((p) => p.id === value) ?? null;
+  selectedCatalogProvider.value = entry;
+  catalogModels.value = [];
+  modelsUnavailable.value = false;
+  if (!entry) return; // 'custom' or a preset fallback — fully manual entry.
+  newProvider.apiBaseUrl = entry.api_base;
+  void loadCatalogModelOptions(entry.id);
+}
+
+/** Load the catalog model list for the given provider, with race protection. */
+async function loadCatalogModelOptions(providerId: string) {
+  const seq = ++modelsRequestSeq;
+  modelsLoading.value = true;
+  try {
+    const resp = await fetchCatalogModels(providerId);
+    if (seq !== modelsRequestSeq) return; // superseded by a newer selection
+    catalogModels.value = resp.models ?? [];
+    // An empty list offers nothing to pick — fall back to free-text input.
+    modelsUnavailable.value = catalogModels.value.length === 0;
+  } catch {
+    if (seq !== modelsRequestSeq) return;
+    catalogModels.value = [];
+    modelsUnavailable.value = true;
+  } finally {
+    if (seq === modelsRequestSeq) modelsLoading.value = false;
+  }
 }
 
 async function confirmAddProvider() {
@@ -457,6 +579,32 @@ async function confirmAddProvider() {
   padding: 6px 16px 10px;
   display: flex;
   align-items: center;
+}
+
+/* Helper text below form inputs (doc link, model fallback hint) */
+.form-item-help {
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Catalog fallback warning at the top of the Add Provider dialog */
+.catalog-fallback-alert {
+  margin-bottom: 16px;
+}
+
+/* Provider/model dropdown option rows with secondary info on the right */
+.provider-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.provider-option-meta {
+  font-size: 12px;
+  color: var(--text-secondary);
 }
 
 /* Add provider dialog */

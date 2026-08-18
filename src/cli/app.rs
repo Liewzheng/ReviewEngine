@@ -343,7 +343,7 @@ pub async fn run() -> Result<()> {
             if default {
                 review_engine::actions::init::run_default()?;
             } else {
-                review_engine::actions::init::run_interactive(".")?;
+                review_engine::actions::init::run_interactive(".").await?;
             }
         }
         Commands::Improve {

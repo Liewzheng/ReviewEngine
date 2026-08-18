@@ -18,6 +18,7 @@ use super::AppState;
 use crate::server::auth::AuthConfig;
 
 pub mod callback;
+pub mod catalog;
 pub mod config;
 pub mod dashboard;
 pub mod events;
@@ -45,6 +46,7 @@ pub fn routes(state: Arc<AppState>, auth: Arc<AuthConfig>) -> Router<Arc<AppStat
         .nest("/dashboard", dashboard::routes())
         .nest("/queue", queue::routes())
         .nest("/llm", llm::routes())
+        .nest("/catalog", catalog::routes())
         .nest("/logs", logs::routes())
         .nest("/feedback", feedback::routes())
         .layer(cors);

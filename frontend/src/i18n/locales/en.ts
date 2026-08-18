@@ -378,6 +378,11 @@ export default {
       saveOnlyBtn: 'Save Providers Only',
       removeTitle: 'Remove Provider',
       removeConfirm: 'Remove "{name}" provider?',
+      customProvider: 'Custom',
+      catalogUnavailable: 'Provider catalog unavailable — using the built-in preset list instead.',
+      modelsCount: '{count} models',
+      viewDocs: 'Docs',
+      modelsFallback: 'Model list unavailable — enter the model id manually.',
     },
     rules: {
       title: 'Review Rules',

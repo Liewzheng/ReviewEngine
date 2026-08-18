@@ -87,6 +87,42 @@ pub struct UpgradeCache {
     pub cached_at: DateTime<Utc>,
 }
 
+/// A cached models.dev catalog plus when it was produced.
+///
+/// The TTL (24h, enforced by the catalog handlers) keeps the interactive
+/// endpoints snappy and models.dev traffic negligible; on fetch failure the
+/// handlers serve the stale disk cache before erroring.
+#[derive(Debug, Clone)]
+pub struct CatalogCache {
+    pub catalog: Arc<crate::catalog::Catalog>,
+    pub cached_at: DateTime<Utc>,
+}
+
+/// In-memory store for the models.dev provider catalog.
+///
+/// Deliberately separate from [`UpgradeStore`]: the catalog has its own TTL
+/// and disk fallback, and reusing the upgrade cache would couple unrelated
+/// refresh cycles.
+pub struct CatalogStore {
+    /// The cached catalog plus its fetch timestamp; the TTL gate lives in
+    /// the catalog handlers.
+    pub cache: RwLock<Option<CatalogCache>>,
+}
+
+impl CatalogStore {
+    pub fn new() -> Self {
+        Self {
+            cache: RwLock::new(None),
+        }
+    }
+}
+
+impl Default for CatalogStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Lightweight single-flight store for the self-upgrade API.
 ///
 /// Deliberately separate from [`TaskStore`]: review tasks and upgrade jobs
@@ -159,6 +195,8 @@ pub struct AppState {
     pub feedback_store: Option<Arc<FeedbackStore>>,
     /// Self-upgrade single-flight store + GitHub check cache + install method.
     pub upgrade: UpgradeStore,
+    /// In-memory models.dev catalog cache (24h TTL enforced by handlers).
+    pub catalog: CatalogStore,
 }
 
 impl AppState {
@@ -177,6 +215,7 @@ impl AppState {
             ui_config: RwLock::new(UiConfig::default()),
             feedback_store: None,
             upgrade: UpgradeStore::new(),
+            catalog: CatalogStore::new(),
         }
     }
 }

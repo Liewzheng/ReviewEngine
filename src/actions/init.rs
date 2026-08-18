@@ -3,10 +3,16 @@
 //! Scans the repository, detects languages / CI / test frameworks, prompts
 //! the user for preferences (commands, experts, LLM), and writes the
 //! resulting `.code-audit-config.toml` to disk.
+//!
+//! The LLM section is backed by the models.dev provider catalog
+//! ([`crate::catalog`]): providers and models are picked from live data, and
+//! the flow degrades to a manual DeepSeek template when the catalog is
+//! unreachable.
 
 use anyhow::Result;
 use inquire::{Confirm, MultiSelect, Select, Text};
 
+use crate::catalog::{self, Catalog, CatalogClient, CatalogModel, CatalogProvider, CatalogSource};
 use crate::config::defaults::default_config;
 use crate::repo::RepoScanner;
 
@@ -134,8 +140,22 @@ fn prompt_commands() -> Result<Vec<usize>> {
     Ok(cmd_indices)
 }
 
+/// Provider ids shown as a curated shortlist before the full catalog list.
+/// Order matters: this is the order the shortlist displays.
+const CURATED_PROVIDER_IDS: &[&str] = &[
+    "openai",
+    "anthropic",
+    "deepseek",
+    "google",
+    "xai",
+    "mistralai",
+    "groq",
+    "openrouter",
+    "ollama",
+];
+
 /// Prompt the user for LLM configuration.
-fn prompt_llm() -> Result<(String, String)> {
+async fn prompt_llm() -> Result<(String, String)> {
     section("LLM (AI Review)");
     let enable_llm = Confirm::new("Enable LLM-based AI review? (skip for local-only static analysis)")
         .with_default(true)
@@ -145,6 +165,189 @@ fn prompt_llm() -> Result<(String, String)> {
         return Ok((String::new(), "disabled".to_string()));
     }
 
+    println!("  Fetching provider catalog from models.dev…");
+    match fetch_catalog().await {
+        Some((catalog, source)) => {
+            if let CatalogSource::DiskCache(fetched_at) = source {
+                println!(
+                    "  (models.dev unreachable — using catalog cached at {})",
+                    fetched_at.format("%Y-%m-%d %H:%M UTC")
+                );
+            }
+            let providers = catalog::usable_providers(&catalog);
+            if providers.is_empty() {
+                println!("  Provider catalog carried no usable providers; falling back to manual configuration.");
+                prompt_llm_fallback()
+            } else {
+                prompt_llm_from_catalog(&providers)
+            }
+        }
+        None => {
+            println!("  Provider catalog unavailable; falling back to manual configuration.");
+            prompt_llm_fallback()
+        }
+    }
+}
+
+/// Fetch the models.dev catalog, honoring the disk-cache fallback. Returns
+/// `None` when both the network and the disk cache fail.
+async fn fetch_catalog() -> Option<(Catalog, CatalogSource)> {
+    let client = CatalogClient::from_env()
+        .map_err(|e| tracing::warn!("Catalog client init failed: {e}"))
+        .ok()?;
+    let cache_path = catalog::default_cache_path();
+    catalog::fetch_or_disk_fallback(&client, cache_path.as_deref())
+        .await
+        .map_err(|e| tracing::warn!("Catalog fetch failed: {e}"))
+        .ok()
+}
+
+/// The curated shortlist, in [`CURATED_PROVIDER_IDS`] order, restricted to
+/// providers actually present in the catalog.
+fn curated_shortlist<'a>(providers: &[&'a CatalogProvider]) -> Vec<&'a CatalogProvider> {
+    CURATED_PROVIDER_IDS
+        .iter()
+        .filter_map(|id| providers.iter().find(|p| p.id == *id).copied())
+        .collect()
+}
+
+/// Display string for a provider entry in an inquire `Select`.
+fn provider_display(p: &CatalogProvider) -> String {
+    format!("  {} ({})", p.name, p.id)
+}
+
+/// Display string for a model entry: name, id, and context limit.
+fn model_display(m: &CatalogModel) -> String {
+    let context = m.limit.as_ref().and_then(|l| l.context);
+    format!("  {} ({}) — {}", m.name, m.id, fmt_context(context))
+}
+
+/// Human-friendly context limit for the model picker (`128000` → `128k ctx`).
+fn fmt_context(context: Option<u64>) -> String {
+    match context {
+        Some(n) if n >= 1000 => format!("{}k ctx", n / 1000),
+        Some(n) => format!("{n} ctx"),
+        None => "unknown context".to_string(),
+    }
+}
+
+/// Render the `[[llm]]` TOML block for the chosen provider/model.
+///
+/// With no API key the `api_key` line is commented out, so the file parses
+/// while making the missing credential explicit.
+fn render_llm_block(provider: &str, model: &str, api_base: &str, api_key: Option<&str>) -> String {
+    let key_line = match api_key {
+        Some(key) => format!("api_key = \"{key}\"\n"),
+        None => "# api_key = \"...\"  # fill in, or pass via LLM_CONFIG env / --llm-config\n".to_string(),
+    };
+    format!(
+        "[[llm]]\nprovider = \"{provider}\"\nmodel = \"{model}\"\n{key_line}api_base = \"{api_base}\"\nmax_tokens = 4096\ntemperature = 0.3\n\n"
+    )
+}
+
+/// Catalog-backed interactive flow: pick provider → model → API key, then
+/// render the `[[llm]]` block.
+fn prompt_llm_from_catalog(providers: &[&CatalogProvider]) -> Result<(String, String)> {
+    let provider = select_catalog_provider(providers)?;
+
+    let models = catalog::sorted_models(provider);
+    let model = if models.is_empty() {
+        Text::new("  Model id").prompt()?.trim().to_string()
+    } else {
+        select_catalog_model(&models)?
+    };
+    if model.is_empty() {
+        anyhow::bail!("A model id is required");
+    }
+
+    let api_base = catalog::normalize_api_base(provider.npm.as_deref(), provider.api.as_deref().unwrap_or_default());
+    let api_key = prompt_api_key(provider.env.first().map(String::as_str))?;
+
+    let block = render_llm_block(&provider.id, &model, &api_base, api_key.as_deref());
+    let note = match &api_key {
+        Some(_) => format!("{} / {}", provider.name, model),
+        None => format!("{} / {} (API key pending)", provider.name, model),
+    };
+    Ok((block, note))
+}
+
+/// Pick a provider: curated shortlist first, "Browse all…" escapes to the
+/// full (filterable) list.
+fn select_catalog_provider<'a>(providers: &[&'a CatalogProvider]) -> Result<&'a CatalogProvider> {
+    let shortlist = curated_shortlist(providers);
+    let browse = format!("  Browse all {} providers…", providers.len());
+
+    if shortlist.is_empty() {
+        return browse_all_providers(providers, &browse);
+    }
+
+    let mut displays: Vec<String> = shortlist.iter().map(|p| provider_display(p)).collect();
+    displays.push(browse.clone());
+    let choice = Select::new("LLM provider", displays).prompt()?;
+
+    if choice == browse {
+        browse_all_providers(providers, &browse)
+    } else {
+        let idx = shortlist
+            .iter()
+            .map(|p| provider_display(p))
+            .position(|d| d == choice)
+            .ok_or_else(|| anyhow::anyhow!("provider selection lost"))?;
+        Ok(shortlist[idx])
+    }
+}
+
+/// Full-catalog provider picker. inquire's `Select` filters as the user
+/// types; the page size keeps the list scrollable.
+fn browse_all_providers<'a>(providers: &[&'a CatalogProvider], message: &str) -> Result<&'a CatalogProvider> {
+    let all: Vec<String> = providers.iter().map(|p| provider_display(p)).collect();
+    let pick = Select::new(message, all.clone()).with_page_size(20).prompt()?;
+    let idx = all
+        .iter()
+        .position(|d| d == &pick)
+        .ok_or_else(|| anyhow::anyhow!("provider selection lost"))?;
+    Ok(providers[idx])
+}
+
+/// Pick a model from the chosen provider's catalog entries.
+fn select_catalog_model(models: &[&CatalogModel]) -> Result<String> {
+    let displays: Vec<String> = models.iter().map(|m| model_display(m)).collect();
+    let pick = Select::new("Model", displays.clone()).with_page_size(20).prompt()?;
+    let idx = displays
+        .iter()
+        .position(|d| d == &pick)
+        .ok_or_else(|| anyhow::anyhow!("model selection lost"))?;
+    Ok(models[idx].id.clone())
+}
+
+/// Resolve the API key: offer the provider's canonical env var when set
+/// (never printing the value), otherwise free-text entry. `None` means the
+/// user deferred credentials to runtime.
+fn prompt_api_key(env_var: Option<&str>) -> Result<Option<String>> {
+    if let Some(var) = env_var {
+        if let Ok(value) = std::env::var(var) {
+            if !value.is_empty() {
+                let use_env = Confirm::new(&format!(
+                    "{var} is set in the environment. Use it? (the value is not printed)"
+                ))
+                .with_default(true)
+                .prompt()?;
+                if use_env {
+                    return Ok(Some(value));
+                }
+            }
+        }
+    }
+    let mut prompt = Text::new("  API key (leave empty to configure later)");
+    if let Some(var) = env_var {
+        prompt = prompt.with_placeholder(var);
+    }
+    let key = prompt.prompt()?.trim().to_string();
+    Ok(if key.is_empty() { None } else { Some(key) })
+}
+
+/// Offline fallback: the pre-catalog DeepSeek flow, unchanged.
+fn prompt_llm_fallback() -> Result<(String, String)> {
     let api_key = std::env::var("DEEPSEEK_API_KEY").unwrap_or_default();
     let api_base = std::env::var("DEEPSEEK_BASE_URL").unwrap_or_default();
     let has_key = !api_key.is_empty();
@@ -369,7 +572,7 @@ fn generate_toml(
 }
 
 /// Run the interactive init flow.
-pub fn run_interactive(local_path: &str) -> Result<()> {
+pub async fn run_interactive(local_path: &str) -> Result<()> {
     // Scan project
     let scan = scan_project(local_path)?;
     print_header(
@@ -382,7 +585,7 @@ pub fn run_interactive(local_path: &str) -> Result<()> {
 
     // Prompt for configuration
     let cmd_indices = prompt_commands()?;
-    let (llm_config, llm_note) = prompt_llm()?;
+    let (llm_config, llm_note) = prompt_llm().await?;
     let selected = prompt_experts()?;
     let weights = compute_weights(&selected)?;
     let (max_findings, large_pr_threshold) = prompt_review_params()?;
@@ -553,5 +756,104 @@ mod tests {
             lead < security && security < performance,
             "experts must be emitted in selection order"
         );
+    }
+
+    // ─── catalog-backed LLM prompt helpers ─────────────────────
+
+    fn provider(id: &str, name: &str) -> CatalogProvider {
+        CatalogProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            api: Some(format!("https://api.{id}.example")),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn curated_shortlist_orders_by_curated_list_not_catalog_order() {
+        let catalog_providers = [
+            provider("groq", "Groq"),
+            provider("zzz", "ZZZ"),
+            provider("openai", "OpenAI"),
+            provider("deepseek", "DeepSeek"),
+        ];
+        let refs: Vec<&CatalogProvider> = catalog_providers.iter().collect();
+
+        let shortlist = curated_shortlist(&refs);
+        let ids: Vec<&str> = shortlist.iter().map(|p| p.id.as_str()).collect();
+        // CURATED_PROVIDER_IDS order wins; catalog order and non-curated
+        // entries are irrelevant.
+        assert_eq!(ids, vec!["openai", "deepseek", "groq"]);
+    }
+
+    #[test]
+    fn curated_shortlist_is_empty_when_no_curated_provider_present() {
+        let catalog_providers = [provider("acme", "Acme")];
+        let refs: Vec<&CatalogProvider> = catalog_providers.iter().collect();
+        assert!(curated_shortlist(&refs).is_empty());
+    }
+
+    #[test]
+    fn render_llm_block_with_key_emits_complete_block() {
+        let block = render_llm_block(
+            "deepseek",
+            "deepseek-chat",
+            "https://api.deepseek.com/v1",
+            Some("sk-test"),
+        );
+        assert!(block.starts_with("[[llm]]\n"));
+        assert!(block.contains("provider = \"deepseek\""));
+        assert!(block.contains("model = \"deepseek-chat\""));
+        assert!(block.contains("api_key = \"sk-test\""));
+        assert!(block.contains("api_base = \"https://api.deepseek.com/v1\""));
+        assert!(block.contains("max_tokens = 4096"));
+        assert!(block.contains("temperature = 0.3"));
+        assert!(!block.contains("# api_key"), "key line must not be commented out");
+        // The block parses as TOML when embedded in a document.
+        let parsed: toml::Value = toml::from_str(&block).expect("llm block must parse as TOML");
+        assert_eq!(parsed["llm"][0]["provider"].as_str().unwrap(), "deepseek");
+    }
+
+    #[test]
+    fn render_llm_block_without_key_comments_out_api_key_line() {
+        let block = render_llm_block("openai", "gpt-4o", "https://api.openai.com/v1", None);
+        assert!(block.contains("# api_key = \"...\""));
+        assert!(!block.contains("\napi_key"), "no live api_key line");
+        assert!(block.contains("provider = \"openai\""));
+        let parsed: toml::Value = toml::from_str(&block).expect("keyless block must still parse as TOML");
+        assert_eq!(parsed["llm"][0]["model"].as_str().unwrap(), "gpt-4o");
+    }
+
+    #[test]
+    fn fmt_context_humanizes_limits() {
+        assert_eq!(fmt_context(Some(128000)), "128k ctx");
+        assert_eq!(fmt_context(Some(1000)), "1k ctx");
+        assert_eq!(fmt_context(Some(64000)), "64k ctx");
+        assert_eq!(fmt_context(Some(512)), "512 ctx");
+        assert_eq!(fmt_context(None), "unknown context");
+    }
+
+    #[test]
+    fn display_strings_carry_name_and_id() {
+        let p = provider("deepseek", "DeepSeek");
+        assert_eq!(provider_display(&p), "  DeepSeek (deepseek)");
+
+        let m = CatalogModel {
+            id: "deepseek-chat".to_string(),
+            name: "DeepSeek Chat".to_string(),
+            limit: Some(catalog::ModelLimit {
+                context: Some(64000),
+                output: Some(8192),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(model_display(&m), "  DeepSeek Chat (deepseek-chat) — 64k ctx");
+
+        let no_limit = CatalogModel {
+            id: "m".to_string(),
+            name: "M".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(model_display(&no_limit), "  M (m) — unknown context");
     }
 }

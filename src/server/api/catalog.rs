@@ -336,6 +336,8 @@ mod tests {
 
     #[tokio::test]
     async fn expired_memory_cache_refreshes_from_network_and_persists_disk() {
+        // Mutates process env — must not interleave with other catalog tests.
+        let _env_lock = crate::catalog::ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api.json"))
@@ -359,6 +361,8 @@ mod tests {
 
     #[tokio::test]
     async fn expired_memory_falls_back_to_stale_disk_on_fetch_failure() {
+        // Mutates process env — must not interleave with other catalog tests.
+        let _env_lock = crate::catalog::ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api.json"))
@@ -383,6 +387,8 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_failure_without_any_cache_is_502_json() {
+        // Mutates process env — must not interleave with other catalog tests.
+        let _env_lock = crate::catalog::ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api.json"))

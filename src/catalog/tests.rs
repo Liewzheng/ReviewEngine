@@ -5,7 +5,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 /// A minimal but realistic catalog document covering the shapes the parser
 /// must tolerate: a full provider, a provider with an SDK-only entry (no
-/// `api`), sparse models, and unknown extra fields at every level.
+/// `api`), sparse models, and unknown extra fields nested inside entries.
+/// (Unknown *top-level* entries are a different case — see
+/// `unknown_top_level_entries_parse_as_empty_providers`.)
 fn catalog_json() -> serde_json::Value {
     json!({
         "deepseek": {
@@ -42,8 +44,7 @@ fn catalog_json() -> serde_json::Value {
             "npm": "@ai-sdk/amazon-bedrock",
             "env": ["AWS_ACCESS_KEY_ID"],
             "models": {}
-        },
-        "unknown_future_top_level_key": {"should": "be ignored by serde"}
+        }
     })
 }
 
@@ -93,6 +94,28 @@ fn parses_provider_with_all_fields_missing() {
     assert!(bare.api.is_none());
     assert!(bare.env.is_empty());
     assert!(bare.models.is_empty());
+}
+
+/// `Catalog` is a map of provider structs, so serde cannot "ignore" an
+/// unknown top-level entry the way it ignores unknown struct fields: an
+/// object value parses as an all-default provider. The graceful degradation
+/// is that such entries carry no `api` and are filtered out of
+/// [`usable_providers`].
+#[test]
+fn unknown_top_level_entries_parse_as_empty_providers_and_are_filtered() {
+    let catalog: Catalog = serde_json::from_value(json!({
+        "real": {"id": "real", "name": "Real", "api": "https://r.example", "models": {}},
+        "future_entry": {"some_future_shape": true}
+    }))
+    .expect("catalog parses");
+    assert_eq!(catalog.len(), 2, "unknown entry is kept as an empty provider");
+
+    let future = catalog.get("future_entry").expect("future entry");
+    assert!(future.api.is_none());
+
+    let usable = usable_providers(&catalog);
+    assert_eq!(usable.len(), 1);
+    assert_eq!(usable[0].id, "real");
 }
 
 // ─── usable_providers / sorted_models ───────────────────────────
@@ -219,6 +242,7 @@ fn disk_cache_missing_or_corrupt_yields_none() {
 
 #[test]
 fn cache_path_honors_env_override() {
+    let _env_lock = ENV_LOCK.blocking_lock();
     let saved = std::env::var(CACHE_PATH_ENV).ok();
 
     std::env::set_var(CACHE_PATH_ENV, "/tmp/reng-catalog-test/cache.json");

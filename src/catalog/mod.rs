@@ -25,6 +25,16 @@ use serde::{Deserialize, Serialize};
 
 pub use client::CatalogClient;
 
+/// Global lock serializing tests that mutate the process environment
+/// (`REVIEW_MODELS_DEV_API_BASE` / `REVIEW_MODELS_DEV_CACHE`): cargo runs a
+/// crate's unit tests in one process on parallel threads, so unsynchronized
+/// `set_var`/`remove_var` races leak one test's override into another — or,
+/// worse, drop the override mid-request and let the real
+/// `~/.config/review-engine/models-dev-cache.json` leak in. Async tests take
+/// `ENV_LOCK.lock().await`; sync tests take `ENV_LOCK.blocking_lock()`.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Result alias for catalog operations.
 pub type Result<T> = std::result::Result<T, CatalogError>;
 

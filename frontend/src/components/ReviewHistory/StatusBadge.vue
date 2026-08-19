@@ -59,10 +59,13 @@ const config = computed(() => {
   gap: 4px;
 }
 
+/* Neutral grey tag (cancelled/skipped): theme vars so the tag reads as a
+   muted surface in BOTH themes — the previous fixed light greys (#f4f4f5…)
+   rendered as a light panel in dark mode. */
 .status-badge.status-grey {
-  --el-tag-bg-color: #f4f4f5;
-  --el-tag-border-color: #e4e4e7;
-  --el-tag-text-color: #71717a;
+  --el-tag-bg-color: var(--bg-card);
+  --el-tag-border-color: var(--border-color);
+  --el-tag-text-color: var(--text-secondary);
 }
 
 .status-dot {

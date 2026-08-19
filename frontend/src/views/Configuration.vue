@@ -186,7 +186,7 @@
 
       <!-- Advanced Toggle -->
       <div class="advanced-toggle">
-        <el-button link type="primary" @click="showAdvanced = !showAdvanced">
+        <el-button link type="primary" :disabled="false" @click="showAdvanced = !showAdvanced">
           <el-icon v-if="showAdvanced"><ArrowUp /></el-icon>
           <el-icon v-else><ArrowDown /></el-icon>
           {{ showAdvanced ? $t('config.advanced.hide') : $t('config.advanced.show') }}

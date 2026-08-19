@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.23] - 2026-08-18
+
+### Fixed
+- **Configuration page: "Show Advanced" toggle disabled in view mode**: the toggle button sat inside the `el-form` carrying `:disabled="!isEditing"`, so the Advanced card could not be expanded to read current values without entering edit mode. The button now sets an explicit `:disabled="false"` (Element Plus resolves an explicit prop before the form cascade); the Advanced card's inner controls remain correctly disabled in view mode. Found by the v6 UI test-case sweep. (`frontend/src/views/Configuration.vue`)
+
 ## [0.9.22] - 2026-08-18
 
 ### Security

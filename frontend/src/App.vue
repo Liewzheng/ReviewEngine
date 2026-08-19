@@ -212,7 +212,7 @@ onMounted(() => {
   } else {
     isDark.value = true
   }
-  document.documentElement.setAttribute('data-theme', isDark.value ? 'dark' : 'light')
+  applyTheme(isDark.value)
 
   // Register the auth signal handler first, then resolve the phase. The
   // version check waits for phase resolution so its 401 (if any) routes
@@ -223,11 +223,22 @@ onMounted(() => {
   })
 })
 
+/**
+ * Apply the theme to <html>: the bespoke `data-theme` attribute drives the
+ * app's own CSS vars (style.css), while the `dark` class activates the
+ * official Element Plus dark palette (theme-chalk/dark/css-vars.css), which
+ * themes every EP component — including poppers, drawers, and dialogs that
+ * mount on <body> and never saw the bespoke vars.
+ */
+function applyTheme(dark: boolean) {
+  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
+  document.documentElement.classList.toggle('dark', dark)
+}
+
 const toggleTheme = () => {
   isDark.value = !isDark.value
-  const theme = isDark.value ? 'dark' : 'light'
-  document.documentElement.setAttribute('data-theme', theme)
-  localStorage.setItem('theme', theme)
+  applyTheme(isDark.value)
+  localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
 }
 
 const toggleSidebar = () => {

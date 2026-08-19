@@ -202,9 +202,12 @@ function viewOriginalComment(row: ReviewListItem) {
 }
 
 /* ─────────────── Formatting ─────────────── */
+/* Theme-var based (see DataTable.vue): an inline style beats every
+   stylesheet rule, so hardcoding hexes here forced a light header row onto
+   dark tables. */
 const headerCellStyle = {
-  background: '#f5f7fa',
-  color: '#303133',
+  background: 'var(--bg-card)',
+  color: 'var(--text-secondary)',
   fontWeight: 600,
   fontSize: '12px',
   textTransform: 'uppercase' as const,
@@ -647,6 +650,19 @@ watch(() => route.query, () => {
 /* Table */
 .table-card {
   overflow: hidden;
+}
+
+/* Table — let the wrapping .table-card show through (same pattern as
+   DataTable.vue / Dashboard.vue) so rows never render as mismatched panels
+   in either theme. */
+.history-table :deep(.el-table) {
+  --el-table-bg-color: transparent;
+  --el-table-tr-bg-color: transparent;
+  --el-table-header-bg-color: var(--bg-card);
+  --el-table-header-text-color: var(--text-secondary);
+  --el-table-text-color: var(--text-primary);
+  --el-table-row-hover-bg-color: var(--bg-hover);
+  --el-table-border-color: var(--border-color);
 }
 
 .history-table :deep(.el-table__row) {

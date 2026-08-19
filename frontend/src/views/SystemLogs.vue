@@ -117,7 +117,7 @@
       <div v-if="isCleared && logItems.length === 0" class="empty-state">
         <el-empty :description="$t('logs.emptyCleared')">
           <template #image>
-            <el-icon size="48" color="#6b7280"><Check /></el-icon>
+            <el-icon size="48" color="var(--offline)"><Check /></el-icon>
           </template>
         </el-empty>
       </div>
@@ -126,7 +126,7 @@
       <div v-else-if="logItems.length === 0" class="empty-state">
         <el-empty :description="$t('logs.emptyWaiting')">
           <template #image>
-            <el-icon size="48" color="#6b7280" class="is-loading"><Loading /></el-icon>
+            <el-icon size="48" color="var(--offline)" class="is-loading"><Loading /></el-icon>
           </template>
         </el-empty>
       </div>
@@ -135,7 +135,7 @@
       <div v-else-if="filteredLogs.length === 0 && logItems.length > 0" class="empty-state">
         <el-empty :description="$t('logs.emptyFiltered')">
           <template #image>
-            <el-icon size="48" color="#6b7280"><InfoFilled /></el-icon>
+            <el-icon size="48" color="var(--offline)"><InfoFilled /></el-icon>
           </template>
         </el-empty>
       </div>
@@ -555,7 +555,7 @@ onUnmounted(() => {
 /* Log Terminal */
 .log-terminal {
   flex: 1;
-  background-color: #0a0a0a;
+  background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   padding: 16px;
@@ -578,7 +578,7 @@ onUnmounted(() => {
 }
 
 .empty-state .el-empty {
-  --el-empty-description-color: #9ca3af;
+  --el-empty-description-color: var(--text-secondary);
 }
 
 .empty-state .el-empty__image {
@@ -612,7 +612,7 @@ onUnmounted(() => {
 }
 
 .log-line:hover {
-  background-color: rgba(255, 255, 255, 0.04);
+  background-color: var(--bg-hover);
 }
 
 .log-line.log-error {
@@ -628,7 +628,7 @@ onUnmounted(() => {
 }
 
 .log-timestamp {
-  color: #6b7280;
+  color: var(--text-secondary);
   min-width: 100px;
   flex-shrink: 0;
   font-size: 12px;
@@ -648,7 +648,7 @@ onUnmounted(() => {
 }
 
 .log-message {
-  color: #e5e7eb;
+  color: var(--text-primary);
   flex: 1;
   word-break: break-word;
   overflow-wrap: anywhere;
@@ -658,18 +658,18 @@ onUnmounted(() => {
 
 .log-message :deep(mark) {
   background-color: rgba(99, 102, 241, 0.4);
-  color: #e5e7eb;
+  color: var(--text-primary);
   padding: 0 2px;
   border-radius: 2px;
 }
 
 .log-link {
-  color: #6366f1;
+  color: var(--brand);
   text-decoration: underline;
 }
 
 .log-link:hover {
-  color: #4f46e5;
+  color: var(--brand-hover);
 }
 
 .log-meta {
@@ -682,15 +682,15 @@ onUnmounted(() => {
 }
 
 .meta-duration {
-  color: #6b7280;
+  color: var(--text-secondary);
   font-size: 11px;
-  background-color: rgba(255, 255, 255, 0.06);
+  background-color: var(--bg-hover);
   padding: 1px 6px;
   border-radius: 4px;
 }
 
 .meta-request {
-  color: #6b7280;
+  color: var(--text-secondary);
   font-size: 11px;
   font-family: var(--font-mono);
   opacity: 0.7;

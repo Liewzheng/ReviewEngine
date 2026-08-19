@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.25] - 2026-08-19
+
+### Fixed
+- **Dark mode comprehensively repaired (55 audit findings: 6 unreadable white-on-white, 32 white panels)**: the app used a bespoke `data-theme` attribute system that only themed its own CSS variables — Element Plus was never switched to dark, so tables, the review-detail drawer, select popovers, buttons, inputs, pagination and more rendered light-on-dark. The fix adopts the official Element Plus dark mechanism: `theme-chalk/dark/css-vars.css` is imported, and `<html>` now carries the `dark` class in dark mode (kept in sync with `data-theme` on init and toggle). A bridge block in `style.css` maps EP's dark base palette onto the app's bespoke palette; the partial ad-hoc `el-table` override was completed and dead `el-menu` rules removed. (`frontend/src/main.ts`, `frontend/src/App.vue`, `frontend/src/style.css`)
+- **Hardcoded theme-breaking colors**: ReviewHistory table header inline style `#f5f7fa/#303133` → theme vars (it beat every stylesheet in both themes); SystemLogs 11 hardcoded dark hexes → theme vars (mirror bug that broke light mode); StatusBadge grey tag fixed greys → theme vars. Light mode re-verified free of dark leftovers. (`frontend/src/views/ReviewHistory.vue`, `frontend/src/views/SystemLogs.vue`, `frontend/src/components/ReviewHistory/StatusBadge.vue`)
+
 ## [0.9.24] - 2026-08-19
 
 ### Refactored

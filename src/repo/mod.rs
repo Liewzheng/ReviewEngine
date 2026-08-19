@@ -334,6 +334,10 @@ impl RepoScanner {
             "toml" | "yaml" | "yml" | "json" => "Config",
             "md" | "rst" | "txt" => "Documentation",
             "html" | "css" | "scss" | "less" => "Web",
+            // Vue SFCs get their own label so scoring code can treat the
+            // `<script>` block (logic) differently from template/style
+            // (presentational); see `code_organization::scoped_logic_loc`.
+            "vue" => "Vue",
             "sh" | "bash" | "zsh" => "Shell",
             "sql" => "SQL",
             "dockerfile" => "Docker",

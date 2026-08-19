@@ -15,6 +15,11 @@ pub use dependency::Dependency;
 pub use documentation::Documentation;
 pub use security::Security;
 
+// Re-exported so the shared test module can unit-test the Vue `<script>`
+// marker scan directly (same pattern as `style_tool_key` below).
+#[cfg(test)]
+pub(crate) use code_organization::vue_script_loc;
+
 // ─── CodeStyle ────────────────────────────────
 
 /// Normalise a style-config file name to a per-tool key, so that aliases

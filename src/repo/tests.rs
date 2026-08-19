@@ -43,6 +43,9 @@ fn test_detect_language() {
     assert_eq!(scanner.detect_language("rs"), "Rust");
     assert_eq!(scanner.detect_language("py"), "Python");
     assert_eq!(scanner.detect_language("md"), "Documentation");
+    // Vue SFCs are labelled "Vue" (not "Other") so experts can scope
+    // logic-only statistics to the `<script>` block.
+    assert_eq!(scanner.detect_language("vue"), "Vue");
 }
 
 #[test]

@@ -34,6 +34,12 @@ async fn evaluate<E: RepoExpert + ?Sized>(expert: &E, context: &RepoContext) -> 
         .expect("static expert should not fail")
 }
 
+/// Detail messages of a score, for assertion debug output (`ScoreItem`
+/// has no `Debug` impl, so details cannot be formatted directly).
+fn messages(score: &ExpertScore) -> Vec<&str> {
+    score.details.iter().map(|d| d.message.as_str()).collect()
+}
+
 /// Build a temp fixture repo that triggers every static finding: a
 /// credential leak (security), a 600-line file (code_organization),
 /// a Cargo.lock with 201 packages (dependency), and nothing else so the
@@ -142,6 +148,165 @@ async fn security_clean_repo_has_no_findings() {
     assert_eq!(score.score, 100);
     assert!(score.details.is_empty());
     assert_eq!(score.summary, "0 security findings");
+}
+
+// ─── CodeOrganization large-file scope ───────────────────
+
+/// Write a Vue SFC fixture with the given number of lines in each section
+/// and return its absolute path (the expert reads `.vue` content from disk
+/// to isolate the `<script>` block).
+fn write_vue(
+    dir: &tempfile::TempDir,
+    name: &str,
+    script_lines: usize,
+    template_lines: usize,
+    style_lines: usize,
+) -> String {
+    let path = dir.path().join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let mut content = String::from("<template>\n");
+    for i in 0..template_lines {
+        content.push_str(&format!("  <div>{{{{ v{i} }}}}</div>\n"));
+    }
+    content.push_str("</template>\n<script setup lang=\"ts\">\n");
+    for i in 0..script_lines {
+        content.push_str(&format!("const v{i} = {i};\n"));
+    }
+    content.push_str("</script>\n<style scoped>\n");
+    for i in 0..style_lines {
+        content.push_str(&format!(".c{i} {{ color: red; }}\n"));
+    }
+    content.push_str("</style>\n");
+    std::fs::write(&path, &content).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[tokio::test]
+async fn code_organization_counts_large_rust_logic_file() {
+    // 700-line Rust logic file → 200 excess LOC → deduction of 2.
+    let context = ctx(vec![entry("src/big.rs", "Rust", 700)]);
+    let score = evaluate(&CodeOrganization, &context).await;
+    assert_eq!(score.score, 98, "summary: {}", score.summary);
+    let finding = score
+        .details
+        .iter()
+        .find(|d| d.message.contains("exceed 500 lines"))
+        .expect("large-file finding must be present");
+    // The message states the scope of the statistic.
+    assert_eq!(
+        finding.message,
+        "1 code files exceed 500 lines (200 excess LOC; tests, Web/Config/Documentation, and non-script Vue sections excluded)"
+    );
+}
+
+#[tokio::test]
+async fn code_organization_excludes_test_files_from_large_file_penalty() {
+    // Every test-file convention (sibling tests.rs / *_tests.rs, tests/ and
+    // __tests__/ directories, *.spec.* / *.test.* basenames) is excluded
+    // even when the file is huge; only the 400-line logic file remains and
+    // it is under the threshold.
+    let context = ctx(vec![
+        entry("src/output/parser/tests.rs", "Rust", 900),
+        entry("src/server/auth/middleware_tests.rs", "Rust", 900),
+        entry("tests/integration.rs", "Rust", 900),
+        entry("src/__tests__/helper.ts", "TypeScript", 900),
+        entry("src/app.spec.ts", "TypeScript", 900),
+        entry("src/app.test.ts", "TypeScript", 900),
+        entry("src/logic.rs", "Rust", 400),
+    ]);
+    let score = evaluate(&CodeOrganization, &context).await;
+    assert_eq!(score.score, 100, "details: {:?}", messages(&score));
+    assert!(
+        score.details.iter().all(|d| !d.message.contains("exceed 500 lines")),
+        "no large-file finding expected: {:?}",
+        messages(&score)
+    );
+    assert!(score.summary.contains("0 large files"), "summary: {}", score.summary);
+}
+
+#[tokio::test]
+async fn code_organization_excludes_web_config_documentation_and_other_languages() {
+    // Presentational/unknown/config/doc files never feed the statistic.
+    let context = ctx(vec![
+        entry("assets/index.html", "Web", 900),
+        entry("assets/app.css", "Web", 900),
+        entry("assets/app.scss", "Web", 900),
+        entry("docs/guide.md", "Documentation", 900),
+        entry("config/app.yaml", "Config", 900),
+        entry("Makefile", "Other", 900),
+        entry("src/logic.rs", "Rust", 400),
+    ]);
+    let score = evaluate(&CodeOrganization, &context).await;
+    assert_eq!(score.score, 100, "details: {:?}", messages(&score));
+    assert!(
+        score.details.iter().all(|d| !d.message.contains("exceed 500 lines")),
+        "no large-file finding expected: {:?}",
+        messages(&score)
+    );
+    assert!(score.summary.contains("0 large files"), "summary: {}", score.summary);
+}
+
+#[tokio::test]
+async fn code_organization_vue_with_small_script_is_excluded() {
+    // 900 total lines but only a 100-line <script> block: template/style
+    // LOC is presentational and must not count.
+    let dir = tempfile::tempdir().unwrap();
+    let vue = write_vue(&dir, "src/Small.vue", 100, 400, 394);
+    let context = ctx(vec![entry(&vue, "Vue", 900)]);
+    let score = evaluate(&CodeOrganization, &context).await;
+    assert_eq!(score.score, 100, "details: {:?}", messages(&score));
+    assert!(
+        score.details.iter().all(|d| !d.message.contains("exceed 500 lines")),
+        "presentational Vue LOC must not be penalised: {:?}",
+        messages(&score)
+    );
+}
+
+#[tokio::test]
+async fn code_organization_vue_with_large_script_contributes_script_excess_only() {
+    // 900 total lines with a 700-line <script> block: only the script
+    // counts → 700 - 500 = 200 excess LOC → deduction of 2.
+    let dir = tempfile::tempdir().unwrap();
+    let vue = write_vue(&dir, "src/Big.vue", 700, 100, 94);
+    let context = ctx(vec![entry(&vue, "Vue", 900)]);
+    let score = evaluate(&CodeOrganization, &context).await;
+    assert_eq!(score.score, 98, "summary: {}", score.summary);
+    let finding = score
+        .details
+        .iter()
+        .find(|d| d.message.contains("exceed 500 lines"))
+        .expect("large-file finding must be present");
+    assert_eq!(
+        finding.message,
+        "1 code files exceed 500 lines (200 excess LOC; tests, Web/Config/Documentation, and non-script Vue sections excluded)"
+    );
+}
+
+#[tokio::test]
+async fn code_organization_unreadable_vue_file_is_excluded_fail_open() {
+    // Fail-open: a Vue entry whose file cannot be read from disk is
+    // excluded from the statistic rather than counted at full-file LOC.
+    let context = ctx(vec![entry("definitely/missing/Component.vue", "Vue", 900)]);
+    let score = evaluate(&CodeOrganization, &context).await;
+    assert_eq!(score.score, 100, "details: {:?}", messages(&score));
+    assert!(
+        score.details.iter().all(|d| !d.message.contains("exceed 500 lines")),
+        "unreadable Vue file must be excluded: {:?}",
+        messages(&score)
+    );
+}
+
+#[test]
+fn vue_script_loc_counts_only_lines_inside_script_markers() {
+    // Template and style lines are ignored; attributes on the opener
+    // (`setup`, `lang="ts"`, …) do not matter.
+    let sfc = "<template>\n<div/>\n</template>\n<script setup lang=\"ts\">\nlet a = 1;\nlet b = 2;\n</script>\n<style>\n.x{}\n</style>\n";
+    assert_eq!(vue_script_loc(sfc), 2);
+    // No script block at all → 0.
+    assert_eq!(vue_script_loc("<template>\n<div/>\n</template>\n"), 0);
+    // Multiple script blocks (plain + setup) are summed.
+    let multi = "<script>\nlet a = 1;\n</script>\n<script setup>\nlet b = 2;\n</script>\n";
+    assert_eq!(vue_script_loc(multi), 2);
 }
 
 // ─── CodeStyle normalisation ───────────────────────────────

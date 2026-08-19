@@ -133,8 +133,9 @@ pub fn compute(entries: &[FileEntry]) -> RepoFacts {
 
 /// Whether a file looks like a test file by naming convention.
 ///
-/// Language-agnostic heuristics, shared with the test-coverage expert so
-/// both count exactly the same files:
+/// Language-agnostic heuristics, shared with the test-coverage expert and
+/// the code-organization large-file statistic so all of them classify
+/// exactly the same files:
 ///   Rust:    `*_test.rs`, `tests/*.rs`, sibling `tests.rs` / `*_tests.rs`
 ///            (the `#[cfg(test)] mod tests;` split-file convention)
 ///   Python:  `test_*.py`, `*_test.py`, `tests/*.py`
@@ -142,17 +143,18 @@ pub fn compute(entries: &[FileEntry]) -> RepoFacts {
 ///   Go:      `*_test.go`
 ///   Java:    `*Test.java`, `src/test/*`
 ///   Swift:   `*Tests.swift`, `Tests/*` (SwiftPM)
+///
+/// The `.test.` / `.spec.` / `_test.` infixes match in ANY extension
+/// (e.g. `foo.test.tsx`, `bar.spec.vue`, `baz_test.ts`), not just the
+/// per-language examples listed above — the convention is the infix,
+/// not the file type.
 pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
-    name.ends_with("_test.rs")
+    name.contains("_test.")
         || name == "tests.rs"
         || name.ends_with("_tests.rs")
-        || name.ends_with("_test.py")
         || name.starts_with("test_")
-        || name.ends_with(".test.js")
-        || name.ends_with(".spec.js")
-        || name.ends_with(".test.ts")
-        || name.ends_with(".spec.ts")
-        || name.ends_with("_test.go")
+        || name.contains(".test.")
+        || name.contains(".spec.")
         || name.ends_with("Test.java")
         || name.ends_with("Tests.swift")
         || path.contains("/tests/")
@@ -516,6 +518,13 @@ def multi(
             ("findings_tests.rs", "src/output/parser/findings_tests.rs", true),
             // `test.rs` (no `s`) is not the convention; `_test.rs` already matched.
             ("contest.rs", "src/contest.rs", false),
+            // The `.test.` / `.spec.` / `_test.` infixes are extension-agnostic:
+            // tsx/vue/etc. variants of the JS/TS conventions count too.
+            ("app.test.tsx", "src/app.test.tsx", true),
+            ("widget.spec.vue", "src/widget.spec.vue", true),
+            ("parser_test.ts", "src/parser_test.ts", true),
+            // "latest" contains "test" but not as a delimited infix.
+            ("latest.rs", "src/latest.rs", false),
         ];
         for (name, path, expected) in cases {
             assert_eq!(is_test_file(name, path), *expected, "name={name} path={path}");

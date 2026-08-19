@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.24] - 2026-08-19
+
+### Refactored
+- **Large-file splits (u12c, pure moves, zero logic change)**: the three oversized core files are now submodule directories — `src/actions/repo_review.rs` (2337 LOC) → `repo_review/{mod,types,scoring,metadata,render,tests}.rs`, `src/config/resolver.rs` (1691) → `resolver/{mod,env,user_fallback,resolve,tests}.rs`, `src/team/orchestrator.rs` (1393) → `orchestrator/{mod,pipeline,validation,tests}.rs`. Public APIs unchanged via re-exports; LOC conserved (+27/+37/+24 glue); all callers verified.
+
+### Changed
+- **`code_organization` large-file penalty now scopes to logic files (scoring honesty)**: the >500-line graduated deduction no longer counts test files (`tests.rs`, `tests/` dirs, `*.test.*`/`*.spec.*` — test bulk tracks coverage, not coupling), presentational languages (`Web`/`Documentation`/`Config`/unknown `Other`), or the non-script sections of `.vue` SFCs (template/style are presentational; only the `<script>` block's LOC counts). Excluded files remain fully LLM-reviewed — only the deduction input is scoped. `.vue` gains a proper `Vue` language label. On this repo: excess 7451 → 3431, deduction 40 (capped) → 34, expert score 60 → 66, and the metric regains feedback sensitivity below the cap. (`src/repo/experts/static_experts/code_organization.rs`, `src/repo/experts/facts.rs`, `src/repo/mod.rs`)
+
 ## [0.9.23] - 2026-08-18
 
 ### Fixed

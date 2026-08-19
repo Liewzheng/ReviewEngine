@@ -17,6 +17,10 @@ import { i18n } from './i18n'
 import 'element-plus/es/components/notification/style/css'
 import 'element-plus/es/components/message/style/css'
 import 'element-plus/es/components/message-box/style/css'
+// Official Element Plus dark theme: defines the full --el-* palette under
+// `html.dark`. App.vue toggles that class alongside the bespoke `data-theme`
+// attribute; style.css re-bridges EP's dark base vars onto the app palette.
+import 'element-plus/theme-chalk/dark/css-vars.css'
 import './style.css'
 
 const app = createApp(App)

@@ -521,7 +521,7 @@ onUnmounted(() => {
 /* Row 2 */
 .row-two {
   display: grid;
-  grid-template-columns: 70% 30%;
+  grid-template-columns: 7fr 3fr;
   gap: 16px;
   margin-bottom: 24px;
 }
@@ -720,7 +720,7 @@ onUnmounted(() => {
 /* Responsive */
 @media (max-width: 1279px) {
   .row-two {
-    grid-template-columns: 60% 40%;
+    grid-template-columns: 3fr 2fr;
   }
 }
 

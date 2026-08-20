@@ -471,6 +471,8 @@ onUnmounted(() => {
 <style scoped>
 .queue-page {
   padding-bottom: 40px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
 
 /* Page Header */

@@ -58,6 +58,7 @@
       :rules="rules"
       :disabled="!isEditing"
       :label-position="labelPosition"
+      label-width="auto"
       class="config-form"
       @submit.prevent
     >
@@ -480,7 +481,7 @@ onUnmounted(() => {
 
 <style scoped>
 .config-page {
-  max-width: 900px;
+  max-width: 1400px;
   margin: 0 auto;
   animation: pageEnter 0.2s ease;
 }
@@ -596,11 +597,20 @@ onUnmounted(() => {
   font-size: 12px;
 }
 
+/* Safety cap so very long i18n labels don't blow out the auto label width */
+.config-form :deep(.el-form-item__label) {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* Slider with value */
 .slider-with-value {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
 }
 
 .slider-with-value .el-slider {
@@ -647,6 +657,7 @@ onUnmounted(() => {
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  width: 100%;
   padding: 4px;
   min-height: 32px;
   background: var(--bg-surface);

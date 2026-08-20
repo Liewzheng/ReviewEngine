@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.26] - 2026-08-19
+
+### Fixed
+- **Dashboard card misalignment**: the middle row used `grid-template-columns: 70% 30%` with a 16px gap — percentages ignore the gap, so the 系统健康 card overflowed ~16px past the KPI row above and 近期评审 below. Switched to `7fr 3fr` (and the ≤1279px breakpoint `60% 40%` → `3fr 2fr`); right/left edges now align to ±0.01px. (`frontend/src/views/Dashboard.vue`)
+- **Unified page container widths**: the 7 sidebar pages had inconsistent widths (Dashboard/LlmStatus/ExpertsManagement 1400px centered, Configuration 900px, ReviewHistory/QueueMonitor/SystemLogs full-bleed). All page roots now share `max-width: 1400px; margin: 0 auto`. (`frontend/src/views/{Configuration,ReviewHistory,QueueMonitor,SystemLogs}.vue`)
+- **Configuration form control alignment**: with `label-position="left"` and no label width, labels auto-sized per item so inputs started at ragged x positions; worse, the read-only secret boxes (`.readonly-field`) shrank to content inside the flex form-item content (e.g. "（未设置）" rendered as a tiny ~90px box). Form now uses `label-width="auto"` (uniform label column, capped at 220px for long i18n labels), and `.readonly-field`/`.slider-with-value`/`.tag-input` wrappers are `width: 100%` so every control shares identical column edges in both view and edit modes. (`frontend/src/views/Configuration.vue`, `frontend/src/components/Config/{GitLabSettingsCard,LlmSettingsCard}.vue`)
+
 ## [0.9.25] - 2026-08-19
 
 ### Fixed

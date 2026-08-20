@@ -408,6 +408,8 @@ onUnmounted(() => {
   flex-direction: column;
   height: 100%;
   gap: 12px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
 
 /* Page Header */

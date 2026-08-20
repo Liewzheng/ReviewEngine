@@ -30,5 +30,8 @@ reports/
 /bin/
 /frontend-dist/
 
+# Local compose overrides (HTTP port mapping for this machine)
+/docker-compose.override.yml
+
 # git worktree isolation for parallel subagent dispatch (pipeline.md)
 .worktrees/

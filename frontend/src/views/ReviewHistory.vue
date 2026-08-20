@@ -605,6 +605,8 @@ watch(() => route.query, () => {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
 
 .page-header {

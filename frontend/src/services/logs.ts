@@ -6,7 +6,8 @@ export type { LogEntry };
 
 export function createLogStream(
   onMessage: (entry: LogEntry) => void,
-  onError?: (err: Event) => void
+  onError?: (err: Event) => void,
+  onOpen?: () => void
 ): EventSource {
   // EventSource cannot set Authorization headers, so a configured API token
   // must ride in the query string (`?token=` — the backend allowlists this
@@ -24,6 +25,7 @@ export function createLogStream(
     }
   };
   if (onError) es.onerror = onError;
+  if (onOpen) es.onopen = onOpen;
   return es;
 }
 

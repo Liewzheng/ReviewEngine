@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.28] - 2026-08-19
+
+### Fixed
+- **System Logs row misalignment**: WARN/ERROR rows carried a colored left border plus an extra `margin-left: 2px`, shifting their content 4px right of INFO rows (ragged left edge). All rows now reserve a constant 2px transparent border slot; warn/error only recolor it — every row's content starts at the same x. (`frontend/src/views/SystemLogs.vue`)
+- **Log column alignment**: timestamp used `min-width` so longer values (ISO strings, verbose locales) pushed the level-tag column right. Timestamp column is now fixed-width (110px; 200px in ISO format via a `ts-iso` modifier) and level tags fixed at 56px — timestamp/tag/message columns align across all rows in every timestamp format. (`frontend/src/views/SystemLogs.vue`)
+- **Transient SSE drops no longer raise an error notification**: the log stream's `onerror` previously surfaced a persistent 'SSE 连接错误' ElNotification even though EventSource auto-reconnects seconds later (e.g. after a server restart). It now shows a subtle inline "连接中断，正在重连…" indicator in the toolbar that auto-clears on reconnect (`es.onopen`); history-load failures still notify as before. New `logs.reconnecting` i18n key in all 6 locales. (`frontend/src/composables/useLogs.ts`, `frontend/src/services/logs.ts`, `frontend/src/views/SystemLogs.vue`)
+
 ## [0.9.27] - 2026-08-19
 
 ### Added

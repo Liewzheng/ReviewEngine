@@ -469,6 +469,7 @@ export default {
     downloadStartedTitle: 'Téléchargement démarré',
     downloadStartedMessage: 'Votre fichier de journaux est en cours de téléchargement.',
     streamErrorTitle: 'Erreur du flux de journaux',
+    reconnecting: 'Connexion perdue — reconnexion…',
     time: {
       secondsAgo: 'il y a {n} s',
       minutesAgo: 'il y a {n} min',

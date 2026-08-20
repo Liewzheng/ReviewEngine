@@ -463,6 +463,7 @@ export default {
     downloadStartedTitle: '다운로드 시작됨',
     downloadStartedMessage: '로그 파일을 다운로드하고 있습니다.',
     streamErrorTitle: '로그 스트림 오류',
+    reconnecting: '연결 끊김 — 재연결 중…',
     time: {
       secondsAgo: '{n}초 전',
       minutesAgo: '{n}분 전',

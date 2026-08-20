@@ -461,6 +461,7 @@ export default {
     downloadStartedTitle: '下载已开始',
     downloadStartedMessage: '您的日志文件正在下载。',
     streamErrorTitle: '日志流错误',
+    reconnecting: '连接中断，正在重连…',
     time: {
       secondsAgo: '{n} 秒前',
       minutesAgo: '{n} 分钟前',

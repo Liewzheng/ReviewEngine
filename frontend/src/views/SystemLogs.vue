@@ -95,6 +95,9 @@
         </div>
 
         <div class="toolbar-right">
+          <span v-if="logs.reconnecting" class="reconnect-indicator">
+            {{ $t('logs.reconnecting') }}
+          </span>
           <span v-if="logs.isPaused" class="pause-indicator">
             <el-icon><VideoPause /></el-icon>
             {{ $t('common.paused') }}
@@ -151,7 +154,7 @@
             'log-warn': log.level === 'WARN',
           }"
         >
-          <span class="log-timestamp">{{ formatTimestamp(log.timestamp) }}</span>
+          <span :class="['log-timestamp', 'ts-' + timestampFormat]">{{ formatTimestamp(log.timestamp) }}</span>
           <el-tag
             :type="getLevelTagType(log.level)"
             size="small"
@@ -539,6 +542,14 @@ onUnmounted(() => {
   font-weight: 500;
 }
 
+.reconnect-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: var(--warning);
+}
+
 .filter-count {
   font-size: 13px;
   color: var(--text-secondary);
@@ -600,6 +611,7 @@ onUnmounted(() => {
   align-items: center;
   gap: 8px;
   padding: 3px 6px;
+  border-left: 2px solid transparent;
   border-radius: 4px;
   user-select: text;
   animation: fadeIn 0.15s ease;
@@ -618,28 +630,30 @@ onUnmounted(() => {
 }
 
 .log-line.log-error {
-  border-left: 2px solid var(--error);
-  padding-left: 6px;
-  margin-left: 2px;
+  border-left-color: var(--error);
 }
 
 .log-line.log-warn {
-  border-left: 2px solid var(--warning);
-  padding-left: 6px;
-  margin-left: 2px;
+  border-left-color: var(--warning);
 }
 
 .log-timestamp {
   color: var(--text-secondary);
-  min-width: 100px;
+  width: 110px;
   flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
   font-size: 12px;
   font-family: var(--font-mono);
 }
 
+.log-timestamp.ts-iso {
+  width: 200px;
+}
+
 .log-level {
   flex-shrink: 0;
-  min-width: 52px;
+  width: 56px;
   text-align: center;
   font-size: 11px;
   font-weight: 600;
@@ -757,7 +771,7 @@ onUnmounted(() => {
   }
 
   .log-timestamp {
-    min-width: 70px;
+    width: 70px;
   }
 
   .log-meta {
@@ -772,12 +786,12 @@ onUnmounted(() => {
 
 @media (max-width: 480px) {
   .log-timestamp {
-    min-width: 60px;
+    width: 60px;
     font-size: 11px;
   }
 
   .log-level {
-    min-width: 44px;
+    width: 44px;
   }
 
   .log-level :deep(.el-tag__content) {

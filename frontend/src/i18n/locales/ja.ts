@@ -464,6 +464,7 @@ export default {
     downloadStartedTitle: 'ダウンロードを開始しました',
     downloadStartedMessage: 'ログファイルをダウンロードしています。',
     streamErrorTitle: 'ログストリームエラー',
+    reconnecting: '接続が切断されました — 再接続中…',
     time: {
       secondsAgo: '{n} 秒前',
       minutesAgo: '{n} 分前',

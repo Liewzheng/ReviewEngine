@@ -461,6 +461,7 @@ export default {
     downloadStartedTitle: '已開始下載',
     downloadStartedMessage: '您的日誌檔正在下載。',
     streamErrorTitle: '日誌串流錯誤',
+    reconnecting: '連線中斷，正在重連…',
     time: {
       secondsAgo: '{n} 秒前',
       minutesAgo: '{n} 分鐘前',

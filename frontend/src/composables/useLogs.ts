@@ -10,6 +10,7 @@ export function useLogs() {
   const logs = ref<LogEntry[]>([]);
   const loading = ref(true);
   const error = ref<string | null>(null);
+  const reconnecting = ref(false);
   const isPaused = ref(false);
   const levels = ref<LogLevel[]>(['INFO', 'WARN', 'ERROR', 'DEBUG']);
   const keyword = ref('');
@@ -45,6 +46,7 @@ export function useLogs() {
     }
     loading.value = true;
     error.value = null;
+    reconnecting.value = false;
     try {
       const history = await fetchLogHistory();
       loadHistory(history);
@@ -64,8 +66,13 @@ export function useLogs() {
         }
       },
       (err) => {
-        error.value = i18n.global.t('errors.sseConnectionError');
+        // Transient drops (e.g. server restart) are auto-retried by
+        // EventSource; flag the reconnect instead of raising a fatal error.
+        reconnecting.value = true;
         console.error('SSE error:', err);
+      },
+      () => {
+        reconnecting.value = false;
       }
     );
   }
@@ -136,6 +143,7 @@ export function useLogs() {
     filteredLogs,
     loading,
     error,
+    reconnecting,
     isPaused,
     levels,
     keyword,

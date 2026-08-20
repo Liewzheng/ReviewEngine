@@ -474,6 +474,7 @@ export default {
     downloadStartedTitle: 'Download Started',
     downloadStartedMessage: 'Your log file is being downloaded.',
     streamErrorTitle: 'Log Stream Error',
+    reconnecting: 'Connection lost — reconnecting…',
     time: {
       secondsAgo: '{n}s ago',
       minutesAgo: '{n}m ago',

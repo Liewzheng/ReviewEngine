@@ -3,9 +3,11 @@ use super::task::{
     current_exe_name, exit_after_upgrade_enabled, find_dist_root, install_method_str, replace_frontend_dist,
     resolve_frontend_dir, resolve_install_dir,
 };
+use crate::server::state::{DownloadProgress, UpgradeJobState};
 use crate::server::AppState;
 use crate::upgrade::{InstallMethod, Release};
 use axum::http::HeaderMap;
+use axum::response::IntoResponse;
 use std::path::PathBuf;
 
 #[test]
@@ -217,9 +219,15 @@ fn stage_frontend_dist_returns_none_when_asset_missing() {
     };
     let state = AppState::new(vec![]);
     let staging = tempfile::tempdir().expect("temp dir");
+    let completed = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     let staged = tokio::runtime::Runtime::new()
         .expect("runtime")
-        .block_on(super::task::stage_frontend_dist(&state, &release, staging.path()));
+        .block_on(super::task::stage_frontend_dist(
+            &state,
+            &release,
+            staging.path(),
+            &completed,
+        ));
     assert!(
         matches!(staged, Ok(None)),
         "no dist asset must degrade to Ok(None), got {staged:?}"
@@ -251,4 +259,60 @@ fn exit_after_upgrade_gate_honors_env() {
         Some(v) => std::env::set_var("REVIEW_UPGRADE_EXIT_AFTER", v),
         None => {}
     }
+}
+
+// ─── upgrade status payload (download progress) ────────────
+
+async fn status_json(state: std::sync::Arc<AppState>) -> serde_json::Value {
+    let resp = super::start::upgrade_status(axum::extract::State(state))
+        .await
+        .into_response();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .expect("body bytes");
+    serde_json::from_slice(&bytes).expect("status payload is valid json")
+}
+
+#[tokio::test]
+async fn upgrade_status_includes_camel_case_download_progress() {
+    let state = std::sync::Arc::new(AppState::new(vec![]));
+    let started_at = chrono::DateTime::parse_from_rfc3339("2026-08-19T11:30:00Z")
+        .expect("valid rfc3339")
+        .with_timezone(&chrono::Utc);
+    {
+        let mut job = state.upgrade.job.write().unwrap();
+        job.state = UpgradeJobState::Downloading;
+        job.message = "正在下载 release 资产".to_string();
+        job.target_version = Some("0.9.27".to_string());
+        job.download = Some(DownloadProgress {
+            downloaded_bytes: 1_234_567,
+            total_bytes: 14_901_232,
+            started_at,
+        });
+    }
+
+    let value = status_json(state).await;
+    assert_eq!(value["state"], "downloading");
+    assert_eq!(value["targetVersion"], "0.9.27");
+    let download = &value["download"];
+    assert_eq!(download["downloadedBytes"], 1_234_567);
+    assert_eq!(download["totalBytes"], 14_901_232);
+    assert!(
+        download.get("downloaded_bytes").is_none(),
+        "snake_case key must not leak"
+    );
+    let parsed = chrono::DateTime::parse_from_rfc3339(download["startedAt"].as_str().expect("startedAt string"))
+        .expect("startedAt must be RFC3339/ISO8601");
+    assert_eq!(parsed.with_timezone(&chrono::Utc), started_at);
+}
+
+#[tokio::test]
+async fn upgrade_status_serializes_null_download_when_no_download() {
+    let state = std::sync::Arc::new(AppState::new(vec![]));
+    let value = status_json(state).await;
+    assert_eq!(value["state"], "idle");
+    assert!(
+        value["download"].is_null(),
+        "download must be null when no download is in progress"
+    );
 }

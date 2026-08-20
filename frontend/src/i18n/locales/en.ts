@@ -568,6 +568,11 @@ export default {
     notSupportedError: 'Automatic upgrade is not available for this installation.',
     restartHint:
       'The container is restarting to apply the update. The page will refresh automatically.',
+    downloadSpeed: 'Speed',
+    downloadTotal: 'Total',
+    downloadEta: 'ETA',
+    etaSeconds: '{s}s',
+    etaMinutesSeconds: '{m}m {s}s',
     source: {
       binary: 'prebuilt binary',
       brew: 'Homebrew',

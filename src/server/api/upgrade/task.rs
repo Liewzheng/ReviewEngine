@@ -1,8 +1,11 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::server::state::UpgradeJobState;
+use chrono::Utc;
+
+use crate::server::state::{DownloadProgress, UpgradeJobState};
 use crate::server::AppState;
 use crate::upgrade::{download, find_checksum_asset, platform, verify, UpdateCheck, UpgradeError};
 
@@ -50,6 +53,41 @@ pub(crate) fn install_method_str(method: crate::upgrade::InstallMethod) -> &'sta
     }
 }
 
+/// Total bytes this job will download: binary asset + its sha256 sidecar,
+/// plus the frontend-dist asset + its sidecar in container mode (mirroring
+/// exactly what [`stage_frontend_dist`] downloads). All sizes come from the
+/// GitHub release metadata, so the total is known before the first byte.
+fn expected_download_total(check: &UpdateCheck, mode: UpgradeMode) -> u64 {
+    let mut total =
+        check.asset.as_ref().map(|a| a.size).unwrap_or(0) + check.checksum_asset.as_ref().map(|c| c.size).unwrap_or(0);
+    if mode == UpgradeMode::ContainerWithFrontend {
+        if let Some(dist) = check
+            .latest_release
+            .assets
+            .iter()
+            .find(|a| a.name == FRONTEND_DIST_ASSET)
+        {
+            total += dist.size;
+            if let Some(c) = find_checksum_asset(&check.latest_release, &dist.name) {
+                total += c.size;
+            }
+        }
+    }
+    total
+}
+
+/// Build a per-download progress closure: `completed` holds the bytes already
+/// finished by earlier downloads of this job, so each invocation folds the
+/// per-download cumulative count into the job-wide `downloaded_bytes`.
+fn download_progress<'a>(state: &'a AppState, completed: &'a AtomicU64) -> impl Fn(u64) + Send + Sync + 'a {
+    move |current: u64| {
+        let mut job = state.upgrade.job.write().unwrap();
+        if let Some(d) = job.download.as_mut() {
+            d.downloaded_bytes = completed.load(Ordering::Relaxed) + current;
+        }
+    }
+}
+
 pub(crate) async fn run_upgrade_task(
     state: Arc<AppState>,
     check: UpdateCheck,
@@ -62,6 +100,10 @@ pub(crate) async fn run_upgrade_task(
         std::process::id(),
         rand::random::<u64>()
     ));
+    // Bytes already finished by earlier downloads of this job; downloads run
+    // sequentially, so `completed + current per-download cumulative` keeps the
+    // job's `downloaded_bytes` monotonically increasing across all downloads.
+    let completed = Arc::new(AtomicU64::new(0));
 
     let result = async {
         let asset = check
@@ -75,11 +117,44 @@ pub(crate) async fn run_upgrade_task(
 
         tokio::fs::create_dir_all(&staging).await?;
 
-        set_job(&state, UpgradeJobState::Downloading, "正在下载 release 资产");
-        let (asset_temp, _) =
-            download::download_asset(&asset.download_url, &staging, &asset.name, Some(asset.size)).await?;
-        let (checksum_temp, _) =
-            download::download_asset(&checksum.download_url, &staging, &checksum.name, Some(checksum.size)).await?;
+        // All sizes are known upfront from the GitHub API metadata; arm the
+        // live progress snapshot as the job enters the download phase.
+        let total_bytes = expected_download_total(&check, mode);
+        {
+            let mut job = state.upgrade.job.write().unwrap();
+            job.state = UpgradeJobState::Downloading;
+            job.message = "正在下载 release 资产".to_string();
+            job.download = Some(DownloadProgress {
+                downloaded_bytes: 0,
+                total_bytes,
+                started_at: Utc::now(),
+            });
+        }
+
+        let (asset_temp, asset_written) = {
+            let progress = download_progress(&state, &completed);
+            download::download_asset(
+                &asset.download_url,
+                &staging,
+                &asset.name,
+                Some(asset.size),
+                Some(&progress),
+            )
+            .await?
+        };
+        completed.fetch_add(asset_written, Ordering::Relaxed);
+        let (checksum_temp, checksum_written) = {
+            let progress = download_progress(&state, &completed);
+            download::download_asset(
+                &checksum.download_url,
+                &staging,
+                &checksum.name,
+                Some(checksum.size),
+                Some(&progress),
+            )
+            .await?
+        };
+        completed.fetch_add(checksum_written, Ordering::Relaxed);
 
         set_job(&state, UpgradeJobState::Verifying, "正在校验 sha256");
         let checksum_text = tokio::fs::read_to_string(&checksum_temp).await?;
@@ -97,7 +172,7 @@ pub(crate) async fn run_upgrade_task(
         }
 
         let staged_dist = if mode == UpgradeMode::ContainerWithFrontend {
-            stage_frontend_dist(&state, &check.latest_release, &staging).await?
+            stage_frontend_dist(&state, &check.latest_release, &staging, &completed).await?
         } else {
             None
         };
@@ -136,6 +211,7 @@ pub(crate) async fn stage_frontend_dist(
     state: &AppState,
     release: &crate::upgrade::Release,
     staging: &Path,
+    completed: &Arc<AtomicU64>,
 ) -> crate::upgrade::Result<Option<PathBuf>> {
     let Some(asset) = release.assets.iter().find(|a| a.name == FRONTEND_DIST_ASSET) else {
         tracing::warn!("release has no {FRONTEND_DIST_ASSET}; skipping frontend dist upgrade (binary-only)");
@@ -143,12 +219,33 @@ pub(crate) async fn stage_frontend_dist(
     };
 
     set_job(state, UpgradeJobState::Downloading, "正在下载 frontend dist");
-    let (dist_temp, _) = download::download_asset(&asset.download_url, staging, &asset.name, Some(asset.size)).await?;
+    let (dist_temp, dist_written) = {
+        let progress = download_progress(state, completed);
+        download::download_asset(
+            &asset.download_url,
+            staging,
+            &asset.name,
+            Some(asset.size),
+            Some(&progress),
+        )
+        .await?
+    };
+    completed.fetch_add(dist_written, Ordering::Relaxed);
 
     if let Some(checksum) = find_checksum_asset(release, &asset.name) {
         set_job(state, UpgradeJobState::Verifying, "正在校验 frontend dist sha256");
-        let (checksum_temp, _) =
-            download::download_asset(&checksum.download_url, staging, &checksum.name, Some(checksum.size)).await?;
+        let (checksum_temp, checksum_written) = {
+            let progress = download_progress(state, completed);
+            download::download_asset(
+                &checksum.download_url,
+                staging,
+                &checksum.name,
+                Some(checksum.size),
+                Some(&progress),
+            )
+            .await?
+        };
+        completed.fetch_add(checksum_written, Ordering::Relaxed);
         let checksum_text = tokio::fs::read_to_string(&checksum_temp).await?;
         verify::verify_file_with_checksum_text(&dist_temp, &checksum_text)?;
     } else {

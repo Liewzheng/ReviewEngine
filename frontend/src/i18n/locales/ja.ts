@@ -556,6 +556,11 @@ export default {
     inProgressError: 'アップグレードタスクはすでに進行中です。しばらくしてから再試行してください。',
     notSupportedError: 'このインストール方法では自動アップグレードは利用できません。',
     restartHint: '更新を適用するためコンテナを再起動しています。ページは自動的に更新されます。',
+    downloadSpeed: 'ダウンロード速度',
+    downloadTotal: '合計サイズ',
+    downloadEta: '残り約',
+    etaSeconds: '{s}秒',
+    etaMinutesSeconds: '{m}分{s}秒',
     source: {
       binary: 'プリビルドバイナリ',
       brew: 'Homebrew',

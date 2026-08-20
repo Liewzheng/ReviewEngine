@@ -71,7 +71,7 @@ pub(super) async fn run_plain_upgrade(check: &UpdateCheck) -> Result<()> {
     let _lock = UpgradeLock::acquire(&exe_dir)?;
 
     println!("downloading {}", asset.name);
-    let archive = download_verified_asset(asset, checksum, &exe_dir).await?;
+    let archive = download_verified_asset(asset, checksum, &exe_dir, None).await?;
     println!("verifying checksum of {}", asset.name);
 
     // Extract into a temp dir next to the exe (same filesystem → atomic rename).
@@ -153,7 +153,8 @@ pub(super) async fn run_plain_upgrade(check: &UpdateCheck) -> Result<()> {
 async fn expected_binary_sha(checksum: &ReleaseAsset, binary_name: &str) -> Result<Option<String>> {
     let tmp = unique_temp_dir(&std::env::temp_dir(), "checksum")?;
     let _cleanup = CleanupPaths(vec![tmp.clone()]);
-    let (sidecar_path, _) = download_asset(&checksum.download_url, &tmp, &checksum.name, Some(checksum.size)).await?;
+    let (sidecar_path, _) =
+        download_asset(&checksum.download_url, &tmp, &checksum.name, Some(checksum.size), None).await?;
     let text = std::fs::read_to_string(&sidecar_path)?;
     Ok(parse_sidecar_binary_hex(&text, binary_name))
 }

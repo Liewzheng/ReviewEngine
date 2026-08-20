@@ -43,6 +43,10 @@ fn download_client() -> Result<reqwest::Client> {
 /// `expected_size` is known (from the GitHub API), any deviation — stream
 /// longer than expected or shorter — fails the download.
 ///
+/// `progress`, when given, is invoked after each chunk with the CUMULATIVE
+/// number of bytes written for this download (starting from 0 for each call
+/// to `download_asset`).
+///
 /// On failure, the temp file is automatically removed so the caller never
 /// sees a partial file.
 pub async fn download_asset(
@@ -50,11 +54,12 @@ pub async fn download_asset(
     dest_dir: &Path,
     asset_name: &str,
     expected_size: Option<u64>,
+    progress: Option<&(dyn Fn(u64) + Send + Sync)>,
 ) -> Result<(PathBuf, u64)> {
     tokio::fs::create_dir_all(dest_dir).await?;
     let client = download_client()?;
     let temp_path = temp_path_for(dest_dir, asset_name);
-    let result = download_to_temp(&client, &temp_path, url, expected_size).await;
+    let result = download_to_temp(&client, &temp_path, url, expected_size, progress).await;
     if result.is_err() {
         // Best-effort cleanup: never hand the caller a partial file.
         let _ = tokio::fs::remove_file(&temp_path).await;
@@ -65,12 +70,17 @@ pub async fn download_asset(
 /// Download `asset` and its `<prefix>-<triple>.sha256` sidecar, verify the checksum, and
 /// rename the verified file into place at `dest_dir/<asset.name>`.
 ///
+/// `progress`, when given, is forwarded to both internal downloads; it
+/// receives per-download cumulative byte counts (resetting to 0 when the
+/// checksum download starts after the asset download finishes).
+///
 /// On any failure both temp files are removed and `dest_dir` is left as it
 /// was. Returns the final path of the verified asset.
 pub async fn download_verified_asset(
     asset: &ReleaseAsset,
     checksum_asset: &ReleaseAsset,
     dest_dir: &Path,
+    progress: Option<&(dyn Fn(u64) + Send + Sync)>,
 ) -> Result<PathBuf> {
     tokio::fs::create_dir_all(dest_dir).await?;
     let client = download_client()?;
@@ -78,12 +88,14 @@ pub async fn download_verified_asset(
     let checksum_temp = temp_path_for(dest_dir, &checksum_asset.name);
 
     let result = async {
-        let (asset_path, _) = download_to_temp(&client, &asset_temp, &asset.download_url, Some(asset.size)).await?;
+        let (asset_path, _) =
+            download_to_temp(&client, &asset_temp, &asset.download_url, Some(asset.size), progress).await?;
         let (checksum_path, _) = download_to_temp(
             &client,
             &checksum_temp,
             &checksum_asset.download_url,
             Some(checksum_asset.size),
+            progress,
         )
         .await?;
         let checksum_text = tokio::fs::read_to_string(&checksum_path).await?;
@@ -114,6 +126,7 @@ async fn download_to_temp(
     temp_path: &Path,
     url: &str,
     expected_size: Option<u64>,
+    progress: Option<&(dyn Fn(u64) + Send + Sync)>,
 ) -> Result<(PathBuf, u64)> {
     let resp = client.get(url).send().await?;
     if !resp.status().is_success() {
@@ -131,6 +144,9 @@ async fn download_to_temp(
         let chunk = chunk.map_err(UpgradeError::from)?;
         file.write_all(&chunk).await?;
         written += chunk.len() as u64;
+        if let Some(cb) = progress {
+            cb(written);
+        }
         if let Some(expected) = expected_size {
             if written > expected {
                 return Err(UpgradeError::invalid_data(format!(
@@ -191,6 +207,7 @@ mod tests {
             dir.path(),
             "review-engine-x86_64-unknown-linux-gnu.tar.gz",
             Some(body.len() as u64),
+            None,
         )
         .await
         .unwrap();
@@ -215,8 +232,8 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let url = format!("{}/asset", server.uri());
-        let (a, _) = download_asset(&url, dir.path(), "asset", None).await.unwrap();
-        let (b, _) = download_asset(&url, dir.path(), "asset", None).await.unwrap();
+        let (a, _) = download_asset(&url, dir.path(), "asset", None, None).await.unwrap();
+        let (b, _) = download_asset(&url, dir.path(), "asset", None, None).await.unwrap();
         assert_ne!(a, b, "temp paths must be unique");
         assert_eq!(std::fs::read(&a).unwrap(), body);
         assert_eq!(std::fs::read(&b).unwrap(), body);
@@ -235,7 +252,9 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let url = format!("{}/asset", server.uri());
-        let err = download_asset(&url, dir.path(), "asset", Some(5)).await.unwrap_err();
+        let err = download_asset(&url, dir.path(), "asset", Some(5), None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, UpgradeError::InvalidData(_)), "got {err:?}");
         assert_eq!(
             std::fs::read_dir(dir.path()).unwrap().count(),
@@ -255,9 +274,99 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let url = format!("{}/asset", server.uri());
-        let err = download_asset(&url, dir.path(), "asset", None).await.unwrap_err();
+        let err = download_asset(&url, dir.path(), "asset", None, None).await.unwrap_err();
         assert!(matches!(err, UpgradeError::Api { status: 404, .. }), "got {err:?}");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn download_reports_cumulative_progress_reaching_total() {
+        let server = MockServer::start().await;
+        // Large enough that reqwest delivers multiple chunks over HTTP.
+        let body = vec![7u8; 512 * 1024];
+        Mock::given(method("GET"))
+            .and(path("/big.bin"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body.clone()))
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_in_cb = seen.clone();
+        let progress = move |n: u64| seen_in_cb.lock().unwrap().push(n);
+        let (temp, written) = download_asset(
+            &format!("{}/big.bin", server.uri()),
+            dir.path(),
+            "big.bin",
+            Some(body.len() as u64),
+            Some(&progress),
+        )
+        .await
+        .unwrap();
+
+        let calls = seen.lock().unwrap();
+        assert!(!calls.is_empty(), "progress callback must fire at least once");
+        assert!(
+            calls.windows(2).all(|w| w[0] < w[1]),
+            "cumulative counts must be strictly increasing, got {calls:?}"
+        );
+        assert_eq!(
+            *calls.last().unwrap(),
+            body.len() as u64,
+            "final cumulative value must equal the total byte count"
+        );
+        assert_eq!(written, body.len() as u64);
+        drop(calls);
+        std::fs::remove_file(&temp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn download_verified_asset_forwards_progress_for_both_files() {
+        let server = MockServer::start().await;
+        let data = vec![3u8; 128 * 1024];
+        let hex = super::super::verify::data_sha256_hex(&data);
+        let checksum_text = format!("{hex}  review-engine-x86_64-unknown-linux-gnu.tar.gz");
+
+        Mock::given(method("GET"))
+            .and(path("/asset.tar.gz"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(data.clone()))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/asset.tar.gz.sha256"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(checksum_text.clone()))
+            .mount(&server)
+            .await;
+
+        let asset = ReleaseAsset {
+            name: "review-engine-x86_64-unknown-linux-gnu.tar.gz".to_string(),
+            download_url: format!("{}/asset.tar.gz", server.uri()),
+            size: data.len() as u64,
+        };
+        let checksum = ReleaseAsset {
+            name: "review-engine-x86_64-unknown-linux-gnu.sha256".to_string(),
+            download_url: format!("{}/asset.tar.gz.sha256", server.uri()),
+            size: checksum_text.len() as u64,
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_in_cb = seen.clone();
+        let progress = move |n: u64| seen_in_cb.lock().unwrap().push(n);
+        download_verified_asset(&asset, &checksum, dir.path(), Some(&progress))
+            .await
+            .unwrap();
+
+        let calls = seen.lock().unwrap();
+        assert!(
+            calls.contains(&(data.len() as u64)),
+            "asset download must report its full size, got {calls:?}"
+        );
+        assert_eq!(
+            *calls.last().unwrap(),
+            checksum_text.len() as u64,
+            "checksum download is last; its cumulative count ends the stream"
+        );
     }
 
     #[tokio::test]
@@ -290,7 +399,9 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let final_path = download_verified_asset(&asset, &checksum, dir.path()).await.unwrap();
+        let final_path = download_verified_asset(&asset, &checksum, dir.path(), None)
+            .await
+            .unwrap();
         assert_eq!(final_path.file_name().unwrap().to_string_lossy(), asset.name);
         assert_eq!(std::fs::read(&final_path).unwrap(), data);
         // Only the final file remains — both temp files were consumed/removed.
@@ -328,7 +439,7 @@ mod tests {
         };
 
         let dir = tempfile::tempdir().unwrap();
-        let err = download_verified_asset(&asset, &checksum, dir.path())
+        let err = download_verified_asset(&asset, &checksum, dir.path(), None)
             .await
             .unwrap_err();
         assert!(matches!(err, UpgradeError::ChecksumMismatch { .. }), "got {err:?}");

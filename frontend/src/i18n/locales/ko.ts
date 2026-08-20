@@ -555,6 +555,11 @@ export default {
     inProgressError: '업그레이드 작업이 이미 진행 중입니다. 나중에 다시 시도해 주세요.',
     notSupportedError: '이 설치 방식에서는 자동 업그레이드를 사용할 수 없습니다.',
     restartHint: '업데이트를 적용하기 위해 컨테이너가 다시 시작되고 있습니다. 페이지가 자동으로 새로고침됩니다.',
+    downloadSpeed: '다운로드 속도',
+    downloadTotal: '총 크기',
+    downloadEta: '예상 남은 시간',
+    etaSeconds: '{s}초',
+    etaMinutesSeconds: '{m}분 {s}초',
     source: {
       binary: '사전 빌드 바이너리',
       brew: 'Homebrew',

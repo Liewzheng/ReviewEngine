@@ -87,6 +87,7 @@ pub(crate) async fn start_upgrade_inner(state: Arc<AppState>, mode: UpgradeMode)
         job.state = UpgradeJobState::Checking;
         job.message = "正在检查最新版本".to_string();
         job.started_at = Some(Utc::now());
+        job.download = None;
     }
 
     let check = match refresh_check(&state).await {
@@ -154,5 +155,6 @@ pub(crate) async fn upgrade_status(State(state): State<Arc<AppState>>) -> impl I
         "message": job.message,
         "currentVersion": job.current_version,
         "targetVersion": job.target_version,
+        "download": job.download,
     }))
 }

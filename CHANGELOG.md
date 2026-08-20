@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.27] - 2026-08-19
+
+### Added
+- **Upgrade download progress**: the upgrade dialog now shows a live progress bar, download speed (EMA-smoothed over the 2s status polls), target total size, and estimated remaining time during the 下载中 (downloading) step. Backend: `GET /api/v1/system/upgrade/status` gains a camelCase `download: { downloadedBytes, totalBytes, startedAt }` object (null when no download in flight); `download_asset`/`download_verified_asset` accept an optional cumulative-bytes progress callback; the task layer aggregates one monotonic counter across the binary, checksum, frontend dist, and dist checksum downloads (total known upfront from GitHub asset metadata). Degrades gracefully to the plain step message when progress data is absent. i18n keys (`upgrade.downloadSpeed/downloadTotal/downloadEta/etaSeconds/etaMinutesSeconds`) added for all 6 locales. (`src/server/state.rs`, `src/upgrade/download.rs`, `src/server/api/upgrade/{task,start}.rs`, `frontend/src/components/Upgrade/UpgradeDialog.vue`, `frontend/src/types/upgrade.ts`)
+
 ## [0.9.26] - 2026-08-19
 
 ### Fixed

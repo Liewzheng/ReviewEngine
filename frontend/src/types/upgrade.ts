@@ -27,11 +27,20 @@ export type UpgradeJobState =
   // never report this state itself).
   | 'restarting'
 
+/** Live download counters reported while the job is in `downloading`. Absent
+ *  (or null) on backends/states that do not track byte-level progress. */
+export interface UpgradeDownloadProgress {
+  downloadedBytes: number
+  totalBytes: number
+  startedAt: string
+}
+
 export interface UpgradeStatus {
   state: UpgradeJobState
   message: string
   currentVersion: string | null
   targetVersion: string | null
+  download?: UpgradeDownloadProgress | null
 }
 
 /** `POST /system/upgrade` 2xx body: binary/docker start the automated job (202);

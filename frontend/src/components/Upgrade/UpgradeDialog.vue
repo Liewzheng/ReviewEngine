@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Link, DocumentCopy, Download, ArrowRight } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
@@ -53,6 +53,92 @@ const inProgress = computed(() => {
   return !!st && (st === 'checking' || st === 'downloading' || st === 'verifying' || st === 'installing')
 })
 const isRestarting = computed(() => status.value?.state === 'restarting')
+
+// ---- Download progress (state === 'downloading') ----
+// The backend reports byte counters on each 2s poll. Speed is derived from
+// consecutive samples and EMA-smoothed to avoid jumpiness; ETA divides the
+// remaining bytes by that smoothed speed. Both show '—' until the first
+// usable sample pair exists.
+
+/** Byte counters while downloading; null degrades the UI to the plain step message. */
+const downloadInfo = computed(() => {
+  const s = status.value
+  if (s?.state === 'downloading' && s.download && s.download.totalBytes > 0) {
+    return s.download
+  }
+  return null
+})
+
+const downloadPercent = computed(() => {
+  const d = downloadInfo.value
+  if (!d) return 0
+  return Math.min(100, Math.floor((d.downloadedBytes / d.totalBytes) * 100))
+})
+
+const prevSample = ref<{ bytes: number; time: number } | null>(null)
+const smoothSpeed = ref(0) // bytes/s, EMA of per-poll instantaneous speed
+
+function resetDownloadSample() {
+  prevSample.value = null
+  smoothSpeed.value = 0
+}
+
+watch(status, (s) => {
+  const d = s?.state === 'downloading' ? s.download : null
+  if (!d || d.totalBytes <= 0) {
+    resetDownloadSample()
+    return
+  }
+  const now = Date.now()
+  const prev = prevSample.value
+  if (prev) {
+    const dt = (now - prev.time) / 1000
+    const inst = dt > 0 ? (d.downloadedBytes - prev.bytes) / dt : 0
+    if (inst > 0) {
+      smoothSpeed.value = smoothSpeed.value > 0 ? 0.5 * smoothSpeed.value + 0.5 * inst : inst
+    }
+  }
+  prevSample.value = { bytes: d.downloadedBytes, time: now }
+})
+
+// Drop stale samples when the dialog closes mid-download.
+watch(visible, (v) => {
+  if (!v) resetDownloadSample()
+})
+
+/** B/KB/MB/GB with 1 decimal (bytes shown whole). */
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  if (bytes < 1024) return `${Math.floor(bytes)} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value.toFixed(1)} ${units[unit]}`
+}
+
+/** Compact localized ETA: "<60s" → seconds-only, otherwise minutes+seconds. */
+function formatEta(totalSeconds: number): string {
+  const s = Math.max(0, Math.round(totalSeconds))
+  if (s < 60) return t('upgrade.etaSeconds', { s })
+  return t('upgrade.etaMinutesSeconds', { m: Math.floor(s / 60), s: s % 60 })
+}
+
+const speedText = computed(() =>
+  smoothSpeed.value > 0 ? `${formatBytes(smoothSpeed.value)}/s` : '—'
+)
+const etaText = computed(() => {
+  const d = downloadInfo.value
+  if (!d || smoothSpeed.value <= 0) return '—'
+  return formatEta((d.totalBytes - d.downloadedBytes) / smoothSpeed.value)
+})
+const downloadTotalTitle = computed(() => {
+  const d = downloadInfo.value
+  return d ? `${t('upgrade.downloadTotal')} ${formatBytes(d.totalBytes)}` : ''
+})
 
 // Done / confirm copy differs between binary and docker (docker restarts itself).
 const doneTitle = computed(() => {
@@ -139,6 +225,19 @@ async function copy(text: string) {
           <el-step v-for="(title, i) in stepTitles" :key="i" :title="title" />
         </el-steps>
         <p v-if="inProgress" class="step-message">{{ status?.message }}</p>
+
+        <!-- download progress: byte counters, speed and ETA (only while
+             the backend reports download progress) -->
+        <div v-if="downloadInfo" class="download-progress">
+          <el-progress :percentage="downloadPercent" :stroke-width="10" class="download-bar" />
+          <div class="download-stats">
+            <span :title="downloadTotalTitle">
+              {{ formatBytes(downloadInfo.downloadedBytes) }} / {{ formatBytes(downloadInfo.totalBytes) }}
+            </span>
+            <span>{{ $t('upgrade.downloadSpeed') }} {{ speedText }}</span>
+            <span>{{ $t('upgrade.downloadEta') }} {{ etaText }}</span>
+          </div>
+        </div>
 
         <el-alert
           v-if="isRestarting"
@@ -313,6 +412,31 @@ async function copy(text: string) {
   text-align: center;
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.download-progress {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.download-bar :deep(.el-progress-bar__outer) {
+  background-color: var(--bg-surface);
+}
+
+.download-bar :deep(.el-progress__text) {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.download-stats {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
 }
 
 .confirm-row {

@@ -46,6 +46,22 @@ impl UpgradeJobState {
     }
 }
 
+/// Real-time download progress for the upgrade's download phase.
+///
+/// Serialized into the `download` field of the upgrade-status payload with
+/// camelCase keys so the frontend can render a progress bar, transfer speed,
+/// and ETA while the job is in the `downloading` state.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadProgress {
+    /// Cumulative bytes written across all downloads of this job so far.
+    pub downloaded_bytes: u64,
+    /// Total bytes expected for all downloads of this job (from GitHub API metadata).
+    pub total_bytes: u64,
+    /// When the download phase started (RFC3339/ISO8601 UTC once serialized).
+    pub started_at: DateTime<Utc>,
+}
+
 /// Snapshot of the current upgrade job for the status endpoint.
 /// Snapshot of the current self-upgrade job for the status endpoint.
 ///
@@ -63,6 +79,10 @@ pub struct UpgradeJob {
     pub target_version: Option<String>,
     /// When the upgrade job started (for elapsed-time display).
     pub started_at: Option<DateTime<Utc>>,
+    /// Live download progress; `None` when no download is in progress or
+    /// sizes are unknown. Left set after the download phase ends — the
+    /// frontend hides it outside the `downloading` state.
+    pub download: Option<DownloadProgress>,
 }
 
 impl Default for UpgradeJob {
@@ -73,6 +93,7 @@ impl Default for UpgradeJob {
             current_version: env!("CARGO_PKG_VERSION").to_string(),
             target_version: None,
             started_at: None,
+            download: None,
         }
     }
 }
@@ -278,6 +299,28 @@ mod tests {
         assert_eq!(job.state, UpgradeJobState::Idle);
         assert_eq!(job.current_version, env!("CARGO_PKG_VERSION"));
         assert!(job.target_version.is_none());
+        assert!(job.download.is_none());
+    }
+
+    #[test]
+    fn download_progress_serializes_camel_case_contract() {
+        let started_at = DateTime::parse_from_rfc3339("2026-08-19T11:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let progress = DownloadProgress {
+            downloaded_bytes: 1_234_567,
+            total_bytes: 14_901_232,
+            started_at,
+        };
+        let value = serde_json::to_value(&progress).unwrap();
+        assert_eq!(value["downloadedBytes"], 1_234_567);
+        assert_eq!(value["totalBytes"], 14_901_232);
+        assert!(value.get("downloaded_bytes").is_none(), "snake_case key must not leak");
+        assert!(value.get("total_bytes").is_none(), "snake_case key must not leak");
+        // startedAt must be RFC3339/ISO8601 UTC.
+        let parsed = DateTime::parse_from_rfc3339(value["startedAt"].as_str().unwrap()).unwrap();
+        assert_eq!(parsed.with_timezone(&Utc), started_at);
+        assert!(value["startedAt"].as_str().unwrap().ends_with('Z'));
     }
 
     #[test]

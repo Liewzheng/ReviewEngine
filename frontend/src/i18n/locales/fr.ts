@@ -561,6 +561,11 @@ export default {
     inProgressError: 'Une tâche de mise à niveau est déjà en cours. Veuillez réessayer plus tard.',
     notSupportedError: 'La mise à niveau automatique n’est pas disponible pour cette installation.',
     restartHint: 'Le conteneur redémarre pour appliquer la mise à jour. La page se rafraîchira automatiquement.',
+    downloadSpeed: 'Vitesse',
+    downloadTotal: 'Taille totale',
+    downloadEta: 'Temps restant',
+    etaSeconds: '{s} s',
+    etaMinutesSeconds: '{m} min {s} s',
     source: {
       binary: 'binaire précompilé',
       brew: 'Homebrew',

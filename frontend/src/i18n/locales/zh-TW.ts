@@ -553,6 +553,11 @@ export default {
     inProgressError: '升級任務已在进行中，請稍後再試',
     notSupportedError: '此安裝方式不支援自動升級。',
     restartHint: '容器正在重新啟動以套用更新，頁面將自動重新整理。',
+    downloadSpeed: '下載速度',
+    downloadTotal: '總大小',
+    downloadEta: '預計剩餘',
+    etaSeconds: '{s} 秒',
+    etaMinutesSeconds: '{m} 分鐘 {s} 秒',
     source: {
       binary: '預編譯二進位檔',
       brew: 'Homebrew',

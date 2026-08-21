@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.29] - 2026-08-20
+
+### Fixed
+- **Self-hosted GitLab on non-default ports / plain HTTP rejected**: `Client::new` rejected any MR URL whose host contained `:` (killing every explicit-port URL, e.g. `http://gitlab.internal:8929/…`) and always built the API base with hardcoded `https://` (killing plain-HTTP internal installs). URL parsing is now extracted into `Client::parse_mr_url` → `ParsedMrUrl { scheme, host, project_path, mr_iid }`; the URL's own scheme is honored, and an optional `:port` (digits, 1–65535) is accepted. Hardening kept: userinfo (`@`), `..`, empty host, bad ports, and IPv6 literals are rejected with clear messages. Benefits every entry point — REST `gitlab_mr` reviews, CLI `review`/`ask`/`describe`/`improve`, and `GitLabProvider`. (`src/git_provider/gitlab/client.rs`)
+- **Invalid MR URLs now fail fast with 422 at enqueue** instead of 202-then-async-failure: `submit_review` and `rerun_review` validate the `gitlab_mr` URL synchronously and return `422 invalid gitlab_mr url: …` without creating a task. (`src/server/api/review/handlers.rs`)
+
 ## [0.9.28] - 2026-08-19
 
 ### Fixed

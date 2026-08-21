@@ -37,11 +37,45 @@ impl std::fmt::Debug for Client {
     }
 }
 
+/// The parsed components of a GitLab merge request web URL.
+///
+/// Produced by [`Client::parse_mr_url`]; carries everything needed to build
+/// the API base URL without constructing a client, so API handlers can
+/// validate an MR URL synchronously at enqueue time.
+#[derive(Debug, Clone)]
+pub struct ParsedMrUrl {
+    /// URL scheme (`http` or `https`), preserved from the input URL.
+    pub scheme: String,
+    /// Host with optional `:port` suffix (e.g. `gitlab.internal:8443`).
+    pub host: String,
+    /// Project path (e.g. `group/project`).
+    pub project_path: String,
+    /// Merge request internal ID (iid).
+    pub mr_iid: u32,
+}
+
+impl ParsedMrUrl {
+    /// GitLab REST API base URL derived from the MR URL, keeping the
+    /// original scheme and port (e.g. `http://localhost:8929/api/v4`).
+    pub fn base_url(&self) -> String {
+        format!("{}://{}/api/v4", self.scheme, self.host)
+    }
+}
+
 impl Client {
-    pub fn new(gitlab_token: &str, mr_url: &str) -> Result<Self> {
-        let stripped = mr_url
+    /// Parse and validate a GitLab MR web URL into its API components.
+    ///
+    /// Accepts `http://` and `https://` (the scheme is preserved for the API
+    /// base URL) and an optional numeric `:port` on the host, so self-hosted
+    /// GitLab instances on plain HTTP and/or non-standard ports work. This
+    /// is a pure parse — no network, no credential — so enqueue-path
+    /// handlers use it to reject malformed URLs with 422 instead of failing
+    /// inside the async review task.
+    pub fn parse_mr_url(mr_url: &str) -> Result<ParsedMrUrl> {
+        let (scheme, stripped) = mr_url
             .strip_prefix("https://")
-            .or_else(|| mr_url.strip_prefix("http://"))
+            .map(|rest| ("https", rest))
+            .or_else(|| mr_url.strip_prefix("http://").map(|rest| ("http", rest)))
             .with_context(|| format!("Invalid MR URL format (no scheme): {mr_url}"))?;
 
         let sep = "/-/merge_requests/";
@@ -60,9 +94,7 @@ impl Client {
         let project_path = &host_and_path[slash_idx + 1..];
 
         // Validate host and project_path to prevent path traversal / command injection
-        if host.is_empty() || host.contains('/') || host.contains("..") || host.contains(':') {
-            anyhow::bail!("Invalid GitLab host in MR URL: {mr_url}");
-        }
+        validate_gitlab_host(host, mr_url)?;
         if project_path.contains("..") || project_path.starts_with('/') || project_path.ends_with('/') {
             anyhow::bail!("Invalid GitLab project path in MR URL: {mr_url}");
         }
@@ -71,14 +103,22 @@ impl Client {
             .parse()
             .with_context(|| format!("Failed to parse MR IID as integer: {iid_str}"))?;
 
-        let base_url = format!("https://{host}/api/v4");
-        let http = HttpClient::new();
-
-        let client = Self {
-            http,
-            base_url,
+        Ok(ParsedMrUrl {
+            scheme: scheme.to_string(),
+            host: host.to_string(),
             project_path: project_path.to_string(),
             mr_iid,
+        })
+    }
+
+    pub fn new(gitlab_token: &str, mr_url: &str) -> Result<Self> {
+        let parsed = Self::parse_mr_url(mr_url)?;
+
+        let client = Self {
+            http: HttpClient::new(),
+            base_url: parsed.base_url(),
+            project_path: parsed.project_path,
+            mr_iid: parsed.mr_iid,
             gitlab_token: gitlab_token.to_string(),
         };
 
@@ -619,6 +659,38 @@ fn encode_project_path(path: &str) -> String {
     path.replace('/', "%2F")
 }
 
+/// Validate the host portion of a GitLab MR URL, allowing an optional
+/// numeric `:port` suffix (1-65535) for self-hosted instances on
+/// non-standard ports. Keeps the anti-traversal intent of the original
+/// host check: the host must be non-empty and must not contain `/`, `..`,
+/// or `@` (userinfo would smuggle a different effective host into the API
+/// URL). IPv6 literals are rejected with an explicit message — bracketed
+/// forms and bare multi-colon forms are both out of scope.
+fn validate_gitlab_host(host: &str, mr_url: &str) -> Result<()> {
+    if host.contains('@') {
+        anyhow::bail!("Invalid GitLab host in MR URL (userinfo is not allowed): {mr_url}");
+    }
+    if host.starts_with('[') || host.matches(':').count() > 1 {
+        anyhow::bail!("Invalid GitLab host in MR URL (IPv6 literals are not supported): {mr_url}");
+    }
+    let hostname = match host.split_once(':') {
+        Some((hostname, port)) => {
+            let valid = !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+                && port.parse::<u32>().is_ok_and(|p| (1..=65535).contains(&p));
+            if !valid {
+                anyhow::bail!("Invalid GitLab host port in MR URL (expected a numeric port in 1-65535): {mr_url}");
+            }
+            hostname
+        }
+        None => host,
+    };
+    if hostname.is_empty() || hostname.contains('/') || hostname.contains("..") {
+        anyhow::bail!("Invalid GitLab host in MR URL: {mr_url}");
+    }
+    Ok(())
+}
+
 /// Defensive validation of a repository-relative file path before it is
 /// embedded in an API URL, consistent with `post_inline_note`.
 fn validate_repo_file_path(path: &str) -> Result<()> {
@@ -667,9 +739,10 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Build a client pointed at a wiremock server. Tests live in the same
-    /// module, so private fields are accessible; `Client::new` cannot be
-    /// used because it derives `base_url` from the MR URL host and rejects
-    /// `host:port` forms.
+    /// module, so private fields are accessible; a struct literal is used
+    /// instead of `Client::new` so `base_url` is the mock server URI exactly
+    /// (`Client::new` derives it from the MR URL with an `/api/v4` suffix,
+    /// which would not match the wiremock path matchers below).
     fn make_test_client(server: &MockServer) -> Client {
         Client {
             http: HttpClient::new(),
@@ -681,6 +754,144 @@ mod tests {
     }
 
     // ─── helpers ──────────────────────────────────
+
+    // ─── parse_mr_url ─────────────────────────────
+
+    #[test]
+    fn test_parse_mr_url_accepts_plain_https() {
+        let parsed = Client::parse_mr_url("https://gitlab.example.com/group/proj/-/merge_requests/1").unwrap();
+        assert_eq!(parsed.scheme, "https");
+        assert_eq!(parsed.host, "gitlab.example.com");
+        assert_eq!(parsed.project_path, "group/proj");
+        assert_eq!(parsed.mr_iid, 1);
+        assert_eq!(parsed.base_url(), "https://gitlab.example.com/api/v4");
+    }
+
+    #[test]
+    fn test_parse_mr_url_accepts_http_with_explicit_port() {
+        // Self-hosted GitLab EE testbed shape: plain HTTP + explicit port.
+        let url = "http://localhost:8929/review-lab/demo-app/-/merge_requests/1";
+        let parsed = Client::parse_mr_url(url).unwrap();
+        assert_eq!(parsed.scheme, "http");
+        assert_eq!(parsed.host, "localhost:8929");
+        assert_eq!(parsed.project_path, "review-lab/demo-app");
+        assert_eq!(parsed.mr_iid, 1);
+        assert_eq!(parsed.base_url(), "http://localhost:8929/api/v4");
+
+        let client = Client::new("test_token", url).unwrap();
+        assert_eq!(client.base_url, "http://localhost:8929/api/v4");
+        assert_eq!(client.project_path, "review-lab/demo-app");
+        assert_eq!(client.mr_iid, 1);
+    }
+
+    #[test]
+    fn test_parse_mr_url_accepts_https_with_explicit_port() {
+        let parsed = Client::parse_mr_url("https://gitlab.internal:8443/g/p/-/merge_requests/7").unwrap();
+        assert_eq!(parsed.scheme, "https");
+        assert_eq!(parsed.host, "gitlab.internal:8443");
+        assert_eq!(parsed.project_path, "g/p");
+        assert_eq!(parsed.mr_iid, 7);
+        assert_eq!(parsed.base_url(), "https://gitlab.internal:8443/api/v4");
+    }
+
+    #[test]
+    fn test_parse_mr_url_rejects_userinfo_host() {
+        for url in [
+            "https://user@gitlab.example.com/g/p/-/merge_requests/1",
+            "https://user:pass@gitlab.example.com/g/p/-/merge_requests/1",
+        ] {
+            let err = Client::parse_mr_url(url).unwrap_err();
+            assert!(
+                err.to_string().contains("userinfo"),
+                "url {url} must fail with a userinfo error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_mr_url_rejects_invalid_ports() {
+        // Empty, zero, non-numeric, and out-of-range ports are all rejected.
+        for host in [
+            "localhost:",
+            "localhost:0",
+            "localhost:abc",
+            "localhost:99999",
+            "localhost:65536",
+            "localhost:99999999999999999999",
+        ] {
+            let url = format!("http://{host}/g/p/-/merge_requests/1");
+            let err = Client::parse_mr_url(&url).unwrap_err();
+            assert!(
+                err.to_string().contains("port"),
+                "url {url} must fail with a port error, got: {err}"
+            );
+        }
+        // Boundaries: 1 and 65535 remain valid.
+        assert!(Client::parse_mr_url("http://localhost:1/g/p/-/merge_requests/1").is_ok());
+        assert!(Client::parse_mr_url("http://localhost:65535/g/p/-/merge_requests/1").is_ok());
+    }
+
+    #[test]
+    fn test_parse_mr_url_rejects_dotdot_in_host() {
+        for url in [
+            "https://git..lab.example.com/g/p/-/merge_requests/1",
+            "https://../g/p/-/merge_requests/1",
+        ] {
+            let err = Client::parse_mr_url(url).unwrap_err();
+            assert!(
+                err.to_string().contains("Invalid GitLab host"),
+                "url {url} must fail with a host error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_mr_url_rejects_ipv6_literals() {
+        for url in [
+            "http://[::1]:8929/g/p/-/merge_requests/1",
+            "http://[fe80::1]/g/p/-/merge_requests/1",
+            "http://::1/g/p/-/merge_requests/1",
+        ] {
+            let err = Client::parse_mr_url(url).unwrap_err();
+            assert!(
+                err.to_string().contains("IPv6"),
+                "url {url} must fail with an IPv6 error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_mr_url_rejects_bad_iid() {
+        for url in [
+            "https://gitlab.example.com/g/p/-/merge_requests/abc",
+            "https://gitlab.example.com/g/p/-/merge_requests/",
+            "https://gitlab.example.com/g/p/-/merge_requests/1.5",
+        ] {
+            let err = Client::parse_mr_url(url).unwrap_err();
+            assert!(
+                err.to_string().contains("MR IID"),
+                "url {url} must fail with an iid error, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_mr_url_rejects_missing_scheme_and_empty_host() {
+        let err = Client::parse_mr_url("not-a-valid-url").unwrap_err();
+        assert!(err.to_string().contains("no scheme"), "unexpected error: {err}");
+
+        let err = Client::parse_mr_url("https://gitlab.example.com/g/p").unwrap_err();
+        assert!(
+            err.to_string().contains("/-/merge_requests/"),
+            "unexpected error: {err}"
+        );
+
+        let err = Client::parse_mr_url("https:///g/p/-/merge_requests/1").unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid GitLab host"),
+            "empty host must be rejected, got: {err}"
+        );
+    }
 
     #[test]
     fn test_encode_file_path() {

@@ -40,6 +40,19 @@ fn resolve_gitlab_credential(
     })
 }
 
+/// Validate a `gitlab_mr` source URL synchronously — a pure parse, no
+/// network and no credential use — so a malformed MR URL fails fast with
+/// 422 at enqueue time instead of being accepted (202) and only failing
+/// inside the async review task. The 202 flow for valid URLs is unchanged.
+fn validate_gitlab_mr_url(source: &ReviewSource) -> Result<(), (StatusCode, String)> {
+    if let ReviewSource::GitLabMr { url } = source {
+        if let Err(e) = crate::git_provider::gitlab::client::Client::parse_mr_url(url) {
+            return Err((StatusCode::UNPROCESSABLE_ENTITY, format!("invalid gitlab_mr url: {e}")));
+        }
+    }
+    Ok(())
+}
+
 /// Validate the optional webhook callback URL (SSRF protection, async DNS).
 async fn validate_webhook(webhook: Option<&str>) -> Result<(), (StatusCode, String)> {
     if let Some(url) = webhook {
@@ -94,6 +107,12 @@ pub(crate) async fn submit_review(
         Ok(r) => r,
         Err(e) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, format!("invalid review request: {e}")),
     };
+
+    // Fail fast: a malformed gitlab_mr URL is an unprocessable entity, not a
+    // queued task that fails asynchronously.
+    if let Err((status, msg)) = validate_gitlab_mr_url(&request.source) {
+        return error_response(status, msg);
+    }
 
     if let Err((status, msg)) = validate_webhook(request.webhook.as_deref()).await {
         return error_response(status, msg);
@@ -185,6 +204,13 @@ pub(crate) async fn rerun_review(
             )
         }
     };
+
+    // A rerun is a fresh enqueue: re-validate a stored gitlab_mr URL the
+    // same way (legacy tasks persisted before enqueue-time validation fail
+    // fast here instead of queuing a task that is doomed to fail).
+    if let Err((status, msg)) = validate_gitlab_mr_url(&request.source) {
+        return error_response(status, msg);
+    }
 
     // The stored parameters carry no credential (it is never persisted), so
     // rerun re-resolves it under the same rule as submit: the rerun request's

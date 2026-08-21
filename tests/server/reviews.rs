@@ -8,12 +8,13 @@ use super::{bootstrap_authed_client, find_free_port, spawn_server_inner_with_env
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// A gitlab_mr body with a deliberately invalid MR URL: the enqueued task
-/// fails fast at GitLab client construction (no network I/O), so these tests
-/// exercise the HTTP contract only.
+/// A gitlab_mr body with a parseable but unreachable MR URL (loopback discard
+/// port): enqueue-time URL validation passes, and the enqueued task fails fast
+/// on connection refused (no external network I/O), so these tests exercise
+/// the HTTP contract only.
 fn gitlab_mr_body() -> serde_json::Value {
     serde_json::json!({
-        "source": {"type": "gitlab_mr", "url": "not-a-valid-url"}
+        "source": {"type": "gitlab_mr", "url": "http://127.0.0.1:9/owner/repo/-/merge_requests/1"}
     })
 }
 

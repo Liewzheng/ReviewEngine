@@ -490,9 +490,11 @@ impl Drop for GitLabRuntimeGuard {
 
 fn gitlab_mr_body() -> serde_json::Value {
     serde_json::json!({
-        // Deliberately invalid: the enqueued task fails fast at client
-        // construction (no network) — the handler contract is what is tested.
-        "source": {"type": "gitlab_mr", "url": "not-a-valid-url"}
+        // Parseable but unreachable: the URL passes enqueue-time validation
+        // (and exercises host:port MR URLs end-to-end), then the enqueued
+        // task fails fast on the loopback fetch (port 9, discard — refused,
+        // no external network) — the handler contract is what is tested.
+        "source": {"type": "gitlab_mr", "url": "http://127.0.0.1:9/owner/repo/-/merge_requests/1"}
     })
 }
 
@@ -526,6 +528,46 @@ async fn submit_gitlab_mr_with_header_token_returns_202() {
         "header token must be accepted, got {json}"
     );
     assert!(json["task_id"].is_string());
+}
+
+#[tokio::test]
+async fn submit_gitlab_mr_with_invalid_url_returns_422() {
+    let cases = [
+        "not-a-valid-url",                                        // no scheme
+        "https://gitlab.example.com/g/p/-/merge_requests/abc",    // non-integer iid
+        "https://user@gitlab.example.com/g/p/-/merge_requests/1", // userinfo
+        "http://localhost:/g/p/-/merge_requests/1",               // empty port
+        "http://localhost:0/g/p/-/merge_requests/1",              // port below range
+        "http://localhost:abc/g/p/-/merge_requests/1",            // non-numeric port
+        "http://localhost:99999/g/p/-/merge_requests/1",          // port above range
+        "https://git..lab.example.com/g/p/-/merge_requests/1",    // `..` in host
+        "http://[::1]:8929/g/p/-/merge_requests/1",               // IPv6 literal
+    ];
+    for url in cases {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+        let body = serde_json::json!({"source": {"type": "gitlab_mr", "url": url}});
+        let resp = submit_review(
+            State(state),
+            headers_with_gitlab_token("glpat-header-token"),
+            Ok(Json(body)),
+        )
+        .await
+        .into_response();
+        let (status, json) = response_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "url {url} must be rejected with 422, got {json}"
+        );
+        let error = json["error"].as_str().unwrap();
+        assert!(
+            error.starts_with("invalid gitlab_mr url:"),
+            "error must carry the parse failure: {error}"
+        );
+        let (_, total) = store.list(None, 1, 20, None, None, None, None, None).await;
+        assert_eq!(total, 0, "an invalid url must not enqueue a task");
+    }
 }
 
 #[tokio::test]
@@ -790,9 +832,9 @@ async fn submit_rejects_invalid_webhook_urls_with_400() {
 #[tokio::test]
 async fn submit_accepts_loopback_webhook() {
     let state = state_with_store();
-    // gitlab_mr + header: the enqueued task fails fast at client
-    // construction, then the callback POST to an unused loopback port fails
-    // closed (connection refused) — no external network in this test.
+    // gitlab_mr + header: the enqueued task fails fast on the loopback
+    // fetch (connection refused, no external network), then the callback
+    // POST to an unused loopback port fails closed.
     let mut body = gitlab_mr_body();
     body["webhook"] = serde_json::json!("http://127.0.0.1:9/hook");
     let resp = submit_review(

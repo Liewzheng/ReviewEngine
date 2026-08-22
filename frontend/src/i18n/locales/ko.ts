@@ -191,6 +191,10 @@ export default {
       requeuedTitle: '리뷰가 다시 대기열에 추가됨',
       requeuedMessage: '{title}에 대한 새 리뷰가 대기열에 추가되었습니다.',
     },
+    llmNotConfiguredTitle: 'LLM이 구성되지 않음',
+    llmNotConfiguredBody:
+      '리뷰에는 사용 가능한 LLM 구성이 필요합니다. 설정 페이지로 이동하여 구성하시겠습니까?',
+    goToConfig: '설정으로 이동',
     copy: {
       idCopied: '리뷰 ID {id}를 클립보드에 복사했습니다.',
     },
@@ -289,6 +293,8 @@ export default {
     notSet: '（설정되지 않음）',
     revealCountdown: '{count}초 동안 표시…',
     noChangesToSave: '저장할 변경 사항이 없습니다',
+    llmNotConfiguredBanner:
+      '아직 사용 가능한 LLM이 구성되지 않았습니다 — 리뷰를 실행하려면 LLM이 필요합니다. 아래 "LLM 설정"에서 API 기본 URL과 키를 입력하거나 "추가 LLM 제공자"에서 추가하세요.',
     validation: {
       invalidUrl: '유효한 URL을 입력하세요',
       invalidProjectPath: 'group/project 형식으로 입력하세요 (예: my-group/my-project)',

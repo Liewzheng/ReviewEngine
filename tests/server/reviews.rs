@@ -4,7 +4,10 @@
 //! time with a 400 on failure.
 use std::time::{Duration, Instant};
 
-use super::{bootstrap_authed_client, find_free_port, spawn_server_inner_with_env, wait_for_server, API_TOKEN};
+use super::{
+    bootstrap_authed_client, find_free_port, spawn_server_inner_with_env, unreachable_llm_config_env, wait_for_server,
+    API_TOKEN,
+};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -46,7 +49,10 @@ async fn poll_until_settled(base: &str, client: &reqwest::Client, task_id: &str)
 async fn submit_gitlab_mr_accepts_x_gitlab_token_header() {
     let port = find_free_port();
     // Neutralize any inherited GITLAB_TOKEN so the header is the only credential.
-    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", "")]);
+    // The unreachable LLM provider passes the no-usable-LLM enqueue gate; the
+    // task then fails fast at runtime, which this test does not wait for.
+    let llm_config_env = unreachable_llm_config_env();
+    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", ""), ("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
     let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);
@@ -109,6 +115,9 @@ async fn submit_gitlab_mr_rejects_body_token() {
 #[tokio::test]
 async fn submit_gitlab_mr_without_any_token_returns_400() {
     let port = find_free_port();
+    // Deliberately no LLM_CONFIG: the credential rule (400) is a
+    // request-shape/auth error and must surface BEFORE the no-usable-LLM
+    // policy gate (422) — this test locks in that precedence.
     let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", "")]);
     wait_for_server(port).await;
     let client = bootstrap_authed_client(port, API_TOKEN).await;
@@ -136,8 +145,14 @@ async fn submit_gitlab_mr_without_any_token_returns_400() {
 async fn submit_gitlab_mr_falls_back_to_server_env_token() {
     let port = find_free_port();
     // The server-side credential source documented in the design doc:
-    // GITLAB_TOKEN (or --gitlab-token) at startup.
-    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", "glpat-env-token")]);
+    // GITLAB_TOKEN (or --gitlab-token) at startup. The unreachable LLM
+    // provider passes the no-usable-LLM enqueue gate.
+    let llm_config_env = unreachable_llm_config_env();
+    let _guard = spawn_server_inner_with_env(
+        port,
+        None,
+        &[("GITLAB_TOKEN", "glpat-env-token"), ("LLM_CONFIG", &llm_config_env)],
+    );
     wait_for_server(port).await;
     let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);
@@ -159,8 +174,10 @@ async fn submit_gitlab_mr_falls_back_to_server_env_token() {
 #[tokio::test]
 async fn rerun_reresolves_credentials_per_request() {
     let port = find_free_port();
-    // No server-side token: only the header can satisfy a rerun.
-    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", "")]);
+    // No server-side token: only the header can satisfy a rerun. The
+    // unreachable LLM provider passes the no-usable-LLM enqueue gate.
+    let llm_config_env = unreachable_llm_config_env();
+    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", ""), ("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
     let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);
@@ -212,6 +229,9 @@ async fn rerun_reresolves_credentials_per_request() {
 #[tokio::test]
 async fn webhook_url_ssrf_validation_rejects_at_enqueue_time() {
     let port = find_free_port();
+    // Deliberately no LLM_CONFIG: webhook SSRF validation (400) is a security
+    // check and must run BEFORE the no-usable-LLM policy gate (422) — this
+    // test locks in that precedence.
     let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", "")]);
     wait_for_server(port).await;
     let client = bootstrap_authed_client(port, API_TOKEN).await;
@@ -261,7 +281,11 @@ async fn webhook_loopback_http_is_accepted_and_delivered() {
         .await;
 
     let port = find_free_port();
-    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", "")]);
+    // The unreachable LLM provider passes the no-usable-LLM enqueue gate, so
+    // the task is accepted, fails fast on the unreachable MR URL, and the
+    // failure callback is delivered to the loopback webhook.
+    let llm_config_env = unreachable_llm_config_env();
+    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", ""), ("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
     let client = bootstrap_authed_client(port, API_TOKEN).await;
     let base = format!("http://127.0.0.1:{}", port);

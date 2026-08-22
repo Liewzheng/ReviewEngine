@@ -2,7 +2,7 @@ use anyhow::Result;
 use review_engine::models::*;
 
 use super::output::write_output;
-use super::review::resolve_llm_configs;
+use super::review::require_llm_configs;
 
 pub async fn run_update_changelog(
     local_path: &str,
@@ -25,7 +25,7 @@ pub async fn run_update_changelog(
 
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
-    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
 
     let mr_info = MRInfo::new(
         local_path.to_string(),

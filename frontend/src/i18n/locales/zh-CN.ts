@@ -189,6 +189,9 @@ export default {
       requeuedTitle: '评审已重新排队',
       requeuedMessage: '已为 {title} 排队新的评审。',
     },
+    llmNotConfiguredTitle: '未配置 LLM',
+    llmNotConfiguredBody: '审核需要可用的 LLM 配置。是否前往配置页面设置？',
+    goToConfig: '前往配置',
     copy: {
       idCopied: '评审 ID {id} 已复制到剪贴板。',
     },
@@ -287,6 +290,8 @@ export default {
     notSet: '（未设置）',
     revealCountdown: '可见 {count} 秒…',
     noChangesToSave: '没有可保存的更改',
+    llmNotConfiguredBanner:
+      '尚未配置可用的 LLM — 审核需要 LLM 才能运行。请在下方「LLM 设置」填写 API 基础 URL 与密钥，或在「其他 LLM 提供商」中添加。',
     validation: {
       invalidUrl: '请输入有效的 URL',
       invalidProjectPath: '请使用 group/project 格式（例如 my-group/my-project）',

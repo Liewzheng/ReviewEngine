@@ -29,6 +29,8 @@ export interface SystemHealth {
   llmProviders: HealthStatus[];
   overall: HealthState;
   lastChecked: string;
+  /** False when the server has no usable LLM configured (reviews cannot run). */
+  llmConfigured: boolean;
 }
 
 // Display-facing status for recent reviews. The backend reports the real task

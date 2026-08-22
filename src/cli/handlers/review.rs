@@ -47,6 +47,56 @@ pub fn resolve_llm_configs(argv_llm_configs: &[String], config: &AppConfig) -> a
     Ok(Vec::new())
 }
 
+/// True when at least one config entry is usable: a non-empty `api_base`
+/// (`api_key` may stay empty — local providers need no key).
+pub(crate) fn has_usable_llm(configs: &[LLMConfig]) -> bool {
+    configs.iter().any(|c| !c.api_base.trim().is_empty())
+}
+
+/// The user-level config file path, resolved with the same home-dir logic as
+/// `config::resolver::user_fallback`
+/// (`~/.config/review-engine/.code-audit-config.toml`).
+fn user_config_path_display() -> String {
+    home::home_dir()
+        .map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml"))
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "~/.config/review-engine/.code-audit-config.toml".to_string())
+}
+
+/// The fail-fast guidance error shown when no usable LLM is configured.
+pub(crate) fn no_usable_llm_error() -> anyhow::Error {
+    anyhow::anyhow!(
+        "no usable LLM configured — reviews require an LLM.\n\
+         \n\
+         Configure one (any of):\n\
+         \x20 1. Run the interactive wizard:  review-engine init\n\
+         \x20 2. Add an [[llm]] section to your config file (provider, model, api_base, api_key):\n\
+         \x20    {}\n\
+         \x20 3. Set the LLM_CONFIG env var, e.g.:\n\
+         \x20    LLM_CONFIG='[{{\"provider\":\"openai\",\"model\":\"gpt-4o\",\"api_base\":\"https://api.openai.com/v1\",\"api_key\":\"sk-...\"}}]'",
+        user_config_path_display()
+    )
+}
+
+/// Fail fast with configuration guidance when nothing usable is configured
+/// (empty list, or no entry with a non-empty `api_base`).
+pub(crate) fn ensure_usable_llm(configs: &[LLMConfig]) -> anyhow::Result<()> {
+    if has_usable_llm(configs) {
+        Ok(())
+    } else {
+        Err(no_usable_llm_error())
+    }
+}
+
+/// Resolve LLM configs, then fail fast with configuration guidance when no
+/// usable LLM is configured — instead of failing deep in the pipeline with
+/// "all LLM providers failed".
+pub fn require_llm_configs(argv_llm_configs: &[String], config: &AppConfig) -> anyhow::Result<Vec<LLMConfig>> {
+    let configs = resolve_llm_configs(argv_llm_configs, config)?;
+    ensure_usable_llm(&configs)?;
+    Ok(configs)
+}
+
 pub(super) fn is_github_url(url: &str) -> bool {
     url.contains(".github.") || url.contains("github.com")
 }
@@ -101,7 +151,7 @@ pub async fn run_mr(
     };
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source.clone()).await?;
-    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
     let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     let progress_override = progress_map.map(|map| (map, review_id.to_string()));
@@ -144,7 +194,7 @@ pub async fn run_local(
     let diff = tokio::fs::read_to_string(diff_path).await?;
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
-    let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let llm_configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
     let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     // Root cause C: propagate the real `--local-path` (defaulting to the
@@ -230,13 +280,7 @@ pub async fn run_local_repo(
 
     let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
-    if llm_configs.is_empty() {
-        anyhow::bail!(
-            "No LLM configuration found. \
-             Provide [[llm]] in ~/.config/review-engine/.code-audit-config.toml, \
-             the project .code-audit-config.toml, --llm-config, or LLM_CONFIG env var."
-        );
-    }
+    ensure_usable_llm(&llm_configs)?;
     let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", base_ref);
@@ -307,18 +351,12 @@ pub async fn run_local_path(
     // Validate the review input FIRST: a bad --path (missing directory, empty
     // tree, traversal) must fail with the path error regardless of LLM
     // configuration. The LLM check below otherwise masks it with an unrelated
-    // "No LLM configuration found" message in environments that resolve no
+    // "no usable LLM configured" message in environments that resolve no
     // provider (e.g. clean CI) — and the actionable error is the path one.
     let full = review_engine::input::full_path::build_path_review_diff(local_path, path)?;
     let file_count = full.files.len();
 
-    if llm_configs.is_empty() {
-        anyhow::bail!(
-            "No LLM configuration found. \
-             Provide [[llm]] in ~/.config/review-engine/.code-audit-config.toml, \
-             the project .code-audit-config.toml, --llm-config, or LLM_CONFIG env var."
-        );
-    }
+    ensure_usable_llm(&llm_configs)?;
     let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", "main");
@@ -413,4 +451,64 @@ pub async fn run_repo_review_local_or_enhanced(
     // disk); --output writes the explicit file plus the same timestamped copy.
     write_report_text(&text, format, output, Some(&output_dir))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn llm_config(api_base: &str) -> LLMConfig {
+        LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key: String::new(),
+            api_base: api_base.to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+        }
+    }
+
+    fn empty_app_config() -> AppConfig {
+        toml::from_str("").expect("empty TOML must parse into AppConfig")
+    }
+
+    #[test]
+    fn ensure_usable_llm_rejects_empty_configs() {
+        let err = ensure_usable_llm(&[]).expect_err("empty configs must fail");
+        let msg = err.to_string();
+        assert!(msg.contains("no usable LLM configured"), "got: {msg}");
+        assert!(msg.contains("review-engine init"), "got: {msg}");
+        assert!(msg.contains(".code-audit-config.toml"), "got: {msg}");
+        assert!(msg.contains("LLM_CONFIG"), "got: {msg}");
+    }
+
+    #[test]
+    fn ensure_usable_llm_rejects_entries_without_api_base() {
+        let configs = vec![llm_config(""), llm_config("   ")];
+        let err = ensure_usable_llm(&configs).expect_err("entries without api_base must fail");
+        assert!(err.to_string().contains("no usable LLM configured"));
+    }
+
+    #[test]
+    fn ensure_usable_llm_accepts_config_with_api_base() {
+        // api_key may stay empty — local providers need no key.
+        let configs = vec![llm_config("http://localhost:11434/v1")];
+        assert!(ensure_usable_llm(&configs).is_ok());
+    }
+
+    #[test]
+    fn require_llm_configs_gates_argv_configs() {
+        // argv-provided configs bypass env/config-file resolution, so this is
+        // deterministic without mutating the LLM_CONFIG env var.
+        let config = empty_app_config();
+
+        let no_base = vec![serde_json::to_string(&llm_config("")).unwrap()];
+        let err = require_llm_configs(&no_base, &config).expect_err("argv configs without api_base must fail");
+        assert!(err.to_string().contains("no usable LLM configured"));
+
+        let usable = vec![serde_json::to_string(&llm_config("http://localhost:11434/v1")).unwrap()];
+        let resolved = require_llm_configs(&usable, &config).expect("usable argv config must pass the gate");
+        assert_eq!(resolved.len(), 1);
+    }
 }

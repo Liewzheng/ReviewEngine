@@ -4,6 +4,9 @@
 //!
 //!
 //! @module review-engine
+// Same test-code policy as the lib target (src/lib.rs): unwrap/expect are
+// fine in `#[cfg(test)]` assertions.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 #[cfg(feature = "cli")]
 mod cli;
 

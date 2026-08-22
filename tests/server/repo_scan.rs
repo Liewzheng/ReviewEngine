@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use super::{bootstrap_authed_client, find_free_port, spawn_server, wait_for_server, API_TOKEN};
+use super::{
+    bootstrap_authed_client, find_free_port, spawn_server, spawn_server_inner_with_env, unreachable_llm_config_env,
+    wait_for_server, API_TOKEN,
+};
 
 // ─── Repo Scan ────────────────────────────────────────────────────
 
@@ -154,14 +157,17 @@ async fn repo_scan_completes_and_returns_health_score() {
     assert!(output.overview.total_experts > 0, "static experts should have run");
 }
 
-/// Unit 7: a review whose every expert fails (no valid LLM configured) must be
-/// recorded as `failed` with a descriptive error, not `completed` with an empty
-/// report set. The spawned server runs with a temp HOME, so the default config's
-/// 11 LLM-backed experts all fail and `run_experts` bails.
+/// Unit 7: a review whose every expert fails must be recorded as `failed`
+/// with a descriptive error, not `completed` with an empty report set. The
+/// enqueue-time no-usable-LLM gate would reject a review with no usable LLM
+/// at 422, so the fixture seeds a usable-but-unreachable provider (loopback
+/// discard port 127.0.0.1:9): the gate passes, every LLM-backed expert then
+/// fails on connection refused at runtime, and `run_experts` bails.
 #[tokio::test]
 async fn review_zero_output_with_expert_failures_marks_failed() {
     let port = find_free_port();
-    let _guard = spawn_server(port);
+    let llm_config_env = unreachable_llm_config_env();
+    let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
     wait_for_server(port).await;
 
     let client = bootstrap_authed_client(port, API_TOKEN).await;

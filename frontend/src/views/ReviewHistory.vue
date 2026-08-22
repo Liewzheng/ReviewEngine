@@ -19,6 +19,7 @@ import {
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
+import type { ApiError } from '../services/api'
 import type { ReviewListItem, HistoryFilters } from '../types/history'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
@@ -167,6 +168,26 @@ function rerunConfirmMessage(row: { mrTitle: string; gitlabMrUrl?: string }): st
   return t('history.rerun.confirmWithMr', { title: title || t('history.untitledReview') })
 }
 
+function handleRerunError(e: unknown) {
+  const err = e as ApiError | null
+  // The rerun endpoint returns 422 + code `llmNotConfigured` when the server
+  // has no usable LLM. Guide the user to the Configuration page instead of
+  // showing the generic error notification (the composable leaves
+  // `error` unset for this case).
+  if (err?.status !== 422 || err?.code !== 'llmNotConfigured') return
+  ElMessageBox.confirm(
+    t('history.llmNotConfiguredBody'),
+    t('history.llmNotConfiguredTitle'),
+    {
+      confirmButtonText: t('history.goToConfig'),
+      cancelButtonText: t('common.cancel'),
+      type: 'warning',
+    }
+  ).then(() => {
+    router.push('/config')
+  }).catch(() => {})
+}
+
 function handleRerun(row: { id: string; mrTitle: string; gitlabMrUrl?: string }) {
   ElMessageBox.confirm(
     rerunConfirmMessage(row),
@@ -177,7 +198,7 @@ function handleRerun(row: { id: string; mrTitle: string; gitlabMrUrl?: string })
       const title = (row.mrTitle || '').trim() || t('history.untitledReview')
       ElNotification.success({ title: t('history.rerun.requeuedTitle'), message: t('history.rerun.requeuedMessage', { title }) })
       fetchReviewsData()
-    })
+    }).catch(handleRerunError)
   }).catch(() => {})
 }
 

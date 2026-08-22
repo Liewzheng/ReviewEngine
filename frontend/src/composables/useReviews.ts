@@ -90,6 +90,10 @@ export function useReviews() {
 
   /**
    * Re-run a previous review with the same parameters.
+   *
+   * A 422 with body code `llmNotConfigured` is surfaced by the view as a
+   * "go to Configuration" dialog instead of the generic error toast, so it
+   * is rethrown without populating `error`.
    * @param id - Review UUID to re-run.
    * @returns The new review task ID on success.
    */
@@ -98,7 +102,10 @@ export function useReviews() {
     try {
       return await rerunReview(id);
     } catch (e) {
-      error.value = rerunErrorMessage(e);
+      const err = e as { status?: number; code?: string } | null;
+      if (err?.status !== 422 || err?.code !== 'llmNotConfigured') {
+        error.value = rerunErrorMessage(e);
+      }
       throw e;
     }
   }

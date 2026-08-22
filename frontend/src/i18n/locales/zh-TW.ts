@@ -189,6 +189,9 @@ export default {
       requeuedTitle: '審查已重新排入佇列',
       requeuedMessage: '已為 {title} 排入新的審查。',
     },
+    llmNotConfiguredTitle: '未設定 LLM',
+    llmNotConfiguredBody: '審查需要可用的 LLM 設定。是否前往設定頁面進行設定？',
+    goToConfig: '前往設定',
     copy: {
       idCopied: '審查 ID {id} 已複製到剪貼簿。',
     },
@@ -287,6 +290,8 @@ export default {
     notSet: '（未設定）',
     revealCountdown: '可顯示 {count} 秒…',
     noChangesToSave: '沒有可儲存的變更',
+    llmNotConfiguredBanner:
+      '尚未設定可用的 LLM — 審查需要 LLM 才能執行。請在下方「LLM 設定」填寫 API 基礎 URL 與密鑰，或在「其他 LLM 提供者」中新增。',
     validation: {
       invalidUrl: '請輸入有效的 URL',
       invalidProjectPath: '請使用 group/project 格式（例如 my-group/my-project）',

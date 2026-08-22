@@ -2,7 +2,7 @@ use anyhow::Result;
 use review_engine::models::*;
 
 use super::output::write_output;
-use super::review::{is_github_url, resolve_llm_configs};
+use super::review::{is_github_url, require_llm_configs};
 
 pub async fn run_improve(
     mr_url: &str,
@@ -21,7 +21,7 @@ pub async fn run_improve(
     };
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
-    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
 
     let (diff, mr_info) = if is_github_url(mr_url) {
         let client = review_engine::git_provider::github::client::Client::new(&token, mr_url)?;
@@ -84,7 +84,7 @@ pub async fn run_improve_local_diff(
     let diff = tokio::fs::read_to_string(diff_path).await?;
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
-    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
 
     let mr_info = MRInfo::new(
         "local".to_string(),
@@ -145,7 +145,7 @@ pub async fn run_improve_local_repo(
 
     let config_source = config_path.map(ConfigSource::Path);
     let config = review_engine::config::resolve_config(config_source).await?;
-    let configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
+    let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
 
     let mr_info = MRInfo::new(
         local_path.to_string(),

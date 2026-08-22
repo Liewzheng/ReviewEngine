@@ -164,9 +164,37 @@ fn source_meta_with_commit() -> SourceMeta {
     }
 }
 
+/// A server-side LLM config that passes the usable-LLM enqueue gate. The
+/// api_base is a loopback discard address (port 9 — connection refused, no
+/// external network): enqueued tasks fail fast, and the handler contract is
+/// what is tested. Constructed directly, never via env-var mutation.
+fn usable_llm_config() -> crate::models::LLMConfig {
+    crate::models::LLMConfig {
+        provider: "openai".to_string(),
+        model: "gpt-4o".to_string(),
+        api_key: String::new(),
+        api_base: "http://127.0.0.1:9/v1".to_string(),
+        max_tokens: 4096,
+        temperature: 0.7,
+        disable_thinking: None,
+    }
+}
+
+/// State with a task store AND a usable server-side LLM config, so enqueue
+/// passes the no-usable-LLM gate and the tests below exercise their own
+/// contract (credentials, URLs, webhooks, …).
 fn state_with_store() -> Arc<AppState> {
     let store = Arc::new(TaskStore::new());
-    let mut state = AppState::new(vec![]);
+    let mut state = AppState::new(vec![usable_llm_config()]);
+    state.task_store = Some(store);
+    Arc::new(state)
+}
+
+/// State with a task store but no usable LLM config — the shipped demo-env
+/// failure mode the enqueue gate exists for.
+fn state_without_usable_llm(llm_configs: Vec<crate::models::LLMConfig>) -> Arc<AppState> {
+    let store = Arc::new(TaskStore::new());
+    let mut state = AppState::new(llm_configs);
     state.task_store = Some(store);
     Arc::new(state)
 }
@@ -850,4 +878,166 @@ async fn submit_accepts_loopback_webhook() {
         StatusCode::ACCEPTED,
         "loopback http webhook must pass enqueue validation, got {json}"
     );
+}
+
+// ─── no-usable-LLM enqueue gate (422 + llmNotConfigured) ────────
+
+/// The exact guidance payload the frontend codes against (`err.code`).
+const LLM_NOT_CONFIGURED_MSG: &str = "no usable LLM configured: set api_base (and api_key) via the config page, POST /api/v1/config, the LLM_CONFIG env var, or run `review-engine init`";
+
+fn static_diff_body() -> serde_json::Value {
+    serde_json::json!({"source": {"type": "static_diff", "diff": "d"}})
+}
+
+async fn store_task_count(store: &TaskStore) -> u64 {
+    let (_, total) = store.list(None, 1, 20, None, None, None, None, None).await;
+    total
+}
+
+#[tokio::test]
+async fn submit_without_any_llm_config_returns_422_llm_not_configured() {
+    let state = state_without_usable_llm(vec![]);
+    let store = state.task_store.clone().unwrap();
+
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(static_diff_body())))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "got {json}");
+    assert_eq!(
+        json["code"], "llmNotConfigured",
+        "the machine-readable code must be exact: {json}"
+    );
+    assert_eq!(json["error"], LLM_NOT_CONFIGURED_MSG);
+    assert_eq!(
+        store_task_count(&store).await,
+        0,
+        "the gated request must not enqueue a task"
+    );
+}
+
+#[tokio::test]
+async fn submit_with_server_llm_lacking_api_base_returns_422_llm_not_configured() {
+    // The shipped demo-env failure mode: an entry exists but has no api_base.
+    let mut unusable = usable_llm_config();
+    unusable.api_base = String::new();
+    let state = state_without_usable_llm(vec![unusable]);
+    let store = state.task_store.clone().unwrap();
+
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(static_diff_body())))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "got {json}");
+    assert_eq!(json["code"], "llmNotConfigured");
+    assert_eq!(json["error"], LLM_NOT_CONFIGURED_MSG);
+    assert_eq!(store_task_count(&store).await, 0);
+}
+
+#[tokio::test]
+async fn submit_with_request_llm_configs_passes_gate() {
+    // Request-level llm_configs with an api_base satisfy the gate even when
+    // the server holds no usable config; the review may still fail later on
+    // the network (loopback discard address) — the enqueue contract is what
+    // is tested here.
+    let state = state_without_usable_llm(vec![]);
+    let store = state.task_store.clone().unwrap();
+
+    let mut body = static_diff_body();
+    body["llm_configs"] = serde_json::json!([{
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_base": "http://127.0.0.1:9/v1",
+        "api_key": ""
+    }]);
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(body)))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "request-level usable llm_configs must pass the gate, got {json}"
+    );
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    assert!(store.get(task_id).await.is_some(), "a task must be enqueued");
+}
+
+#[tokio::test]
+async fn rerun_without_usable_llm_returns_422_llm_not_configured() {
+    let state = state_without_usable_llm(vec![]);
+    let store = state.task_store.clone().unwrap();
+
+    let request = crate::server::api::types::ReviewRequest {
+        source: ReviewSource::StaticDiff {
+            diff: "diff".to_string(),
+        },
+        config: None,
+        llm_configs: None,
+        webhook: None,
+    };
+    let request_json = serde_json::to_value(&request).unwrap();
+    let original_id = store
+        .create_with_request(Some(SourceMeta::default()), Some(request_json))
+        .await;
+    store
+        .update(original_id, TaskState::Failed, None, Some("boom".to_string()))
+        .await;
+
+    let resp = rerun_review(State(state), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "got {json}");
+    assert_eq!(json["code"], "llmNotConfigured");
+    assert_eq!(json["error"], LLM_NOT_CONFIGURED_MSG);
+    assert_eq!(
+        store_task_count(&store).await,
+        1,
+        "the gate must not enqueue a new task"
+    );
+    let entry = store.get(original_id).await.unwrap();
+    assert_eq!(entry.state, TaskState::Failed, "the original task must be untouched");
+}
+
+#[tokio::test]
+async fn rerun_with_stored_request_llm_configs_passes_gate() {
+    // A stored request that carries its own usable llm_configs passes the
+    // gate even when the server holds no usable config.
+    let state = state_without_usable_llm(vec![]);
+    let store = state.task_store.clone().unwrap();
+
+    let request = crate::server::api::types::ReviewRequest {
+        source: ReviewSource::StaticDiff {
+            diff: "diff".to_string(),
+        },
+        config: None,
+        llm_configs: Some(vec![usable_llm_config()]),
+        webhook: None,
+    };
+    let request_json = serde_json::to_value(&request).unwrap();
+    let original_id = store
+        .create_with_request(Some(SourceMeta::default()), Some(request_json))
+        .await;
+    store
+        .update(
+            original_id,
+            TaskState::Completed,
+            Some(serde_json::json!({"reports": []})),
+            None,
+        )
+        .await;
+
+    let resp = rerun_review(State(state), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "stored request llm_configs must pass the gate, got {json}"
+    );
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    assert_ne!(new_id, original_id, "rerun must create a fresh task id");
+    assert!(store.get(new_id).await.is_some(), "a new task must be enqueued");
 }

@@ -123,9 +123,16 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 
     let overall = if llm_providers.is_empty() { "offline" } else { "success" };
 
+    // Top-level gate flag for the frontend: true iff at least one effective
+    // LLM config is usable — a non-empty `api_base` (`api_key` may stay
+    // empty for local providers). Mirrors the enqueue-time gate on
+    // POST /api/v1/reviews.
+    let llm_configured = llm_configs.iter().any(|c| !c.api_base.trim().is_empty());
+
     Json(serde_json::json!({
         "integrations": integrations,
         "llmProviders": llm_providers,
+        "llmConfigured": llm_configured,
         "overall": overall,
         "lastChecked": chrono::Utc::now().to_rfc3339(),
     }))
@@ -420,5 +427,52 @@ mod tests {
         assert_eq!(body["configured"], true);
         assert_eq!(body["bootstrap"], false);
         assert_eq!(body["bootstrapKeyRequired"], false);
+    }
+
+    fn llm_config(api_base: &str) -> crate::models::LLMConfig {
+        crate::models::LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key: String::new(),
+            api_base: api_base.to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+        }
+    }
+
+    async fn health_json(state: AppState) -> serde_json::Value {
+        let resp = system_health(State(Arc::new(state))).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    }
+
+    /// `/system/health` exposes a top-level `llmConfigured` flag: true iff at
+    /// least one effective LLM config has a non-empty `api_base` (`api_key`
+    /// may stay empty — local providers need no key).
+    #[tokio::test]
+    async fn system_health_reports_llm_configured_flag() {
+        // No configs at all → not configured.
+        let body = health_json(AppState::new(vec![])).await;
+        assert_eq!(body["llmConfigured"], false, "empty configs must report false: {body}");
+
+        // Entries exist but none has an api_base (the shipped demo-env
+        // failure mode) → still not configured.
+        let body = health_json(AppState::new(vec![llm_config(""), llm_config("   ")])).await;
+        assert_eq!(
+            body["llmConfigured"], false,
+            "entries without api_base must report false: {body}"
+        );
+
+        // At least one entry with a non-empty api_base → configured.
+        let body = health_json(AppState::new(vec![
+            llm_config(""),
+            llm_config("http://localhost:11434/v1"),
+        ]))
+        .await;
+        assert_eq!(
+            body["llmConfigured"], true,
+            "an entry with api_base must report true: {body}"
+        );
     }
 }

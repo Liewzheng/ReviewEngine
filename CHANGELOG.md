@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.30] - 2026-08-21
+
+### Added
+- **Guided LLM configuration when none is usable** (previously every review failed deep in the pipeline with "all LLM providers failed / has no api_base set"). A config counts as usable when any entry has a non-empty `api_base`.
+  - **REST**: `GET /api/v1/system/health` now reports top-level `llmConfigured`; `POST /api/v1/reviews` and `/reviews/{id}/rerun` fail fast with **422 `{"code": "llmNotConfigured", "error": "…"}`** at enqueue (after request-shape, SSRF, and credential validation — security checks keep precedence) when neither the request nor the server has a usable LLM.
+  - **CLI**: `review`/`ask`/`describe`/`improve`/`changelog` now exit immediately with a guidance message listing the three configuration paths (`review-engine init` wizard, the resolved config file path, `LLM_CONFIG` env example) instead of failing mid-review.
+  - **Web**: the Configuration page shows a warning banner (all 6 locales) when `llmConfigured` is false; rerunning a review that hits the 422 opens a confirm dialog offering to jump to the config page. (`src/server/api/{system,review/handlers}.rs`, `src/cli/handlers/review.rs` + all command handlers, `frontend/src/views/{Configuration,ReviewHistory}.vue`, `frontend/src/composables/useReviews.ts`, `frontend/src/types/dashboard.ts`)
+
 ## [0.9.29] - 2026-08-20
 
 ### Fixed

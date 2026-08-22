@@ -19,6 +19,44 @@ fn error_response(status: StatusCode, message: impl Into<String>) -> axum::respo
     (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
 }
 
+/// Like [`error_response`], but additionally carries a machine-readable
+/// `code` field. Only used for the no-usable-LLM gate; every other error
+/// keeps the plain `{"error": ...}` shape.
+fn error_response_with_code(status: StatusCode, message: impl Into<String>, code: &str) -> axum::response::Response {
+    (
+        status,
+        Json(serde_json::json!({ "error": message.into(), "code": code })),
+    )
+        .into_response()
+}
+
+/// Error message for the enqueue-time "no usable LLM configured" gate (422).
+const LLM_NOT_CONFIGURED_MSG: &str = "no usable LLM configured: set api_base (and api_key) via the config page, POST /api/v1/config, the LLM_CONFIG env var, or run `review-engine init`";
+
+/// Fail fast with 422 + `llmNotConfigured` when the review would be enqueued
+/// with no usable LLM. The effective configs mirror `task::enqueue_review`'s
+/// resolution: request-level `llm_configs` win when non-empty, otherwise the
+/// server-side configs. "Usable" = at least one entry with a non-empty
+/// `api_base` (`api_key` may be empty — local providers).
+///
+/// Returns the `(StatusCode, message)` convention of this file's other
+/// enqueue-time validators; the caller wraps it with
+/// [`error_response_with_code`] to attach the `llmNotConfigured` code.
+fn require_usable_llm(state: &AppState, request: &ReviewRequest) -> Result<(), (StatusCode, &'static str)> {
+    fn any_usable(configs: &[crate::models::LLMConfig]) -> bool {
+        configs.iter().any(|c| !c.api_base.trim().is_empty())
+    }
+    let usable = match &request.llm_configs {
+        Some(configs) if !configs.is_empty() => any_usable(configs),
+        _ => any_usable(&state.llm_configs.read().unwrap()),
+    };
+    if usable {
+        Ok(())
+    } else {
+        Err((StatusCode::UNPROCESSABLE_ENTITY, LLM_NOT_CONFIGURED_MSG))
+    }
+}
+
 /// Resolve the GitLab credential for a `gitlab_mr` review, per
 /// docs/rest-api.md §1: the `X-Gitlab-Token` request header wins, then the
 /// server-side configured token (CLI `--gitlab-token` / `GITLAB_TOKEN` /
@@ -108,8 +146,9 @@ pub(crate) async fn submit_review(
         Err(e) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, format!("invalid review request: {e}")),
     };
 
-    // Fail fast: a malformed gitlab_mr URL is an unprocessable entity, not a
-    // queued task that fails asynchronously.
+    // Request-shape and security validation run before any policy gate: a
+    // malformed gitlab_mr URL is an unprocessable entity, not a queued task
+    // that fails asynchronously.
     if let Err((status, msg)) = validate_gitlab_mr_url(&request.source) {
         return error_response(status, msg);
     }
@@ -122,6 +161,17 @@ pub(crate) async fn submit_review(
         Ok(token) => token,
         Err((status, msg)) => return error_response(status, msg),
     };
+
+    // The no-usable-LLM policy gate runs last, after shape/SSRF/credential
+    // validation: those errors describe the request itself and must surface
+    // first (a client with a broken request gets a 400/422 about the request,
+    // not about server configuration). Fail fast with configuration guidance
+    // when neither the request nor the server holds a usable LLM — otherwise
+    // the enqueued task fails deep in the pipeline with "all LLM providers
+    // failed".
+    if let Err((status, msg)) = require_usable_llm(&state, &request) {
+        return error_response_with_code(status, msg, "llmNotConfigured");
+    }
 
     // The persisted request parameters are serialized from the credential-free
     // struct, so the token can never land in the task store; rerun re-resolves
@@ -205,10 +255,18 @@ pub(crate) async fn rerun_review(
         }
     };
 
-    // A rerun is a fresh enqueue: re-validate a stored gitlab_mr URL the
-    // same way (legacy tasks persisted before enqueue-time validation fail
-    // fast here instead of queuing a task that is doomed to fail).
+    // A rerun is a fresh enqueue, so the enqueue-time validators re-apply in
+    // the same order as `submit_review`: request shape and security first.
+    // Re-validate a stored gitlab_mr URL (legacy tasks persisted before
+    // enqueue-time validation fail fast here instead of queuing a task that
+    // is doomed to fail).
     if let Err((status, msg)) = validate_gitlab_mr_url(&request.source) {
+        return error_response(status, msg);
+    }
+
+    // Re-validate the stored webhook URL: policy is enforced at enqueue time,
+    // and a rerun is a fresh enqueue.
+    if let Err((status, msg)) = validate_webhook(request.webhook.as_deref()).await {
         return error_response(status, msg);
     }
 
@@ -220,10 +278,11 @@ pub(crate) async fn rerun_review(
         Err((status, msg)) => return error_response(status, msg),
     };
 
-    // Re-validate the stored webhook URL: policy is enforced at enqueue time,
-    // and a rerun is a fresh enqueue.
-    if let Err((status, msg)) = validate_webhook(request.webhook.as_deref()).await {
-        return error_response(status, msg);
+    // The no-usable-LLM policy gate runs last, as in `submit_review` (the
+    // stored request may predate any LLM configuration, or the server config
+    // may have been cleared since the original submit).
+    if let Err((status, msg)) = require_usable_llm(&state, &request) {
+        return error_response_with_code(status, msg, "llmNotConfigured");
     }
 
     let new_task_id = enqueue_review(&state, &store, request, request_json, gitlab_token).await;

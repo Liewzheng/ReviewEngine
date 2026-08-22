@@ -163,6 +163,32 @@ async fn wait_for_server(port: u16) {
     }
 }
 
+/// `LLM_CONFIG` env value giving a fixture server a usable-but-unreachable
+/// server-side LLM provider: `api_base` is the loopback discard port
+/// (`127.0.0.1:9`). This passes the enqueue-time no-usable-LLM gate
+/// (`api_base` non-empty) and fails fast at runtime (connection refused, no
+/// external network I/O) — exactly what the review-contract tests want: the
+/// enqueue is accepted (202), then the task fails quickly and
+/// deterministically, e.g. with "all experts failed".
+///
+/// Same mechanism as `llm_configs::review_falls_back_to_server_llm_configs_when_request_omits_them`:
+/// the value travels through `spawn_server_inner_with_env` → `Command::env`,
+/// i.e. it is set on the spawned child process only. No test ever calls
+/// `std::env::set_var`, so there is no in-process env-var race between
+/// parallel tests (unlike the unit-test `EnvGuard` cases, which must
+/// serialize on a mutex).
+fn unreachable_llm_config_env() -> String {
+    serde_json::json!([{
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_key": "sk-test",
+        "api_base": "http://127.0.0.1:9/v1",
+        "max_tokens": 2048,
+        "temperature": 0.3
+    }])
+    .to_string()
+}
+
 /// Drive a fresh no-token (loopback-bind, first-run) server through the
 /// bootstrap flow: `PUT /api/v1/system/token` sets `token`, and the returned
 /// client carries it as `Authorization: Bearer` for the rest of the test.

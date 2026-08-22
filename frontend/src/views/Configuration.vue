@@ -40,6 +40,15 @@
       </div>
     </div>
 
+    <!-- LLM-not-configured banner: reviews cannot run without a usable LLM -->
+    <el-alert
+      v-if="llmNotConfigured"
+      type="warning"
+      :closable="false"
+      :title="$t('config.llmNotConfiguredBanner')"
+      class="llm-banner"
+    />
+
     <!-- Loading Skeleton -->
     <div v-if="loading" class="skeleton-container">
       <el-card v-for="n in 3" :key="n" class="skeleton-card">
@@ -284,6 +293,7 @@ import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
 import { useConfigForm } from '../composables/useConfigForm'
 import { useProviders } from '../composables/useProviders'
+import { getSystemHealth } from '../services/health'
 import GitLabSettingsCard from '../components/Config/GitLabSettingsCard.vue'
 import LlmSettingsCard from '../components/Config/LlmSettingsCard.vue'
 import ProvidersSection from '../components/Config/ProvidersSection.vue'
@@ -338,6 +348,8 @@ const saving = cfg.saving
 const testingConnection = cfg.testing
 const testResult = cfg.testResult
 const showAdvanced = ref(false)
+/** True when the server reports no usable LLM via /system/health. */
+const llmNotConfigured = ref(false)
 
 // Card refs for flash animation
 const gitlabCardRef = ref<HTMLElement>()
@@ -459,6 +471,12 @@ onMounted(() => {
   window.addEventListener('resize', handleResize)
   loadConfig()
   loadProviders()
+  // Fail-open: if the health check errors, simply don't show the banner.
+  getSystemHealth()
+    .then((health) => {
+      llmNotConfigured.value = health.llmConfigured === false
+    })
+    .catch(() => {})
 })
 
 // --- Error handling ---
@@ -535,6 +553,11 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+/* LLM-not-configured banner sits below the header, above the cards */
+.llm-banner {
+  margin-bottom: 20px;
 }
 
 /* Wrapper lets the tooltip hover target survive the disabled save button */

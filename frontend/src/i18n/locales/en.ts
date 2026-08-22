@@ -201,6 +201,10 @@ export default {
       requeuedTitle: 'Review re-queued',
       requeuedMessage: 'A new review has been queued for {title}.',
     },
+    llmNotConfiguredTitle: 'LLM Not Configured',
+    llmNotConfiguredBody:
+      'Reviews require a usable LLM configuration. Go to the Configuration page to set it up?',
+    goToConfig: 'Go to Configuration',
     copy: {
       idCopied: 'Review ID {id} copied to clipboard.',
     },
@@ -299,6 +303,8 @@ export default {
     notSet: '(not set)',
     revealCountdown: 'Visible for {count}s...',
     noChangesToSave: 'No changes to save',
+    llmNotConfiguredBanner:
+      'No usable LLM configured yet — reviews need an LLM to run. Fill in the API Base URL and key under "LLM Settings" below, or add one under "Additional LLM Providers".',
     validation: {
       invalidUrl: 'Please enter a valid URL',
       invalidProjectPath: 'Use the format group/project (e.g. my-group/my-project)',

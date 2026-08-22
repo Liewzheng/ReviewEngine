@@ -192,6 +192,10 @@ export default {
       requeuedTitle: 'レビューを再キューしました',
       requeuedMessage: '{title} の新しいレビューをキューに追加しました。',
     },
+    llmNotConfiguredTitle: 'LLM が未設定です',
+    llmNotConfiguredBody:
+      'レビューには利用可能な LLM 設定が必要です。設定ページへ移動して設定しますか？',
+    goToConfig: '設定へ移動',
     copy: {
       idCopied: 'レビュー ID {id} をクリップボードにコピーしました。',
     },
@@ -290,6 +294,8 @@ export default {
     notSet: '（未設定）',
     revealCountdown: '表示時間 {count} 秒…',
     noChangesToSave: '保存する変更がありません',
+    llmNotConfiguredBanner:
+      '利用可能な LLM がまだ設定されていません — レビューの実行には LLM が必要です。下の「LLM 設定」で API ベース URL とキーを入力するか、「追加の LLM プロバイダー」で追加してください。',
     validation: {
       invalidUrl: '有効な URL を入力してください',
       invalidProjectPath: 'group/project 形式で入力してください（例: my-group/my-project）',

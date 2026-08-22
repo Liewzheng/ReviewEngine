@@ -193,6 +193,10 @@ export default {
       requeuedTitle: 'Revue remise en file',
       requeuedMessage: 'Une nouvelle revue a été mise en file pour {title}.',
     },
+    llmNotConfiguredTitle: 'LLM non configuré',
+    llmNotConfiguredBody:
+      "Les revues nécessitent une configuration LLM utilisable. Aller à la page Configuration pour la définir ?",
+    goToConfig: 'Aller à Configuration',
     copy: {
       idCopied: "ID de revue {id} copié dans le presse-papiers.",
     },
@@ -291,6 +295,8 @@ export default {
     notSet: '(non défini)',
     revealCountdown: 'Visible pendant {count} s…',
     noChangesToSave: 'Aucune modification à enregistrer',
+    llmNotConfiguredBanner:
+      "Aucun LLM utilisable n'est encore configuré — les revues nécessitent un LLM pour s'exécuter. Renseignez l'URL de base de l'API et la clé dans « Paramètres LLM » ci-dessous, ou ajoutez-en un dans « Fournisseurs LLM supplémentaires ».",
     validation: {
       invalidUrl: 'Veuillez saisir une URL valide',
       invalidProjectPath: 'Utilisez le format groupe/projet (p. ex. my-group/my-project)',

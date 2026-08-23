@@ -285,6 +285,48 @@ impl Client {
 
     pub async fn fetch_diff(&self) -> Result<String> {
         let project = self.encoded_project_path();
+        let raw_url = format!(
+            "{}/projects/{}/merge_requests/{}/raw_diffs",
+            self.base_url, project, self.mr_iid
+        );
+
+        info!(url = %raw_url, "Fetching MR diff via raw_diffs");
+
+        let resp = self
+            .http
+            .get(&raw_url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await
+            .with_context(|| format!("Failed to send GET {raw_url}"))?;
+
+        if resp.status().is_success() {
+            // raw_diffs returns the complete unified git diff as plain text
+            // (including `diff --git` headers), so it can be returned as-is.
+            return resp
+                .text()
+                .await
+                .with_context(|| "Failed to read raw_diffs response body");
+        }
+
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        info!(
+            status = %status,
+            body = %body,
+            "raw_diffs unavailable, falling back to /changes"
+        );
+
+        self.fetch_diff_via_changes().await
+    }
+
+    /// Fallback diff fetch for GitLab instances without `raw_diffs`
+    /// (pre-15.7): uses `GET .../merge_requests/:iid/changes` and joins the
+    /// per-change `diff` fragments. Note these fragments are headerless
+    /// patch bodies (starting at `@@`), so downstream parsers see no
+    /// `diff --git` file headers.
+    async fn fetch_diff_via_changes(&self) -> Result<String> {
+        let project = self.encoded_project_path();
         let url = format!(
             "{}/projects/{}/merge_requests/{}/changes",
             self.base_url, project, self.mr_iid
@@ -985,6 +1027,71 @@ mod tests {
         assert_eq!(parse_blob_search_paths(&value, 0), vec!["src/a.rs".to_string()]);
         let value = json!([{"path": "src/a.rs"}, {"path": "src/b.rs"}]);
         assert_eq!(parse_blob_search_paths(&value, 1), vec!["src/a.rs".to_string()]);
+    }
+
+    // ─── fetch_diff ───────────────────────────────
+
+    const RAW_DIFF_BODY: &str = "diff --git a/src/main.rs b/src/main.rs\nindex 1111111..2222222 100644\n--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,2 +1,2 @@\n fn main() {\n-    println!(\"old\");\n+    println!(\"new\");\n }\n";
+
+    #[tokio::test]
+    async fn test_fetch_diff_raw_diffs_returns_body_verbatim() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/raw_diffs"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(RAW_DIFF_BODY))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let diff = client.fetch_diff().await.unwrap();
+        assert_eq!(diff, RAW_DIFF_BODY);
+        assert!(diff.contains("diff --git a/src/main.rs b/src/main.rs"));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_diff_falls_back_to_changes_on_raw_diffs_404() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/raw_diffs"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("{\"message\":\"404 Not Found\"}"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/changes"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "changes": [
+                    {"diff": "@@ -1,2 +1,2 @@\n fn main() {\n-old\n+new\n }"},
+                    {"diff": "@@ -1 +1 @@\n-a\n+b"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let diff = client.fetch_diff().await.unwrap();
+        assert_eq!(
+            diff,
+            "@@ -1,2 +1,2 @@\n fn main() {\n-old\n+new\n }\n@@ -1 +1 @@\n-a\n+b"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fetch_diff_errors_when_raw_diffs_and_changes_both_fail() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/raw_diffs"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("{\"message\":\"404 Not Found\"}"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/changes"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("internal error"))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let err = client.fetch_diff().await.unwrap_err();
+        assert!(err.to_string().contains("500"), "error should mention 500, got: {err}");
     }
 
     // ─── fetch_file_raw ───────────────────────────

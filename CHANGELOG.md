@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.31] - 2026-08-23
+
+### Fixed
+- **GitLab MR reviews analyzed an empty diff**: `fetch_diff` used `/merge_requests/:iid/changes` and joined the per-change `diff` fragments, which are headerless patch bodies (they start at `@@`, no `diff --git`/`---`/`+++` lines) — the diff parser extracted zero files, so reviews "completed" with 0 findings and a hollow 100/unverified score (verified live against GitLab EE 19.2.4). `fetch_diff` now prefers `/merge_requests/:iid/raw_diffs` (full unified git diff, returned verbatim) and falls back to `/changes` for old GitLab versions. (`src/git_provider/gitlab/client.rs`)
+
 ## [0.9.30] - 2026-08-21
 
 ### Added

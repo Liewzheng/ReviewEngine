@@ -29,29 +29,47 @@ pub(crate) fn resolve_gitlab_token(header: Option<&str>) -> Option<String> {
         .filter(|t| !t.is_empty())
 }
 
+/// A resolved review source: the raw diff plus, for MR-based sources, the MR
+/// metadata fetched from the provider API. `mr_info` is `Some` only for
+/// `gitlab_mr` sources today; local/static sources carry no MR context.
+#[derive(Debug)]
+pub(crate) struct ResolvedSource {
+    pub diff: String,
+    pub mr_info: Option<crate::models::MRInfo>,
+}
+
 pub(crate) async fn run_review(
-    source: ReviewSource,
-    gitlab_token: Option<String>,
-    cfg: &Option<Arc<crate::models::AppConfig>>,
+    resolved: ResolvedSource,
     config_toml: Option<String>,
     llm_configs: Vec<crate::models::LLMConfig>,
 ) -> anyhow::Result<(serde_json::Value, String)> {
-    let diff_raw = resolve_source(source, gitlab_token, cfg).await?;
-
     let config_source = config_toml.map(crate::models::ConfigSource::Inline);
     let app_config = crate::config::resolve_config(config_source).await?;
 
     let experts = app_config.build_expert_defs();
-    let mr_info = crate::models::MRInfo::new(
-        "api".to_string(),
-        "API Review".to_string(),
-        "unknown".to_string(),
-        "unknown".to_string(),
-    );
+    // MR-based reviews reuse the freshly fetched metadata so prompts carry the
+    // real title/branches; local/static sources keep the placeholder context.
+    let mr_info = resolved.mr_info.unwrap_or_else(|| {
+        crate::models::MRInfo::new(
+            "api".to_string(),
+            "API Review".to_string(),
+            "unknown".to_string(),
+            "unknown".to_string(),
+        )
+    });
 
     let review_result = tokio::time::timeout(
         std::time::Duration::from_secs(600),
-        orchestrator::run_experts(&experts, &mr_info, &diff_raw, &llm_configs, &app_config, None, "", None),
+        orchestrator::run_experts(
+            &experts,
+            &mr_info,
+            &resolved.diff,
+            &llm_configs,
+            &app_config,
+            None,
+            "",
+            None,
+        ),
     )
     .await;
 
@@ -73,7 +91,7 @@ pub(crate) async fn resolve_source(
     source: ReviewSource,
     gitlab_token: Option<String>,
     _config: &Option<Arc<crate::models::AppConfig>>,
-) -> anyhow::Result<String> {
+) -> anyhow::Result<ResolvedSource> {
     match source {
         ReviewSource::GitLabMr { url } => {
             // Defense in depth: submit/rerun handlers already enforce the
@@ -87,8 +105,15 @@ pub(crate) async fn resolve_source(
                     )
                 })?;
             let client = crate::git_provider::gitlab::client::Client::new(&token, &url)?;
+            // Fetch metadata before the diff: when the diff fetch (or the
+            // review itself) later fails, the task runner has already
+            // back-filled the record's display metadata from `mr_info`.
+            let mr_info = client.fetch_mr_info().await?;
             let diff = client.fetch_diff().await?;
-            Ok(diff)
+            Ok(ResolvedSource {
+                diff,
+                mr_info: Some(mr_info),
+            })
         }
         ReviewSource::LocalRepo { path, base, head } => {
             let repo_path = std::path::Path::new(&path);
@@ -108,7 +133,7 @@ pub(crate) async fn resolve_source(
             let diff = browser
                 .get_diff(base.as_deref().unwrap_or("main"), head.as_deref(), false, None, None)
                 .await?;
-            Ok(diff)
+            Ok(ResolvedSource { diff, mr_info: None })
         }
         ReviewSource::StaticDiff { diff } => {
             if diff.len() > MAX_STATIC_DIFF_BYTES {
@@ -117,7 +142,7 @@ pub(crate) async fn resolve_source(
                     MAX_STATIC_DIFF_BYTES / (1024 * 1024)
                 );
             }
-            Ok(diff)
+            Ok(ResolvedSource { diff, mr_info: None })
         }
     }
 }

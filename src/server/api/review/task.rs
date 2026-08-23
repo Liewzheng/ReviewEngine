@@ -147,6 +147,30 @@ pub(crate) fn source_meta_from_request(source: &ReviewSource) -> SourceMeta {
     }
 }
 
+/// Map the MR metadata resolved by the review pipeline (`MRInfo`, fetched
+/// from the provider API) onto task source metadata for the History UI.
+/// Empty strings map to `None` — a missing value must stay absent rather
+/// than be persisted as `""`. Paired with [`TaskStore::fill_source_meta`]'s
+/// fill-only-blank semantics so enqueue-time values are never clobbered.
+pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMeta {
+    fn non_empty(s: &str) -> Option<String> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    SourceMeta {
+        mr_title: non_empty(&info.title),
+        branch: non_empty(&info.source_branch),
+        target_branch: non_empty(&info.target_branch),
+        author_name: info.pr_author.clone(),
+        commit_sha: non_empty(&info.git_hash),
+        ..SourceMeta::default()
+    }
+}
+
 use crate::server::task_queue::TaskStore;
 use crate::server::AppState;
 use serde::Deserialize;
@@ -205,7 +229,24 @@ pub(crate) async fn enqueue_review(
             }),
         );
 
-        match super::resolve::run_review(source, gitlab_token, &cfg, config_toml, llm_configs).await {
+        // Resolve the source first: for gitlab_mr reviews this fetches the MR
+        // metadata up front, so the task record is back-filled (History shows
+        // the real title/branch/author/commit) even when the review itself
+        // later fails. Fill happens before the (possibly long) expert run and
+        // only touches fields still blank, so enqueue-time values win.
+        let outcome = match super::resolve::resolve_source(source, gitlab_token, &cfg).await {
+            Ok(resolved) => {
+                if let Some(ref info) = resolved.mr_info {
+                    store_clone
+                        .fill_source_meta(task_id, source_meta_from_mr_info(info))
+                        .await;
+                }
+                super::resolve::run_review(resolved, config_toml, llm_configs).await
+            }
+            Err(e) => Err(e),
+        };
+
+        match outcome {
             Ok((value, summary)) => {
                 crate::server::log_collector::push_global_entry(
                     "INFO",

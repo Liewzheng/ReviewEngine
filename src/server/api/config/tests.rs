@@ -237,6 +237,127 @@ fn is_blank_or_masked_treats_empty_and_mask_as_keep() {
     assert!(!is_blank_or_masked("sk-real"));
 }
 
+// ── POST /config/models probe key fallback ────────────────────────────
+
+/// Build an `AppState` holding one LLM config with `api_base`/`api_key`,
+/// mimicking an env-`LLM_CONFIG`-seeded server-side entry.
+fn state_with_llm_entry(api_base: &str, api_key: &str) -> Arc<AppState> {
+    Arc::new(AppState::new(vec![crate::models::LLMConfig {
+        provider: "openai".to_string(),
+        model: "gpt-4o".to_string(),
+        api_key: api_key.to_string(),
+        api_base: api_base.to_string(),
+        max_tokens: 4096,
+        temperature: 0.7,
+        disable_thinking: None,
+    }]))
+}
+
+async fn fetch_models_body(state: Arc<AppState>, api_base: &str, api_key: &str) -> serde_json::Value {
+    let req: super::helpers::ModelsRequest =
+        serde_json::from_value(serde_json::json!({ "api_base": api_base, "api_key": api_key }))
+            .expect("ModelsRequest must deserialize");
+    let resp = super::helpers::fetch_models(State(state), Json(req))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Regression for the env-config 401: a masked (`***`) probe key must fall
+/// back to the effective server-side key for the same api_base, so the
+/// upstream provider authenticates instead of returning HTTP 401.
+#[tokio::test]
+async fn fetch_models_falls_back_to_server_key_when_masked() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("Authorization", "Bearer sk-real-server-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "mimo-2"}, {"id": "gpt-4o"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let state = state_with_llm_entry(&server.uri(), "sk-real-server-key");
+    let body = fetch_models_body(state, &server.uri(), API_KEY_MASK).await;
+    assert_eq!(
+        body["models"],
+        serde_json::json!(["gpt-4o", "mimo-2"]),
+        "the upstream request must carry the server-side key, got {body}"
+    );
+}
+
+/// A blank probe key (frontend "leave blank") takes the same fallback.
+#[tokio::test]
+async fn fetch_models_falls_back_to_server_key_when_blank() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("Authorization", "Bearer sk-real-server-key"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "gpt-4o"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let state = state_with_llm_entry(&server.uri(), "sk-real-server-key");
+    let body = fetch_models_body(state, &server.uri(), "").await;
+    assert_eq!(body["models"], serde_json::json!(["gpt-4o"]), "got {body}");
+}
+
+/// An explicit probe key is used as-is, even when the server holds a
+/// different key for the same api_base (unchanged behavior).
+#[tokio::test]
+async fn fetch_models_uses_explicit_key_unchanged() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("Authorization", "Bearer sk-explicit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [{"id": "custom-model"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let state = state_with_llm_entry(&server.uri(), "sk-real-server-key");
+    let body = fetch_models_body(state, &server.uri(), "sk-explicit").await;
+    assert_eq!(body["models"], serde_json::json!(["custom-model"]), "got {body}");
+}
+
+/// A masked key with no matching server-side config keeps the old behavior:
+/// the masked value is sent verbatim (and the provider's 401 surfaces as
+/// the unchanged `{"models": [], "error": "HTTP 401 Unauthorized"}` shape).
+#[tokio::test]
+async fn fetch_models_without_matching_config_keeps_masked_key() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(header("Authorization", format!("Bearer {API_KEY_MASK}")))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .mount(&server)
+        .await;
+
+    // The server-side entry points at a different api_base, so no fallback.
+    let state = state_with_llm_entry("https://elsewhere.example/v1", "sk-real-server-key");
+    let body = fetch_models_body(state, &server.uri(), API_KEY_MASK).await;
+    assert_eq!(body["models"], serde_json::json!([]));
+    assert_eq!(body["error"], "HTTP 401 Unauthorized");
+}
+
 // ── GitLab apiToken masking (contract-4) ──────────────────────────────
 
 /// Snapshot/restore guard for the global GitLab runtime, so a round-trip

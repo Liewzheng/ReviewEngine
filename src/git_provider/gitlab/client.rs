@@ -250,7 +250,15 @@ impl Client {
             description: Option<String>,
             source_branch: String,
             target_branch: String,
+            author: Option<GitLabAuthor>,
             diff_refs: Option<DiffRefs>,
+        }
+
+        #[derive(serde::Deserialize)]
+        struct GitLabAuthor {
+            id: Option<u64>,
+            username: Option<String>,
+            name: Option<String>,
         }
 
         #[derive(serde::Deserialize)]
@@ -266,6 +274,13 @@ impl Client {
         let git_hash = diff_refs.as_ref().and_then(|d| d.head_sha.clone()).unwrap_or_default();
         let base_sha = diff_refs.as_ref().and_then(|d| d.base_sha.clone());
         let start_sha = diff_refs.as_ref().and_then(|d| d.start_sha.clone());
+        // Prefer the username handle (parity with GitHub's `user.login`);
+        // fall back to the display name when the API omits the username.
+        let pr_author = gl
+            .author
+            .as_ref()
+            .and_then(|a| a.username.clone().or_else(|| a.name.clone()));
+        let pr_author_id = gl.author.as_ref().and_then(|a| a.id);
 
         Ok(MRInfo {
             project_path: self.project_path.clone(),
@@ -278,8 +293,8 @@ impl Client {
             base_sha,
             start_sha,
             merge_commit_sha: None,
-            pr_author: None,
-            pr_author_id: None,
+            pr_author,
+            pr_author_id,
         })
     }
 
@@ -1092,6 +1107,58 @@ mod tests {
         let client = make_test_client(&server);
         let err = client.fetch_diff().await.unwrap_err();
         assert!(err.to_string().contains("500"), "error should mention 500, got: {err}");
+    }
+
+    // ─── fetch_mr_info ──────────────────────────
+
+    #[tokio::test]
+    async fn test_fetch_mr_info_maps_metadata_and_author() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "Add login endpoint",
+                "description": "desc",
+                "source_branch": "feature/login",
+                "target_branch": "main",
+                "author": {"id": 7, "username": "alice", "name": "Alice A"},
+                "diff_refs": {"base_sha": "base1", "head_sha": "deadbeef", "start_sha": "start1"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let info = client.fetch_mr_info().await.unwrap();
+        assert_eq!(info.title, "Add login endpoint");
+        assert_eq!(info.source_branch, "feature/login");
+        assert_eq!(info.target_branch, "main");
+        assert_eq!(info.git_hash, "deadbeef");
+        assert_eq!(info.base_sha.as_deref(), Some("base1"));
+        assert_eq!(info.start_sha.as_deref(), Some("start1"));
+        assert_eq!(info.pr_author.as_deref(), Some("alice"));
+        assert_eq!(info.pr_author_id, Some(7));
+    }
+
+    #[tokio::test]
+    async fn test_fetch_mr_info_falls_back_to_author_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 9, "name": "Alice A"}
+            })))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let info = client.fetch_mr_info().await.unwrap();
+        assert_eq!(info.pr_author.as_deref(), Some("Alice A"));
+        assert_eq!(info.pr_author_id, Some(9));
+        // Missing diff_refs must not fail the fetch; git_hash degrades to "".
+        assert_eq!(info.git_hash, "");
     }
 
     // ─── fetch_file_raw ───────────────────────────

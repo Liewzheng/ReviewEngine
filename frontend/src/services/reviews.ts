@@ -1,6 +1,6 @@
 import { request } from './api';
 import { normalizeStatus } from './status';
-import type { ReviewListItem, ReviewDetail, HistoryFilters } from '../types/history';
+import type { ReviewListItem, ReviewDetail, HistoryFilters, RiskLevel, ReviewAssessment } from '../types/history';
 
 export interface ReviewsListResponse {
   items: ReviewListItem[];
@@ -40,6 +40,62 @@ interface RawReviewItem {
   createdAt?: string;
   gitlab_mr_url?: string | null;
   gitlabMrUrl?: string;
+  /** Embedded full `ReviewOutput` JSON (carries `consolidated.assessment`). */
+  result?: unknown;
+}
+
+/** Fallback band derivation, mirroring `scoring::review::score_to_risk_level`. */
+function riskLevelFromScore(score: number): RiskLevel {
+  if (score >= 91) return 'healthy';
+  if (score >= 81) return 'low';
+  if (score >= 61) return 'low-medium';
+  if (score >= 41) return 'medium';
+  if (score >= 21) return 'high';
+  return 'critical';
+}
+
+/**
+ * The backend serializes `risk_level` either as serde variant names
+ * (`"LowMedium"`, MR reviews) or lowercase display strings (`"low-medium"`,
+ * repo-side adapter) depending on the code path — accept both.
+ */
+function normalizeRiskLevel(raw: unknown, score: number): RiskLevel {
+  const s = typeof raw === 'string' ? raw.toLowerCase() : '';
+  switch (s) {
+    case 'healthy':
+      return 'healthy';
+    case 'low':
+      return 'low';
+    case 'lowmedium':
+    case 'low-medium':
+      return 'low-medium';
+    case 'medium':
+      return 'medium';
+    case 'high':
+      return 'high';
+    case 'critical':
+      return 'critical';
+    default:
+      return riskLevelFromScore(score);
+  }
+}
+
+/**
+ * Extract the lead-consolidation overall assessment from an embedded
+ * `ReviewOutput` (`consolidated.assessment`). Absent for non-completed tasks
+ * and results without consolidation — the UI hides the score then.
+ */
+export function extractAssessment(result: unknown): ReviewAssessment | undefined {
+  if (!result || typeof result !== 'object') return undefined;
+  const assessment = (result as {
+    consolidated?: { assessment?: { score?: unknown; risk_level?: unknown; unverified?: unknown } } | null;
+  }).consolidated?.assessment;
+  if (!assessment || typeof assessment.score !== 'number') return undefined;
+  return {
+    score: assessment.score,
+    riskLevel: normalizeRiskLevel(assessment.risk_level, assessment.score),
+    unverified: assessment.unverified === true,
+  };
 }
 
 function normalizeReviewListItem(raw: RawReviewItem): ReviewListItem {
@@ -58,6 +114,7 @@ function normalizeReviewListItem(raw: RawReviewItem): ReviewListItem {
     durationMs: raw.durationMs ?? raw.duration_ms ?? 0,
     createdAt: raw.createdAt ?? raw.created_at ?? '',
     gitlabMrUrl: raw.gitlabMrUrl ?? raw.gitlab_mr_url ?? undefined,
+    assessment: extractAssessment(raw.result),
   };
 }
 
@@ -88,10 +145,17 @@ export async function getReviews(
 }
 
 export async function getReview(id: string): Promise<ReviewDetail> {
-  const raw = await request<ReviewDetail>(`/reviews/${id}`);
+  const raw = await request<ReviewDetail & { result?: unknown }>(`/reviews/${id}`);
   // The merged detail response carries the raw snake_case status string
   // (`pending`/`running`/...); normalize it to the display vocabulary.
-  return { ...raw, status: normalizeStatus(raw.status) };
+  // `rawApiResponse` is the embedded `ReviewOutput` (same payload as the
+  // snake_case `result` key); the assessment lives under
+  // `consolidated.assessment` in it.
+  return {
+    ...raw,
+    status: normalizeStatus(raw.status),
+    assessment: extractAssessment(raw.rawApiResponse ?? raw.result),
+  };
 }
 
 export async function deleteReview(id: string): Promise<void> {

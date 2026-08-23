@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.32] - 2026-08-23
+
+### Fixed
+- **Review tasks never carried MR metadata**: History showed "Untitled Review"/"unknown" for every gitlab_mr review — nothing ever wrote the fetched `MRInfo` back to the task. `fetch_mr_info` now deserializes the MR author; the task runner back-fills title/author/branches/commit SHA right after MR resolution (so even failed reviews show real metadata); the orchestrator now receives the real MRInfo instead of a hardcoded "API Review"/"unknown" placeholder (prompts carry the true title/branches). Enqueue-time URL-parsed values win (fill-only-blank). (`src/git_provider/gitlab/client.rs`, `src/server/task_queue.rs`, `src/server/api/review/{resolve,task}.rs`)
+- **`/api/v1/config/models` probe 401 for env-provided LLM configs**: the model-list probe used only the request-body key, which is blank or the `***` mask for env-sourced configs. The handler now falls back to the effective server-side key matching the same `api_base`. (`src/server/api/config/helpers.rs`)
+
+### Added (UI)
+- **Review score & risk level are finally visible**: History table gains a sortable score column (color-coded ≥80/≥60/<60) and the detail drawer header shows score + risk level (+ an "unverified" warning tag when coverage is insufficient). (`frontend/src/views/ReviewHistory.vue`, `frontend/src/types/history.ts`, `frontend/src/services/reviews.ts`)
+- **Full Comment tab**: shows a localized empty state ("该审核未生成评论") instead of a blank box for API-triggered reviews without an MR comment.
+- **Expert findings render the curated `summary` markdown** in a readable pre-wrap container; the raw LLM YAML moved behind a collapsed "原始响应" toggle. i18n keys added in all 6 locales.
+
 ## [0.9.31] - 2026-08-23
 
 ### Fixed

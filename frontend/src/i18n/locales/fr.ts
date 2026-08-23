@@ -170,6 +170,7 @@ export default {
       project: 'Projet',
       author: 'Auteur',
       status: 'Statut',
+      score: 'Score',
       duration: 'Durée',
       created: 'Créée',
       time: 'Heure',
@@ -224,6 +225,20 @@ export default {
       },
       generatedByPrefix: 'Revue générée par {count} experts avec statut global',
       viewOnGitlab: 'Voir sur GitLab',
+      score: 'Score global',
+      noComment: "Cette revue n'a généré aucun commentaire.",
+      rawResponse: 'Réponse brute',
+      unverified: 'Non vérifié',
+      unverifiedTooltip:
+        "Tous les experts ont rapporté zéro constatation ou la couverture était insuffisante — le score n'est pas un signal de qualité vérifié.",
+    },
+    riskLevel: {
+      healthy: 'Sain',
+      low: 'Faible',
+      lowMedium: 'Faible-moyen',
+      medium: 'Moyen',
+      high: 'Élevé',
+      critical: 'Critique',
     },
     time: {
       justNow: "à l'instant",

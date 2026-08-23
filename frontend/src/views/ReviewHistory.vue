@@ -20,7 +20,7 @@ import {
 import { ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import type { ApiError } from '../services/api'
-import type { ReviewListItem, HistoryFilters } from '../types/history'
+import type { ReviewListItem, HistoryFilters, RiskLevel } from '../types/history'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 
@@ -268,6 +268,47 @@ function getInitials(name: string): string {
     .slice(0, 2)
 }
 
+/* ─────────────── Score & Risk badges ─────────────── */
+/* Tag-type thresholds match the existing per-expert score tag below. Element
+   tag types carry the theme colors — no hardcoded hex. */
+function scoreTagType(score: number): 'success' | 'warning' | 'danger' {
+  if (score >= 80) return 'success'
+  if (score >= 60) return 'warning'
+  return 'danger'
+}
+
+function riskTagType(level: RiskLevel): 'success' | 'warning' | 'danger' {
+  switch (level) {
+    case 'healthy':
+    case 'low':
+      return 'success'
+    case 'low-medium':
+    case 'medium':
+      return 'warning'
+    case 'high':
+    case 'critical':
+      return 'danger'
+  }
+}
+
+/* Maps a normalized risk level onto its i18n key under `history.riskLevel`. */
+const riskLevelKeys: Record<RiskLevel, string> = {
+  healthy: 'healthy',
+  low: 'low',
+  'low-medium': 'lowMedium',
+  medium: 'medium',
+  high: 'high',
+  critical: 'critical',
+}
+
+function riskLabelKey(level: RiskLevel): string {
+  return 'history.riskLevel.' + riskLevelKeys[level]
+}
+
+const hasRawComment = computed(
+  () => !!selectedReview.value?.rawComment?.trim()
+)
+
 /* ─────────────── Pagination display ─────────────── */
 const paginationInfo = computed(() => {
   if (total.value === 0) return t('history.pagination.empty')
@@ -427,6 +468,21 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
+          <el-table-column :label="$t('history.columns.score')" width="90" align="center" sortable :sort-by="['assessment.score']">
+            <template #default="{ row }">
+              <el-tooltip
+                v-if="row.status === 'completed' && row.assessment"
+                :content="$t(riskLabelKey(row.assessment.riskLevel))"
+                placement="top"
+              >
+                <el-tag size="small" :type="scoreTagType(row.assessment.score)" class="score-tag">
+                  {{ row.assessment.score }}
+                </el-tag>
+              </el-tooltip>
+              <span v-else class="score-empty">-</span>
+            </template>
+          </el-table-column>
+
           <el-table-column :label="$t('history.columns.duration')" width="100" sortable :sort-by="['durationMs']">
             <template #default="{ row }">
               <span class="duration-text">{{ formatDuration(row.durationMs) }}</span>
@@ -499,7 +555,24 @@ watch(() => route.query, () => {
       <template #header>
         <div class="drawer-title-row">
           <h3 class="drawer-title">{{ selectedReview?.mrTitle || $t('history.drawer.reviewDetails') }}</h3>
-          <StatusBadge v-if="selectedReview" :status="selectedReview.status" />
+          <div class="drawer-badges" v-if="selectedReview">
+            <template v-if="selectedReview.status === 'completed' && selectedReview.assessment">
+              <el-tooltip :content="$t('history.drawer.score')" placement="bottom">
+                <el-tag :type="scoreTagType(selectedReview.assessment.score)" class="score-tag">
+                  {{ selectedReview.assessment.score }}
+                </el-tag>
+              </el-tooltip>
+              <el-tag :type="riskTagType(selectedReview.assessment.riskLevel)" effect="plain" class="risk-tag">
+                {{ $t(riskLabelKey(selectedReview.assessment.riskLevel)) }}
+              </el-tag>
+              <el-tooltip v-if="selectedReview.assessment.unverified" :content="$t('history.drawer.unverifiedTooltip')" placement="bottom">
+                <el-tag type="warning" effect="plain" size="small" class="unverified-tag">
+                  {{ $t('history.drawer.unverified') }}
+                </el-tag>
+              </el-tooltip>
+            </template>
+            <StatusBadge :status="selectedReview.status" />
+          </div>
         </div>
       </template>
       <div v-if="selectedReview" class="drawer-content">
@@ -571,8 +644,13 @@ watch(() => route.query, () => {
               </div>
             </template>
             <div class="expert-content">
-              <p class="expert-summary">{{ exp.summary }}</p>
-              <p v-if="exp.details" class="expert-details">{{ exp.details }}</p>
+              <!-- `summary` carries the curated pre-rendered Markdown report;
+                   pre-wrap keeps its structure readable without a renderer. -->
+              <div class="expert-markdown">{{ exp.summary }}</div>
+              <details v-if="exp.details" class="raw-toggle">
+                <summary class="raw-toggle-summary">{{ $t('history.drawer.rawResponse') }}</summary>
+                <pre class="raw-response-block">{{ exp.details }}</pre>
+              </details>
             </div>
           </el-collapse-item>
         </el-collapse>
@@ -588,13 +666,8 @@ watch(() => route.query, () => {
           </el-tab-pane>
           <el-tab-pane :label="$t('history.drawer.tabs.fullComment')">
             <div class="raw-panel">
-              <el-input
-                v-model="selectedReview.rawComment"
-                type="textarea"
-                :rows="10"
-                readonly
-                resize="none"
-              />
+              <pre v-if="hasRawComment" class="comment-block">{{ selectedReview.rawComment }}</pre>
+              <p v-else class="empty-text">{{ $t('history.drawer.noComment') }}</p>
             </div>
           </el-tab-pane>
           <el-tab-pane :label="$t('history.drawer.tabs.apiResponse')">
@@ -909,23 +982,50 @@ watch(() => route.query, () => {
   gap: 8px;
 }
 
-.expert-summary {
+.expert-markdown {
   font-size: 13px;
   color: var(--text-primary);
-  line-height: 1.5;
+  line-height: 1.6;
   margin: 0;
-}
-
-.expert-details {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.5;
-  margin: 0;
-  padding: 8px;
+  padding: 8px 12px;
   background: var(--bg-surface);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
   font-family: var(--font-sans);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.raw-toggle {
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-surface);
+}
+
+.raw-toggle-summary {
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.raw-toggle-summary:hover {
+  color: var(--text-primary);
+}
+
+.raw-response-block {
+  margin: 0;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-color);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow-y: auto;
 }
 
 .raw-panel {
@@ -936,6 +1036,45 @@ watch(() => route.query, () => {
   font-size: 13px;
   color: var(--text-primary);
   line-height: 1.6;
+}
+
+.comment-block {
+  margin: 0;
+  padding: 12px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.empty-text {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.drawer-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.score-tag {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+
+.score-empty {
+  color: var(--text-secondary);
+  font-size: 13px;
 }
 
 .json-block {

@@ -264,6 +264,56 @@ impl TaskStore {
         }
     }
 
+    /// Back-fill a task's `source_meta` from `candidate`, filling only fields
+    /// that are currently unset (`None` or blank/whitespace). Values already
+    /// present — e.g. parsed from the request URL at enqueue time — always
+    /// win, so a late fill (MR metadata resolved mid-review) can never
+    /// clobber enqueue-time metadata.
+    ///
+    /// No lifecycle event is broadcast: this is metadata enrichment, not a
+    /// state transition. The next state-change event (`review.completed`, …)
+    /// already reads the updated `source_meta`.
+    ///
+    /// Like [`update`](Self::update), a cancelled task is left untouched.
+    pub async fn fill_source_meta(&self, task_id: Uuid, candidate: SourceMeta) {
+        fn is_blank(value: &Option<String>) -> bool {
+            value.as_deref().map(str::trim).unwrap_or_default().is_empty()
+        }
+        if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
+            if entry.state == TaskState::Cancelled {
+                return;
+            }
+            let meta = &mut entry.source_meta;
+            if is_blank(&meta.mr_title) {
+                meta.mr_title = candidate.mr_title;
+            }
+            if is_blank(&meta.project) {
+                meta.project = candidate.project;
+            }
+            if is_blank(&meta.repository) {
+                meta.repository = candidate.repository;
+            }
+            if is_blank(&meta.branch) {
+                meta.branch = candidate.branch;
+            }
+            if is_blank(&meta.target_branch) {
+                meta.target_branch = candidate.target_branch;
+            }
+            if is_blank(&meta.author_name) {
+                meta.author_name = candidate.author_name;
+            }
+            if is_blank(&meta.author_avatar_url) {
+                meta.author_avatar_url = candidate.author_avatar_url;
+            }
+            if is_blank(&meta.gitlab_mr_url) {
+                meta.gitlab_mr_url = candidate.gitlab_mr_url;
+            }
+            if is_blank(&meta.commit_sha) {
+                meta.commit_sha = candidate.commit_sha;
+            }
+        }
+    }
+
     pub async fn get(&self, task_id: Uuid) -> Option<TaskEntry> {
         self.inner.read().await.get(&task_id).cloned()
     }
@@ -518,4 +568,97 @@ pub struct QueueStats {
     pub failed_last_24h: u64,
     pub total_last_24h: u64,
     pub is_paused: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn candidate_meta() -> SourceMeta {
+        SourceMeta {
+            mr_title: Some("Add login endpoint".to_string()),
+            project: Some("group/proj".to_string()),
+            repository: Some("group/proj".to_string()),
+            branch: Some("feature/login".to_string()),
+            target_branch: Some("main".to_string()),
+            author_name: Some("alice".to_string()),
+            author_avatar_url: None,
+            gitlab_mr_url: None,
+            commit_sha: Some("deadbeef".to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn fill_source_meta_populates_blank_fields() {
+        let store = TaskStore::new();
+        let id = store.create(Some(SourceMeta::default())).await;
+
+        store.fill_source_meta(id, candidate_meta()).await;
+
+        let meta = store.get(id).await.expect("task exists").source_meta;
+        assert_eq!(meta.mr_title.as_deref(), Some("Add login endpoint"));
+        assert_eq!(meta.branch.as_deref(), Some("feature/login"));
+        assert_eq!(meta.target_branch.as_deref(), Some("main"));
+        assert_eq!(meta.author_name.as_deref(), Some("alice"));
+        assert_eq!(meta.commit_sha.as_deref(), Some("deadbeef"));
+        // Candidate-absent fields stay absent.
+        assert!(meta.author_avatar_url.is_none());
+        assert!(meta.gitlab_mr_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn fill_source_meta_never_clobbers_existing_values() {
+        let store = TaskStore::new();
+        let id = store
+            .create(Some(SourceMeta {
+                mr_title: Some("webhook title".to_string()),
+                branch: Some("webhook-branch".to_string()),
+                ..SourceMeta::default()
+            }))
+            .await;
+
+        store.fill_source_meta(id, candidate_meta()).await;
+
+        let meta = store.get(id).await.expect("task exists").source_meta;
+        // Pre-existing (enqueue/webhook-provided) values win...
+        assert_eq!(meta.mr_title.as_deref(), Some("webhook title"));
+        assert_eq!(meta.branch.as_deref(), Some("webhook-branch"));
+        // ...while still-blank fields are filled.
+        assert_eq!(meta.target_branch.as_deref(), Some("main"));
+        assert_eq!(meta.author_name.as_deref(), Some("alice"));
+        assert_eq!(meta.commit_sha.as_deref(), Some("deadbeef"));
+    }
+
+    #[tokio::test]
+    async fn fill_source_meta_treats_empty_and_whitespace_as_blank() {
+        let store = TaskStore::new();
+        let id = store
+            .create(Some(SourceMeta {
+                mr_title: Some(String::new()),
+                branch: Some("   ".to_string()),
+                ..SourceMeta::default()
+            }))
+            .await;
+
+        store.fill_source_meta(id, candidate_meta()).await;
+
+        let meta = store.get(id).await.expect("task exists").source_meta;
+        assert_eq!(meta.mr_title.as_deref(), Some("Add login endpoint"));
+        assert_eq!(meta.branch.as_deref(), Some("feature/login"));
+    }
+
+    #[tokio::test]
+    async fn fill_source_meta_skips_cancelled_tasks() {
+        let store = TaskStore::new();
+        let id = store.create(Some(SourceMeta::default())).await;
+        assert!(store.delete(id).await, "pending task must cancel");
+
+        store.fill_source_meta(id, candidate_meta()).await;
+
+        let meta = store.get(id).await.expect("cancelled record is kept").source_meta;
+        assert!(
+            meta.mr_title.is_none() && meta.branch.is_none() && meta.commit_sha.is_none(),
+            "a cancelled task must not be mutated, got {meta:?}"
+        );
+    }
 }

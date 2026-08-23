@@ -169,6 +169,7 @@ export default {
       project: 'プロジェクト',
       author: '作成者',
       status: 'ステータス',
+      score: 'スコア',
       duration: '所要時間',
       created: '作成日時',
       time: '時間',
@@ -223,6 +224,20 @@ export default {
       },
       generatedByPrefix: '{count} 名のエキスパートがレビューを生成、全体ステータス',
       viewOnGitlab: 'GitLab で表示',
+      score: '総合スコア',
+      noComment: 'このレビューではコメントは生成されませんでした',
+      rawResponse: '生レスポンス',
+      unverified: '未検証',
+      unverifiedTooltip:
+        'すべてのエキスパートで指摘がゼロ、またはカバレッジが不足しています。スコアは検証済みの品質指標ではありません。',
+    },
+    riskLevel: {
+      healthy: '健全',
+      low: '低',
+      lowMedium: '低〜中',
+      medium: '中',
+      high: '高',
+      critical: '重大',
     },
     time: {
       justNow: 'たった今',

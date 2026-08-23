@@ -168,6 +168,7 @@ export default {
       project: '프로젝트',
       author: '작성자',
       status: '상태',
+      score: '점수',
       duration: '소요 시간',
       created: '생성 시간',
       time: '시간',
@@ -222,6 +223,20 @@ export default {
       },
       generatedByPrefix: '{count}명의 전문가가 리뷰를 생성했으며 전체 상태',
       viewOnGitlab: 'GitLab에서 보기',
+      score: '전체 점수',
+      noComment: '이 리뷰는 댓글을 생성하지 않았습니다',
+      rawResponse: '원본 응답',
+      unverified: '미검증',
+      unverifiedTooltip:
+        '모든 전문가가 발견 사항 없음으로 보고했거나 커버리지가 부족합니다. 점수는 검증된 품질 신호가 아닙니다.',
+    },
+    riskLevel: {
+      healthy: '정상',
+      low: '낮음',
+      lowMedium: '낮음-중간',
+      medium: '중간',
+      high: '높음',
+      critical: '심각',
     },
     time: {
       justNow: '방금 전',

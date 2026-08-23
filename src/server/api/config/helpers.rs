@@ -1,5 +1,9 @@
+use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::Json;
+use std::sync::Arc;
+
+use crate::server::AppState;
 
 #[derive(Debug, serde::Deserialize)]
 pub struct TestConfigRequest {
@@ -54,7 +58,10 @@ struct OpenAiModel {
     id: String,
 }
 
-pub async fn fetch_models(Json(body): Json<ModelsRequest>) -> impl axum::response::IntoResponse {
+pub async fn fetch_models(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ModelsRequest>,
+) -> impl axum::response::IntoResponse {
     use reqwest::Client;
     let client = Client::new();
 
@@ -64,10 +71,28 @@ pub async fn fetch_models(Json(body): Json<ModelsRequest>) -> impl axum::respons
         body.api_base.clone()
     };
 
+    // The UI never sees real keys (`GET /config` masks them as `***`), so a
+    // blank or masked probe key means "use the server-side one": fall back to
+    // the effective configured key for the same api_base (seeded from env
+    // LLM_CONFIG or saved via PUT /config). An explicit key is used as-is,
+    // and a masked key with no matching config keeps the old behavior.
+    let api_key = if super::is_blank_or_masked(&body.api_key) {
+        state
+            .llm_configs
+            .read()
+            .unwrap()
+            .iter()
+            .find(|c| c.api_base == body.api_base)
+            .map(|c| c.api_key.clone())
+            .unwrap_or_else(|| body.api_key.clone())
+    } else {
+        body.api_key.clone()
+    };
+
     let url = format!("{}/models", base);
     let result = client
         .get(&url)
-        .header("Authorization", format!("Bearer {}", body.api_key))
+        .header("Authorization", format!("Bearer {}", api_key))
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await;

@@ -4,6 +4,20 @@
 export type ReviewStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled'
 export type ExpertResultStatus = 'success' | 'warning' | 'error' | 'skipped'
 
+/** Normalized overall risk level (from `result.consolidated.assessment`). */
+export type RiskLevel = 'healthy' | 'low' | 'low-medium' | 'medium' | 'high' | 'critical'
+
+/**
+ * Lead-consolidation overall assessment, extracted from the embedded
+ * `ReviewOutput` (`consolidated.assessment`) by the service layer. Absent for
+ * non-completed tasks and results that predate consolidation.
+ */
+export interface ReviewAssessment {
+  score: number
+  riskLevel: RiskLevel
+  unverified: boolean
+}
+
 export interface ReviewAuthor {
   name: string
   avatarUrl?: string
@@ -17,7 +31,10 @@ export interface ExpertResult {
   expertName: string
   status: ExpertResultStatus
   score?: number
+  // Carries the curated pre-rendered Markdown report (`report.markdown` on the
+  // backend; falls back to "N finding(s)" when no Markdown was produced).
   summary: string
+  // Raw LLM response (`report.raw_llm_response`); debugging aid only.
   details?: string
 }
 
@@ -33,6 +50,7 @@ export interface ReviewListItem {
   durationMs: number
   createdAt: string
   gitlabMrUrl?: string
+  assessment?: ReviewAssessment
 }
 
 export interface ReviewDetail {
@@ -52,6 +70,7 @@ export interface ReviewDetail {
   rawComment?: string
   rawApiResponse?: object
   gitlabMrUrl?: string
+  assessment?: ReviewAssessment
 }
 
 export interface HistoryFilters {

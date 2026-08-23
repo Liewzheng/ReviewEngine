@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use super::handlers::{delete_review, get_review, list_reviews, rerun_review, submit_review};
 use super::resolve::{resolve_gitlab_token, resolve_source, GITLAB_TOKEN_HEADER, MAX_STATIC_DIFF_BYTES};
-use super::task::{task_to_status, ListParams};
+use super::task::{source_meta_from_mr_info, task_to_status, ListParams};
 
 #[tokio::test]
 async fn test_resolve_source_static_diff_within_limit() {
@@ -18,7 +18,9 @@ async fn test_resolve_source_static_diff_within_limit() {
     let source = ReviewSource::StaticDiff { diff: diff.clone() };
     let result = resolve_source(source, None, &None).await;
     assert!(result.is_ok());
-    assert_eq!(result.unwrap(), diff);
+    let resolved = result.unwrap();
+    assert_eq!(resolved.diff, diff);
+    assert!(resolved.mr_info.is_none(), "static diffs carry no MR context");
 }
 
 #[tokio::test]
@@ -494,6 +496,157 @@ async fn test_absent_metadata_is_null_in_both_naming_schemes() {
     assert!(item["mrTitle"].is_null(), "list mrTitle must be null");
     assert!(item["author"]["name"].is_null(), "list author.name must be null");
     assert!(item["durationMs"].is_null(), "list durationMs must be null");
+}
+
+// ─── task metadata back-fill from resolved MRInfo ─────────────
+
+#[test]
+fn test_source_meta_from_mr_info_maps_display_fields() {
+    let mut info = crate::models::MRInfo::new(
+        "group/proj".to_string(),
+        "Add login endpoint".to_string(),
+        "feature/login".to_string(),
+        "main".to_string(),
+    );
+    info.git_hash = "deadbeef".to_string();
+    info.pr_author = Some("alice".to_string());
+
+    let meta = source_meta_from_mr_info(&info);
+    assert_eq!(meta.mr_title.as_deref(), Some("Add login endpoint"));
+    assert_eq!(meta.branch.as_deref(), Some("feature/login"));
+    assert_eq!(meta.target_branch.as_deref(), Some("main"));
+    assert_eq!(meta.author_name.as_deref(), Some("alice"));
+    assert_eq!(meta.commit_sha.as_deref(), Some("deadbeef"));
+    // The mapping carries no URL/avatar/project; those stay absent so
+    // fill_source_meta never touches the enqueue-time values for them.
+    assert!(meta.project.is_none());
+    assert!(meta.gitlab_mr_url.is_none());
+    assert!(meta.author_avatar_url.is_none());
+}
+
+#[test]
+fn test_source_meta_from_mr_info_empty_strings_become_none() {
+    let info = crate::models::MRInfo::new(
+        "group/proj".to_string(),
+        String::new(),
+        "  ".to_string(),
+        "main".to_string(),
+    );
+    // MRInfo::new's placeholder git_hash ("0000") is a non-empty string and
+    // is kept; empty/whitespace titles and branches degrade to None.
+    let meta = source_meta_from_mr_info(&info);
+    assert!(meta.mr_title.is_none());
+    assert!(meta.branch.is_none());
+    assert_eq!(meta.target_branch.as_deref(), Some("main"));
+    assert!(meta.author_name.is_none());
+}
+
+#[tokio::test]
+async fn test_resolve_source_gitlab_mr_resolves_mr_info() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "title": "Add login endpoint",
+            "description": "desc",
+            "source_branch": "feature/login",
+            "target_branch": "main",
+            "author": {"id": 7, "username": "alice", "name": "Alice A"},
+            "diff_refs": {"base_sha": "base1", "head_sha": "deadbeef", "start_sha": "start1"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/raw_diffs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/a b/a\n"))
+        .mount(&server)
+        .await;
+
+    let source = ReviewSource::GitLabMr {
+        url: format!("{}/group/project/-/merge_requests/1", server.uri()),
+    };
+    let resolved = resolve_source(source, Some("test-token".to_string()), &None)
+        .await
+        .expect("gitlab_mr source must resolve against the mock API");
+    assert_eq!(resolved.diff, "diff --git a/a b/a\n");
+    let info = resolved.mr_info.expect("gitlab_mr must resolve MRInfo");
+    assert_eq!(info.title, "Add login endpoint");
+    assert_eq!(info.source_branch, "feature/login");
+    assert_eq!(info.target_branch, "main");
+    assert_eq!(info.git_hash, "deadbeef");
+    assert_eq!(info.pr_author.as_deref(), Some("alice"));
+}
+
+/// End-to-end at the handler level: a task created with URL-parse-only
+/// metadata gets back-filled via `fill_source_meta` (what the task runner
+/// does once MRInfo is resolved), and both the detail and list endpoints
+/// then expose the real metadata.
+#[tokio::test]
+async fn test_filled_metadata_is_exposed_by_get_and_list() {
+    let state = state_with_store();
+    let store = state.task_store.clone().unwrap();
+
+    // Enqueue-time shape: project/repository/gitlab_mr_url from the URL
+    // parse; the display fields are still blank.
+    let id = store
+        .create(Some(SourceMeta {
+            project: Some("group/proj".to_string()),
+            repository: Some("group/proj".to_string()),
+            gitlab_mr_url: Some("http://gitlab/group/proj/-/merge_requests/1".to_string()),
+            ..SourceMeta::default()
+        }))
+        .await;
+
+    let mut info = crate::models::MRInfo::new(
+        "group/proj".to_string(),
+        "Add login endpoint".to_string(),
+        "feature/login".to_string(),
+        "main".to_string(),
+    );
+    info.git_hash = "deadbeef".to_string();
+    info.pr_author = Some("alice".to_string());
+    store.fill_source_meta(id, source_meta_from_mr_info(&info)).await;
+    store
+        .update(id, TaskState::Completed, Some(serde_json::json!({"reports": []})), None)
+        .await;
+
+    let resp = get_review(State(state.clone()), Path(id)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["mrTitle"], "Add login endpoint");
+    assert_eq!(json["mr_title"], "Add login endpoint");
+    assert_eq!(json["author"]["name"], "alice");
+    assert_eq!(json["author_name"], "alice");
+    assert_eq!(json["branch"], "feature/login");
+    assert_eq!(json["targetBranch"], "main");
+    assert_eq!(json["commitSha"], "deadbeef");
+    assert_eq!(json["commit_sha"], "deadbeef");
+    // The enqueue-time URL-derived fields survived the fill.
+    assert_eq!(json["project"], "group/proj");
+    assert_eq!(json["gitlab_mr_url"], "http://gitlab/group/proj/-/merge_requests/1");
+
+    let params = ListParams {
+        status: None,
+        page: None,
+        per_page: None,
+        q: None,
+        project: None,
+        repository: None,
+        date_from: None,
+        date_to: None,
+    };
+    let resp = list_reviews(State(state), Query(params)).await.into_response();
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let item = &json["items"][0];
+    assert_eq!(item["mrTitle"], "Add login endpoint");
+    assert_eq!(item["author"]["name"], "alice");
+    assert_eq!(item["branch"], "feature/login");
+    assert_eq!(item["targetBranch"], "main");
 }
 
 // ─── credential transport (docs/rest-api.md §1) ─────────────────

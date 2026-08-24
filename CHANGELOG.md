@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.35] - 2026-08-24
+
+### Changed
+- **LLM configuration moved to the LLM page**: the `/llm` page is now 状态监控 (provider health, unchanged) on top + LLM 配置 below — the `LlmSettingsCard` and `ProvidersSection` cards moved from `/config`, with their own「编辑配置/保存/取消」lifecycle independent of the Configuration page. Saving issues a sparse `PUT /api/v1/config` carrying only the `llm` key (other sections — GitLab, Git 平台, rules, advanced — are preserved server-side), then refreshes the provider health cards. The `llmNotConfigured` banner moved with it; the rerun guidance dialog in Review History now routes to `/llm`, and the provider card's「配置」button scrolls to the on-page config section. `/config` keeps GitLab / Git 平台 / 评审规则 / 高级设置 and no longer touches the `llm` section on save. (`frontend/src/views/LlmStatus.vue`, `frontend/src/views/Configuration.vue`, `frontend/src/composables/useConfig.ts`, `frontend/src/services/config.ts`, `frontend/src/views/ReviewHistory.vue`, `frontend/src/components/LlmStatus/ProviderCard.vue`, `frontend/src/i18n/locales/*`)
+
 ## [0.9.34] - 2026-08-24
 
 ### Fixed

@@ -494,6 +494,7 @@ export default {
       latency: 'Latency: {n}ms',
     },
     configure: 'Configure',
+    configSection: 'LLM Configuration',
     lastChecked: 'Last checked: {date}',
   },
   logs: {

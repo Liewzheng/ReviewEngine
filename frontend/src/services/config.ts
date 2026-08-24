@@ -12,10 +12,15 @@ export async function getConfig(): Promise<AppConfig> {
 
 /**
  * Update the application configuration on the server.
- * @param config - The new configuration to apply.
+ *
+ * The backend treats the payload as a PARTIAL (sparse) update: top-level
+ * sections omitted from `config` keep their stored values, so callers may
+ * send a single section (e.g. `{ llm: ... }`) without touching the rest.
+ * Masked (`***`) or blank secrets keep the stored values.
+ * @param config - The configuration (or section subset) to apply.
  * @returns Status confirmation on success.
  */
-export async function updateConfig(config: AppConfig): Promise<{ status: string }> {
+export async function updateConfig(config: Partial<AppConfig>): Promise<{ status: string }> {
   return request('/config', {
     method: 'PUT',
     body: JSON.stringify(config),

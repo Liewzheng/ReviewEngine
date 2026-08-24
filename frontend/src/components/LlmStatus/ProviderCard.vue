@@ -158,10 +158,14 @@ function handleTest() {
 }
 
 function handleConfigure() {
-  router.push({
-    path: '/config',
-    query: { tab: 'llm', provider: props.provider.id },
-  })
+  // LLM configuration lives on this page (/llm) — scroll to the config
+  // section instead of routing away. Fallback for unexpected hosts: /llm.
+  const el = document.getElementById('llm-config-section')
+  if (el) {
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  } else {
+    router.push('/llm')
+  }
 }
 
 function showTestResult(result: TestResult) {

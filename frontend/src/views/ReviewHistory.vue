@@ -171,8 +171,8 @@ function rerunConfirmMessage(row: { mrTitle: string; gitlabMrUrl?: string }): st
 function handleRerunError(e: unknown) {
   const err = e as ApiError | null
   // The rerun endpoint returns 422 + code `llmNotConfigured` when the server
-  // has no usable LLM. Guide the user to the Configuration page instead of
-  // showing the generic error notification (the composable leaves
+  // has no usable LLM. Guide the user to the LLM page (where LLM config lives)
+  // instead of showing the generic error notification (the composable leaves
   // `error` unset for this case).
   if (err?.status !== 422 || err?.code !== 'llmNotConfigured') return
   ElMessageBox.confirm(
@@ -184,7 +184,7 @@ function handleRerunError(e: unknown) {
       type: 'warning',
     }
   ).then(() => {
-    router.push('/config')
+    router.push('/llm')
   }).catch(() => {})
 }
 

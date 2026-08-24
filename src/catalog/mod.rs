@@ -301,6 +301,107 @@ pub async fn fetch_or_disk_fallback(
     }
 }
 
+// ─── Builtin fallback catalog ───────────────────────────────
+
+/// Static catalog served when the network fetch and every cache layer fail.
+///
+/// models.dev is a convenience, not a hard dependency: an air-gapped or
+/// egress-restricted deployment (e.g. Docker without internet access to
+/// models.dev) must still offer the well-known providers so the
+/// configuration UI and `init` flow stay usable offline. Entries mirror the
+/// curated shortlist in `crate::actions::init`; model lists are deliberately
+/// empty — model ids age quickly, and both consumers already fall back to
+/// manual model entry when a provider carries none.
+pub fn builtin_catalog() -> Catalog {
+    fn provider(id: &str, name: &str, npm: &str, api: &str, env: &[&str], doc: &str) -> CatalogProvider {
+        CatalogProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            npm: Some(npm.to_string()),
+            api: Some(api.to_string()),
+            env: env.iter().map(|s| s.to_string()).collect(),
+            doc: Some(doc.to_string()),
+            models: BTreeMap::new(),
+        }
+    }
+    let entries = [
+        provider(
+            "openai",
+            "OpenAI",
+            "@ai-sdk/openai",
+            "https://api.openai.com/v1",
+            &["OPENAI_API_KEY"],
+            "https://platform.openai.com/docs",
+        ),
+        provider(
+            "anthropic",
+            "Anthropic",
+            "@ai-sdk/anthropic",
+            "https://api.anthropic.com/v1",
+            &["ANTHROPIC_API_KEY"],
+            "https://docs.anthropic.com",
+        ),
+        provider(
+            "deepseek",
+            "DeepSeek",
+            "@ai-sdk/openai-compatible",
+            "https://api.deepseek.com",
+            &["DEEPSEEK_API_KEY"],
+            "https://api-docs.deepseek.com",
+        ),
+        provider(
+            "google",
+            "Google",
+            "@ai-sdk/google",
+            "https://generativelanguage.googleapis.com/v1beta",
+            &["GOOGLE_GENERATIVE_AI_API_KEY"],
+            "https://ai.google.dev/gemini-api/docs",
+        ),
+        provider(
+            "xai",
+            "xAI",
+            "@ai-sdk/xai",
+            "https://api.x.ai/v1",
+            &["XAI_API_KEY"],
+            "https://docs.x.ai",
+        ),
+        provider(
+            "mistral",
+            "Mistral AI",
+            "@ai-sdk/mistral",
+            "https://api.mistral.ai/v1",
+            &["MISTRAL_API_KEY"],
+            "https://docs.mistral.ai",
+        ),
+        provider(
+            "groq",
+            "Groq",
+            "@ai-sdk/groq",
+            "https://api.groq.com/openai/v1",
+            &["GROQ_API_KEY"],
+            "https://console.groq.com/docs",
+        ),
+        provider(
+            "openrouter",
+            "OpenRouter",
+            "@openrouter/ai-sdk-provider",
+            "https://openrouter.ai/api/v1",
+            &["OPENROUTER_API_KEY"],
+            "https://openrouter.ai/docs",
+        ),
+        // Local server — no API key required.
+        provider(
+            "ollama",
+            "Ollama",
+            "ollama-ai-provider",
+            "http://localhost:11434/v1",
+            &[],
+            "https://ollama.com",
+        ),
+    ];
+    entries.into_iter().map(|p| (p.id.clone(), p)).collect()
+}
+
 // ─── Pure helpers ───────────────────────────────────────────────
 
 /// Providers usable through review-engine's OpenAI-compatible passthrough:

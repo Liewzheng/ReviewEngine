@@ -102,7 +102,21 @@
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.rules.maxDuration')" prop="rules.maxReviewDurationSeconds">
-                <el-input-number v-model="config.rules.maxReviewDurationSeconds" :disabled="!isEditing" :min="30" :max="3600" :step="30" style="width: 100%" />
+                <!-- 0 means "unlimited" (the backend seeds the UI projection
+                     with 0 when the field was never configured, and nothing
+                     backend-side consumes a fabricated minimum). Render 0 as
+                     an empty input with a placeholder instead of letting the
+                     spinbutton clamp the display to 30; clearing the input
+                     writes 0 back, so saving keeps 0 as 0. -->
+                <el-input-number
+                  v-model="maxDurationInput"
+                  :disabled="!isEditing"
+                  :min="0"
+                  :max="3600"
+                  :step="30"
+                  :placeholder="$t('config.rules.maxDurationUnlimited')"
+                  style="width: 100%"
+                />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
@@ -318,6 +332,17 @@ const labelPosition = computed(() => (windowWidth.value >= 1024 ? 'left' : 'top'
 
 // --- Computed ---
 const dirty = computed(() => configDirty.value)
+
+// Display proxy for `rules.maxReviewDurationSeconds`: the stored 0 renders as
+// an empty input (placeholder explains "0 = unlimited") instead of a fake 30;
+// clearing the input stores 0 again. The underlying config model only ever
+// holds real numbers, so save/snapshot/dirty tracking are unaffected.
+const maxDurationInput = computed<number | undefined>({
+  get: () => (config.rules.maxReviewDurationSeconds === 0 ? undefined : config.rules.maxReviewDurationSeconds),
+  set: (val) => {
+    config.rules.maxReviewDurationSeconds = val ?? 0
+  },
+})
 
 // --- Methods ---
 // Git platform rows live on the main reactive `config`, so these mutations feed

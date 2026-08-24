@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.36] - 2026-08-25
+
+### Fixed
+- **`GET /api/v1/catalog/providers` 502 when the model catalog upstream is unreachable**: the resolution chain (fresh mem → network → stale disk → stale mem) had no terminal fallback, so a parameterless GET 502'd in offline/blocked-egress deployments (Docker) and the UI degraded to presets with「提供商目录不可用」. A curated builtin catalog (9 providers: openai/anthropic/deepseek/google/xai/mistral/groq/openrouter/ollama, real api bases, empty model lists — UIs already fall back to manual entry) now terminates the chain with 200; builtin responses are not cached so the next request retries the network. (`src/catalog/mod.rs`, `src/server/api/catalog.rs`)
+- **`GET /api/v1/system/experts` hardcoded `"weight": 80`**: the listing was built from the review-execution expert view with a placeholder weight (and dropped disabled experts), so cards showed 80% and the 平均权重 KPI was wrong until a PUT refreshed them. The listing now reads `review_experts` config directly — the same source PUT writes — returning real weights/enabled flags. (`src/server/api/system.rs`)
+- **「导出评审」button was dead** (no click handler): now exports the currently-filtered history (all pages, same query path as the list) as `review-history-<ts>.json` via Blob download, with empty-list tooltip/disabled state and success/failure messages. (`frontend/src/views/ReviewHistory.vue`)
+- Queue「取消所有失败任务」is now disabled with a tooltip when there are 0 failed tasks (was a silent no-op). (`frontend/src/views/QueueMonitor.vue`)
+- Config 评审规则「添加模式」→ 取消 no longer leaves a stray empty pattern row (local state reset on cancel/enter/save). (`frontend/src/composables/useConfigForm.ts`)
+- 高级设置 `maxReviewDurationSeconds` no longer displays a fabricated `30` when unset: 0 renders as empty with placeholder「0 = 不限制」and round-trips as 0. (`frontend/src/views/Configuration.vue`)
+
+All found by an exhaustive live UI audit (78 checks across all 7 pages + app chrome, real Chrome via WebBridge) — every button/link exercised; results recorded in `reports/test-cases/frontend-test-cases-v9-fullsite-audit-2026-08-25.xlsx`.
+
 ## [0.9.35] - 2026-08-24
 
 ### Changed

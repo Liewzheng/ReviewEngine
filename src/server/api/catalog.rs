@@ -6,11 +6,13 @@
 //!   provider, sorted by name; 404 when the provider is unknown or SDK-only.
 //!
 //! Resolution order: fresh in-memory cache (24h TTL) → network fetch → stale
-//! in-memory cache → stale disk cache
-//! (`~/.config/review-engine/models-dev-cache.json`, overridable via
-//! `REVIEW_MODELS_DEV_CACHE`) → `502` JSON error. Successful fetches refresh
-//! both caches. Auth is applied by the parent router like every other
-//! `/api/v1` endpoint.
+//! disk cache (`~/.config/review-engine/models-dev-cache.json`, overridable
+//! via `REVIEW_MODELS_DEV_CACHE`) → stale in-memory cache → the builtin
+//! static catalog ([`catalog::builtin_catalog`]). Successful fetches refresh
+//! both caches. The endpoints never `502` on an upstream outage: the builtin
+//! catalog exists precisely as the offline terminal fallback (e.g. Docker
+//! deployments without egress to models.dev). Auth is applied by the parent
+//! router like every other `/api/v1` endpoint.
 
 use axum::{
     extract::{Path, State},
@@ -37,13 +39,6 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/providers/{id}/models", get(provider_models))
 }
 
-fn bad_gateway(e: &crate::catalog::CatalogError) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::BAD_GATEWAY,
-        Json(serde_json::json!({ "error": format!("catalog fetch failed: {e}") })),
-    )
-}
-
 /// Return the in-memory catalog while it is still within the TTL. The read
 /// guard is dropped before this function returns — it is never held across
 /// an `.await`.
@@ -59,10 +54,16 @@ fn fresh_cached(store: &CatalogStore) -> Option<Arc<Catalog>> {
 }
 
 /// Resolve the catalog through the cache layers described in the module docs.
-async fn resolve_catalog(state: &AppState) -> Result<Arc<Catalog>, (StatusCode, Json<serde_json::Value>)> {
+///
+/// Infallible by design: these GET endpoints take no parameters, so there is
+/// no malformed-request case to reject, and an unreachable upstream is a
+/// deployment condition — not a client error. The terminal fallback is the
+/// builtin static catalog, so the provider picker stays usable on air-gapped
+/// or egress-restricted deployments instead of degrading to a 502.
+async fn resolve_catalog(state: &AppState) -> Arc<Catalog> {
     // 1. Fresh in-memory cache.
     if let Some(catalog) = fresh_cached(&state.catalog) {
-        return Ok(catalog);
+        return catalog;
     }
 
     // 2. Single-flight: exactly one request fetches from the network;
@@ -71,14 +72,19 @@ async fn resolve_catalog(state: &AppState) -> Result<Arc<Catalog>, (StatusCode, 
 
     // 3. Double-check: a competitor may have refreshed while we queued.
     if let Some(catalog) = fresh_cached(&state.catalog) {
-        return Ok(catalog);
+        return catalog;
     }
 
     // 4. Network fetch, with disk-cache fallback handled inside. The cache
     //    RwLock is not held across the network call — only the fetch lock.
-    let client = CatalogClient::from_env().map_err(|e| bad_gateway(&e))?;
-    let cache_path = catalog::default_cache_path();
-    match catalog::fetch_or_disk_fallback(&client, cache_path.as_deref()).await {
+    let result = match CatalogClient::from_env() {
+        Ok(client) => {
+            let cache_path = catalog::default_cache_path();
+            catalog::fetch_or_disk_fallback(&client, cache_path.as_deref()).await
+        }
+        Err(e) => Err(e),
+    };
+    match result {
         Ok((catalog, source)) => {
             // A disk-fallback hit keeps its original fetch timestamp so the
             // TTL stays honest about the data's real age.
@@ -91,18 +97,20 @@ async fn resolve_catalog(state: &AppState) -> Result<Arc<Catalog>, (StatusCode, 
                 catalog: catalog.clone(),
                 cached_at,
             });
-            Ok(catalog)
+            catalog
         }
         Err(e) => {
-            // 5. Last resort: an expired in-memory entry beats an error.
+            // 5. An expired in-memory entry still beats the static fallback.
             let stale = state.catalog.cache.read().unwrap().as_ref().map(|c| c.catalog.clone());
-            match stale {
-                Some(catalog) => {
-                    tracing::warn!("Catalog: fetch failed ({e}); serving stale in-memory cache");
-                    Ok(catalog)
-                }
-                None => Err(bad_gateway(&e)),
+            if let Some(catalog) = stale {
+                tracing::warn!("Catalog: fetch failed ({e}); serving stale in-memory cache");
+                return catalog;
             }
+            // 6. Terminal fallback: the builtin catalog. Deliberately NOT
+            //    written into the caches, so the next request retries the
+            //    network instead of pinning the static list behind the TTL.
+            tracing::warn!("Catalog: fetch failed ({e}); serving builtin provider catalog");
+            Arc::new(catalog::builtin_catalog())
         }
     }
 }
@@ -137,35 +145,29 @@ fn model_summary(m: &CatalogModel) -> serde_json::Value {
 }
 
 async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    match resolve_catalog(&state).await {
-        Ok(catalog) => {
-            let providers: Vec<serde_json::Value> = catalog::usable_providers(&catalog)
-                .iter()
-                .map(|p| provider_summary(p))
-                .collect();
-            Json(serde_json::json!({ "providers": providers })).into_response()
-        }
-        Err(resp) => resp.into_response(),
-    }
+    let catalog = resolve_catalog(&state).await;
+    let providers: Vec<serde_json::Value> = catalog::usable_providers(&catalog)
+        .iter()
+        .map(|p| provider_summary(p))
+        .collect();
+    Json(serde_json::json!({ "providers": providers }))
 }
 
 async fn provider_models(State(state): State<Arc<AppState>>, Path(id): Path<String>) -> impl IntoResponse {
-    match resolve_catalog(&state).await {
-        Ok(catalog) => match catalog.get(&id) {
-            Some(provider) if provider.api.is_some() => {
-                let models: Vec<serde_json::Value> = catalog::sorted_models(provider)
-                    .iter()
-                    .map(|m| model_summary(m))
-                    .collect();
-                Json(serde_json::json!({ "models": models })).into_response()
-            }
-            _ => (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({ "error": format!("unknown provider: {id}") })),
-            )
-                .into_response(),
-        },
-        Err(resp) => resp.into_response(),
+    let catalog = resolve_catalog(&state).await;
+    match catalog.get(&id) {
+        Some(provider) if provider.api.is_some() => {
+            let models: Vec<serde_json::Value> = catalog::sorted_models(provider)
+                .iter()
+                .map(|m| model_summary(m))
+                .collect();
+            Json(serde_json::json!({ "models": models })).into_response()
+        }
+        _ => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": format!("unknown provider: {id}") })),
+        )
+            .into_response(),
     }
 }
 
@@ -405,7 +407,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_failure_without_any_cache_is_502_json() {
+    async fn fetch_failure_without_any_cache_serves_builtin_catalog() {
         // Mutates process env — must not interleave with other catalog tests.
         let _env_lock = crate::catalog::ENV_LOCK.lock().await;
         let server = MockServer::start().await;
@@ -419,10 +421,36 @@ mod tests {
         let cache_path = dir.path().join("absent.json");
         let _env = EnvGuard::set(&server.uri(), &cache_path);
 
+        // No fresh/expired memory entry, no disk cache, upstream down: the
+        // endpoint must still answer 200 with the builtin catalog — an
+        // unreachable upstream (e.g. Docker without egress) is not an error.
         let state = Arc::new(AppState::new(vec![]));
-        let (status, body) = get_json(state, "/providers").await;
-        assert_eq!(status, StatusCode::BAD_GATEWAY);
-        assert!(body["error"].as_str().unwrap().contains("catalog fetch failed"));
+        let (status, body) = get_json(state.clone(), "/providers").await;
+        assert_eq!(status, StatusCode::OK);
+        let providers = body["providers"].as_array().expect("providers array");
+        let ids: Vec<&str> = providers.iter().map(|p| p["id"].as_str().unwrap()).collect();
+        assert!(
+            ids.contains(&"openai") && ids.contains(&"deepseek"),
+            "builtin catalog must be served: {ids:?}"
+        );
+        assert!(
+            providers.iter().all(|p| p["api_base"].is_string()),
+            "every builtin entry must carry an api base"
+        );
+
+        // The builtin fallback must not populate the cache: the next request
+        // retries the network instead of pinning the static list for 24h.
+        assert!(state.catalog.cache.read().unwrap().is_none());
+
+        // A builtin provider resolves on the models endpoint with an empty
+        // list — the UI then falls back to free-text model entry.
+        let (status, body) = get_json(state.clone(), "/providers/deepseek/models").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["models"], json!([]));
+
+        // An unknown id is still a genuine client error.
+        let (status, _) = get_json(state, "/providers/nope/models").await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -474,7 +502,7 @@ mod tests {
             handles.push(tokio::spawn(async move { resolve_catalog(&state).await }));
         }
         for handle in handles {
-            let catalog = handle.await.expect("task panicked").expect("resolve must succeed");
+            let catalog = handle.await.expect("task panicked");
             assert!(catalog.contains_key("deepseek"));
         }
 
@@ -510,11 +538,11 @@ mod tests {
         });
         drop(guard);
 
-        let catalog = queued
-            .await
-            .expect("task panicked")
-            .expect("double-check must serve the fresh cache");
-        assert!(catalog.contains_key("deepseek"));
+        let catalog = queued.await.expect("task panicked");
+        assert!(
+            catalog.contains_key("deepseek"),
+            "double-check must serve the fresh cache"
+        );
 
         let received = server.received_requests().await.expect("request recording enabled");
         assert!(

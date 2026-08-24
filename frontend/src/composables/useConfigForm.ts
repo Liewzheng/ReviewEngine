@@ -263,9 +263,17 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     }
   }
 
+  /** Discard the transient (unsaved) pattern input row, if one is open. */
+  function resetPatternInput() {
+    patternInputVisible.value = false;
+    patternInputValue.value = '';
+  }
+
   /** Enter edit mode, snapshotting the current config for dirty tracking. */
   function enterEditMode() {
     originalConfig.value = JSON.parse(JSON.stringify(config));
+    // Start clean: no half-typed pattern row left over from a previous edit.
+    resetPatternInput();
     isEditing.value = true;
     formValid.value = true;
   }
@@ -278,6 +286,10 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     if (originalConfig.value) {
       Object.assign(config, originalConfig.value);
     }
+    // Cancel drops any unsaved edits; the transient pattern input row is
+    // local-only state and must disappear with them (the persisted
+    // `excludedPatterns` list is untouched either way).
+    resetPatternInput();
     isEditing.value = false;
     formValid.value = true;
   }
@@ -285,6 +297,7 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
   /** Mark the current config as persisted after a successful save. */
   function commitSnapshot() {
     originalConfig.value = JSON.parse(JSON.stringify(config));
+    resetPatternInput();
     isEditing.value = false;
   }
 

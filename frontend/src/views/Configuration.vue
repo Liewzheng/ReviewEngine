@@ -40,15 +40,6 @@
       </div>
     </div>
 
-    <!-- LLM-not-configured banner: reviews cannot run without a usable LLM -->
-    <el-alert
-      v-if="llmNotConfigured"
-      type="warning"
-      :closable="false"
-      :title="$t('config.llmNotConfiguredBanner')"
-      class="llm-banner"
-    />
-
     <!-- Loading Skeleton -->
     <div v-if="loading" class="skeleton-container">
       <el-card v-for="n in 3" :key="n" class="skeleton-card">
@@ -89,29 +80,6 @@
         @add="addGitPlatform"
         @edit="editGitPlatform"
         @remove="removeGitPlatform"
-      />
-
-      <!-- LLM Card -->
-      <LlmSettingsCard
-        ref="llmCardRef"
-        :config="config.llm"
-        :is-editing="isEditing"
-        :models="availableModels"
-        :model-fetch-loading="modelFetchLoading"
-        :model-fetch-error="modelFetchError"
-        :testing="testingConnection"
-        :test-result="testResult"
-        @test="testConnection"
-      />
-
-      <!-- Additional LLM Providers Card -->
-      <ProvidersSection
-        :providers="additionalProviders"
-        :is-editing="isEditing"
-        :loading="providersLoading"
-        @toggle="toggleProvider"
-        @remove="confirmDeleteProvider"
-        @add="addProvider"
       />
 
       <!-- Review Rules Card -->
@@ -302,12 +270,8 @@ import { ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
 import { useConfigForm } from '../composables/useConfigForm'
-import { useProviders } from '../composables/useProviders'
-import { getSystemHealth } from '../services/health'
-import type { GitPlatformConfig } from '../types/config'
+import type { AppConfig, GitPlatformConfig } from '../types/config'
 import GitLabSettingsCard from '../components/Config/GitLabSettingsCard.vue'
-import LlmSettingsCard from '../components/Config/LlmSettingsCard.vue'
-import ProvidersSection from '../components/Config/ProvidersSection.vue'
 import GitPlatformsSection from '../components/Config/GitPlatformsSection.vue'
 
 // --- Composables ---
@@ -323,9 +287,6 @@ const {
   revealed,
   revealCountdown,
   revealField,
-  availableModels,
-  modelFetchLoading,
-  modelFetchError,
   patternInputVisible,
   patternInputValue,
   setPatternInputRef,
@@ -337,36 +298,17 @@ const {
   commitSnapshot,
   loadConfig,
   refreshConfig,
-  testConnection,
 } = useConfigForm(cfg)
-
-const {
-  additionalProviders,
-  providersLoading,
-  providersDirty,
-  loadProviders,
-  addProvider,
-  toggleProvider,
-  confirmDeleteProvider,
-  resetProviders,
-  saveAdditionalProviders,
-  saveProvidersOnly,
-} = useProviders(isEditing, configDirty)
 
 // --- State ---
 const loading = cfg.loading
 const loadError = computed(() => !!cfg.error.value)
 const saving = cfg.saving
-const testingConnection = cfg.testing
-const testResult = cfg.testResult
 const showAdvanced = ref(false)
-/** True when the server reports no usable LLM via /system/health. */
-const llmNotConfigured = ref(false)
 
 // Card refs for flash animation
 const gitlabCardRef = ref<HTMLElement>()
 const gitPlatformsCardRef = ref<HTMLElement>()
-const llmCardRef = ref<HTMLElement>()
 const rulesCardRef = ref<HTMLElement>()
 const advancedCardRef = ref<HTMLElement>()
 
@@ -375,7 +317,7 @@ const windowWidth = ref(window.innerWidth)
 const labelPosition = computed(() => (windowWidth.value >= 1024 ? 'left' : 'top'))
 
 // --- Computed ---
-const dirty = computed(() => configDirty.value || providersDirty.value)
+const dirty = computed(() => configDirty.value)
 
 // --- Methods ---
 // Git platform rows live on the main reactive `config`, so these mutations feed
@@ -401,19 +343,9 @@ function removeGitPlatform(index: number) {
 
 function cancelEdit() {
   restoreSnapshot()
-  // Discard unsaved provider edits as well, otherwise they would keep the
-  // page dirty the next time edit mode is entered.
-  resetProviders()
 }
 
 async function saveChanges() {
-  // Provider-only changes are independent of the main form: skip main-form
-  // validation, which would otherwise block provider management when the
-  // main config is incomplete (e.g. empty demo GitLab URL/token).
-  if (!configDirty.value && providersDirty.value) {
-    await saveProvidersOnly()
-    return
-  }
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
   // Missing/incorrect fields keep their inline validation errors, but they
@@ -430,8 +362,12 @@ async function saveChanges() {
   }
 
   try {
-    await cfg.save(JSON.parse(JSON.stringify(config)))
-    await saveAdditionalProviders()
+    // LLM settings are managed on the LLM page (/llm): omit the `llm` key so
+    // this save never touches the stored LLM section (the backend deep-merges
+    // the payload over the stored config; omitted sections are preserved).
+    const payload: Partial<AppConfig> = JSON.parse(JSON.stringify(config))
+    delete payload.llm
+    await cfg.save(payload)
     commitSnapshot()
 
     ElNotification({
@@ -446,7 +382,7 @@ async function saveChanges() {
     // root node must be reached via `$el` (calling classList on the instance
     // itself throws and lands in the catch above, showing a bogus error
     // notification after a successful save).
-    const cardRefs = [gitlabCardRef, gitPlatformsCardRef, llmCardRef, rulesCardRef, advancedCardRef]
+    const cardRefs = [gitlabCardRef, gitPlatformsCardRef, rulesCardRef, advancedCardRef]
     cardRefs.forEach((cardRef) => {
       const el = (cardRef.value as unknown as { $el?: HTMLElement })?.$el
       if (el?.classList) {
@@ -504,13 +440,6 @@ onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('resize', handleResize)
   loadConfig()
-  loadProviders()
-  // Fail-open: if the health check errors, simply don't show the banner.
-  getSystemHealth()
-    .then((health) => {
-      llmNotConfigured.value = health.llmConfigured === false
-    })
-    .catch(() => {})
 })
 
 // --- Error handling ---
@@ -587,11 +516,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-/* LLM-not-configured banner sits below the header, above the cards */
-.llm-banner {
-  margin-bottom: 20px;
 }
 
 /* Wrapper lets the tooltip hover target survive the disabled save button */

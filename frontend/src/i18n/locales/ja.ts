@@ -484,6 +484,7 @@ export default {
       latency: 'レイテンシー：{n}ms',
     },
     configure: '設定',
+    configSection: 'LLM 設定',
     lastChecked: '最終チェック：{date}',
   },
   logs: {

@@ -478,6 +478,7 @@ export default {
       latency: '延迟：{n}ms',
     },
     configure: '配置',
+    configSection: 'LLM 配置',
     lastChecked: '上次检查：{date}',
   },
   logs: {

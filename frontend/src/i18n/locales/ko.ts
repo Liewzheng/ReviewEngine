@@ -483,6 +483,7 @@ export default {
       latency: '지연 시간: {n}ms',
     },
     configure: '설정',
+    configSection: 'LLM 구성',
     lastChecked: '마지막 확인: {date}',
   },
   logs: {

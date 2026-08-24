@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.34] - 2026-08-24
+
+### Fixed
+- **Env-sourced LLM credentials leaked into `ui-state.toml`**: a sparse `PUT /api/v1/config` (e.g. saving only Git platforms) reconstructed the env-derived LLM entry through the legacy scalar keep-path, relabeled its provider as `openai`, and persisted its live API key — the env filter then couldn't recognize the relabeled entry, and on a clean-env restart the entry would resurrect. Three-layer fix: `UiConfig::from_app_config` now seeds the stored UI projection with masked (`***`) secrets (upholding the masked-projection invariant, so sparse PUT merges take the keep-path under the entry's real provider name); post-save mask-sync keys off the effective primary provider; and the env-derived filter in `persist.rs` also matches on secret + `api_base` identity regardless of provider label. Regression tests: `sparse_put_never_persists_env_non_openai_entry`, `sparse_and_full_put_persist_identical_llm`, `from_applied_filters_relabeled_env_entry`, `sparse_put_keeps_masked_projection_for_non_openai_primary`. (`src/server/api/config/{types,put,persist}.rs`)
+
 ## [0.9.33] - 2026-08-24
 
 ### Added

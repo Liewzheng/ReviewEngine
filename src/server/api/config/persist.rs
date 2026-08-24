@@ -134,17 +134,27 @@ impl UiStateFile {
     }
 }
 
-/// True when a resolved LLM entry is env-derived: it carries the same
-/// secret as an env-seeded entry (provider + non-empty key equality — the
-/// leak guard is about the SECRET reaching disk), or, for key-less
-/// providers (e.g. local ones), full provider/base/model identity. A user
-/// who re-types a DIFFERENT key for the same provider produces a distinct
-/// entry that IS persisted.
+/// True when a resolved LLM entry is env-derived. The leak guard is about
+/// the SECRET reaching disk, so any resolved entry carrying an env entry's
+/// live key is env-derived when it is recognizably the same credential:
+/// same provider label (the normal reconstruction: a masked round trip
+/// resolves the env key back under its own name), or the same endpoint
+/// (a reconstruction path that relabeled the provider still carries the
+/// secret + base — matching on the label alone would let it through). For
+/// key-less providers (e.g. local ones) there is no secret to leak, so
+/// identity requires full provider/base/model equality. A user who re-types
+/// a DIFFERENT key for the same provider produces a distinct entry that IS
+/// persisted.
 fn is_env_derived_llm(entry: &LLMConfig, env_entries: &[LLMConfig]) -> bool {
     env_entries.iter().any(|e| {
-        e.provider == entry.provider
-            && e.api_key == entry.api_key
-            && (!e.api_key.is_empty() || (e.api_base == entry.api_base && e.model == entry.model))
+        if e.api_key.is_empty() {
+            entry.api_key.is_empty()
+                && e.provider == entry.provider
+                && e.api_base == entry.api_base
+                && e.model == entry.model
+        } else {
+            e.api_key == entry.api_key && (e.provider == entry.provider || e.api_base == entry.api_base)
+        }
     })
 }
 
@@ -876,5 +886,218 @@ mod tests {
         assert_eq!(resp.status(), axum::http::StatusCode::OK);
         let file = load_ui_state(&path).unwrap().unwrap();
         assert_eq!(file.gitlab.token, "glpat-user");
+    }
+
+    // ── Non-openai env primary: env secret never persisted, masked projection kept ──
+
+    /// The env-seeded non-openai primary entry (token-plan xiaomi-mimo): the
+    /// legacy scalar fields describe this primary (whatever its name), so the
+    /// masked round trip and any relabeling reconstruction revolve around it.
+    fn env_xiaomi_entry() -> LLMConfig {
+        LLMConfig {
+            provider: "xiaomi-mimo".to_string(),
+            model: "mimo-v2.5-pro".to_string(),
+            api_key: "tp-REALKEY".to_string(),
+            api_base: "https://token-plan-cn.xiaomimimo.com/v1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        }
+    }
+
+    /// State as the server looks at PUT time when booted with the
+    /// xiaomi-mimo entry from env: the entry is effective in the runtime and
+    /// tracked as env-derived.
+    fn state_with_env_xiaomi(path: &Path) -> AppState {
+        let mut state = fresh_state(vec![env_xiaomi_entry()]);
+        state.ui_state_path = Some(path.to_path_buf());
+        state.ui_state_env = Some(UiStateEnvOverrides {
+            llm_from_env: true,
+            llm_entries: vec![env_xiaomi_entry()],
+            ..Default::default()
+        });
+        state
+    }
+
+    /// A sparse PUT touching only `gitPlatforms` — no llm section at all.
+    fn sparse_git_platform_put() -> serde_json::Value {
+        serde_json::json!({
+            "gitPlatforms": [{
+                "name": "t",
+                "type": "gitlab",
+                "baseUrl": "http://g.internal",
+                "token": "glpat-x"
+            }]
+        })
+    }
+
+    /// A sparse PUT over a stored projection seeded from a non-openai env
+    /// primary must persist NOTHING env-derived: the seeded key stays masked
+    /// in the stored projection, so the merge cannot smuggle the live secret
+    /// into the save pipeline (where the legacy scalar path would rebuild it
+    /// with a hardcoded `provider: "openai"` label).
+    #[tokio::test]
+    async fn sparse_put_never_persists_env_non_openai_entry() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let state = Arc::new(state_with_env_xiaomi(&path));
+
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state.clone()),
+            axum::Json(sparse_git_platform_put()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("tp-REALKEY"), "env secret must never be persisted: {raw}");
+        assert!(
+            !raw.contains("provider = \"openai\""),
+            "no relabeled openai entry may reach disk: {raw}"
+        );
+        let file = load_ui_state(&path).unwrap().expect("file must load");
+        assert!(
+            file.llm.is_empty(),
+            "the env-derived entry must not be persisted: {:?}",
+            file.llm
+        );
+    }
+
+    /// Sparse and full PUTs of the same stored (masked) projection resolve to
+    /// the same applied LLM set, so both persist the same llm section — here
+    /// the empty one, the only entry being env-derived.
+    #[tokio::test]
+    async fn sparse_and_full_put_persist_identical_llm() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+
+        let path_sparse = dir.path().join("sparse.toml");
+        let state_sparse = Arc::new(state_with_env_xiaomi(&path_sparse));
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state_sparse.clone()),
+            axum::Json(sparse_git_platform_put()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let path_full = dir.path().join("full.toml");
+        let state_full = Arc::new(state_with_env_xiaomi(&path_full));
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state_full.clone()),
+            axum::Json(serde_json::json!({
+                "llm": {
+                    "openaiApiKey": API_KEY_MASK,
+                    "apiBaseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+                    "defaultModel": "mimo-v2.5-pro",
+                    "providers": [{
+                        "provider": "xiaomi-mimo",
+                        "apiKey": API_KEY_MASK,
+                        "apiBaseUrl": "https://token-plan-cn.xiaomimimo.com/v1",
+                        "defaultModel": "mimo-v2.5-pro"
+                    }]
+                }
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let sparse = load_ui_state(&path_sparse).unwrap().unwrap();
+        let full = load_ui_state(&path_full).unwrap().unwrap();
+        assert!(
+            sparse.llm.is_empty(),
+            "sparse PUT must persist an empty llm section: {:?}",
+            sparse.llm
+        );
+        assert!(
+            full.llm.is_empty(),
+            "full PUT must persist an empty llm section: {:?}",
+            full.llm
+        );
+        assert_eq!(
+            serde_json::to_value(&sparse.llm).unwrap(),
+            serde_json::to_value(&full.llm).unwrap(),
+            "sparse and full PUT must persist identical llm sections"
+        );
+    }
+
+    /// A reconstruction path that relabels the env entry's provider to
+    /// "openai" but keeps its secret + base must still be recognized as
+    /// env-derived: identity is the credential, not the label.
+    #[test]
+    fn from_applied_filters_relabeled_env_entry() {
+        let mut ui = UiConfig::default();
+        ui.llm.openai_api_key = API_KEY_MASK.to_string();
+        let applied = AppliedConfig {
+            llm: vec![LLMConfig {
+                provider: "openai".to_string(),
+                model: "mimo-v2.5-pro".to_string(),
+                api_key: "tp-REALKEY".to_string(),
+                api_base: "https://token-plan-cn.xiaomimimo.com/v1".to_string(),
+                max_tokens: 4096,
+                temperature: 0.3,
+                disable_thinking: None,
+            }],
+            git_platforms: vec![],
+            gitlab_token: String::new(),
+            gitlab_webhook_secret: String::new(),
+            gitlab_webhook_signing_secret: String::new(),
+            ui,
+        };
+        let env = UiStateEnvOverrides {
+            llm_from_env: true,
+            llm_entries: vec![env_xiaomi_entry()],
+            ..Default::default()
+        };
+
+        let file = UiStateFile::from_applied(&applied, Some(&env));
+        assert!(
+            file.llm.is_empty(),
+            "secret+base identity beats the provider label: {:?}",
+            file.llm
+        );
+        assert!(
+            file.ui.unwrap().llm.openai_api_key.is_empty(),
+            "no mask marker for a key the file does not hold"
+        );
+    }
+
+    /// The legacy scalar key field echoes the PRIMARY provider's key, so the
+    /// mask marker must key off the effective primary: after a sparse PUT
+    /// with a non-openai primary the stored projection keeps `***` (a
+    /// configured key must not read as unset), and the authoritative store
+    /// keeps exactly the env-seeded entry.
+    #[tokio::test]
+    async fn sparse_put_keeps_masked_projection_for_non_openai_primary() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let state = Arc::new(state_with_env_xiaomi(&path));
+
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state.clone()),
+            axum::Json(sparse_git_platform_put()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        assert_eq!(
+            state.ui_config.read().unwrap().llm.openai_api_key,
+            API_KEY_MASK,
+            "a configured non-openai primary must read as masked, not unset"
+        );
+
+        let llm = state.app_config.read().unwrap().as_ref().unwrap().llm.clone();
+        assert_eq!(llm.len(), 1, "app_config.llm must hold exactly one entry: {llm:?}");
+        assert_eq!(llm[0].provider, "xiaomi-mimo");
+        assert_eq!(llm[0].api_key, "tp-REALKEY");
+        assert_eq!(llm[0].api_base, "https://token-plan-cn.xiaomimimo.com/v1");
     }
 }

@@ -199,15 +199,38 @@ pub(crate) fn default_enable_metrics() -> bool {
 impl UiConfig {
     /// Build a `UiConfig` from the backend-native `AppConfig`, filling in
     /// sensible defaults for fields that only exist in the UI layer.
+    ///
+    /// The returned projection is the value STORED in `AppState::ui_config`,
+    /// and that store only ever holds the masked shape: secrets are projected
+    /// as the `***` sentinel here, exactly like the PUT pipeline does after
+    /// every save (`put::apply_ui_config`). Storing a live key would not stay
+    /// an in-memory-only concern: `PUT /config` merges incoming patches over
+    /// this stored projection, so a live seeded key would arrive at the save
+    /// pipeline indistinguishable from a user-TYPED value. For a non-openai
+    /// primary (the legacy scalar fields describe the primary, whatever its
+    /// name — see the fallthrough below) the legacy scalar path then rebuilds
+    /// the entry with a hardcoded `provider: "openai"` label — relabeling the
+    /// provider and carrying the secret into persistence. Masking at seed
+    /// time keeps every later merge on the "keep unchanged" path instead.
     pub fn from_app_config(app: &AppConfig) -> Self {
         let mut ui = UiConfig::default();
+
+        /// The masked projection of a secret for the stored UI config: `***`
+        /// when set, empty when unset (same semantics as `mask_secrets`).
+        fn masked(secret: &str) -> String {
+            if secret.is_empty() {
+                String::new()
+            } else {
+                API_KEY_MASK.to_string()
+            }
+        }
 
         // Map LLM configs — legacy single fields
         for l in &app.llm {
             match l.provider.as_str() {
                 "openai" => {
                     ui.llm.primary_provider = "openai".to_string();
-                    ui.llm.openai_api_key = l.api_key.clone();
+                    ui.llm.openai_api_key = masked(&l.api_key);
                     ui.llm.api_base_url = if l.api_base.is_empty() {
                         "https://api.openai.com/v1".to_string()
                     } else {
@@ -224,7 +247,7 @@ impl UiConfig {
         if ui.llm.primary_provider.is_empty() {
             if let Some(first) = app.llm.first() {
                 ui.llm.primary_provider = first.provider.clone();
-                ui.llm.openai_api_key = first.api_key.clone();
+                ui.llm.openai_api_key = masked(&first.api_key);
                 ui.llm.api_base_url = if first.api_base.is_empty() {
                     "https://api.openai.com/v1".to_string()
                 } else {
@@ -240,7 +263,7 @@ impl UiConfig {
         for l in &app.llm {
             ui.llm.providers.push(UiLlmProviderConfig {
                 provider: l.provider.clone(),
-                api_key: l.api_key.clone(),
+                api_key: masked(&l.api_key),
                 api_base_url: l.api_base.clone(),
                 default_model: l.model.clone(),
                 max_tokens: l.max_tokens,

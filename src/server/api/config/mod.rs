@@ -3,6 +3,7 @@
 //! @module review-engine: part of the CodeReview Board virtual engineering team
 
 mod helpers;
+pub mod persist;
 mod put;
 #[cfg(test)]
 mod tests;
@@ -25,9 +26,11 @@ pub use self::types::UiConfig;
 use self::types::API_KEY_MASK;
 use super::types::{ConfigValidateRequest, ConfigValidateResponse};
 
-pub use self::helpers::{fetch_models, test_config};
+pub use self::helpers::{fetch_models, test_config, test_git_platform};
 pub use self::put::{apply_gitlab_runtime_config, put_config};
-pub use self::types::{UiAdvancedConfig, UiGitLabConfig, UiLlmConfig, UiLlmProviderConfig, UiRulesConfig};
+pub use self::types::{
+    UiAdvancedConfig, UiGitLabConfig, UiGitPlatformConfig, UiLlmConfig, UiLlmProviderConfig, UiRulesConfig,
+};
 
 /// A UI-supplied key means "keep the existing one" when it is empty (frontend
 /// "leave blank = unchanged") or carries the mask sentinel `GET /config`
@@ -37,7 +40,8 @@ fn is_blank_or_masked(key: &str) -> bool {
 }
 
 /// Replace live API keys with the mask sentinel before serializing to the UI.
-/// `GET /config` must never return a real LLM key or the GitLab API token.
+/// `GET /config` must never return a real LLM key, the GitLab API token, or
+/// any git platform secret.
 fn mask_secrets(ui: &mut UiConfig) {
     if !ui.llm.openai_api_key.is_empty() {
         ui.llm.openai_api_key = API_KEY_MASK.to_string();
@@ -50,6 +54,17 @@ fn mask_secrets(ui: &mut UiConfig) {
     if !ui.gitlab.api_token.is_empty() {
         ui.gitlab.api_token = API_KEY_MASK.to_string();
     }
+    for platform in &mut ui.git_platforms {
+        if !platform.token.is_empty() {
+            platform.token = API_KEY_MASK.to_string();
+        }
+        if !platform.webhook_secret.is_empty() {
+            platform.webhook_secret = API_KEY_MASK.to_string();
+        }
+        if !platform.webhook_signing_secret.is_empty() {
+            platform.webhook_signing_secret = API_KEY_MASK.to_string();
+        }
+    }
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -59,6 +74,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/validate", post(validate_config))
         .route("/test", post(test_config))
         .route("/models", post(fetch_models))
+        .route("/git-platforms/test", post(test_git_platform))
 }
 
 async fn get_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {

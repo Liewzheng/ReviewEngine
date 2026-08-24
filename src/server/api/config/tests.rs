@@ -548,3 +548,499 @@ async fn gitlab_api_token_mask_round_trip() {
     let serialized = serde_json::to_string(&body).unwrap();
     assert!(!serialized.contains("glpat-new"), "secret leaked in {serialized}");
 }
+
+// ── gitPlatforms (multi-instance) ─────────────────────────────────
+
+fn testbed_platform_json() -> serde_json::Value {
+    serde_json::json!({
+        "name": "testbed",
+        "type": "gitlab",
+        "baseUrl": "http://gitlab.internal:8929",
+        "token": "glpat-platform",
+        "webhookSecret": "wh-platform"
+    })
+}
+
+fn stored_platform(state: &Arc<AppState>, name: &str) -> Option<crate::models::GitPlatformConfig> {
+    state
+        .git_platforms
+        .read()
+        .unwrap()
+        .iter()
+        .find(|p| p.name == name)
+        .cloned()
+}
+
+/// PUT/GET round trip: the entry lands in the live store with real secrets,
+/// and GET returns the masked projection — never a live secret.
+#[tokio::test]
+async fn put_get_git_platforms_round_trip() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = stored_platform(&state, "testbed").expect("platform must be stored");
+    assert_eq!(stored.platform_type, "gitlab");
+    assert_eq!(stored.base_url, "http://gitlab.internal:8929");
+    assert_eq!(stored.token, "glpat-platform");
+    assert_eq!(stored.webhook_secret, "wh-platform");
+
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let entry = &body["gitPlatforms"][0];
+    assert_eq!(entry["name"], "testbed");
+    assert_eq!(entry["type"], "gitlab");
+    assert_eq!(entry["baseUrl"], "http://gitlab.internal:8929");
+    assert_eq!(entry["token"], API_KEY_MASK);
+    assert_eq!(entry["webhookSecret"], API_KEY_MASK);
+    let serialized = serde_json::to_string(&body).unwrap();
+    assert!(!serialized.contains("glpat-platform"), "secret leaked in {serialized}");
+    assert!(!serialized.contains("wh-platform"), "secret leaked in {serialized}");
+}
+
+/// Masked (`***`) or blank secrets on an entry with the SAME (name, baseUrl)
+/// keep the stored secret; a real value replaces it.
+#[tokio::test]
+async fn put_git_platforms_masked_secret_keeps_stored() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Same name + same baseUrl: a masked token + blank webhookSecret keep
+    // both stored secrets.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": API_KEY_MASK,
+                "webhookSecret": ""
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert_eq!(stored.token, "glpat-platform", "masked token keeps stored secret");
+    assert_eq!(
+        stored.webhook_secret, "wh-platform",
+        "blank webhookSecret keeps stored secret"
+    );
+    assert_eq!(stored.base_url, "http://gitlab.internal:8929");
+
+    // A real value replaces the stored secret.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": "glpat-new"
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(stored_platform(&state, "testbed").unwrap().token, "glpat-new");
+}
+
+/// Secret-keep matches on the (name, baseUrl) PAIR: re-pointing the
+/// same-named entry at a DIFFERENT instance must NOT inherit the old
+/// instance's credentials (cross-instance secret leakage). The entry is
+/// saved with empty secrets; the user re-enters them explicitly.
+#[tokio::test]
+async fn put_git_platforms_base_url_change_does_not_inherit_secrets() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Same name, different baseUrl, masked secrets → secrets are NOT carried
+    // over from the other instance.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:9000",
+                "token": API_KEY_MASK,
+                "webhookSecret": API_KEY_MASK
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert_eq!(stored.base_url, "http://gitlab.internal:9000");
+    assert!(
+        stored.token.is_empty(),
+        "changed baseUrl must not inherit the old instance's token, got {:?}",
+        stored.token
+    );
+    assert!(
+        stored.webhook_secret.is_empty(),
+        "changed baseUrl must not inherit the old instance's webhook secret"
+    );
+
+    // The GET projection shows empty (unconfigured) secrets — not a `***`
+    // mask that would imply a stored secret exists.
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let entry = &body["gitPlatforms"][0];
+    assert_eq!(entry["token"], "");
+    assert_eq!(entry["webhookSecret"], "");
+    let serialized = serde_json::to_string(&body).unwrap();
+    assert!(!serialized.contains("glpat-platform"), "secret leaked in {serialized}");
+    assert!(!serialized.contains("wh-platform"), "secret leaked in {serialized}");
+
+    // Explicitly re-entered secrets on the new baseUrl save normally.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:9000",
+                "token": "glpat-other-instance"
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        stored_platform(&state, "testbed").unwrap().token,
+        "glpat-other-instance"
+    );
+}
+
+/// baseUrl must be an absolute http(s) URL with a host: empty, unparseable,
+/// or non-http(s) values fail the whole PUT with 422 and nothing persists.
+#[tokio::test]
+async fn put_git_platforms_invalid_base_url_rejected() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    for base_url in ["", "   ", "not a url", "ftp://gitlab.internal", "http:///no-host"] {
+        let mut bad = testbed_platform_json();
+        bad["baseUrl"] = serde_json::json!(base_url);
+        let resp = put_config(State(state.clone()), Json(serde_json::json!({ "gitPlatforms": [bad] })))
+            .await
+            .into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "baseUrl {base_url:?} must be rejected"
+        );
+    }
+    assert!(
+        state.git_platforms.read().unwrap().is_empty(),
+        "rejected updates must not persist"
+    );
+}
+
+/// Full-replace semantics: the submitted array replaces the whole set — an
+/// entry absent from the array is removed (the deletion mechanism).
+#[tokio::test]
+async fn put_git_platforms_full_replace_removes_absent_entries() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let mut second = testbed_platform_json();
+    second["name"] = serde_json::json!("prod");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json(), second] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.git_platforms.read().unwrap().len(), 2);
+
+    // Re-submit with only one entry → the other is gone.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        stored_platform(&state, "prod").is_none(),
+        "absent entry must be removed"
+    );
+    assert!(stored_platform(&state, "testbed").is_some());
+
+    // An explicit empty array clears the set.
+    let resp = put_config(State(state.clone()), Json(serde_json::json!({ "gitPlatforms": [] })))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(state.git_platforms.read().unwrap().is_empty());
+}
+
+/// A sparse PUT that omits `gitPlatforms` leaves the configured set alone
+/// (partial-update semantics, same as every other section).
+#[tokio::test]
+async fn put_config_sparse_patch_preserves_git_platforms() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").expect("omitted gitPlatforms must survive a sparse PUT");
+    assert_eq!(stored.token, "glpat-platform", "secrets survive the masked round trip");
+    assert_eq!(state.ui_config.read().unwrap().git_platforms[0].token, API_KEY_MASK);
+}
+
+/// Only `gitlab` is implemented: another `type` fails the whole PUT with
+/// 422, and nothing is persisted.
+#[tokio::test]
+async fn put_git_platforms_unknown_type_rejected() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+    let mut bad = testbed_platform_json();
+    bad["type"] = serde_json::json!("gitea");
+    let resp = put_config(State(state.clone()), Json(serde_json::json!({ "gitPlatforms": [bad] })))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        state.git_platforms.read().unwrap().is_empty(),
+        "rejected update must not persist"
+    );
+}
+
+/// Entries with a blank name are skipped; a duplicate name keeps the last
+/// occurrence.
+#[tokio::test]
+async fn put_git_platforms_skips_nameless_and_dedupes() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [
+                { "name": "", "type": "gitlab", "baseUrl": "http://x.internal" },
+                { "name": "testbed", "type": "gitlab", "baseUrl": "http://a.internal", "token": "glpat-a" },
+                { "name": "testbed", "type": "gitlab", "baseUrl": "http://b.internal", "token": "glpat-b" }
+            ]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let platforms = state.git_platforms.read().unwrap();
+    assert_eq!(platforms.len(), 1);
+    assert_eq!(
+        platforms[0].base_url, "http://b.internal",
+        "duplicate name: last write wins"
+    );
+    assert_eq!(platforms[0].token, "glpat-b");
+}
+
+// ── POST /config/git-platforms/test probe ─────────────────────────
+
+async fn probe_git_platform(state: Arc<AppState>, base_url: &str, token: &str) -> serde_json::Value {
+    let req: super::helpers::TestGitPlatformRequest =
+        serde_json::from_value(serde_json::json!({ "baseUrl": base_url, "token": token }))
+            .expect("TestGitPlatformRequest must deserialize");
+    let resp = super::helpers::test_git_platform(State(state), Json(req))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK, "probe errors stay in the body");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+#[tokio::test]
+async fn git_platform_probe_reports_version_on_success() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/version"))
+        .and(header("Authorization", "Bearer glpat-explicit"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "version": "19.2.4-ee",
+            "revision": "abc123"
+        })))
+        .mount(&server)
+        .await;
+
+    let body = probe_git_platform(Arc::new(AppState::new(vec![])), &server.uri(), "glpat-explicit").await;
+    assert_eq!(body["ok"], true);
+    assert_eq!(body["version"], "19.2.4-ee");
+}
+
+/// The masked-token fallback: a blank/masked probe token resolves to the
+/// stored token of the platform with the same baseUrl (fetch_models pattern).
+#[tokio::test]
+async fn git_platform_probe_falls_back_to_stored_token_when_masked() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/version"))
+        .and(header("Authorization", "Bearer glpat-stored"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "version": "19.2.4-ee" })))
+        .mount(&server)
+        .await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    *state.git_platforms.write().unwrap() = vec![crate::models::GitPlatformConfig {
+        name: "testbed".to_string(),
+        platform_type: "gitlab".to_string(),
+        base_url: server.uri(),
+        token: "glpat-stored".to_string(),
+        webhook_secret: String::new(),
+        webhook_signing_secret: String::new(),
+    }];
+
+    for token in [API_KEY_MASK, ""] {
+        let body = probe_git_platform(state.clone(), &server.uri(), token).await;
+        assert_eq!(
+            body["ok"], true,
+            "token {token:?} must fall back to the stored one: {body}"
+        );
+        assert_eq!(body["version"], "19.2.4-ee");
+    }
+}
+
+/// Probe failures surface in the body: HTTP errors as `HTTP <status>`, and
+/// a masked token with no matching platform is sent verbatim (unchanged old
+/// behavior — the upstream 401 becomes the error).
+#[tokio::test]
+async fn git_platform_probe_reports_http_errors() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/version"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .mount(&server)
+        .await;
+
+    let body = probe_git_platform(Arc::new(AppState::new(vec![])), &server.uri(), API_KEY_MASK).await;
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"], "HTTP 401 Unauthorized");
+}
+
+#[tokio::test]
+async fn git_platform_probe_validates_base_url() {
+    let state = Arc::new(AppState::new(vec![]));
+    let body = probe_git_platform(state.clone(), "", "tok").await;
+    assert_eq!(body["ok"], false);
+    assert!(body["error"].as_str().unwrap().contains("baseUrl"), "got {body}");
+    let body = probe_git_platform(state, "not a url", "tok").await;
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["error"].as_str().unwrap().contains("invalid baseUrl"),
+        "got {body}"
+    );
+}
+
+/// SSRF: the probe applies the same address policy as review webhook
+/// callbacks — link-local/metadata targets are blocked under both schemes,
+/// and plain http is only allowed for loopback/private targets. All of
+/// these fail validation BEFORE any network request, so no mock is needed.
+#[tokio::test]
+async fn git_platform_probe_blocks_ssrf_targets() {
+    let state = Arc::new(AppState::new(vec![]));
+
+    // Cloud metadata endpoint — blocked even over https.
+    let body = probe_git_platform(state.clone(), "https://169.254.169.254/latest/meta-data", "tok").await;
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["error"].as_str().unwrap().contains("blocked range"),
+        "metadata target must be blocked: {body}"
+    );
+    let body = probe_git_platform(state.clone(), "http://169.254.169.254/", "tok").await;
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["error"].as_str().unwrap().contains("invalid baseUrl"),
+        "got {body}"
+    );
+
+    // Unspecified address — blocked.
+    let body = probe_git_platform(state.clone(), "http://0.0.0.0:9000/", "tok").await;
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["error"].as_str().unwrap().contains("blocked range"),
+        "0.0.0.0 must be blocked: {body}"
+    );
+
+    // http to a PUBLIC host is rejected (https would be required).
+    let body = probe_git_platform(state.clone(), "http://93.184.216.34/", "tok").await;
+    assert_eq!(body["ok"], false);
+    assert!(
+        body["error"].as_str().unwrap().contains("loopback/private"),
+        "public http must be rejected: {body}"
+    );
+}
+
+/// The guard must not be stricter than the review webhook policy: loopback
+/// and private-network instances (the primary deployment case, e.g. the
+/// E2E testbed at http://localhost:8929) still probe. Port 9 is the
+/// discard port — validation passes and the request itself fails with a
+/// connect error, proving the target was not rejected by the SSRF guard.
+#[tokio::test]
+async fn git_platform_probe_allows_loopback_and_private_targets() {
+    let state = Arc::new(AppState::new(vec![]));
+    for base in ["http://localhost:9", "http://127.0.0.1:9", "http://10.255.255.1:9"] {
+        let body = probe_git_platform(state.clone(), base, "tok").await;
+        assert_eq!(body["ok"], false, "unreachable target fails the probe: {body}");
+        assert!(
+            !body["error"].as_str().unwrap().contains("invalid baseUrl"),
+            "{base} must pass SSRF validation and fail at connect time instead: {body}"
+        );
+    }
+}

@@ -81,6 +81,16 @@
         @reveal="revealField"
       />
 
+      <!-- Git Platforms Card -->
+      <GitPlatformsSection
+        ref="gitPlatformsCardRef"
+        :platforms="config.gitPlatforms"
+        :is-editing="isEditing"
+        @add="addGitPlatform"
+        @edit="editGitPlatform"
+        @remove="removeGitPlatform"
+      />
+
       <!-- LLM Card -->
       <LlmSettingsCard
         ref="llmCardRef"
@@ -294,9 +304,11 @@ import { useConfig } from '../composables/useConfig'
 import { useConfigForm } from '../composables/useConfigForm'
 import { useProviders } from '../composables/useProviders'
 import { getSystemHealth } from '../services/health'
+import type { GitPlatformConfig } from '../types/config'
 import GitLabSettingsCard from '../components/Config/GitLabSettingsCard.vue'
 import LlmSettingsCard from '../components/Config/LlmSettingsCard.vue'
 import ProvidersSection from '../components/Config/ProvidersSection.vue'
+import GitPlatformsSection from '../components/Config/GitPlatformsSection.vue'
 
 // --- Composables ---
 const { t } = useI18n()
@@ -353,6 +365,7 @@ const llmNotConfigured = ref(false)
 
 // Card refs for flash animation
 const gitlabCardRef = ref<HTMLElement>()
+const gitPlatformsCardRef = ref<HTMLElement>()
 const llmCardRef = ref<HTMLElement>()
 const rulesCardRef = ref<HTMLElement>()
 const advancedCardRef = ref<HTMLElement>()
@@ -365,6 +378,27 @@ const labelPosition = computed(() => (windowWidth.value >= 1024 ? 'left' : 'top'
 const dirty = computed(() => configDirty.value || providersDirty.value)
 
 // --- Methods ---
+// Git platform rows live on the main reactive `config`, so these mutations feed
+// the existing configDirty JSON comparison and ride along in the PUT /config
+// payload (full-replace semantics; blank/masked secrets keep stored values).
+function addGitPlatform(entry: GitPlatformConfig) {
+  config.gitPlatforms.push(entry)
+  ElNotification({
+    title: t('config.gitPlatforms.addedTitle'),
+    message: t('config.gitPlatforms.addedMessage'),
+    type: 'info',
+    duration: 3000,
+  })
+}
+
+function editGitPlatform(index: number, entry: GitPlatformConfig) {
+  config.gitPlatforms.splice(index, 1, entry)
+}
+
+function removeGitPlatform(index: number) {
+  config.gitPlatforms.splice(index, 1)
+}
+
 function cancelEdit() {
   restoreSnapshot()
   // Discard unsaved provider edits as well, otherwise they would keep the
@@ -412,7 +446,7 @@ async function saveChanges() {
     // root node must be reached via `$el` (calling classList on the instance
     // itself throws and lands in the catch above, showing a bogus error
     // notification after a successful save).
-    const cardRefs = [gitlabCardRef, llmCardRef, rulesCardRef, advancedCardRef]
+    const cardRefs = [gitlabCardRef, gitPlatformsCardRef, llmCardRef, rulesCardRef, advancedCardRef]
     cardRefs.forEach((cardRef) => {
       const el = (cardRef.value as unknown as { $el?: HTMLElement })?.$el
       if (el?.classList) {

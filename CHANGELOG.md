@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.9.33] - 2026-08-24
+
+### Added
+- **Runtime-configurable Git platforms (multi-GitLab)**: a new `gitPlatforms` config section — managed from the Web UI (Configuration page → 「Git 平台」 card) or `PUT /api/v1/config` — registers multiple GitLab instances (name / baseUrl / token / optional webhookSecret + webhookSigningSecret). Review requests and inbound GitLab webhooks are routed to the matching instance by URL `host[:port]` (host matched case-insensitively, explicit port matched strictly); per-platform webhook secrets are honored for both the legacy `X-Gitlab-Token` header and GitLab 19.x `webhook-signature` HMAC verification. The `X-Gitlab-Token` request header still overrides, and the legacy single `gitlab` config section keeps working as the implicit default. (`src/models/git_platform.rs`, `src/models/mod.rs`, `src/server/api/review/{handlers,resolve}.rs`, `src/server/gitlab/{mod,handler}.rs`, `src/server/state.rs`)
+- **Hot-reload + persistence of Web-UI config**: `PUT /api/v1/config` already applied changes in-memory without restart; it now also persists the effective UI-managed config (LLM providers, Git platforms, rules, advanced) atomically to `ui-state.toml` (0600) in the config dir, replayed at startup through the same code path — restarts no longer lose Web-UI changes. Precedence: `config.toml` < `ui-state.toml` < env vars. Secrets sourced from env vars are never persisted into `ui-state.toml`. (`src/server/api/config/{put,persist,helpers,types}.rs`, `src/server/state.rs`, `src/cli/app.rs`)
+- **`POST /api/v1/config/git-platforms/test`**: probes a GitLab instance with `{baseUrl, token}` — always returns 200 with `{ok, version}` / `{ok: false, error}`; a blank or masked token falls back to the stored token of the platform with a matching baseUrl. (`src/server/api/config/{mod,put,types}.rs`)
+
+### Changed
+- **Docker: the `/app/config` bind mount is no longer read-only**, so Web-UI config changes (`ui-state.toml`) persist across container restarts. (`docker-compose.yml`)
+
+### Added (UI)
+- **「Git 平台」 management card on the Configuration page**: list / add / edit / delete / test-connection for Git platforms, with masked-secret keep semantics and an empty state; i18n keys added in all 6 locales (en/zh-CN/zh-TW/ja/ko/fr). (`frontend/src/components/Config/GitPlatformsSection.vue`, `frontend/src/views/Configuration.vue`, `frontend/src/{services,types}/config.ts`, `frontend/src/composables/useConfigForm.ts`, `frontend/src/i18n/locales/*`)
+
 ## [0.9.32] - 2026-08-23
 
 ### Fixed

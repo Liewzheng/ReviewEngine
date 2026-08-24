@@ -41,6 +41,24 @@ impl GitLabRuntimeConfig {
             token: handler.token.clone(),
         }
     }
+
+    /// Build a runtime config from a configured git platform entry, deriving
+    /// the HMAC signing key from the `whsec_`-prefixed signing secret exactly
+    /// like startup (`GitLabWebhookHandler::new`) does.
+    pub fn from_platform(platform: &crate::models::GitPlatformConfig) -> Self {
+        use base64::Engine;
+        let signing_secret = Some(platform.webhook_signing_secret.clone()).filter(|s| !s.is_empty());
+        let signing_key = signing_secret
+            .as_ref()
+            .and_then(|s| s.strip_prefix("whsec_"))
+            .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok());
+        Self {
+            webhook_secret: platform.webhook_secret.clone(),
+            signing_secret,
+            signing_key,
+            token: platform.token.clone(),
+        }
+    }
 }
 
 /// Accessor for the global GitLab runtime config.

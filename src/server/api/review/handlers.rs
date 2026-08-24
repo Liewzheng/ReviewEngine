@@ -58,24 +58,29 @@ fn require_usable_llm(state: &AppState, request: &ReviewRequest) -> Result<(), (
 }
 
 /// Resolve the GitLab credential for a `gitlab_mr` review, per
-/// docs/rest-api.md §1: the `X-Gitlab-Token` request header wins, then the
-/// server-side configured token (CLI `--gitlab-token` / `GITLAB_TOKEN` /
-/// `PUT /config`). `None` when the source needs no credential. A `gitlab_mr`
-/// source with no resolvable credential is a `400`.
+/// docs/rest-api.md §1: the `X-Gitlab-Token` request header wins, then a
+/// configured git platform whose `baseUrl` host[:port] matches the MR URL,
+/// then the legacy server-side token (CLI `--gitlab-token` / `GITLAB_TOKEN`
+/// / `PUT /config`). `None` when the source needs no credential. A
+/// `gitlab_mr` source with no resolvable credential is a `400`.
 fn resolve_gitlab_credential(
+    state: &AppState,
     source: &ReviewSource,
     headers: &HeaderMap,
 ) -> Result<Option<String>, (StatusCode, String)> {
-    if !matches!(source, ReviewSource::GitLabMr { .. }) {
+    let ReviewSource::GitLabMr { url } = source else {
         return Ok(None);
-    }
+    };
     let header = headers.get(resolve::GITLAB_TOKEN_HEADER).and_then(|v| v.to_str().ok());
-    resolve::resolve_gitlab_token(header).map(Some).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            "gitlab token required for gitlab_mr reviews: pass the X-Gitlab-Token request header or configure a server-side GitLab token".to_string(),
-        )
-    })
+    let platforms = state.git_platforms.read().unwrap().clone();
+    resolve::resolve_gitlab_token(header, Some(url.as_str()), &platforms)
+        .map(Some)
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                "gitlab token required for gitlab_mr reviews: pass the X-Gitlab-Token request header or configure a server-side GitLab token".to_string(),
+            )
+        })
 }
 
 /// Validate a `gitlab_mr` source URL synchronously — a pure parse, no
@@ -157,7 +162,7 @@ pub(crate) async fn submit_review(
         return error_response(status, msg);
     }
 
-    let gitlab_token = match resolve_gitlab_credential(&request.source, &headers) {
+    let gitlab_token = match resolve_gitlab_credential(&state, &request.source, &headers) {
         Ok(token) => token,
         Err((status, msg)) => return error_response(status, msg),
     };
@@ -272,8 +277,9 @@ pub(crate) async fn rerun_review(
 
     // The stored parameters carry no credential (it is never persisted), so
     // rerun re-resolves it under the same rule as submit: the rerun request's
-    // own X-Gitlab-Token header first, then the server-side configured token.
-    let gitlab_token = match resolve_gitlab_credential(&request.source, &headers) {
+    // own X-Gitlab-Token header first, then the matching git platform, then
+    // the legacy server-side configured token.
+    let gitlab_token = match resolve_gitlab_credential(&state, &request.source, &headers) {
         Ok(token) => token,
         Err((status, msg)) => return error_response(status, msg),
     };

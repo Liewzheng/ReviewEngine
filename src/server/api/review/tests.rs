@@ -841,18 +841,130 @@ async fn gitlab_token_resolution_precedence() {
 
     // Header wins over the server-side configured token.
     assert_eq!(
-        resolve_gitlab_token(Some("glpat-header")),
+        resolve_gitlab_token(Some("glpat-header"), None, &[]),
         Some("glpat-header".to_string())
     );
     // Missing / blank / whitespace header falls back to the config token.
-    assert_eq!(resolve_gitlab_token(None), Some("glpat-config".to_string()));
-    assert_eq!(resolve_gitlab_token(Some("")), Some("glpat-config".to_string()));
-    assert_eq!(resolve_gitlab_token(Some("   ")), Some("glpat-config".to_string()));
+    assert_eq!(resolve_gitlab_token(None, None, &[]), Some("glpat-config".to_string()));
+    assert_eq!(
+        resolve_gitlab_token(Some(""), None, &[]),
+        Some("glpat-config".to_string())
+    );
+    assert_eq!(
+        resolve_gitlab_token(Some("   "), None, &[]),
+        Some("glpat-config".to_string())
+    );
 
     // Neither present → None (callers return 400).
     crate::server::gitlab::gitlab_runtime().write().unwrap().token = String::new();
-    assert_eq!(resolve_gitlab_token(None), None);
-    assert_eq!(resolve_gitlab_token(Some("")), None);
+    assert_eq!(resolve_gitlab_token(None, None, &[]), None);
+    assert_eq!(resolve_gitlab_token(Some(""), None, &[]), None);
+}
+
+// ─── gitPlatforms credential routing ──────────────────────────────
+
+fn testbed_platform() -> crate::models::GitPlatformConfig {
+    crate::models::GitPlatformConfig {
+        name: "testbed".to_string(),
+        platform_type: "gitlab".to_string(),
+        base_url: "http://gitlab.internal:8929".to_string(),
+        token: "glpat-platform".to_string(),
+        webhook_secret: String::new(),
+        webhook_signing_secret: String::new(),
+    }
+}
+
+#[tokio::test]
+async fn gitlab_token_resolution_picks_platform_by_host_port() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-legacy".to_string();
+    let platforms = vec![testbed_platform()];
+    let mr = "http://gitlab.internal:8929/group/proj/-/merge_requests/1";
+
+    // Host:port match → the platform token is used for that instance.
+    assert_eq!(
+        resolve_gitlab_token(None, Some(mr), &platforms),
+        Some("glpat-platform".to_string())
+    );
+    // Case-insensitive host, scheme-less comparison.
+    assert_eq!(
+        resolve_gitlab_token(
+            None,
+            Some("https://GITLAB.internal:8929/group/proj/-/merge_requests/2"),
+            &platforms
+        ),
+        Some("glpat-platform".to_string())
+    );
+    // The header still wins over a matched platform.
+    assert_eq!(
+        resolve_gitlab_token(Some("glpat-header"), Some(mr), &platforms),
+        Some("glpat-header".to_string())
+    );
+}
+
+#[tokio::test]
+async fn gitlab_token_resolution_falls_back_to_legacy_when_no_platform_matches() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-legacy".to_string();
+    let platforms = vec![testbed_platform()];
+
+    // Different port → no match → legacy token.
+    assert_eq!(
+        resolve_gitlab_token(
+            None,
+            Some("http://gitlab.internal:9999/g/p/-/merge_requests/1"),
+            &platforms
+        ),
+        Some("glpat-legacy".to_string())
+    );
+    // Different host → no match → legacy token.
+    assert_eq!(
+        resolve_gitlab_token(
+            None,
+            Some("http://other.internal:8929/g/p/-/merge_requests/1"),
+            &platforms
+        ),
+        Some("glpat-legacy".to_string())
+    );
+    // No URL context → legacy token.
+    assert_eq!(
+        resolve_gitlab_token(None, None, &platforms),
+        Some("glpat-legacy".to_string())
+    );
+    // Unparseable URL → legacy token (the enqueue-time URL validator rejects
+    // these with 422 before resolution runs).
+    assert_eq!(
+        resolve_gitlab_token(None, Some("not-a-url"), &platforms),
+        Some("glpat-legacy".to_string())
+    );
+}
+
+#[tokio::test]
+async fn gitlab_token_resolution_matched_platform_without_token_falls_through() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-legacy".to_string();
+    let mut platform = testbed_platform();
+    platform.token = String::new();
+    let platforms = vec![platform];
+    let mr = "http://gitlab.internal:8929/group/proj/-/merge_requests/1";
+
+    // A matched platform with an empty token yields nothing; the legacy
+    // token still applies (first non-empty token wins).
+    assert_eq!(
+        resolve_gitlab_token(None, Some(mr), &platforms),
+        Some("glpat-legacy".to_string())
+    );
+
+    // No match and no legacy token → None → the handler returns 400.
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = String::new();
+    assert_eq!(
+        resolve_gitlab_token(None, Some("http://nowhere.internal/x/-/merge_requests/1"), &platforms),
+        None
+    );
+    assert_eq!(resolve_gitlab_token(None, Some(mr), &platforms), None);
 }
 
 #[tokio::test]

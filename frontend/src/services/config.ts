@@ -45,6 +45,34 @@ export async function testConnection(data: {
   });
 }
 
+/** Result of a git platform connectivity probe. */
+export interface GitPlatformTestResult {
+  /** Whether the probe reached the platform and authenticated. */
+  ok: boolean;
+  /** Platform version string when the probe succeeded. */
+  version?: string;
+  /** Error description when the probe failed. */
+  error?: string;
+}
+
+/**
+ * Probe a git platform instance (`POST /config/git-platforms/test`).
+ * The endpoint always answers HTTP 200 — probe failures arrive in the body
+ * as `{ ok: false, error }`. A blank or masked (`***`) token falls back
+ * server-side to the stored token of the platform with the matching
+ * baseUrl, so callers can pass the masked value as-is.
+ * @param data - Instance base URL and (possibly masked) access token.
+ */
+export async function testGitPlatform(data: {
+  baseUrl: string;
+  token: string;
+}): Promise<GitPlatformTestResult> {
+  return request('/config/git-platforms/test', {
+    method: 'POST',
+    body: JSON.stringify({ baseUrl: data.baseUrl, token: data.token }),
+  });
+}
+
 /**
  * Fetch available model names from the given API endpoint.
  * Useful for populating model dropdowns in the configuration UI.

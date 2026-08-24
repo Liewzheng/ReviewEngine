@@ -235,8 +235,29 @@ pub async fn run() -> Result<()> {
             let mut config = review_engine::config::resolve_config(None).await?;
             // LLM_CONFIG env is a fallback for the provider list only: a
             // non-empty [[llm]] from config files always wins (same
-            // precedence as webhook-triggered reviews).
+            // precedence as webhook-triggered reviews). Track the entries env
+            // ACTUALLY seeded: they win at runtime but must never be
+            // persisted into ui-state.toml (see the persist module docs).
+            let env_llm_entries = if config.llm.is_empty() {
+                review_engine::config::llm_configs_from_env()
+            } else {
+                Vec::new()
+            };
             review_engine::config::apply_llm_env_fallback(&mut config);
+            // Track which GitLab credentials came from CLI flags / env vars:
+            // those sources win over the persisted ui-state.toml (precedence:
+            // config.toml < ui-state.toml < env), so they are injected as
+            // overrides when the file is replayed below and skipped when the
+            // file is saved.
+            let gitlab_token_opt = gitlab_token
+                .or_else(|| std::env::var("GITLAB_TOKEN").ok())
+                .filter(|s| !s.is_empty());
+            let webhook_secret_opt = gitlab_webhook_secret
+                .or_else(|| std::env::var("GITLAB_WEBHOOK_SECRET").ok())
+                .filter(|s| !s.is_empty());
+            let signing_secret = gitlab_webhook_signing_secret
+                .or_else(|| std::env::var("GITLAB_WEBHOOK_SIGNING_SECRET").ok())
+                .filter(|s| !s.is_empty());
             let mut app_state = review_engine::server::AppState::new(config.llm.clone());
             app_state.task_store = Some(Arc::new(review_engine::server::task_queue::TaskStore::new()));
             app_state.app_config = std::sync::RwLock::new(Some(Arc::new(config.clone())));
@@ -249,27 +270,19 @@ pub async fn run() -> Result<()> {
             app_state.feedback_store = Some(Arc::new(review_engine::feedback::FeedbackStore::persistent()));
             app_state.ui_config =
                 std::sync::RwLock::new(review_engine::server::api::config::UiConfig::from_app_config(&config));
+            app_state.ui_state_path = review_engine::server::api::config::persist::resolve_ui_state_path();
+            app_state.ui_state_env = Some(review_engine::server::api::config::persist::UiStateEnvOverrides {
+                gitlab_token: gitlab_token_opt.clone(),
+                gitlab_webhook_secret: webhook_secret_opt.clone(),
+                gitlab_webhook_signing_secret: signing_secret.clone(),
+                llm_from_env: !env_llm_entries.is_empty(),
+                llm_entries: env_llm_entries,
+            });
             let state = Arc::new(app_state);
             let dispatcher = review_engine::server::dispatcher::MrDispatcher::persistent();
             let mut handlers: Vec<Arc<dyn review_engine::server::webhook::WebhookHandler>> = vec![];
-            let gitlab_token = gitlab_token
-                .or_else(|| std::env::var("GITLAB_TOKEN").ok())
-                .unwrap_or_default();
-            let signing_secret = gitlab_webhook_signing_secret
-                .or_else(|| std::env::var("GITLAB_WEBHOOK_SIGNING_SECRET").ok())
-                .or_else(|| {
-                    let ui = match state.ui_config.read() {
-                        Ok(guard) => guard,
-                        Err(_) => {
-                            tracing::warn!("UI config lock is poisoned; skipping UI signing secret");
-                            return None;
-                        }
-                    };
-                    Some(ui.gitlab.webhook_signing_secret.clone()).filter(|s| !s.is_empty())
-                });
-            let webhook_secret = gitlab_webhook_secret
-                .or_else(|| std::env::var("GITLAB_WEBHOOK_SECRET").ok())
-                .unwrap_or_default();
+            let gitlab_token = gitlab_token_opt.clone().unwrap_or_default();
+            let webhook_secret = webhook_secret_opt.clone().unwrap_or_default();
             // Always initialise the global GitLab runtime config from the
             // startup CLI/env values — even when no webhook secret is
             // configured: the REST API's `gitlab_mr` credential fallback
@@ -285,13 +298,28 @@ pub async fn run() -> Result<()> {
                     gitlab_token.clone(),
                 ),
             );
+            // Load the persisted UI state (ui-state.toml) and apply it
+            // through the same code path as PUT /config, so hot-apply and
+            // cold-start semantics are identical. A missing/corrupt file
+            // never blocks startup — it just reverts to config.toml/env.
+            if let Some(path) = state.ui_state_path.clone() {
+                let overrides = state.ui_state_env.clone().unwrap_or_default();
+                match review_engine::server::api::config::persist::load_and_apply_ui_state(&state, &path, &overrides) {
+                    Ok(true) => tracing::info!("applied persisted UI state from {}", path.display()),
+                    Ok(false) => {}
+                    Err(e) => tracing::warn!("failed to load persisted UI state from {}: {e:#}", path.display()),
+                }
+            }
             if !webhook_secret.is_empty() || signing_secret.is_some() {
-                handlers.push(Arc::new(review_engine::server::gitlab::GitLabWebhookHandler::new(
-                    webhook_secret,
-                    signing_secret,
-                    dispatcher.clone(),
-                    gitlab_token,
-                )));
+                handlers.push(Arc::new(
+                    review_engine::server::gitlab::GitLabWebhookHandler::new(
+                        webhook_secret,
+                        signing_secret,
+                        dispatcher.clone(),
+                        gitlab_token,
+                    )
+                    .with_app_state(&state),
+                ));
             }
             if let Some((tok, secret)) = github_token
                 .or_else(|| std::env::var("GITHUB_TOKEN").ok())

@@ -30,6 +30,23 @@ pub struct GitLabWebhookHandler {
     pub(crate) signing_key: Option<Vec<u8>>,
     pub dispatcher: MrDispatcher,
     pub token: String,
+    /// Shared multi-platform configs (weak handle to the server's `AppState`
+    /// — the handler is mounted next to it, never owning it). `None` in
+    /// tests and legacy startup paths: only the runtime default applies.
+    app_state: Option<std::sync::Weak<crate::server::AppState>>,
+}
+
+/// Extract the instance URL identifying which git platform a webhook payload
+/// belongs to: GitLab MR/Note hooks carry `project.web_url`, Push hooks
+/// carry `repository.homepage`. `None` when the body carries neither (or is
+/// not JSON) — the caller then uses the runtime default.
+fn payload_instance_url(body: &str) -> Option<String> {
+    let parsed: Value = serde_json::from_str(body).ok()?;
+    parsed["project"]["web_url"]
+        .as_str()
+        .or_else(|| parsed["repository"]["homepage"].as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 impl GitLabWebhookHandler {
@@ -46,6 +63,35 @@ impl GitLabWebhookHandler {
             })
             .map(|rt| rt.clone())
             .unwrap_or_else(|| GitLabRuntimeConfig::from_handler(self))
+    }
+
+    /// Return the effective config for a specific webhook body: when the
+    /// payload's project/repository URL host matches a configured git
+    /// platform, THAT platform's webhook_secret / signing_secret / token
+    /// take over both verification and review dispatch; otherwise the
+    /// runtime default applies.
+    ///
+    /// A matched platform WITHOUT any webhook verification credential
+    /// (token-only entry, configured for REST review routing) deliberately
+    /// does not take over: webhooks for its host keep the runtime default,
+    /// so adding an instance for routing never breaks an existing webhook
+    /// setup for the same host.
+    pub(crate) fn effective_config_for_body(&self, body: &str) -> GitLabRuntimeConfig {
+        let fallback = self.effective_config();
+        let Some(state) = self.app_state.as_ref().and_then(|w| w.upgrade()) else {
+            return fallback;
+        };
+        let Some(url) = payload_instance_url(body) else {
+            return fallback;
+        };
+        let platforms = state.git_platforms.read().unwrap().clone();
+        match crate::models::find_git_platform_for_url(&platforms, &url) {
+            Some(platform) if platform.has_webhook_verification() => {
+                tracing::debug!(platform = %platform.name, "gitlab webhook matched configured git platform");
+                GitLabRuntimeConfig::from_platform(platform)
+            }
+            _ => fallback,
+        }
     }
 
     /// Create a new GitLab webhook handler.
@@ -69,12 +115,26 @@ impl GitLabWebhookHandler {
             signing_key,
             dispatcher,
             token,
+            app_state: None,
         }
     }
 
+    /// Attach the shared `AppState` so webhook verification/dispatch can
+    /// match the payload's instance URL against the configured git
+    /// platforms. Stored as a weak handle: the router owns the state, and
+    /// tests construct handlers without one.
+    pub fn with_app_state(mut self, state: &std::sync::Arc<crate::server::AppState>) -> Self {
+        self.app_state = Some(std::sync::Arc::downgrade(state));
+        self
+    }
+
     /// Verify `webhook-signature` header (GitLab 19.0+ signing tokens, Standard Webhooks).
-    fn verify_signing(&self, headers: &HeaderMap, body: &str) -> Result<(), (StatusCode, Json<Value>)> {
-        let cfg = self.effective_config();
+    fn verify_signing(
+        &self,
+        cfg: &GitLabRuntimeConfig,
+        headers: &HeaderMap,
+        body: &str,
+    ) -> Result<(), (StatusCode, Json<Value>)> {
         let key = match &cfg.signing_key {
             Some(k) => k,
             None => {
@@ -169,8 +229,11 @@ impl GitLabWebhookHandler {
     }
 
     /// Verify legacy `X-Gitlab-Token` header.
-    fn verify_secret_token(&self, headers: &HeaderMap) -> Result<(), (StatusCode, Json<Value>)> {
-        let cfg = self.effective_config();
+    fn verify_secret_token(
+        &self,
+        cfg: &GitLabRuntimeConfig,
+        headers: &HeaderMap,
+    ) -> Result<(), (StatusCode, Json<Value>)> {
         if cfg.webhook_secret.is_empty() {
             return Ok(()); // legacy secret not configured — skip this check
         }
@@ -212,7 +275,7 @@ impl WebhookHandler for GitLabWebhookHandler {
     }
 
     async fn verify(&self, headers: &HeaderMap, body: &str) -> Result<(), (StatusCode, Json<Value>)> {
-        let cfg = self.effective_config();
+        let cfg = self.effective_config_for_body(body);
         let signing_configured = cfg.signing_secret.as_ref().map_or(false, |s| !s.is_empty());
         let legacy_configured = !cfg.webhook_secret.is_empty();
         let signature_header_present = headers.get("webhook-signature").is_some();
@@ -223,12 +286,12 @@ impl WebhookHandler for GitLabWebhookHandler {
         // failure because that would allow a downgrade attack. We only fall back
         // to the legacy token when the signature header is absent.
         if signing_configured && signature_header_present {
-            return self.verify_signing(headers, body);
+            return self.verify_signing(&cfg, headers, body);
         }
 
         // Otherwise fall back to the legacy token if it is configured.
         if legacy_configured {
-            return self.verify_secret_token(headers);
+            return self.verify_secret_token(&cfg, headers);
         }
 
         // Signing is configured but the signature header is missing, and no
@@ -255,8 +318,10 @@ impl WebhookHandler for GitLabWebhookHandler {
             .unwrap_or("");
 
         // Clone the token before the match so the RwLock guard is dropped
-        // before any .await call (RwLockReadGuard is not Send).
-        let token = self.effective_config().token.clone();
+        // before any .await call (RwLockReadGuard is not Send). The token is
+        // resolved per payload: a body whose instance URL matches a
+        // configured git platform dispatches with that platform's token.
+        let token = self.effective_config_for_body(body).token.clone();
 
         match event {
             "Merge Request Hook" => super::handle_mr_hook(body, &self.dispatcher, &token)

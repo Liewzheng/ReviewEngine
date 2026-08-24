@@ -16,6 +16,26 @@ export interface GitLabConfig {
   autoReview: boolean
 }
 
+/** One entry of the `llm.providers[]` array in GET /config (key masked). */
+export interface LlmProviderConfigEntry {
+  /** Provider type identifier (e.g. `openai`, `deepseek`); the entry's identity. */
+  provider: string
+  /** API key; `***` when configured, empty when unset (never the live key). */
+  apiKey: string
+  /** Base URL for the provider API. */
+  apiBaseUrl: string
+  /** Default model identifier. */
+  defaultModel: string
+  /** Maximum tokens in the LLM response. */
+  maxTokens: number
+  /** Sampling temperature. */
+  temperature: number
+  /** Request timeout in seconds. */
+  timeoutSeconds: number
+  /** Number of retry attempts on transient LLM API failures. */
+  retryAttempts: number
+}
+
 /** LLM provider configuration for code review AI models. */
 export interface LLMConfig {
   /** Base URL for the LLM API (e.g. `https://api.openai.com/v1`). */
@@ -32,6 +52,10 @@ export interface LLMConfig {
   timeoutSeconds: number
   /** Number of retry attempts on transient LLM API failures. */
   retryAttempts: number
+  /** Name of the primary provider (echoed by GET /config). */
+  primaryProvider: string
+  /** Every configured provider, primary included (keys masked on read). */
+  providers: LlmProviderConfigEntry[]
 }
 
 /** Review quality rules and gating configuration. */
@@ -154,6 +178,8 @@ export function createMockConfig(): AppConfig {
       temperature: 0.7,
       timeoutSeconds: 60,
       retryAttempts: 3,
+      primaryProvider: 'openai',
+      providers: [],
     },
     rules: {
       minScore: 75,

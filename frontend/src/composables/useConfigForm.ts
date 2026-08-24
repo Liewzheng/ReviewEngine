@@ -23,6 +23,8 @@ const defaultConfig: AppConfig = {
     temperature: 0.7,
     timeoutSeconds: 60,
     retryAttempts: 3,
+    primaryProvider: '',
+    providers: [],
   },
   rules: {
     minScore: 75,
@@ -55,12 +57,14 @@ const DEFAULT_REQUIRED_EXPERTS = ['Security', 'Performance', 'Quality'];
 export type RevealableField = 'apiToken' | 'webhookSecret' | 'webhookSigningSecret';
 
 /**
- * Composable for the main Configuration form (GitLab / LLM / Rules / Advanced).
+ * Composable for the main Configuration form (GitLab / Rules / Advanced).
  *
  * Owns the editable `config` model, edit-mode snapshotting, dirty tracking,
- * validation rules, secret reveal timers, the excluded-pattern tag input, and
- * the debounced model list fetch. Provider management lives in
- * `useProviders`; the page composes the two.
+ * validation rules, secret reveal timers, and the excluded-pattern tag
+ * input. LLM provider management lives on the /llm page (unified provider
+ * cards with immediate per-card persistence — see `useProviderCards`); the
+ * `llm` section is loaded here only so the full config model stays complete,
+ * and Configuration.vue drops it from its save payload.
  *
  * @param cfg - The shared `useConfig()` instance used by the page.
  */
@@ -100,14 +104,7 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     patternInputRef.value = el;
   }
 
-  // --- Model list fetch state ---
-  const modelOptions = ref<string[]>([]);
-  const modelFetchLoading = ref(false);
-  const modelFetchError = ref<string | null>(null);
-  const modelFetchTimer = ref<number | null>(null);
-
   // --- Computed ---
-  const availableModels = computed(() => modelOptions.value);
 
   /** True when the main form differs from the snapshot taken on edit entry. */
   const configDirty = computed(() => {
@@ -173,13 +170,6 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
         trigger: 'blur',
       },
     ],
-    'llm.apiBaseUrl': [{ validator: validateUrl, trigger: 'blur' }],
-    // The LLM API key shares the same keep-existing semantics as the GitLab
-    // token (never echoed by GET /config), so it has no required rule.
-    'llm.openaiApiKey': [],
-    'llm.defaultModel': [
-      { required: true, message: t('config.validation.modelRequired'), trigger: 'change' },
-    ],
     'rules.requiredExperts': [
       {
         validator: (_rule: any, value: any, callback: any) => {
@@ -217,52 +207,7 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     { deep: true }
   );
 
-  watch(
-    () => [config.llm.apiBaseUrl, config.llm.openaiApiKey],
-    () => {
-      if (modelFetchTimer.value) {
-        clearTimeout(modelFetchTimer.value);
-      }
-      modelFetchTimer.value = window.setTimeout(() => {
-        loadModels();
-      }, 500);
-    }
-  );
-
   // --- Methods ---
-  /** Fetch the model list from the configured LLM endpoint (debounced caller). */
-  async function loadModels() {
-    const apiBase = config.llm.apiBaseUrl.trim();
-    const apiKey = config.llm.openaiApiKey.trim();
-    if (!apiBase || !apiKey) {
-      modelOptions.value = [];
-      modelFetchError.value = null;
-      return;
-    }
-    try {
-      new URL(apiBase);
-    } catch {
-      modelOptions.value = [];
-      return;
-    }
-    modelFetchLoading.value = true;
-    modelFetchError.value = null;
-    try {
-      const models = await cfg.fetchModels(apiBase, apiKey);
-      if (cfg.modelsError.value) {
-        modelFetchError.value = cfg.modelsError.value;
-        modelOptions.value = [];
-      } else {
-        modelOptions.value = models;
-        if (!models.includes(config.llm.defaultModel)) {
-          config.llm.defaultModel = models[0] || '';
-        }
-      }
-    } finally {
-      modelFetchLoading.value = false;
-    }
-  }
-
   /** Discard the transient (unsaved) pattern input row, if one is open. */
   function resetPatternInput() {
     patternInputVisible.value = false;
@@ -279,8 +224,7 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
   }
 
   /**
-   * Restore the edit-entry snapshot and leave edit mode. Callers should also
-   * reset provider state (`useProviders().resetProviders`) when cancelling.
+   * Restore the edit-entry snapshot and leave edit mode.
    */
   function restoreSnapshot() {
     if (originalConfig.value) {
@@ -318,16 +262,6 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
       message: t('config.refreshed'),
       type: 'info',
       duration: 2000,
-    });
-  }
-
-  /** Test connectivity to the configured primary LLM provider. */
-  async function testConnection() {
-    await cfg.test({
-      provider: 'openai',
-      model: config.llm.defaultModel,
-      apiKey: config.llm.openaiApiKey,
-      apiBase: config.llm.apiBaseUrl,
     });
   }
 
@@ -384,9 +318,6 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     revealed,
     revealCountdown,
     revealField,
-    availableModels,
-    modelFetchLoading,
-    modelFetchError,
     patternInputVisible,
     patternInputValue,
     setPatternInputRef,
@@ -398,6 +329,5 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     commitSnapshot,
     loadConfig,
     refreshConfig,
-    testConnection,
   };
 }

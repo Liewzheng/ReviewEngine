@@ -1,20 +1,19 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { ElNotification } from 'element-plus'
+import { ref, computed, watch, onMounted } from 'vue'
+import { ElMessage, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { RefreshRight, Cpu, CircleCheck, Warning, CircleClose, Remove, Edit, Check, Close } from '@element-plus/icons-vue'
+import { RefreshRight, Cpu, CircleCheck, Warning, CircleClose, Remove, Plus } from '@element-plus/icons-vue'
 import { useLlmStatus } from '../composables/useLlmStatus'
-import { useConfig } from '../composables/useConfig'
-import { useConfigForm } from '../composables/useConfigForm'
-import { useProviders } from '../composables/useProviders'
+import { useProviderCards } from '../composables/useProviderCards'
+import type { ProviderCardState } from '../composables/llmPayload'
 import { getSystemHealth } from '../services/health'
 import ProviderCard from '../components/LlmStatus/ProviderCard.vue'
-import LlmSettingsCard from '../components/Config/LlmSettingsCard.vue'
-import ProvidersSection from '../components/Config/ProvidersSection.vue'
+import ProviderConfigCard from '../components/Config/ProviderConfigCard.vue'
+import ProviderEditDialog from '../components/Config/ProviderEditDialog.vue'
 import type { LlmProvider } from '../types/llm'
 
 /* ------------------------------------------------------------------ */
-/*  Composable                                                        */
+/*  Status section (KPIs + health cards)                              */
 /* ------------------------------------------------------------------ */
 
 const { t } = useI18n()
@@ -45,60 +44,11 @@ const totalRequests = computed(() =>
 )
 
 /* ------------------------------------------------------------------ */
-/*  LLM Configuration (edit lifecycle local to this section)          */
+/*  LLM Configuration — unified provider cards with immediate saves   */
 /* ------------------------------------------------------------------ */
 
-const cfg = useConfig()
-
-const {
-  config,
-  isEditing: cfgEditing,
-  formRef: cfgFormRef,
-  configDirty,
-  rules: cfgRules,
-  availableModels,
-  modelFetchLoading,
-  modelFetchError,
-  enterEditMode,
-  restoreSnapshot,
-  commitSnapshot,
-  loadConfig,
-  testConnection,
-} = useConfigForm(cfg)
-
-const {
-  additionalProviders,
-  providersLoading,
-  providersDirty,
-  loadProviders,
-  addProvider,
-  toggleProvider,
-  confirmDeleteProvider,
-  resetProviders,
-  saveAdditionalProviders,
-  saveProvidersOnly,
-} = useProviders(cfgEditing, configDirty)
-
-const configLoading = cfg.loading
-const cfgSaving = cfg.saving
-const cfgTesting = cfg.testing
-const cfgTestResult = cfg.testResult
 /** True when the server reports no usable LLM via /system/health. */
 const llmNotConfigured = ref(false)
-/** Card ref for the save flash animation (LlmSettingsCard only —
- *  ProvidersSection is multi-root, so its $el is not the card element). */
-const llmSettingsCardRef = ref<HTMLElement>()
-
-/** Dirty across the LLM form and the additional-providers list. */
-const cfgDirtyAll = computed(() => configDirty.value || providersDirty.value)
-
-// Responsive label layout, same breakpoint convention as Configuration.vue
-const windowWidth = ref(window.innerWidth)
-const labelPosition = computed(() => (windowWidth.value >= 1024 ? 'left' : 'top'))
-
-function handleResize() {
-  windowWidth.value = window.innerWidth
-}
 
 /** Refresh the not-configured banner. Fail-open: a health-check error keeps
  *  the current banner state. */
@@ -110,75 +60,81 @@ function checkLlmConfigured() {
     .catch(() => {})
 }
 
-function cancelConfigEdit() {
-  restoreSnapshot()
-  // Discard unsaved provider edits as well, otherwise they would keep the
-  // section dirty the next time edit mode is entered.
-  resetProviders()
-}
-
-async function saveConfigChanges() {
-  // Provider-only changes are independent of the LLM form: skip form
-  // validation, which would otherwise block provider management when the
-  // primary LLM config is incomplete.
-  if (!configDirty.value && providersDirty.value) {
-    await saveProvidersOnly()
-    llm.fetch()
-    checkLlmConfigured()
-    return
-  }
-  if (!cfgFormRef.value) return
-  const valid = await cfgFormRef.value.validate().catch(() => false)
-  // Validation failures keep their inline errors but must not block saving:
-  // the backend treats blank/masked secrets as "keep the stored value", so a
-  // partially-filled form saves safely. Warn, then save with what is present.
-  if (!valid) {
-    ElNotification({
-      title: t('config.validation.title'),
-      message: t('config.validation.saveWithWarnings'),
-      type: 'warning',
-      duration: 4000,
-    })
-  }
-
-  try {
-    // Sparse PUT: send ONLY the `llm` section. The backend deep-merges the
-    // payload over the stored config — omitted sections (gitlab/rules/…)
-    // stay untouched, and masked (`***`)/blank API keys keep the stored
-    // secrets. `config.llm` carries the legacy scalar fields plus the
-    // `providers` array echoed by GET /config (masked keys), assembled
-    // exactly like the Configuration page's save did.
-    await cfg.save({ llm: JSON.parse(JSON.stringify(config.llm)) })
-    await saveAdditionalProviders()
-    commitSnapshot()
-
-    ElNotification({
-      title: t('common.success'),
-      message: t('config.saved'),
-      type: 'success',
-      duration: 3000,
-    })
-
-    // Flash border animation on the saved card. The template ref on
-    // <el-card> resolves to the component instance, so the root node must be
-    // reached via `$el`.
-    const el = (llmSettingsCardRef.value as unknown as { $el?: HTMLElement })?.$el
-    if (el?.classList) {
-      el.classList.add('flash-success')
-      setTimeout(() => el.classList.remove('flash-success'), 600)
-    }
-
+const {
+  cards: providerCards,
+  primaryName,
+  loading: cardsLoading,
+  saving: cardsSaving,
+  error: cardsError,
+  load: loadProviderCards,
+  addCard,
+  editCard,
+  setPrimary,
+  deleteCard,
+} = useProviderCards({
+  statusProviders: llm.providers,
+  afterSave: () => {
     // Reflect the new config in the health cards and the banner.
     llm.fetch()
     checkLlmConfigured()
-  } catch {
-    ElNotification({
-      title: t('common.error'),
-      message: t('config.saveFailed'),
-      type: 'error',
-      duration: 5000,
-    })
+  },
+})
+
+/** Runtime health entries keyed by provider name, for the config cards. */
+const healthByName = computed(() => {
+  const map = new Map<string, LlmProvider>()
+  for (const p of providers.value) {
+    if (!map.has(p.name)) map.set(p.name, p)
   }
+  return map
+})
+
+// --- Add/Edit dialog ---
+const dialogVisible = ref(false)
+const dialogMode = ref<'add' | 'edit'>('add')
+const editingCard = ref<ProviderCardState | null>(null)
+
+function openAddDialog() {
+  dialogMode.value = 'add'
+  editingCard.value = null
+  dialogVisible.value = true
+}
+
+function openEditDialog(card: ProviderCardState) {
+  dialogMode.value = 'edit'
+  editingCard.value = { ...card }
+  dialogVisible.value = true
+}
+
+async function handleDialogSave(form: ProviderCardState) {
+  const ok =
+    dialogMode.value === 'add'
+      ? await addCard(form)
+      : await editCard(editingCard.value?.provider ?? form.provider, form)
+  if (ok) dialogVisible.value = false
+}
+
+/** Card-level connectivity test rides the server-side probe (stored key),
+ *  so no secret ever round-trips through the browser. */
+async function handleCardTest(card: ProviderCardState) {
+  const health = healthByName.value.get(card.provider)
+  if (!health) return
+  try {
+    const result = await llm.test(health.id)
+    ElMessage({
+      type: result.success ? 'success' : 'error',
+      message: result.success
+        ? t('config.llm.connected', { n: result.latencyMs })
+        : t('config.llm.testFailed', { error: result.error }),
+    })
+  } catch {
+    // Error already handled by composable (llm.error watcher notifies).
+  }
+}
+
+function isCardTesting(card: ProviderCardState): boolean {
+  const health = healthByName.value.get(card.provider)
+  return !!health && llm.testingId.value === health.id
 }
 
 /* ------------------------------------------------------------------ */
@@ -196,7 +152,7 @@ watch(() => llm.error.value, (err) => {
   }
 })
 
-watch(() => cfg.error.value, (err) => {
+watch(() => cardsError.value, (err) => {
   if (err) {
     ElNotification({
       title: t('common.error'),
@@ -247,14 +203,8 @@ async function handleTestSingle(provider: LlmProvider) {
 
 onMounted(() => {
   fetchProviders()
-  loadConfig()
-  loadProviders()
+  loadProviderCards()
   checkLlmConfigured()
-  window.addEventListener('resize', handleResize)
-})
-
-onUnmounted(() => {
-  window.removeEventListener('resize', handleResize)
 })
 </script>
 
@@ -379,36 +329,15 @@ onUnmounted(() => {
       </div>
     </template>
 
-    <!-- LLM Configuration Section (own edit lifecycle, independent of the
-         status section above, which stays fully functional while editing) -->
+    <!-- LLM Configuration Section: unified provider cards, every mutation
+         saves immediately (no page-level edit mode). -->
     <section id="llm-config-section" class="llm-config-section">
       <div class="config-section-header">
         <h3 class="section-title">{{ $t('llm.configSection') }}</h3>
         <div class="header-actions">
-          <template v-if="!cfgEditing">
-            <el-button type="primary" :disabled="configLoading" @click="enterEditMode">
-              <el-icon><Edit /></el-icon>
-              <span>{{ $t('config.editBtn') }}</span>
-            </el-button>
-          </template>
-          <template v-else>
-            <!-- Tooltip explains why Save is disabled; the wrapper span is needed
-                 because a disabled button swallows pointer events. -->
-            <el-tooltip :content="$t('config.noChangesToSave')" :disabled="cfgDirtyAll" placement="top">
-              <span class="save-button-wrapper">
-                <el-badge :is-dot="cfgDirtyAll" type="danger">
-                  <el-button type="primary" :loading="cfgSaving" :disabled="!cfgDirtyAll" @click="saveConfigChanges">
-                    <el-icon><Check /></el-icon>
-                    <span>{{ $t('common.saveChanges') }}</span>
-                  </el-button>
-                </el-badge>
-              </span>
-            </el-tooltip>
-            <el-button @click="cancelConfigEdit">
-              <el-icon><Close /></el-icon>
-              <span>{{ $t('common.cancel') }}</span>
-            </el-button>
-          </template>
+          <el-button type="primary" :icon="Plus" :disabled="cardsLoading" @click="openAddDialog">
+            {{ $t('config.providerCards.add') }}
+          </el-button>
         </div>
       </div>
 
@@ -421,53 +350,46 @@ onUnmounted(() => {
         class="llm-banner"
       />
 
-      <el-form
-        ref="cfgFormRef"
-        :model="config"
-        :rules="cfgRules"
-        :disabled="!cfgEditing"
-        :label-position="labelPosition"
-        label-width="auto"
-        class="config-form"
-        @submit.prevent
-      >
-        <!-- LLM Card -->
-        <LlmSettingsCard
-          ref="llmSettingsCardRef"
-          :config="config.llm"
-          :is-editing="cfgEditing"
-          :models="availableModels"
-          :model-fetch-loading="modelFetchLoading"
-          :model-fetch-error="modelFetchError"
-          :testing="cfgTesting"
-          :test-result="cfgTestResult"
-          @test="testConnection"
-        />
-
-        <!-- Additional LLM Providers Card -->
-        <ProvidersSection
-          :providers="additionalProviders"
-          :is-editing="cfgEditing"
-          :loading="providersLoading"
-          @toggle="toggleProvider"
-          @remove="confirmDeleteProvider"
-          @add="addProvider"
-        />
-      </el-form>
-
-      <!-- Mobile Sticky Actions -->
-      <div v-if="cfgEditing" class="mobile-actions">
-        <el-tooltip :content="$t('config.noChangesToSave')" :disabled="cfgDirtyAll" placement="top">
-          <span class="save-button-wrapper">
-            <el-badge :is-dot="cfgDirtyAll" type="danger" class="mobile-badge">
-              <el-button type="primary" :loading="cfgSaving" :disabled="!cfgDirtyAll" @click="saveConfigChanges">
-                {{ $t('common.saveChanges') }}
-              </el-button>
-            </el-badge>
-          </span>
-        </el-tooltip>
-        <el-button @click="cancelConfigEdit">{{ $t('common.cancel') }}</el-button>
+      <!-- Loading Skeleton -->
+      <div v-if="cardsLoading && providerCards.length === 0" class="skeleton-grid">
+        <el-skeleton v-for="i in 2" :key="i" animated :rows="3" class="skeleton-card" />
       </div>
+
+      <!-- Empty State -->
+      <el-empty
+        v-else-if="providerCards.length === 0"
+        :description="$t('config.providerCards.empty')"
+      >
+        <el-button type="primary" :icon="Plus" @click="openAddDialog">
+          {{ $t('config.providerCards.add') }}
+        </el-button>
+      </el-empty>
+
+      <!-- Unified Provider Card Grid -->
+      <div v-else class="provider-grid">
+        <ProviderConfigCard
+          v-for="card in providerCards"
+          :key="card.provider"
+          :card="card"
+          :primary="card.provider === primaryName"
+          :health="healthByName.get(card.provider)"
+          :testing="isCardTesting(card)"
+          :saving="cardsSaving"
+          @test="handleCardTest(card)"
+          @edit="openEditDialog(card)"
+          @delete="deleteCard(card)"
+          @set-primary="setPrimary(card)"
+        />
+      </div>
+
+      <ProviderEditDialog
+        v-model:visible="dialogVisible"
+        :mode="dialogMode"
+        :initial="editingCard"
+        :existing-names="providerCards.map((c) => c.provider)"
+        :saving="cardsSaving"
+        @save="handleDialogSave"
+      />
     </section>
   </div>
 </template>
@@ -562,7 +484,7 @@ onUnmounted(() => {
   border: 1px solid var(--border-color);
 }
 
-/* Provider Grid */
+/* Provider Grid (status cards and config cards share the layout) */
 .provider-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
@@ -608,96 +530,9 @@ onUnmounted(() => {
   transition: all 0.15s ease;
 }
 
-/* Wrapper lets the tooltip hover target survive the disabled save button */
-.save-button-wrapper {
-  display: inline-flex;
-}
-
 /* LLM-not-configured banner sits below the section header, above the cards */
 .llm-banner {
   margin-bottom: 20px;
-}
-
-.config-form {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-/* Card Design System — the moved config cards rely on the parent view for
-   their themed shell (scoped styles reach the child component root). */
-.config-card {
-  background-color: var(--bg-card);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  box-shadow: var(--shadow-card);
-  transition: opacity 0.15s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.config-card:hover {
-  border-color: var(--brand);
-  box-shadow: 0 0 0 1px var(--brand), var(--shadow-card);
-}
-
-.config-card :deep(.el-card__header) {
-  padding: 14px 20px;
-  border-bottom: 1px solid var(--border-color);
-}
-
-/* Form label override */
-.config-card :deep(.el-form-item__label) {
-  font-size: 12px;
-}
-
-/* Safety cap so very long i18n labels don't blow out the auto label width */
-.config-form :deep(.el-form-item__label) {
-  max-width: 220px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.config-card :deep(.el-card__body) {
-  max-height: none;
-  overflow: visible;
-}
-
-/* Flash animation on successful save */
-@keyframes flashBorder {
-  0% {
-    border-color: var(--border-color);
-  }
-  50% {
-    border-color: var(--success);
-    box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
-  }
-  100% {
-    border-color: var(--border-color);
-  }
-}
-
-.config-card.flash-success {
-  animation: flashBorder 0.6s ease;
-}
-
-/* Mobile sticky actions */
-.mobile-actions {
-  display: none;
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  padding: 12px 16px;
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-color);
-  gap: 12px;
-  justify-content: flex-end;
-  z-index: 50;
-}
-
-.mobile-badge :deep(.el-badge__content) {
-  top: 4px;
-  right: 4px;
 }
 
 /* Responsive */
@@ -717,14 +552,6 @@ onUnmounted(() => {
 
   .skeleton-grid {
     grid-template-columns: 1fr;
-  }
-
-  .llm-config-section .header-actions {
-    display: none;
-  }
-
-  .llm-config-section .mobile-actions {
-    display: flex;
   }
 
   .config-section-header {

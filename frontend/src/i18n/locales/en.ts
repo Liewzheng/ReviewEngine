@@ -408,6 +408,28 @@ export default {
       viewDocs: 'Docs',
       modelsFallback: 'Model list unavailable — enter the model id manually.',
     },
+    providerCards: {
+      add: 'Add Provider',
+      empty: 'No LLM providers configured yet',
+      primaryBadge: 'Primary',
+      setPrimary: 'Set as Primary',
+      primarySet: '"{name}" is now the primary provider',
+      addTitle: 'Add Provider',
+      editTitle: 'Edit Provider',
+      keepKeyPlaceholder: 'Leave empty to keep the saved key',
+      advanced: 'Advanced Settings',
+      deleteTitle: 'Delete Provider',
+      deleteConfirm: 'Delete provider "{name}"? This saves immediately.',
+      deletePrimaryConfirm:
+        '"{name}" is the primary provider. Deleting it will make "{next}" the new primary provider. Continue?',
+      deleted: 'Provider "{name}" deleted',
+      saved: 'Provider saved',
+      saveFailed: 'Failed to save provider',
+      duplicateProvider: 'This provider is already configured',
+      providerRequired: 'Please select a provider type',
+      apiKeyRequired: 'API Key is required',
+      testUnavailable: 'This provider is not active on the server',
+    },
     gitPlatforms: {
       title: 'Git Platforms',
       subtitle:

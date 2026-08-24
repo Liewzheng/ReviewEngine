@@ -397,6 +397,28 @@ export default {
       viewDocs: '문서',
       modelsFallback: '모델 목록을 사용할 수 없습니다 — 모델 ID를 직접 입력하세요.',
     },
+    providerCards: {
+      add: '공급자 추가',
+      empty: '아직 구성된 LLM 공급자가 없습니다',
+      primaryBadge: '기본',
+      setPrimary: '기본 공급자로 설정',
+      primarySet: '"{name}"이(가) 기본 공급자로 설정되었습니다',
+      addTitle: '공급자 추가',
+      editTitle: '공급자 편집',
+      keepKeyPlaceholder: '비워 두면 저장된 키가 유지됩니다',
+      advanced: '고급 설정',
+      deleteTitle: '공급자 삭제',
+      deleteConfirm: '공급자 "{name}"을(를) 삭제하시겠습니까? 즉시 저장됩니다.',
+      deletePrimaryConfirm:
+        '"{name}"은(는) 현재 기본 공급자입니다. 삭제하면 "{next}"이(가) 자동으로 기본 공급자로 설정됩니다. 계속하시겠습니까?',
+      deleted: '공급자 "{name}"을(를) 삭제했습니다',
+      saved: '공급자가 저장되었습니다',
+      saveFailed: '공급자 저장에 실패했습니다',
+      duplicateProvider: '이미 구성된 공급자입니다',
+      providerRequired: '공급자 유형을 선택하세요',
+      apiKeyRequired: 'API 키를 입력하세요',
+      testUnavailable: '이 공급자는 서버에서 활성화되어 있지 않습니다',
+    },
     gitPlatforms: {
       title: 'Git 플랫폼',
       subtitle:

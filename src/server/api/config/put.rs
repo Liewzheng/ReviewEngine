@@ -320,7 +320,20 @@ pub(crate) fn apply_ui_config(
             .iter()
             .any(|c| c.provider == provider && !c.api_key.is_empty())
     };
-    body.llm.openai_api_key = if has_stored_key("openai") {
+    // The legacy scalar field echoes the PRIMARY provider's key
+    // (`UiConfig::from_app_config` fills the scalars from the primary entry,
+    // whatever its name), so the mask marker must key off the effective
+    // primary — keying it off the literal "openai" would show a configured
+    // non-openai primary as "unset" in GET /config after any save.
+    let scalar_provider = {
+        let p = body.llm.primary_provider.trim();
+        if p.is_empty() {
+            "openai"
+        } else {
+            p
+        }
+    };
+    body.llm.openai_api_key = if has_stored_key(scalar_provider) {
         API_KEY_MASK.to_string()
     } else {
         String::new()

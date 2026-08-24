@@ -112,7 +112,8 @@ pub struct UpgradeCache {
 ///
 /// The TTL (24h, enforced by the catalog handlers) keeps the interactive
 /// endpoints snappy and models.dev traffic negligible; on fetch failure the
-/// handlers serve the stale disk cache before erroring.
+/// handlers serve the stale disk cache, then the stale in-memory entry, then
+/// the builtin static catalog — the endpoints never error on an outage.
 #[derive(Debug, Clone)]
 pub struct CatalogCache {
     pub catalog: Arc<crate::catalog::Catalog>,

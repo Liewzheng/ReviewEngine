@@ -36,23 +36,29 @@ async fn list_experts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         }
     };
 
+    // Read straight from `review_experts` — the same config source the PUT
+    // handler writes to — so the list reflects the true configured state:
+    // real weights (never a placeholder) and disabled experts included with
+    // `enabled: false` (the management UI needs them to re-enable a card).
+    // `build_expert_defs` is deliberately NOT used here: it filters disabled
+    // and invalid experts, which is right for review execution but wrong for
+    // a management listing.
     let experts: Vec<serde_json::Value> = cfg
-        .build_expert_defs()
-        .into_iter()
-        .map(|e| {
-            let name = &e.name;
+        .review_experts
+        .iter()
+        .map(|(name, e)| {
             let id = slugify(name);
-            let category = derive_category(name, &e.config.role);
+            let category = derive_category(name, &e.role);
             let icon = icon_for_category(&category);
             serde_json::json!({
                 "id": id,
-                "name": if e.config.title.is_empty() { name } else { &e.config.title },
+                "name": if e.title.is_empty() { name } else { &e.title },
                 "category": category,
                 "icon": icon,
-                "enabled": e.config.enabled,
-                "weight": 80,
-                "description": e.config.role,
-                "promptPreview": e.prompt.clone(),
+                "enabled": e.enabled,
+                "weight": e.weight,
+                "description": e.role,
+                "promptPreview": e.prompt.clone().unwrap_or_default(),
                 "lastReviews": [],
             })
         })
@@ -325,6 +331,136 @@ async fn auth_status(Extension(auth): Extension<Arc<AuthConfig>>) -> impl IntoRe
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::{
+        AppConfig, DiffConfig, ExpertTomlDef, LanguagesConfig, RateLimitConfig, ReportConfig, ScoringConfig,
+    };
+    use std::collections::HashMap;
+
+    fn expert_def(title: &str, role: &str, weight: u8, enabled: bool) -> ExpertTomlDef {
+        ExpertTomlDef {
+            enabled,
+            title: title.to_string(),
+            role: role.to_string(),
+            weight,
+            prompt: Some(format!("{title} prompt")),
+            ..Default::default()
+        }
+    }
+
+    /// Expert fixture per the audit notes: four enabled experts whose
+    /// weights sum to 100 (docs=5), plus one disabled expert that must
+    /// remain visible in the management listing.
+    fn state_with_experts() -> Arc<AppState> {
+        let mut review_experts = HashMap::new();
+        review_experts.insert(
+            "Lead".to_string(),
+            expert_def("Lead Reviewer", "Overall review lead", 50, true),
+        );
+        review_experts.insert(
+            "Security".to_string(),
+            expert_def("Security Lead", "Security vulnerabilities and injection", 30, true),
+        );
+        review_experts.insert(
+            "Performance".to_string(),
+            expert_def("Performance", "Performance optimization", 15, true),
+        );
+        review_experts.insert(
+            "Docs".to_string(),
+            expert_def("Docs", "Documentation and comments", 5, true),
+        );
+        review_experts.insert(
+            "Experimental".to_string(),
+            expert_def("Experimental", "Experimental quality checks", 0, false),
+        );
+        let config = AppConfig {
+            project: None,
+            report: ReportConfig::default(),
+            review_experts,
+            commands: HashMap::new(),
+            scoring: ScoringConfig::default(),
+            llm: Vec::new(),
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            output_dir: String::new(),
+            diff: DiffConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            languages: LanguagesConfig::default(),
+        };
+        let state = Arc::new(AppState::new(vec![]));
+        *state.app_config.write().unwrap() = Some(Arc::new(config));
+        state
+    }
+
+    async fn experts_body(state: Arc<AppState>) -> serde_json::Value {
+        let resp = list_experts(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    }
+
+    fn expert_by_id<'a>(body: &'a serde_json::Value, id: &str) -> &'a serde_json::Value {
+        body["experts"]
+            .as_array()
+            .expect("experts array")
+            .iter()
+            .find(|e| e["id"] == id)
+            .unwrap_or_else(|| panic!("expert '{id}' missing from {body}"))
+    }
+
+    /// Regression for the live-audit finding: GET hardcoded `"weight": 80`
+    /// for every expert. The listing must carry each expert's configured
+    /// weight (docs=5, enabled weights summing to 100 here).
+    #[tokio::test]
+    async fn list_experts_returns_configured_weights_not_placeholder() {
+        let body = experts_body(state_with_experts()).await;
+        let experts = body["experts"].as_array().expect("experts array");
+        assert_eq!(experts.len(), 5, "disabled experts must stay listed");
+
+        assert_eq!(expert_by_id(&body, "lead")["weight"], 50);
+        assert_eq!(expert_by_id(&body, "security")["weight"], 30);
+        assert_eq!(expert_by_id(&body, "performance")["weight"], 15);
+        assert_eq!(expert_by_id(&body, "docs")["weight"], 5);
+
+        let enabled_weight_sum: u64 = experts
+            .iter()
+            .filter(|e| e["enabled"] == true)
+            .map(|e| e["weight"].as_u64().unwrap())
+            .sum();
+        assert_eq!(enabled_weight_sum, 100);
+
+        // Disabled experts keep their real state instead of vanishing.
+        assert_eq!(expert_by_id(&body, "experimental")["enabled"], false);
+        assert_eq!(expert_by_id(&body, "experimental")["weight"], 0);
+    }
+
+    /// GET must agree with PUT: the audit caught values jumping because PUT
+    /// returned the true weight while GET served the hardcoded placeholder.
+    #[tokio::test]
+    async fn list_experts_reflects_put_updates() {
+        let state = state_with_experts();
+        let resp = update_expert(
+            State(state.clone()),
+            Path("docs".to_string()),
+            Json(UpdateExpertRequest {
+                enabled: None,
+                weight: Some(25),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["weight"], 25);
+
+        let body = experts_body(state).await;
+        assert_eq!(expert_by_id(&body, "docs")["weight"], 25);
+    }
+
+    #[tokio::test]
+    async fn list_experts_503_without_loaded_config() {
+        let resp = list_experts(State(Arc::new(AppState::new(vec![]))))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
 
     /// Unit 8: `/system/version` always exposes a `commit` string (from a
     /// compile-time env var, falling back to "unknown" when none is set).

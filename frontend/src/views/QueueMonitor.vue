@@ -296,10 +296,16 @@ onUnmounted(() => {
           @change="handleMaxConcurrentChange"
           @update:model-value="onMaxConcurrentModelUpdate"
         />
-        <el-button type="danger" @click="handleCancelAllFailed">
-          <el-icon class="btn-icon"><Delete /></el-icon>
-          <span>{{ $t('queue.cancelAllFailed') }}</span>
-        </el-button>
+        <!-- Wrapper span: a disabled button swallows pointer events, so the
+             "no failed tasks" tooltip needs a hoverable parent. -->
+        <el-tooltip :content="$t('queue.noFailedToCancel')" :disabled="failedTasks.length > 0" placement="bottom">
+          <span>
+            <el-button type="danger" :disabled="failedTasks.length === 0" @click="handleCancelAllFailed">
+              <el-icon class="btn-icon"><Delete /></el-icon>
+              <span>{{ $t('queue.cancelAllFailed') }}</span>
+            </el-button>
+          </span>
+        </el-tooltip>
         <el-button @click="loadQueueData">
           <el-icon class="btn-icon"><Refresh /></el-icon>
           <span>{{ $t('common.refresh') }}</span>

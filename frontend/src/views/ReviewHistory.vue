@@ -17,10 +17,11 @@ import {
   Document,
   Folder,
 } from '@element-plus/icons-vue'
-import { ElMessageBox, ElNotification } from 'element-plus'
+import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import type { ApiError } from '../services/api'
 import type { ReviewListItem, HistoryFilters, RiskLevel } from '../types/history'
+import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 
@@ -84,6 +85,60 @@ const repositories = computed(() => [...new Set(items.value.map(i => i.repositor
 
 async function fetchReviewsData() {
   await reviews.fetchReviews(filters.value, page.value, pageSize.value)
+}
+
+/* ─────────────── Export ─────────────── */
+const exporting = ref(false)
+/** The export mirrors the current filter set; empty filtered list = nothing to export. */
+const exportEmpty = computed(() => total.value === 0)
+
+/** Local-time stamp for the download name: review-history-YYYYMMDD-HHmm.json */
+function exportFileName(): string {
+  const d = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `review-history-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`
+}
+
+/**
+ * Export the CURRENTLY FILTERED history list as JSON. Reuses the same query
+ * path as the list (`getReviews` — including its queued→pending status
+ * translation) with a single large-page request so every match across pages
+ * is included. Goes through the service directly instead of the composable
+ * so the displayed page is not replaced by the export result.
+ */
+async function handleExport() {
+  if (exporting.value || exportEmpty.value) return
+  exporting.value = true
+  try {
+    const data = await getReviews(filters.value, 1, 10000)
+    const payload = {
+      exportedAt: new Date().toISOString(),
+      filters: {
+        q: filters.value.q || undefined,
+        project: filters.value.project ?? undefined,
+        status: filters.value.status ?? undefined,
+        dateFrom: filters.value.dateFrom ?? undefined,
+        dateTo: filters.value.dateTo ?? undefined,
+        repository: filters.value.repository ?? undefined,
+      },
+      total: data.total,
+      items: data.items,
+    }
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = exportFileName()
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+    ElMessage.success(t('history.exportSuccess', { count: data.items.length }))
+  } catch {
+    ElMessage.error(t('history.exportFailed'))
+  } finally {
+    exporting.value = false
+  }
 }
 
 /* ─────────────── URL Sync ─────────────── */
@@ -334,9 +389,24 @@ watch(() => route.query, () => {
     <!-- Header -->
     <div class="page-header">
       <h2 class="page-title">{{ $t('history.title') }}</h2>
-      <el-button type="primary" :icon="Download" plain :aria-label="$t('history.exportAria')">
-        {{ $t('history.export') }}
-      </el-button>
+      <!-- Wrapper span: a disabled button swallows pointer events, so the
+           tooltip needs a hoverable parent (same pattern as the config page
+           save button). -->
+      <el-tooltip :content="$t('history.exportEmptyTooltip')" :disabled="!exportEmpty" placement="bottom">
+        <span>
+          <el-button
+            type="primary"
+            :icon="Download"
+            plain
+            :loading="exporting"
+            :disabled="exportEmpty"
+            :aria-label="$t('history.exportAria')"
+            @click="handleExport"
+          >
+            {{ $t('history.export') }}
+          </el-button>
+        </span>
+      </el-tooltip>
     </div>
 
     <!-- Filter Bar -->

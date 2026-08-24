@@ -403,6 +403,28 @@ export default {
       modelsFallback:
         'Liste des modèles indisponible — saisissez manuellement l’identifiant du modèle.',
     },
+    providerCards: {
+      add: 'Ajouter un fournisseur',
+      empty: 'Aucun fournisseur LLM configuré pour le moment',
+      primaryBadge: 'Principal',
+      setPrimary: 'Définir comme principal',
+      primarySet: '« {name} » est maintenant le fournisseur principal',
+      addTitle: 'Ajouter un fournisseur',
+      editTitle: 'Modifier le fournisseur',
+      keepKeyPlaceholder: 'Laisser vide pour conserver la clé enregistrée',
+      advanced: 'Paramètres avancés',
+      deleteTitle: 'Supprimer le fournisseur',
+      deleteConfirm: 'Supprimer le fournisseur « {name} » ? L’enregistrement est immédiat.',
+      deletePrimaryConfirm:
+        '« {name} » est le fournisseur principal. Le supprimer fera de « {next} » le nouveau fournisseur principal. Continuer ?',
+      deleted: 'Fournisseur « {name} » supprimé',
+      saved: 'Fournisseur enregistré',
+      saveFailed: 'Échec de l’enregistrement du fournisseur',
+      duplicateProvider: 'Ce fournisseur est déjà configuré',
+      providerRequired: 'Veuillez sélectionner un type de fournisseur',
+      apiKeyRequired: 'La clé API est requise',
+      testUnavailable: 'Ce fournisseur n’est pas actif sur le serveur',
+    },
     gitPlatforms: {
       title: 'Plateformes Git',
       subtitle:

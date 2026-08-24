@@ -398,6 +398,28 @@ export default {
       viewDocs: 'ドキュメント',
       modelsFallback: 'モデル一覧を取得できません — モデル ID を手動で入力してください。',
     },
+    providerCards: {
+      add: 'プロバイダーを追加',
+      empty: 'LLM プロバイダーがまだ設定されていません',
+      primaryBadge: 'プライマリ',
+      setPrimary: 'プライマリに設定',
+      primarySet: '「{name}」をプライマリプロバイダーに設定しました',
+      addTitle: 'プロバイダーを追加',
+      editTitle: 'プロバイダーを編集',
+      keepKeyPlaceholder: '空欄の場合は保存済みのキーを保持します',
+      advanced: '詳細設定',
+      deleteTitle: 'プロバイダーを削除',
+      deleteConfirm: 'プロバイダー「{name}」を削除しますか？すぐに保存されます。',
+      deletePrimaryConfirm:
+        '「{name}」は現在のプライマリプロバイダーです。削除すると「{next}」が自動的にプライマリに設定されます。続行しますか？',
+      deleted: 'プロバイダー「{name}」を削除しました',
+      saved: 'プロバイダーを保存しました',
+      saveFailed: 'プロバイダーの保存に失敗しました',
+      duplicateProvider: 'このプロバイダーはすでに設定されています',
+      providerRequired: 'プロバイダータイプを選択してください',
+      apiKeyRequired: 'API キーを入力してください',
+      testUnavailable: 'このプロバイダーはサーバー上でアクティブではありません',
+    },
     gitPlatforms: {
       title: 'Git プラットフォーム',
       subtitle:

@@ -47,66 +47,6 @@ export interface LlmProvider {
   temperature?: number
 }
 
-/** Input/update shape for the provider management CRUD endpoints. */
-export interface ProviderConfig {
-  /** Provider type identifier (e.g. `openai`, `anthropic`). */
-  provider: string
-  /** API key for the provider. */
-  apiKey: string
-  /** Base URL for the provider API. */
-  apiBaseUrl: string
-  /** Default model for this provider. */
-  defaultModel?: string
-  /** Maximum tokens per request. */
-  maxTokens?: number
-  /** Sampling temperature. */
-  temperature?: number
-  /** Request timeout in seconds. */
-  timeout?: number
-  /** Number of retry attempts on failure. */
-  retry?: number
-}
-
-/** Response shape returned by add/update/delete provider endpoints. */
-export interface ProviderResponse {
-  /** Server-assigned provider ID. */
-  id: string
-  /** Provider type identifier. */
-  provider: string
-  /** Base URL for the provider API. */
-  apiBaseUrl: string
-  /** Default model for this provider. */
-  defaultModel?: string
-  /** Maximum tokens per request. */
-  maxTokens?: number
-  /** Sampling temperature. */
-  temperature?: number
-  /** Request timeout in seconds. */
-  timeout?: number
-  /** Number of retry attempts on failure. */
-  retry?: number
-  /** Whether the provider has valid credentials configured. */
-  configured: boolean
-  /** Current health status (if known). */
-  status?: LlmProviderStatus
-  /** ISO 8601 timestamp when this provider was created. */
-  createdAt?: string
-  /** ISO 8601 timestamp of the last update. */
-  updatedAt?: string
-}
-
-/** A provider entry used locally in the Configuration UI (merges input + id tracking). */
-export interface ProviderEntry extends ProviderConfig {
-  /** Server-assigned id (absent for newly-added, unsaved providers). */
-  id?: string
-  /** Client-side stable key for v-for rendering. */
-  _key: string
-  /** Whether the inline edit form is expanded. */
-  _expanded: boolean
-  /** True when this provider was added but not yet persisted. */
-  _isNew?: boolean
-}
-
 /** Supported LLM provider types for the configuration dropdown. */
 export const PROVIDER_TYPES = [
   { label: 'OpenAI', value: 'openai' },

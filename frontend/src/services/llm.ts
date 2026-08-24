@@ -1,5 +1,5 @@
 import { request } from './api';
-import type { LlmProvider, ProviderConfig, ProviderResponse, TestResult } from '../types/llm';
+import type { LlmProvider, TestResult } from '../types/llm';
 
 export interface LlmProvidersResponse {
   items: LlmProvider[];
@@ -20,17 +20,13 @@ export async function testProvider(id: string): Promise<TestResult> {
   });
 }
 
-/** Create a new LLM provider. */
-export async function addProvider(config: ProviderConfig): Promise<ProviderResponse> {
-  return request('/llm/providers', { method: 'POST', body: JSON.stringify(config) });
-}
-
-/** Delete an LLM provider by id. */
+/**
+ * Delete an LLM provider by id. Provider mutations otherwise persist through
+ * the sparse `PUT /config` {llm} path; this endpoint is only needed to
+ * remove the LAST provider, which the PUT rebuild cannot express (the
+ * backend only replaces the runtime set when the resolved list is
+ * non-empty, and a blank scalar key means "keep").
+ */
 export async function deleteProvider(id: string): Promise<void> {
   return request(`/llm/providers/${id}`, { method: 'DELETE' });
-}
-
-/** Update an existing LLM provider. */
-export async function updateProvider(id: string, config: Partial<ProviderConfig>): Promise<ProviderResponse> {
-  return request(`/llm/providers/${id}`, { method: 'PUT', body: JSON.stringify(config) });
 }

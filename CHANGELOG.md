@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.37] - 2026-08-25
+
+### Changed
+- **Unified LLM provider management on the LLM page**: the dual「LLM 设置 (primary) + 附加提供商 (list)」structure is replaced by a single provider-card grid — every provider is a card (type avatar, name, apiBaseUrl, defaultModel, masked key, health tag; primary carries a「主」badge). 「添加供应商」opens a catalog-driven modal (type select prefills apiBaseUrl; model select fetches from `/config/models` with free-text allow; advanced group for tokens/temperature/timeout/retry; in-modal 测试连接). Edit uses the same modal (secrets blank = keep); delete has a confirm dialog (deleting the primary auto-promotes the next provider); 设为主提供商 on non-primary cards. Every mutation saves immediately via the sparse `PUT {llm}` path (hot-applied + persisted) and refreshes health — the page-level 编辑/保存/取消 lifecycle is gone. Backend payload contract unchanged (primary → legacy scalar fields + `primaryProvider`, others → `providers[]`; verified no-op round-trips are byte-identical). (`frontend/src/views/LlmStatus.vue`, new `frontend/src/composables/{llmPayload,useProviderCards}.ts`, new `frontend/src/components/Config/{ProviderConfigCard,ProviderEditDialog}.vue`; deleted `LlmSettingsCard.vue`, `ProvidersSection.vue`, `useProviders.ts`; i18n `config.providerCards.*` ×6 locales)
+
 ## [0.9.36] - 2026-08-25
 
 ### Fixed

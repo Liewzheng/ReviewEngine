@@ -124,7 +124,7 @@ independently-backed-up deploy directory.
 ```text
 /path/to/reng-deploy/
 ├── .env          # real credentials (copy from .env.example, then edit)
-├── config/       # review-engine config → mounted to /app/config (read-only)
+├── config/       # review-engine config → mounted to /app/config (writable: UI-saved config persists to ui-state.toml here)
 ├── reports/      # review reports     → mounted to /app/reports
 └── tls/          # TLS cert/key for native HTTPS (optional) → mounted to /app/tls
 ```

@@ -90,11 +90,12 @@ services:
       REVIEW_UPGRADE_FRONTEND_DIR: /app/frontend/dist
 
     volumes:
-      # Persist config file (mounted from host or created via init)
+      # Persist config file (mounted from host or created via init).
+      # Writable: the server persists UI-saved config (ui-state.toml) here so
+      # web-UI changes (LLM / Git platforms) survive container restarts.
       - type: bind
         source: ${CONFIG_PATH:-./config}
         target: /app/config
-        read_only: true
 
       # Persist review reports
       - type: bind

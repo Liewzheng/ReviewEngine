@@ -42,6 +42,7 @@ const defaultConfig: AppConfig = {
     enableMetrics: true,
     debugMode: false,
   },
+  gitPlatforms: [],
 };
 
 // Backend's documented default trio; used when GET /config returns an empty

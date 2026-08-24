@@ -70,6 +70,31 @@ export interface AdvancedConfig {
   debugMode: boolean
 }
 
+/** Git platform kinds recognized by the backend. Only `gitlab` is implemented today. */
+export type GitPlatformType = 'gitlab'
+
+/**
+ * A configured Git platform instance (webhook receiver + API credentials).
+ * Mirrors the backend's `UiGitPlatformConfig` camelCase contract. Secret
+ * fields arrive masked as `***` from `GET /config` when configured and as
+ * `""` when unset; submitting `""`/`"***"` keeps the stored secret for the
+ * entry with the matching `name` (see `PUT /config`).
+ */
+export interface GitPlatformConfig {
+  /** Unique instance name; also the match key for secret preservation. */
+  name: string
+  /** Platform kind. */
+  type: GitPlatformType
+  /** Instance base URL (e.g. `https://gitlab.example.com`). */
+  baseUrl: string
+  /** API access token; `***` when the backend reports it as configured. */
+  token: string
+  /** Webhook verification secret; `***` when configured, empty when unset. */
+  webhookSecret: string
+  /** Webhook signing secret; `***` when configured, empty when unset. */
+  webhookSigningSecret: string
+}
+
 /** Complete application configuration combining all config sections. */
 export interface AppConfig {
   /** GitLab integration settings. */
@@ -80,6 +105,8 @@ export interface AppConfig {
   rules: ReviewRules
   /** Advanced runtime settings. */
   advanced: AdvancedConfig
+  /** Configured Git platform instances (full-replace semantics on save). */
+  gitPlatforms: GitPlatformConfig[]
   /** Optional server-side metadata (populated when reading from backend). */
   version?: string
   /** Optional expert summary (populated when reading from backend). */
@@ -146,5 +173,6 @@ export function createMockConfig(): AppConfig {
       enableMetrics: true,
       debugMode: false,
     },
+    gitPlatforms: [],
   }
 }

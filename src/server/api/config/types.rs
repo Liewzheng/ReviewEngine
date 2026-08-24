@@ -16,6 +16,37 @@ pub struct UiConfig {
     pub rules: UiRulesConfig,
     #[serde(default)]
     pub advanced: UiAdvancedConfig,
+    /// Configured git platform instances. Carries only masked secrets — the
+    /// live values live in `AppState::git_platforms` (see `put_config`).
+    #[serde(default)]
+    pub git_platforms: Vec<UiGitPlatformConfig>,
+}
+
+/// REST shape of one git platform entry (camelCase contract, e.g.
+/// `{ "name": "testbed", "type": "gitlab", "baseUrl": "http://host:8929",
+///    "token": "***", "webhookSecret": "***" }`). Mirrors
+/// [`crate::models::GitPlatformConfig`], which carries the snake_case TOML
+/// persistence shape and the live secrets.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UiGitPlatformConfig {
+    #[serde(default)]
+    pub name: String,
+    /// Platform kind; only `"gitlab"` is implemented today.
+    #[serde(rename = "type", default = "default_git_platform_type")]
+    pub platform_type: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default)]
+    pub webhook_secret: String,
+    #[serde(default)]
+    pub webhook_signing_secret: String,
+}
+
+pub(crate) fn default_git_platform_type() -> String {
+    "gitlab".to_string()
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

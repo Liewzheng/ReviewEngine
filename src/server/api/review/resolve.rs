@@ -14,13 +14,30 @@ pub(crate) const GITLAB_TOKEN_HEADER: &str = "x-gitlab-token";
 /// Resolve the GitLab upstream credential for a review request.
 ///
 /// Precedence (docs/rest-api.md §1): the `X-Gitlab-Token` request header
-/// wins; when absent/blank the server-side configured token is used — the
-/// GitLab runtime config seeded at startup from `--gitlab-token` /
-/// `GITLAB_TOKEN` and mutable via `PUT /api/v1/config`. Returns `None` when
-/// neither source yields a token; callers turn that into a `400`.
-pub(crate) fn resolve_gitlab_token(header: Option<&str>) -> Option<String> {
+/// wins; when absent/blank, a configured git platform whose `base_url`
+/// scheme-less `host[:port]` matches the MR URL supplies the token for that
+/// instance; when no platform matches (or the match has no token), the
+/// legacy server-side token is used — the GitLab runtime config seeded at
+/// startup from `--gitlab-token` / `GITLAB_TOKEN` and mutable via
+/// `PUT /api/v1/config`. Returns `None` when no source yields a token;
+/// callers turn that into a `400`.
+pub(crate) fn resolve_gitlab_token(
+    header: Option<&str>,
+    mr_url: Option<&str>,
+    platforms: &[crate::models::GitPlatformConfig],
+) -> Option<String> {
     if let Some(t) = header.map(str::trim).filter(|t| !t.is_empty()) {
         return Some(t.to_string());
+    }
+    // A matched platform with an empty token "yields" nothing — the chain
+    // continues to the legacy default (first non-empty token wins), exactly
+    // like a blank header falls through to the server-side lookup.
+    if let Some(url) = mr_url {
+        if let Some(platform) = crate::models::find_git_platform_for_url(platforms, url) {
+            if !platform.token.trim().is_empty() {
+                return Some(platform.token.clone());
+            }
+        }
     }
     crate::server::gitlab::gitlab_runtime()
         .read()

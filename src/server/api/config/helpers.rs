@@ -156,3 +156,105 @@ pub(crate) async fn test_llm_connectivity(cfg: &crate::models::LLMConfig) -> any
     }
     Ok(())
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TestGitPlatformRequest {
+    base_url: String,
+    #[serde(default)]
+    token: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct GitLabVersionResponse {
+    version: String,
+}
+
+/// Probe a git platform instance: `GET {baseUrl}/api/v4/version` with the
+/// supplied token. Always answers 200 — probe failures are reported in the
+/// body (`{"ok": false, "error": "..."}`), matching the `fetch_models`
+/// pattern.
+///
+/// SSRF: the target is validated with the exact guard used for review
+/// webhook callbacks ([`crate::server::api::callback::validate_callback_url`])
+/// — `http` only for loopback/private targets, link-local/metadata/
+/// unspecified always blocked (literal IP and DNS-resolved, fail-closed), so
+/// the probe cannot be aimed at e.g. the cloud metadata endpoint, while
+/// private-network GitLab instances (the primary use case) keep working.
+///
+/// The UI never sees real tokens (`GET /config` masks them as `***`), so a
+/// blank or masked probe token means "use the server-side one": fall back to
+/// the stored token of the configured platform with the same baseUrl (the
+/// same fallback pattern as the `fetch_models` fix). An explicit token is
+/// used as-is, and a masked token with no matching platform keeps the old
+/// behavior.
+pub async fn test_git_platform(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<TestGitPlatformRequest>,
+) -> impl axum::response::IntoResponse {
+    let base = body.base_url.trim().trim_end_matches('/').to_string();
+    if base.is_empty() {
+        return Json(serde_json::json!({"ok": false, "error": "baseUrl is required"})).into_response();
+    }
+    // Same SSRF policy as review webhook callbacks (see the module docs):
+    // subsumes the syntactic checks (parseable, http(s), host present) and
+    // adds the address-range policy on the literal/resolved IPs.
+    if let Err(reason) = crate::server::api::callback::validate_callback_url(&base).await {
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": format!("invalid baseUrl: {reason}")
+        }))
+        .into_response();
+    }
+
+    let token = if super::is_blank_or_masked(&body.token) {
+        state
+            .git_platforms
+            .read()
+            .unwrap()
+            .iter()
+            .find(|p| p.base_url == base)
+            .map(|p| p.token.clone())
+            .unwrap_or_else(|| body.token.clone())
+    } else {
+        body.token.clone()
+    };
+
+    let url = format!("{base}/api/v4/version");
+    let request = reqwest::Client::new()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(10));
+    // GitLab accepts PATs via Bearer (the review client authenticates the
+    // same way); an empty token probes unauthenticated, surfacing the 401.
+    let request = if token.is_empty() {
+        request
+    } else {
+        request.header("Authorization", format!("Bearer {token}"))
+    };
+
+    match request.send().await {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                return Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("HTTP {}", status),
+                }))
+                .into_response();
+            }
+            match resp.json::<GitLabVersionResponse>().await {
+                Ok(parsed) => Json(serde_json::json!({ "ok": true, "version": parsed.version })).into_response(),
+                Err(e) => Json(serde_json::json!({
+                    "ok": false,
+                    "error": format!("failed to parse response: {}", e),
+                }))
+                .into_response(),
+            }
+        }
+        Err(e) => Json(serde_json::json!({
+            "ok": false,
+            "error": e.to_string(),
+        }))
+        .into_response(),
+    }
+}

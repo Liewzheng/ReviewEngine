@@ -219,6 +219,21 @@ pub struct AppState {
     pub log_collector: Option<Arc<Mutex<LogCollector>>>,
     /// UI-facing configuration (frontend-compatible shape, persisted in-memory).
     pub ui_config: RwLock<UiConfig>,
+    /// Configured git platform instances (live secrets; the UI only ever
+    /// sees masked projections via `ui_config`). Hot-updated by
+    /// `PUT /api/v1/config` and consulted for `gitlab_mr` credential
+    /// resolution and per-instance webhook verification.
+    pub git_platforms: RwLock<Vec<crate::models::GitPlatformConfig>>,
+    /// Where `PUT /api/v1/config` persists UI-managed state
+    /// (`ui-state.toml`, see `server::api::config::persist`). `None`
+    /// disables persistence (tests, embedded use) so unit tests never
+    /// write to the real config dir.
+    pub ui_state_path: Option<std::path::PathBuf>,
+    /// Which config values came from CLI/env at startup. Consulted by the
+    /// ui-state SAVE path so env-derived secrets are never persisted, and
+    /// by the LOAD path so env wins over the file. `None` in tests (direct
+    /// state construction) → no env filtering.
+    pub ui_state_env: Option<crate::server::api::config::persist::UiStateEnvOverrides>,
     /// Finding feedback store for user verdicts (optional).
     pub feedback_store: Option<Arc<FeedbackStore>>,
     /// Self-upgrade single-flight store + GitHub check cache + install method.
@@ -241,6 +256,9 @@ impl AppState {
             app_config: RwLock::new(None),
             log_collector: None,
             ui_config: RwLock::new(UiConfig::default()),
+            git_platforms: RwLock::new(Vec::new()),
+            ui_state_path: None,
+            ui_state_env: None,
             feedback_store: None,
             upgrade: UpgradeStore::new(),
             catalog: CatalogStore::new(),

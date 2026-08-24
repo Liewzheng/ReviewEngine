@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::server::AppState;
 
 use super::is_blank_or_masked;
-use super::types::{UiConfig, UiGitLabConfig, API_KEY_MASK};
+use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK};
 
 /// Deep-merge `patch` into `base` (both JSON values), returning the result.
 ///
@@ -76,38 +76,166 @@ pub fn apply_gitlab_runtime_config(
     new_token
 }
 
-pub async fn put_config(
-    State(state): State<Arc<AppState>>,
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    // Contract: `PUT /config` is a PARTIAL update. Only fields present in the
-    // request JSON overwrite the stored config; omitted fields keep their
-    // current values. A sparse PUT (e.g. just `{"rules":{"minScore":90}}`)
-    // must never silently zero temperature/minScore/maxConcurrentReviews/
-    // enableMetrics or drop `llm.providers`. We merge the request over a
-    // snapshot of the stored UI config, then run the existing save pipeline
-    // unchanged — a full-form PUT (every field present) deep-merges to exactly
-    // the request, so behaviour is identical to the old wholesale replace.
-    if !payload.is_object() {
-        return (
-            StatusCode::UNPROCESSABLE_ENTITY,
-            Json(serde_json::json!({"error": "config update must be a JSON object"})),
-        )
-            .into_response();
+/// The masked/empty projection of a secret for the UI layer: `***` when set,
+/// empty string when unset — the same masking semantics as LLM keys, so
+/// `GET /config` never leaks a live secret.
+fn mask_or_empty(secret: &str) -> String {
+    if secret.is_empty() {
+        String::new()
+    } else {
+        API_KEY_MASK.to_string()
     }
+}
+
+/// Resolve the submitted `gitPlatforms` array into the new live set.
+///
+/// Semantics: when the `gitPlatforms` key is present, the submitted array
+/// REPLACES the full configured set (to delete an entry, submit the array
+/// without it) — except that a blank or masked (`***`) token / webhookSecret
+/// / webhookSigningSecret on an entry keeps the stored secret of the SAME
+/// (name, baseUrl) entry, identical to how additional LLM providers save.
+/// Matching on the pair, not the name alone, is deliberate: a same-named
+/// entry pointing at a DIFFERENT instance must not silently inherit the old
+/// instance's credentials (cross-instance secret leakage), and renaming an
+/// entry (name change, same baseUrl) likewise drops the secrets — the user
+/// re-enters them after a rename or a baseUrl change. When the key is absent
+/// from the PUT payload, the merge with the stored config carries the
+/// existing (masked) list over, so the set round-trips unchanged. Duplicate
+/// names in one submission: last write wins.
+fn resolve_git_platforms(
+    submitted: &[UiGitPlatformConfig],
+    existing: &[crate::models::GitPlatformConfig],
+) -> Result<Vec<crate::models::GitPlatformConfig>, (StatusCode, Json<serde_json::Value>)> {
+    let mut resolved: Vec<crate::models::GitPlatformConfig> = Vec::new();
+    for p in submitted {
+        let name = p.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let platform_type = {
+            let t = p.platform_type.trim();
+            if t.is_empty() {
+                "gitlab".to_string()
+            } else {
+                t.to_ascii_lowercase()
+            }
+        };
+        if platform_type != "gitlab" {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "unsupported git platform type '{}' for entry '{}' (only 'gitlab' is implemented)",
+                        p.platform_type, name
+                    )
+                })),
+            ));
+        }
+        let base_url = p.base_url.trim().trim_end_matches('/').to_string();
+        // baseUrl keys both the credential routing (host:port matching at
+        // review/webhook time) and the secret-keep below, so an empty,
+        // unparseable, or non-http(s) value is a hard 422 — never a silently
+        // stored broken entry. The authority check closes a `url`-crate
+        // quirk: `http:///host` parses successfully with host "host" (the
+        // empty authority is collapsed), so the original string must carry a
+        // non-empty authority between `scheme://` and the next `/`.
+        let valid_base = reqwest::Url::parse(&base_url)
+            .ok()
+            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+            .filter(|_| {
+                base_url
+                    .split_once("://")
+                    .is_some_and(|(_, rest)| !rest.is_empty() && !rest.starts_with('/'))
+            });
+        if valid_base.is_none() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid baseUrl '{}' for git platform '{}': expected an absolute http(s) URL",
+                        p.base_url, name
+                    )
+                })),
+            ));
+        }
+        // Secret-keep matches on the (name, baseUrl) PAIR: pointing an entry
+        // at a different instance makes it a different platform as far as
+        // credentials are concerned.
+        let stored = existing.iter().find(|e| e.name == name && e.base_url == base_url);
+        let keep = |submitted: &str, pick: fn(&crate::models::GitPlatformConfig) -> &str| -> String {
+            if is_blank_or_masked(submitted) {
+                stored.map(|s| pick(s).to_string()).unwrap_or_default()
+            } else {
+                submitted.to_string()
+            }
+        };
+        let entry = crate::models::GitPlatformConfig {
+            name: name.to_string(),
+            platform_type,
+            base_url,
+            token: keep(&p.token, |s| &s.token),
+            webhook_secret: keep(&p.webhook_secret, |s| &s.webhook_secret),
+            webhook_signing_secret: keep(&p.webhook_signing_secret, |s| &s.webhook_signing_secret),
+        };
+        match resolved.iter_mut().find(|e| e.name == entry.name) {
+            Some(slot) => *slot = entry,
+            None => resolved.push(entry),
+        }
+    }
+    Ok(resolved)
+}
+
+/// The request-resolved configuration produced by [`apply_ui_config`]: the
+/// sets the UI actually submitted, with kept secrets resolved against stored
+/// values (the full-replace-with-secret-keep semantics). `put_config`
+/// persists THIS to `ui-state.toml` — never the effective runtime state,
+/// which may additionally carry env-derived entries (env wins at runtime;
+/// env is never persisted, see [`super::persist`]).
+#[derive(Debug, Clone)]
+pub(crate) struct AppliedConfig {
+    /// Request-resolved LLM provider set.
+    pub llm: Vec<crate::models::LLMConfig>,
+    /// Request-resolved git platform set.
+    pub git_platforms: Vec<crate::models::GitPlatformConfig>,
+    /// Resolved legacy GitLab fields (post keep/clear/replace semantics).
+    pub gitlab_token: String,
+    pub gitlab_webhook_secret: String,
+    pub gitlab_webhook_signing_secret: String,
+    /// The masked UI projection stored in `ui_config`.
+    pub ui: UiConfig,
+}
+
+/// Apply a UI config payload to the in-memory state — the shared core of
+/// `PUT /config` and the `ui-state.toml` startup replay
+/// ([`super::persist`]), so hot-apply and cold-start semantics (masked-secret
+/// keep, provider rebuild, GitLab runtime sync, gitPlatforms resolution) are
+/// identical. Does NOT persist to disk; callers handle that.
+///
+/// Contract: the payload is a PARTIAL update. Only fields present in the
+/// request JSON overwrite the stored config; omitted fields keep their
+/// current values. A sparse PUT (e.g. just `{"rules":{"minScore":90}}`)
+/// must never silently zero temperature/minScore/maxConcurrentReviews/
+/// enableMetrics or drop `llm.providers`/`gitPlatforms`. We merge the
+/// request over a snapshot of the stored UI config, then run the save
+/// pipeline unchanged — a full-form PUT (every field present) deep-merges to
+/// exactly the request, so behaviour is identical to the old wholesale
+/// replace.
+pub(crate) fn apply_ui_config(
+    state: &AppState,
+    payload: &serde_json::Value,
+) -> Result<AppliedConfig, (StatusCode, Json<serde_json::Value>)> {
     let mut body: UiConfig = {
         let stored = state.ui_config.read().unwrap().clone();
         // UiConfig is a plain struct of serde-native types, so serializing the
         // stored config cannot fail; the fallback is unreachable defensive code.
         let stored_json = serde_json::to_value(&stored).unwrap_or_else(|_| serde_json::json!({}));
-        match serde_json::from_value(merge_json(&stored_json, &payload)) {
+        match serde_json::from_value(merge_json(&stored_json, payload)) {
             Ok(ui) => ui,
             Err(e) => {
-                return (
+                return Err((
                     StatusCode::UNPROCESSABLE_ENTITY,
                     Json(serde_json::json!({"error": format!("invalid config update: {e}")})),
-                )
-                    .into_response();
+                ));
             }
         }
     };
@@ -205,6 +333,12 @@ pub async fn put_config(
         };
     }
 
+    // Git platforms: resolve the submitted array (full-replace with
+    // secret-keep, see `resolve_git_platforms`). Validation only — the
+    // resolved set is written to state after the `config not loaded` check
+    // below, so a rejected update never partially mutates state.
+    let new_platforms = resolve_git_platforms(&body.git_platforms, &state.git_platforms.read().unwrap())?;
+
     let mut cfg_opt = state.app_config.write().unwrap();
     if let Some(arc) = cfg_opt.as_ref() {
         let mut new_cfg = (**arc).clone();
@@ -215,17 +349,31 @@ pub async fn put_config(
         new_cfg.max_team_size = Some(body.advanced.max_concurrent_reviews as usize);
         *cfg_opt = Some(Arc::new(new_cfg));
     } else {
-        return (
+        return Err((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(serde_json::json!({"error": "config not loaded"})),
-        )
-            .into_response();
+        ));
     }
     drop(cfg_opt);
 
+    // Store the resolved live platform set and project the masked shape into
+    // the UI config (which `GET /config` serializes).
+    *state.git_platforms.write().unwrap() = new_platforms.clone();
+    body.git_platforms = new_platforms
+        .iter()
+        .map(|p| UiGitPlatformConfig {
+            name: p.name.clone(),
+            platform_type: p.platform_type.clone(),
+            base_url: p.base_url.clone(),
+            token: mask_or_empty(&p.token),
+            webhook_secret: mask_or_empty(&p.webhook_secret),
+            webhook_signing_secret: mask_or_empty(&p.webhook_signing_secret),
+        })
+        .collect();
+
     if !new_llm_configs.is_empty() {
         let mut llm = state.llm_configs.write().unwrap();
-        *llm = new_llm_configs;
+        *llm = new_llm_configs.clone();
     }
 
     // Persist full UI config so GET /config returns exactly what was saved
@@ -237,7 +385,7 @@ pub async fn put_config(
     // semantics (`***` keeps, empty clears, a real value replaces); the real
     // token lives in the runtime only, and `ui_config` persists the mask/empty
     // projection so `GET /config` never echoes it (see `mask_secrets`).
-    {
+    let (resolved_gitlab_token, resolved_gitlab_webhook_secret, resolved_gitlab_signing_secret) = {
         let rt = crate::server::gitlab::gitlab_runtime();
         let mut gl_rt = rt.write().unwrap();
         let resolved_token = apply_gitlab_runtime_config(&mut gl_rt, &ui.gitlab);
@@ -246,6 +394,61 @@ pub async fn put_config(
         } else {
             API_KEY_MASK.to_string()
         };
+        (
+            resolved_token,
+            gl_rt.webhook_secret.clone(),
+            gl_rt.signing_secret.clone().unwrap_or_default(),
+        )
+    };
+
+    Ok(AppliedConfig {
+        llm: new_llm_configs,
+        git_platforms: new_platforms,
+        gitlab_token: resolved_gitlab_token,
+        gitlab_webhook_secret: resolved_gitlab_webhook_secret,
+        gitlab_webhook_signing_secret: resolved_gitlab_signing_secret,
+        ui: ui.clone(),
+    })
+}
+
+pub async fn put_config(
+    State(state): State<Arc<AppState>>,
+    Json(payload): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    if !payload.is_object() {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "config update must be a JSON object"})),
+        )
+            .into_response();
+    }
+    let applied = match apply_ui_config(&state, &payload) {
+        Ok(applied) => applied,
+        Err((status, body)) => return (status, body).into_response(),
+    };
+
+    // Write-through persistence: everything the UI manages (llm, gitlab
+    // legacy fields, gitPlatforms, rules, advanced…) lands in
+    // `ui-state.toml` so a restart keeps it. The in-memory update above has
+    // already been applied either way; a persist failure is surfaced as a
+    // 500 so a silently-non-persistent deployment cannot go unnoticed.
+    //
+    // The file is built from the REQUEST-RESOLVED sets (`applied`), never
+    // from the effective runtime state: the runtime may additionally carry
+    // env-derived entries (env wins at runtime), and persisting those would
+    // leak env secrets to disk and resurrect them on a clean-env restart.
+    if let Some(path) = &state.ui_state_path {
+        let snapshot = super::persist::UiStateFile::from_applied(&applied, state.ui_state_env.as_ref());
+        if let Err(e) = super::persist::save_ui_state(path, &snapshot) {
+            tracing::error!(path = %path.display(), error = %e, "failed to persist ui-state.toml");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("config applied in memory but failed to persist to {}: {e}", path.display())
+                })),
+            )
+                .into_response();
+        }
     }
 
     Json(serde_json::json!({"status": "saved"})).into_response()

@@ -12,10 +12,12 @@
 mod config;
 mod expert;
 mod finding;
+mod git_platform;
 
 pub use config::*;
 pub use expert::*;
 pub use finding::*;
+pub use git_platform::*;
 
 use serde::{Deserialize, Serialize};
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.9.38] - 2026-08-25
+
+### Fixed
+- **Provider edit modal「高级设置」panel background mismatched the dialog**: el-collapse's default header/wrap paint `--el-fill-color-blank` (white in light mode, `--bg-surface` in dark) over the dialog's `--bg-card`, showing a distinct gray block in both themes. The collapse is now transparent/borderless with only a subtle top divider. (`frontend/src/components/Config/ProviderEditDialog.vue`)
+- Edit-mode「提供商类型」select rendered a bare raw id when the provider isn't in the catalog/preset list (e.g. `xiaomi-mimo`): the current provider is now injected as a temporary option so the disabled select shows a proper selected value. (same file)
+
 ## [0.9.37] - 2026-08-25
 
 ### Changed

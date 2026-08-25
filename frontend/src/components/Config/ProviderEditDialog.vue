@@ -49,6 +49,18 @@ const selectedCatalogProvider = ref<CatalogProvider | null>(null)
 const catalogAvailable = computed(() => catalogProviders.value.length > 0)
 const presetProviderTypes = computed(() => PROVIDER_TYPES.filter((pt) => pt.value !== 'custom'))
 
+/** Edit mode only: the saved provider id may be absent from both the catalog
+ *  and the preset list (e.g. a removed catalog entry like "xiaomi-mimo").
+ *  The disabled select would then render the raw id as bare text, so inject
+ *  it as a temporary option (label = id) to display a proper selected value. */
+const currentProviderMissing = computed(() => {
+  if (props.mode !== 'edit' || !form.provider || form.provider === 'custom') return false
+  if (catalogAvailable.value) {
+    return !catalogProviders.value.some((p) => p.id === form.provider)
+  }
+  return !presetProviderTypes.value.some((pt) => pt.value === form.provider)
+})
+
 const apiKeyPlaceholder = computed(() => {
   if (props.mode === 'edit') return t('config.providerCards.keepKeyPlaceholder')
   return selectedCatalogProvider.value?.env?.[0] || t('config.providers.apiKeyPlaceholder')
@@ -271,6 +283,11 @@ async function confirm() {
               style="width: 100%"
               @change="onProviderChange"
             >
+              <el-option
+                v-if="currentProviderMissing"
+                :label="form.provider"
+                :value="form.provider"
+              />
               <el-option :label="$t('config.providers.customProvider')" value="custom" />
               <template v-if="catalogAvailable">
                 <el-option v-for="p in catalogProviders" :key="p.id" :label="p.name" :value="p.id">
@@ -436,9 +453,20 @@ async function confirm() {
   color: var(--text-secondary);
 }
 
+/* The dialog body is --bg-card, but el-collapse's default header/wrap paint
+   --el-fill-color-blank (white in light, --bg-surface in dark), showing up as
+   a mismatched gray block. Make the collapse fully transparent/borderless and
+   keep only the subtle top divider as a visual separator. */
 .advanced-collapse {
   margin-top: 4px;
   border-top: 1px solid var(--border-color);
+  border-bottom: none;
+}
+
+.advanced-collapse :deep(.el-collapse-item__header),
+.advanced-collapse :deep(.el-collapse-item__wrap) {
+  background-color: transparent;
+  border-bottom: none;
 }
 
 .slider-with-value {

@@ -49,6 +49,65 @@ const healthInfo = computed(() => {
 
 /** Masked key indicator: the echo carries `***` when a key is stored. */
 const keyIndicator = computed(() => (props.card.apiKey ? '●●●●●' : t('config.notSet')))
+
+/* ------------------------------------------------------------------ */
+/*  Runtime health metrics (joined by provider name) — plain reactive  */
+/*  values, no count-up animation or status-change flash.              */
+/* ------------------------------------------------------------------ */
+
+/** True when the health entry carries live metrics worth showing. */
+const hasLiveMetrics = computed(() => {
+  const h = props.health
+  return !!h && h.configured && h.status !== 'offline'
+})
+
+const formattedLatency = computed(() => {
+  const h = props.health
+  if (!h || !hasLiveMetrics.value) return '—'
+  return `${h.latencyMs} ms`
+})
+
+const latencyColor = computed(() => {
+  const h = props.health
+  if (!h || !hasLiveMetrics.value || h.latencyMs === 0) return ''
+  if (h.latencyMs < 500) return 'var(--success)'
+  if (h.latencyMs <= 1500) return 'var(--warning)'
+  return 'var(--error)'
+})
+
+const latencyStyle = computed(() => {
+  if (formattedLatency.value === '—') return {}
+  return { color: latencyColor.value }
+})
+
+const formattedRequestsDisplay = computed(() => {
+  const h = props.health
+  if (!h || !hasLiveMetrics.value) return '—'
+  return new Intl.NumberFormat('en-US').format(h.requestCount)
+})
+
+const errorRateColor = computed(() => {
+  const h = props.health
+  if (!h) return ''
+  // When status is error, force red regardless of error rate value
+  if (h.status === 'error') return 'var(--error)'
+  if (h.errorRate < 0.01) return 'var(--success)'
+  if (h.errorRate <= 0.05) return 'var(--warning)'
+  return 'var(--error)'
+})
+
+const formattedErrorRateDisplay = computed(() => {
+  const h = props.health
+  if (!h || !hasLiveMetrics.value) return '—'
+  return `${(h.errorRate * 100).toFixed(1)}%`
+})
+
+const usagePercent = computed(() => props.health?.usagePercent ?? 0)
+
+const showUsage = computed(() => {
+  const h = props.health
+  return !!h && h.usagePercent !== undefined && h.configured
+})
 </script>
 
 <template>
@@ -88,6 +147,47 @@ const keyIndicator = computed(() => (props.card.apiKey ? '●●●●●' : t('
         <span class="row-label">{{ $t('config.providers.apiKey') }}</span>
         <span class="row-value mono">{{ keyIndicator }}</span>
       </div>
+    </div>
+
+    <!-- Metrics Row (runtime health; '—' when unconfigured or offline) -->
+    <div class="metrics-row">
+      <div class="metric">
+        <div class="metric-label">{{ $t('llm.metrics.latency') }}</div>
+        <div class="metric-value" :style="latencyStyle">
+          {{ formattedLatency }}
+        </div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">{{ $t('llm.metrics.requests') }}</div>
+        <div class="metric-value">{{ formattedRequestsDisplay }}</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">{{ $t('llm.metrics.errors') }}</div>
+        <div
+          class="metric-value"
+          :style="{
+            color: formattedErrorRateDisplay !== '—' ? errorRateColor : undefined,
+          }"
+        >
+          {{ formattedErrorRateDisplay }}
+        </div>
+      </div>
+    </div>
+
+    <!-- Usage Bar -->
+    <div v-if="showUsage" class="usage-bar">
+      <el-progress
+        :percentage="usagePercent"
+        :stroke-width="6"
+        :color="'var(--brand)'"
+        :show-text="false"
+      />
+      <span class="usage-label">{{ $t('llm.usage', { percent: usagePercent }) }}</span>
+    </div>
+
+    <!-- Last checked -->
+    <div v-if="health" class="last-checked">
+      {{ $t('llm.lastChecked', { date: new Date(health.lastChecked).toLocaleString() }) }}
     </div>
 
     <!-- Action Row -->
@@ -229,6 +329,51 @@ const keyIndicator = computed(() => (props.card.apiKey ? '●●●●●' : t('
 .row-value.mono {
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+.metrics-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.metric {
+  text-align: center;
+}
+
+.metric-label {
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.metric-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 500;
+  color: var(--text-primary);
+  transition: color 0.2s ease;
+}
+
+.usage-bar {
+  margin-bottom: 12px;
+}
+
+.usage-label {
+  display: block;
+  font-size: 12px;
+  color: var(--text-secondary);
+  margin-top: 4px;
+}
+
+.last-checked {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+  text-align: right;
 }
 
 .action-row {

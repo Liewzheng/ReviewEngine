@@ -486,12 +486,6 @@ export default {
   llm: {
     title: 'État LLM',
     subtitle: 'État des fournisseurs et performances',
-    refreshAll: 'Tout actualiser',
-    noProviders: 'Aucun fournisseur configuré',
-    reload: 'Recharger',
-    refreshedTitle: 'Fournisseurs actualisés',
-    refreshedMessage:
-      'Tous les fournisseurs testés — {healthy} sains, {issues} en échec',
     status: {
       healthy: 'Sain',
       degraded: 'Dégradé',
@@ -509,13 +503,6 @@ export default {
       errors: 'Erreurs',
     },
     usage: '{percent}% de capacité',
-    test: {
-      connected: 'Connecté',
-      failed: 'Échec de la connexion',
-      latency: 'Latence : {n} ms',
-    },
-    configure: 'Configurer',
-    configSection: 'Configuration LLM',
     lastChecked: 'Dernière vérification : {date}',
   },
   logs: {

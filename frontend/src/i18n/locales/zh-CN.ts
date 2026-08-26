@@ -474,12 +474,6 @@ export default {
   llm: {
     title: 'LLM 状态',
     subtitle: '提供商健康与性能',
-    refreshAll: '全部刷新',
-    noProviders: '未配置提供商',
-    reload: '重新加载',
-    refreshedTitle: '提供商已刷新',
-    refreshedMessage:
-      '已测试所有提供商 — {healthy} 个正常，{issues} 个异常',
     status: {
       healthy: '正常',
       degraded: '性能下降',
@@ -497,13 +491,6 @@ export default {
       errors: '错误数',
     },
     usage: '容量 {percent}%',
-    test: {
-      connected: '已连接',
-      failed: '连接失败',
-      latency: '延迟：{n}ms',
-    },
-    configure: '配置',
-    configSection: 'LLM 配置',
     lastChecked: '上次检查：{date}',
   },
   logs: {

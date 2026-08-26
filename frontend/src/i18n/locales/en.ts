@@ -491,12 +491,6 @@ export default {
   llm: {
     title: 'LLM Status',
     subtitle: 'Provider health and performance',
-    refreshAll: 'Refresh All',
-    noProviders: 'No providers configured',
-    reload: 'Reload',
-    refreshedTitle: 'Providers Refreshed',
-    refreshedMessage:
-      'All providers tested — {healthy} healthy, {issues} issues',
     status: {
       healthy: 'Healthy',
       degraded: 'Degraded',
@@ -514,13 +508,6 @@ export default {
       errors: 'Errors',
     },
     usage: '{percent}% capacity',
-    test: {
-      connected: 'Connected',
-      failed: 'Connection failed',
-      latency: 'Latency: {n}ms',
-    },
-    configure: 'Configure',
-    configSection: 'LLM Configuration',
     lastChecked: 'Last checked: {date}',
   },
   logs: {

@@ -480,12 +480,6 @@ export default {
   llm: {
     title: 'LLM 상태',
     subtitle: '제공자 상태 및 성능',
-    refreshAll: '모두 새로고침',
-    noProviders: '제공자가 설정되지 않았습니다',
-    reload: '다시 로드',
-    refreshedTitle: '제공자가 새로고침됨',
-    refreshedMessage:
-      '모든 제공자를 테스트했습니다 — 정상 {healthy}건, 문제 {issues}건',
     status: {
       healthy: '정상',
       degraded: '성능 저하',
@@ -503,13 +497,6 @@ export default {
       errors: '오류 수',
     },
     usage: '용량 {percent}%',
-    test: {
-      connected: '연결됨',
-      failed: '연결 실패',
-      latency: '지연 시간: {n}ms',
-    },
-    configure: '설정',
-    configSection: 'LLM 구성',
     lastChecked: '마지막 확인: {date}',
   },
   logs: {

@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.39] - 2026-08-26
+
+### Changed
+- **LLM page: status and config cards merged into one unified provider card**: the runtime health card and the「LLM 配置」card previously rendered side-by-side per provider — two cards for the same entity, with the status card's「配置」button merely scrolling to the other card. Each provider now has a single card carrying everything: avatar/name/「主」badge/health tag, config rows (apiBaseUrl / defaultModel / masked key), runtime metrics (延迟 / 请求数 / 错误率, `—` when offline or no runtime entry), usage bar, last-checked line, and the unified actions 测试连接 / 编辑 / 设为主提供商 / 删除. The old status-only `ProviderCard` component (with its scroll-to-config button) is deleted. (`frontend/src/components/Config/ProviderConfigCard.vue`, `frontend/src/views/LlmStatus.vue`, deleted `frontend/src/components/LlmStatus/ProviderCard.vue`)
+- **「全部刷新」button replaced by 30s auto-refresh**: the page now polls runtime health (`GET /llm/providers` + `/system/health`) every 30 seconds with a re-entry guard, stopped on unmount — KPIs, health tags, metrics and last-checked update without interaction. The config echo (`GET /config`) is intentionally not polled; it resyncs on this page's own mutations, so in-flight dialog edits are never disturbed. 「添加供应商」moved to the page header. (`frontend/src/views/LlmStatus.vue`)
+- i18n cleanup: removed keys orphaned by the merge (`llm.refreshAll/noProviders/reload/refreshed*/configure/configSection/test.*`) across all 6 locales.
+
 ## [0.9.38] - 2026-08-25
 
 ### Fixed

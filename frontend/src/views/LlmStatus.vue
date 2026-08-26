@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { RefreshRight, Cpu, CircleCheck, Warning, CircleClose, Remove, Plus } from '@element-plus/icons-vue'
@@ -7,26 +7,18 @@ import { useLlmStatus } from '../composables/useLlmStatus'
 import { useProviderCards } from '../composables/useProviderCards'
 import type { ProviderCardState } from '../composables/llmPayload'
 import { getSystemHealth } from '../services/health'
-import ProviderCard from '../components/LlmStatus/ProviderCard.vue'
 import ProviderConfigCard from '../components/Config/ProviderConfigCard.vue'
 import ProviderEditDialog from '../components/Config/ProviderEditDialog.vue'
 import type { LlmProvider } from '../types/llm'
 
 /* ------------------------------------------------------------------ */
-/*  Status section (KPIs + health cards)                              */
+/*  Runtime health (KPIs + per-card metrics)                           */
 /* ------------------------------------------------------------------ */
 
 const { t } = useI18n()
 const llm = useLlmStatus()
 
 const providers = llm.providers
-const loading = llm.loading
-const cardRefs = ref<InstanceType<typeof ProviderCard>[]>([])
-
-const testingMap = computed<Record<string, boolean>>(() => {
-  if (!llm.testingId.value) return {}
-  return { [llm.testingId.value]: true }
-})
 
 const healthyCount = computed(() => llm.healthyCount.value)
 const degradedCount = computed(() => llm.degradedCount.value)
@@ -164,36 +156,32 @@ watch(() => cardsError.value, (err) => {
 })
 
 /* ------------------------------------------------------------------ */
-/*  Actions                                                           */
+/*  Auto-refresh (QueueMonitor pattern): poll runtime health every     */
+/*  30s. The config echo is NOT polled — it resyncs on mutations, and  */
+/*  polling it would fight in-flight dialog edits.                     */
 /* ------------------------------------------------------------------ */
 
-function fetchProviders() {
-  llm.fetch()
-}
+let refreshTimer: ReturnType<typeof setInterval> | null = null
+const isPolling = ref(false)
 
-function handleRefreshAll() {
-  llm.fetch().then(() => {
-    const healthy = healthyCount.value
-    const issues = degradedCount.value + errorCount.value
-
-    ElNotification({
-      title: t('llm.refreshedTitle'),
-      message: t('llm.refreshedMessage', { healthy, issues }),
-      type: issues === 0 ? 'success' : 'warning',
-      duration: issues === 0 ? 3000 : 5000,
-    })
-  })
-}
-
-async function handleTestSingle(provider: LlmProvider) {
-  try {
-    const result = await llm.test(provider.id)
-    const card = cardRefs.value.find(c => c.providerId === provider.id)
-    if (card) {
-      card.showTestResult(result)
+function startAutoRefresh() {
+  stopAutoRefresh()
+  refreshTimer = setInterval(async () => {
+    if (isPolling.value) return
+    isPolling.value = true
+    try {
+      await llm.fetch()
+      checkLlmConfigured()
+    } finally {
+      isPolling.value = false
     }
-  } catch {
-    // Error already handled by composable
+  }, 30_000)
+}
+
+function stopAutoRefresh() {
+  if (refreshTimer) {
+    clearInterval(refreshTimer)
+    refreshTimer = null
   }
 }
 
@@ -202,9 +190,14 @@ async function handleTestSingle(provider: LlmProvider) {
 /* ------------------------------------------------------------------ */
 
 onMounted(() => {
-  fetchProviders()
+  llm.fetch()
   loadProviderCards()
   checkLlmConfigured()
+  startAutoRefresh()
+})
+
+onUnmounted(() => {
+  stopAutoRefresh()
 })
 </script>
 
@@ -218,179 +211,131 @@ onMounted(() => {
       </div>
       <el-button
         type="primary"
-        :icon="RefreshRight"
-        :loading="loading"
-        @click="handleRefreshAll"
+        :icon="Plus"
+        :disabled="cardsLoading"
+        @click="openAddDialog"
       >
-        {{ $t('llm.refreshAll') }}
+        {{ $t('config.providerCards.add') }}
       </el-button>
     </div>
 
+    <!-- Summary Stats -->
+    <div class="stats-row">
+      <el-card shadow="never" class="stat-card">
+        <div class="stat-content">
+          <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
+          <div class="stat-body">
+            <div class="stat-value">{{ providers.length }}</div>
+            <div class="stat-label">{{ $t('llm.stats.providers') }}</div>
+          </div>
+        </div>
+      </el-card>
+      <el-card shadow="never" class="stat-card">
+        <div class="stat-content">
+          <el-icon class="stat-icon" :size="24" color="var(--success)"><CircleCheck /></el-icon>
+          <div class="stat-body">
+            <div class="stat-value" style="color: var(--success)">{{ healthyCount }}</div>
+            <div class="stat-label">{{ $t('llm.status.healthy') }}</div>
+          </div>
+        </div>
+      </el-card>
+      <el-card shadow="never" class="stat-card">
+        <div class="stat-content">
+          <el-icon class="stat-icon" :size="24" color="var(--warning)"><Warning /></el-icon>
+          <div class="stat-body">
+            <div class="stat-value" style="color: var(--warning)">{{ degradedCount }}</div>
+            <div class="stat-label">{{ $t('llm.status.degraded') }}</div>
+          </div>
+        </div>
+      </el-card>
+      <el-card shadow="never" class="stat-card">
+        <div class="stat-content">
+          <el-icon class="stat-icon" :size="24" color="var(--error)"><CircleClose /></el-icon>
+          <div class="stat-body">
+            <div class="stat-value" style="color: var(--error)">{{ errorCount }}</div>
+            <div class="stat-label">{{ $t('llm.status.error') }}</div>
+          </div>
+        </div>
+      </el-card>
+      <el-card shadow="never" class="stat-card">
+        <div class="stat-content">
+          <el-icon class="stat-icon" :size="24" color="var(--offline)"><Remove /></el-icon>
+          <div class="stat-body">
+            <div class="stat-value" style="color: var(--offline)">{{ offlineCount }}</div>
+            <div class="stat-label">{{ $t('llm.status.offline') }}</div>
+          </div>
+        </div>
+      </el-card>
+      <el-card shadow="never" class="stat-card">
+        <div class="stat-content">
+          <el-icon class="stat-icon" :size="24"><RefreshRight /></el-icon>
+          <div class="stat-body">
+            <div class="stat-value">{{ avgLatency }} ms</div>
+            <div class="stat-label">{{ $t('llm.stats.avgLatency') }}</div>
+          </div>
+        </div>
+      </el-card>
+      <el-card shadow="never" class="stat-card">
+        <div class="stat-content">
+          <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
+          <div class="stat-body">
+            <div class="stat-value">{{ new Intl.NumberFormat('en-US').format(totalRequests) }}</div>
+            <div class="stat-label">{{ $t('llm.stats.totalRequests') }}</div>
+          </div>
+        </div>
+      </el-card>
+    </div>
+
+    <!-- LLM-not-configured banner: reviews cannot run without a usable LLM -->
+    <el-alert
+      v-if="llmNotConfigured"
+      type="warning"
+      :closable="false"
+      :title="$t('config.llmNotConfiguredBanner')"
+      class="llm-banner"
+    />
+
     <!-- Loading Skeleton -->
-    <div v-if="loading && providers.length === 0" class="skeleton-grid">
-      <el-skeleton
-        v-for="i in 6"
-        :key="i"
-        animated
-        :rows="4"
-        class="skeleton-card"
-      />
+    <div v-if="cardsLoading && providerCards.length === 0" class="skeleton-grid">
+      <el-skeleton v-for="i in 2" :key="i" animated :rows="3" class="skeleton-card" />
     </div>
 
     <!-- Empty State -->
     <el-empty
-      v-else-if="providers.length === 0"
-      :description="$t('llm.noProviders')"
+      v-else-if="providerCards.length === 0"
+      :description="$t('config.providerCards.empty')"
     >
-      <el-button type="primary" @click="fetchProviders">{{ $t('llm.reload') }}</el-button>
+      <el-button type="primary" :icon="Plus" @click="openAddDialog">
+        {{ $t('config.providerCards.add') }}
+      </el-button>
     </el-empty>
 
-    <!-- Content -->
-    <template v-else>
-      <!-- Summary Stats -->
-      <div class="stats-row">
-        <el-card shadow="never" class="stat-card">
-          <div class="stat-content">
-            <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
-            <div class="stat-body">
-              <div class="stat-value">{{ providers.length }}</div>
-              <div class="stat-label">{{ $t('llm.stats.providers') }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card shadow="never" class="stat-card">
-          <div class="stat-content">
-            <el-icon class="stat-icon" :size="24" color="var(--success)"><CircleCheck /></el-icon>
-            <div class="stat-body">
-              <div class="stat-value" style="color: var(--success)">{{ healthyCount }}</div>
-              <div class="stat-label">{{ $t('llm.status.healthy') }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card shadow="never" class="stat-card">
-          <div class="stat-content">
-            <el-icon class="stat-icon" :size="24" color="var(--warning)"><Warning /></el-icon>
-            <div class="stat-body">
-              <div class="stat-value" style="color: var(--warning)">{{ degradedCount }}</div>
-              <div class="stat-label">{{ $t('llm.status.degraded') }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card shadow="never" class="stat-card">
-          <div class="stat-content">
-            <el-icon class="stat-icon" :size="24" color="var(--error)"><CircleClose /></el-icon>
-            <div class="stat-body">
-              <div class="stat-value" style="color: var(--error)">{{ errorCount }}</div>
-              <div class="stat-label">{{ $t('llm.status.error') }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card shadow="never" class="stat-card">
-          <div class="stat-content">
-            <el-icon class="stat-icon" :size="24" color="var(--offline)"><Remove /></el-icon>
-            <div class="stat-body">
-              <div class="stat-value" style="color: var(--offline)">{{ offlineCount }}</div>
-              <div class="stat-label">{{ $t('llm.status.offline') }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card shadow="never" class="stat-card">
-          <div class="stat-content">
-            <el-icon class="stat-icon" :size="24"><RefreshRight /></el-icon>
-            <div class="stat-body">
-              <div class="stat-value">{{ avgLatency }} ms</div>
-              <div class="stat-label">{{ $t('llm.stats.avgLatency') }}</div>
-            </div>
-          </div>
-        </el-card>
-        <el-card shadow="never" class="stat-card">
-          <div class="stat-content">
-            <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
-            <div class="stat-body">
-              <div class="stat-value">{{ new Intl.NumberFormat('en-US').format(totalRequests) }}</div>
-              <div class="stat-label">{{ $t('llm.stats.totalRequests') }}</div>
-            </div>
-          </div>
-        </el-card>
-      </div>
-
-      <!-- Provider Grid -->
-      <div class="provider-grid">
-        <ProviderCard
-          v-for="(provider, idx) in providers"
-          :key="provider.id"
-          ref="cardRefs"
-          :provider="provider"
-          :index="idx"
-          :testing="testingMap[provider.id]"
-          :loading="loading"
-          @test="handleTestSingle"
-        />
-      </div>
-    </template>
-
-    <!-- LLM Configuration Section: unified provider cards, every mutation
-         saves immediately (no page-level edit mode). -->
-    <section id="llm-config-section" class="llm-config-section">
-      <div class="config-section-header">
-        <h3 class="section-title">{{ $t('llm.configSection') }}</h3>
-        <div class="header-actions">
-          <el-button type="primary" :icon="Plus" :disabled="cardsLoading" @click="openAddDialog">
-            {{ $t('config.providerCards.add') }}
-          </el-button>
-        </div>
-      </div>
-
-      <!-- LLM-not-configured banner: reviews cannot run without a usable LLM -->
-      <el-alert
-        v-if="llmNotConfigured"
-        type="warning"
-        :closable="false"
-        :title="$t('config.llmNotConfiguredBanner')"
-        class="llm-banner"
-      />
-
-      <!-- Loading Skeleton -->
-      <div v-if="cardsLoading && providerCards.length === 0" class="skeleton-grid">
-        <el-skeleton v-for="i in 2" :key="i" animated :rows="3" class="skeleton-card" />
-      </div>
-
-      <!-- Empty State -->
-      <el-empty
-        v-else-if="providerCards.length === 0"
-        :description="$t('config.providerCards.empty')"
-      >
-        <el-button type="primary" :icon="Plus" @click="openAddDialog">
-          {{ $t('config.providerCards.add') }}
-        </el-button>
-      </el-empty>
-
-      <!-- Unified Provider Card Grid -->
-      <div v-else class="provider-grid">
-        <ProviderConfigCard
-          v-for="card in providerCards"
-          :key="card.provider"
-          :card="card"
-          :primary="card.provider === primaryName"
-          :health="healthByName.get(card.provider)"
-          :testing="isCardTesting(card)"
-          :saving="cardsSaving"
-          @test="handleCardTest(card)"
-          @edit="openEditDialog(card)"
-          @delete="deleteCard(card)"
-          @set-primary="setPrimary(card)"
-        />
-      </div>
-
-      <ProviderEditDialog
-        v-model:visible="dialogVisible"
-        :mode="dialogMode"
-        :initial="editingCard"
-        :existing-names="providerCards.map((c) => c.provider)"
+    <!-- Unified Provider Card Grid: config echo joined with runtime health,
+         every mutation saves immediately (no page-level edit mode). -->
+    <div v-else class="provider-grid">
+      <ProviderConfigCard
+        v-for="card in providerCards"
+        :key="card.provider"
+        :card="card"
+        :primary="card.provider === primaryName"
+        :health="healthByName.get(card.provider)"
+        :testing="isCardTesting(card)"
         :saving="cardsSaving"
-        @save="handleDialogSave"
+        @test="handleCardTest(card)"
+        @edit="openEditDialog(card)"
+        @delete="deleteCard(card)"
+        @set-primary="setPrimary(card)"
       />
-    </section>
+    </div>
+
+    <ProviderEditDialog
+      v-model:visible="dialogVisible"
+      :mode="dialogMode"
+      :initial="editingCard"
+      :existing-names="providerCards.map((c) => c.provider)"
+      :saving="cardsSaving"
+      @save="handleDialogSave"
+    />
   </div>
 </template>
 
@@ -470,6 +415,11 @@ onMounted(() => {
   margin-top: 2px;
 }
 
+/* LLM-not-configured banner sits below the stats row, above the cards */
+.llm-banner {
+  margin-bottom: 20px;
+}
+
 /* Skeleton */
 .skeleton-grid {
   display: grid;
@@ -484,55 +434,11 @@ onMounted(() => {
   border: 1px solid var(--border-color);
 }
 
-/* Provider Grid (status cards and config cards share the layout) */
+/* Provider Grid */
 .provider-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 16px;
-}
-
-/* ------------------------------------------------------------------ */
-/*  LLM Configuration section (visual language mirrors Configuration)  */
-/* ------------------------------------------------------------------ */
-
-.llm-config-section {
-  margin-top: 32px;
-}
-
-.config-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-}
-
-.section-title {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-}
-
-.header-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
-.header-actions .el-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  transition: all 0.15s ease;
-}
-
-/* LLM-not-configured banner sits below the section header, above the cards */
-.llm-banner {
-  margin-bottom: 20px;
 }
 
 /* Responsive */
@@ -552,11 +458,6 @@ onMounted(() => {
 
   .skeleton-grid {
     grid-template-columns: 1fr;
-  }
-
-  .config-section-header {
-    flex-direction: column;
-    align-items: flex-start;
   }
 }
 

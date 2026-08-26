@@ -481,12 +481,6 @@ export default {
   llm: {
     title: 'LLM ステータス',
     subtitle: 'プロバイダーの状態とパフォーマンス',
-    refreshAll: 'すべて再読み込み',
-    noProviders: 'プロバイダーが設定されていません',
-    reload: '再読み込み',
-    refreshedTitle: 'プロバイダーを再読み込みしました',
-    refreshedMessage:
-      'すべてのプロバイダーをテストしました — 正常 {healthy}、問題 {issues}',
     status: {
       healthy: '正常',
       degraded: '性能低下',
@@ -504,13 +498,6 @@ export default {
       errors: 'エラー数',
     },
     usage: '容量 {percent}%',
-    test: {
-      connected: '接続済み',
-      failed: '接続に失敗しました',
-      latency: 'レイテンシー：{n}ms',
-    },
-    configure: '設定',
-    configSection: 'LLM 設定',
     lastChecked: '最終チェック：{date}',
   },
   logs: {

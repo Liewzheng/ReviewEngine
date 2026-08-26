@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "review-engine"
-version = "0.9.35"
+version = "0.9.39"
 dependencies = [
  "anyhow",
  "async-trait",

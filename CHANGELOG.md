@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.40] - 2026-08-27
+
+### Added
+- **`reng config provider` — git-config-like LLM provider management from the CLI** (no more running the full `init` wizard just to view or tweak a provider):
+  - `reng config provider list` — resolved effective provider list (project `[[llm]]` → user-level fallback → `LLM_CONFIG` env) with per-entry source annotation (`[project]`/`[user]`/`[env]`); api keys always masked (`***`). `--global`/`--project` show only that file's raw entries.
+  - `reng config provider set <name> [--model/--api-base/--api-key/--max-tokens/--temperature/--disable-thinking] [--global]` — upsert one `[[llm]]` entry via surgical `toml_edit` round-trip: other sections, comments and formatting are preserved byte-for-byte; omitting `--api-key` on update keeps the stored key (blank=keep, same semantic as the web UI); new entries fall back to serde defaults for omitted fields.
+  - `reng config provider remove <name> [--global]` — delete one entry; clean non-zero error when the file or name is missing.
+  - `reng config provider test <name>` — real connectivity probe with the stored key (`GET {api_base}/models`, 10s timeout), prints latency and exits non-zero on failure for scripting.
+  - The probe is now a shared `llm::probe::probe_llm_connectivity` used by the CLI and both server endpoints (`POST /llm/providers/{id}/test`, `POST /config/test`), replacing two duplicated private copies; the `***` mask sentinel is canonicalized in `models::API_KEY_MASK`. (`src/cli/commands.rs`, `src/cli/handlers/config/provider.rs`, `src/llm/probe.rs`, `src/models/config.rs`, `src/server/api/llm.rs`, `src/server/api/config/helpers.rs`)
+  - The no-usable-LLM startup guidance now lists `reng config provider set` as an option.
+
 ## [0.9.39] - 2026-08-26
 
 ### Changed

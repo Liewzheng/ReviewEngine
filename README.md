@@ -364,6 +364,7 @@ ReviewEngine is organized around a small set of focused commands:
 | `serve`            | Start the REST API and webhook server.                     |
 | `upgrade`          | Check for and apply self-upgrades (`--check` / `--yes` / `--version` / `--rollback`). |
 | `validate`         | Validate your `.code-audit-config.toml`.                   |
+| `config provider`  | List, edit, remove, and connectivity-test LLM providers (`list` / `set` / `remove` / `test`, `--global` / `--project`). |
 | `init`             | Generate a starter config for a new project.               |
 | `default`          | Print the built-in default config.                         |
 | `generate-token`   | Generate a random API token for `reng serve`.              |

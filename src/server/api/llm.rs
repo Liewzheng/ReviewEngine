@@ -370,7 +370,7 @@ async fn test_provider(State(state): State<Arc<AppState>>, Path(id): Path<String
     }
 
     let start = std::time::Instant::now();
-    let result = test_llm_connectivity(&cfg).await;
+    let result = crate::llm::probe::probe_llm_connectivity(&cfg).await;
     let latency_ms = start.elapsed().as_millis() as u64;
 
     let (success, error) = match result {
@@ -384,35 +384,6 @@ async fn test_provider(State(state): State<Arc<AppState>>, Path(id): Path<String
         "error": error,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
-}
-
-async fn test_llm_connectivity(cfg: &crate::models::LLMConfig) -> anyhow::Result<()> {
-    use reqwest::Client;
-    let client = Client::new();
-
-    let base = if cfg.api_base.is_empty() {
-        match cfg.provider.to_lowercase().as_str() {
-            "openai" => "https://api.openai.com/v1",
-            "anthropic" => "https://api.anthropic.com",
-            "ollama" => "http://localhost:11434",
-            _ => "https://api.openai.com/v1",
-        }
-    } else {
-        &cfg.api_base
-    };
-
-    let url = format!("{}/models", base);
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", cfg.api_key))
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        anyhow::bail!("HTTP {}", resp.status());
-    }
-    Ok(())
 }
 
 fn logo_for_provider(provider: &str) -> String {

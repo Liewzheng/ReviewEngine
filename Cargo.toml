@@ -1,6 +1,6 @@
 [package]
 name = "review-engine"
-version = "0.9.39"
+version = "0.9.40"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -60,6 +60,10 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 
 # Config parsing
 toml = "0.8"
+# Format-preserving TOML editing for `config provider set/remove` — keeps
+# comments and unrelated sections byte-for-byte. Already resolved in the
+# tree (transitive dep of `toml`); promoted to a direct dependency.
+toml_edit = "0.22.27"
 
 # Template engine (Jinja2-compatible)
 minijinja = "2"

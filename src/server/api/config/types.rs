@@ -3,7 +3,10 @@ use crate::models::AppConfig;
 /// Sentinel masking a configured API key in `GET /config`. The frontend
 /// renders it as "configured" and treats `""` or this sentinel as "leave
 /// unchanged" on save (see `put_config`), so masking never destroys state.
-pub const API_KEY_MASK: &str = "***";
+///
+/// Re-exported from [`crate::models`], which owns the canonical constant
+/// shared with the CLI `config provider` output.
+pub use crate::models::API_KEY_MASK;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

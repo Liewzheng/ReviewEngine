@@ -1762,7 +1762,7 @@ dependencies = [
 
 [[package]]
 name = "review-engine"
-version = "0.9.39"
+version = "0.9.40"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1800,6 +1800,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "toml",
+ "toml_edit",
  "tower",
  "tower-http",
  "tracing",

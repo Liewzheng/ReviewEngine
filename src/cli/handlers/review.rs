@@ -73,7 +73,8 @@ pub(crate) fn no_usable_llm_error() -> anyhow::Error {
          \x20 2. Add an [[llm]] section to your config file (provider, model, api_base, api_key):\n\
          \x20    {}\n\
          \x20 3. Set the LLM_CONFIG env var, e.g.:\n\
-         \x20    LLM_CONFIG='[{{\"provider\":\"openai\",\"model\":\"gpt-4o\",\"api_base\":\"https://api.openai.com/v1\",\"api_key\":\"sk-...\"}}]'",
+         \x20    LLM_CONFIG='[{{\"provider\":\"openai\",\"model\":\"gpt-4o\",\"api_base\":\"https://api.openai.com/v1\",\"api_key\":\"sk-...\"}}]'\n\
+         \x20 4. Add a provider from the CLI:  reng config provider set <name> --model <model> --api-base <url> --api-key <key>",
         user_config_path_display()
     )
 }

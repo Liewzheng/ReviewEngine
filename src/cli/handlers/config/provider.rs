@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-use review_engine::models::{default_max_tokens, default_temperature, mask_api_key, LLMConfig};
+use review_engine::models::{default_max_tokens, default_temperature, LLMConfig, API_KEY_MASK};
 
 use crate::cli::commands::ProviderAction;
 
@@ -218,6 +218,19 @@ fn dash_if_empty(s: &str) -> String {
     }
 }
 
+/// The displayed API-key cell, selected by CONTROL FLOW on the key's
+/// emptiness bit alone: `-` when no key is stored, the [`API_KEY_MASK`]
+/// constant when one is. The raw key never enters any render/print path —
+/// every string this produces is a compile-time constant, so no printed
+/// output is secret-derived (CodeQL `rust/cleartext-logging`).
+fn key_cell(key_empty: bool) -> String {
+    if key_empty {
+        "-".to_string()
+    } else {
+        API_KEY_MASK.to_string()
+    }
+}
+
 /// Render the human-readable provider table (one line per entry, API keys
 /// masked). An empty list renders a friendly hint pointing at `set`.
 pub fn render_provider_table(entries: &[ListedProvider]) -> String {
@@ -237,7 +250,7 @@ pub fn render_provider_table(entries: &[ListedProvider]) -> String {
             e.config.provider.clone(),
             dash_if_empty(&e.config.model),
             dash_if_empty(&e.config.api_base),
-            dash_if_empty(&mask_api_key(&e.config.api_key)),
+            key_cell(e.config.api_key.is_empty()),
             e.source.label().to_string(),
         ]);
     }
@@ -283,19 +296,16 @@ pub struct ProviderPatch {
 /// entry missing optional keys still echoes cleanly).
 ///
 /// Defense in depth against cleartext logging: the raw `api_key` never
-/// leaves [`echo_of`] — the outcome carries only the pre-masked projection
-/// plus an emptiness flag, so no print/log statement downstream can
-/// reference the live secret.
+/// leaves [`echo_of`] — the outcome carries only the key's emptiness bit,
+/// and the confirmation print selects between compile-time-constant strings
+/// (`-` / `***`) via [`key_cell`], so no printed output is secret-derived.
 #[derive(Debug)]
 pub struct SetOutcome {
     /// True when a new `[[llm]]` entry was appended.
     pub created: bool,
     pub model: String,
-    /// The stored key after [`mask_api_key`] (`***` when set, `""` when
-    /// empty). Never the raw secret.
-    pub masked_key: String,
     /// True when the stored api_key is empty (drives the "created without a
-    /// key" warning in `run_set`).
+    /// key" warning in `run_set` and the `-`/`***` display select).
     pub key_empty: bool,
     pub api_base: String,
     pub max_tokens: i64,
@@ -386,9 +396,8 @@ fn echo_of(table: &toml_edit::Table, created: bool) -> SetOutcome {
     SetOutcome {
         created,
         model: table_str(table, "model"),
-        // Mask immediately and let the raw value drop at the end of this
-        // function: `SetOutcome` never carries the live key.
-        masked_key: mask_api_key(&raw_key),
+        // Keep only the emptiness bit and let the raw value drop at the end
+        // of this function: `SetOutcome` carries nothing secret-derived.
         key_empty: raw_key.is_empty(),
         api_base: table_str(table, "api_base"),
         max_tokens: table_i64(table, "max_tokens", default_max_tokens() as i64),
@@ -533,8 +542,9 @@ pub fn run_set(name: &str, patch: ProviderPatch, global: bool, project: bool) ->
             "warning: no --api-key given; provider \"{name}\" was saved with an empty api_key — most providers require one"
         );
     }
-    // The echo prints only the pre-masked key projection — the raw secret
-    // is never in scope here (see `SetOutcome`).
+    // The echo selects the displayed key from compile-time constants via
+    // `key_cell(outcome.key_empty)` — the raw secret is never in scope here
+    // (see `SetOutcome`).
     println!(
         "✓ {} provider \"{}\" in {} {}: model={} api_base={} api_key={} max_tokens={} temperature={}",
         if outcome.created { "created" } else { "updated" },
@@ -543,7 +553,7 @@ pub fn run_set(name: &str, patch: ProviderPatch, global: bool, project: bool) ->
         scope.source().label(),
         dash_if_empty(&outcome.model),
         dash_if_empty(&outcome.api_base),
-        dash_if_empty(&outcome.masked_key),
+        key_cell(outcome.key_empty),
         outcome.max_tokens,
         outcome.temperature,
     );

@@ -281,12 +281,22 @@ pub struct ProviderPatch {
 /// The effective values of an entry after a `set`, used for the
 /// confirmation echo (kept separate from [`LLMConfig`] so a hand-written
 /// entry missing optional keys still echoes cleanly).
+///
+/// Defense in depth against cleartext logging: the raw `api_key` never
+/// leaves [`echo_of`] — the outcome carries only the pre-masked projection
+/// plus an emptiness flag, so no print/log statement downstream can
+/// reference the live secret.
 #[derive(Debug)]
 pub struct SetOutcome {
     /// True when a new `[[llm]]` entry was appended.
     pub created: bool,
     pub model: String,
-    pub api_key: String,
+    /// The stored key after [`mask_api_key`] (`***` when set, `""` when
+    /// empty). Never the raw secret.
+    pub masked_key: String,
+    /// True when the stored api_key is empty (drives the "created without a
+    /// key" warning in `run_set`).
+    pub key_empty: bool,
     pub api_base: String,
     pub max_tokens: i64,
     pub temperature: f64,
@@ -372,10 +382,14 @@ fn f32_value(v: f32) -> toml_edit::Value {
 }
 
 fn echo_of(table: &toml_edit::Table, created: bool) -> SetOutcome {
+    let raw_key = table_str(table, "api_key");
     SetOutcome {
         created,
         model: table_str(table, "model"),
-        api_key: table_str(table, "api_key"),
+        // Mask immediately and let the raw value drop at the end of this
+        // function: `SetOutcome` never carries the live key.
+        masked_key: mask_api_key(&raw_key),
+        key_empty: raw_key.is_empty(),
         api_base: table_str(table, "api_base"),
         max_tokens: table_i64(table, "max_tokens", default_max_tokens() as i64),
         temperature: table_f64(table, "temperature", default_temperature() as f64),
@@ -514,11 +528,13 @@ pub fn run_set(name: &str, patch: ProviderPatch, global: bool, project: bool) ->
     let scope = scope_from_flags(global, project).unwrap_or(Scope::Project);
     let path = scope_path(scope)?;
     let outcome = upsert_provider(&path, name, &patch)?;
-    if outcome.created && outcome.api_key.is_empty() {
+    if outcome.created && outcome.key_empty {
         eprintln!(
             "warning: no --api-key given; provider \"{name}\" was saved with an empty api_key — most providers require one"
         );
     }
+    // The echo prints only the pre-masked key projection — the raw secret
+    // is never in scope here (see `SetOutcome`).
     println!(
         "✓ {} provider \"{}\" in {} {}: model={} api_base={} api_key={} max_tokens={} temperature={}",
         if outcome.created { "created" } else { "updated" },
@@ -527,7 +543,7 @@ pub fn run_set(name: &str, patch: ProviderPatch, global: bool, project: bool) ->
         scope.source().label(),
         dash_if_empty(&outcome.model),
         dash_if_empty(&outcome.api_base),
-        dash_if_empty(&mask_api_key(&outcome.api_key)),
+        dash_if_empty(&outcome.masked_key),
         outcome.max_tokens,
         outcome.temperature,
     );

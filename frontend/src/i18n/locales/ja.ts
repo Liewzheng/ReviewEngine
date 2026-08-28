@@ -153,6 +153,7 @@ export default {
     exportEmptyTooltip: '現在のフィルターに一致するレビューがありません',
     exportSuccess: '{count} 件のレビューをエクスポートしました',
     exportFailed: 'エクスポートに失敗しました',
+    exportTruncated: '一致した {total} 件のうち先頭 {count} 件をエクスポートしました（エクスポート上限のため一部省略）',
     searchPlaceholder: 'MR タイトル、作成者、ブランチで検索…',
     empty: 'レビューが見つかりません',
     untitledReview: '無題のレビュー',

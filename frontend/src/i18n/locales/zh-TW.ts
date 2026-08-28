@@ -150,6 +150,7 @@ export default {
     exportEmptyTooltip: '目前篩選結果為空，沒有可匯出的審查紀錄',
     exportSuccess: '已匯出 {count} 筆審查紀錄',
     exportFailed: '匯出失敗',
+    exportTruncated: '已匯出前 {count} 筆審查紀錄（共 {total} 筆符合，已達匯出上限）',
     searchPlaceholder: '搜尋 MR 標題、作者、分支…',
     empty: '找不到審查',
     untitledReview: '未命名審查',

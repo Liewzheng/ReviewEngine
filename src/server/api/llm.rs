@@ -373,15 +373,23 @@ async fn test_provider(State(state): State<Arc<AppState>>, Path(id): Path<String
     let result = crate::llm::probe::probe_llm_connectivity(&cfg).await;
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    let (success, error) = match result {
-        Ok(_) => (true, None::<String>),
-        Err(e) => (false, Some(e.to_string())),
+    let (success, error, resolved_base) = match result {
+        Ok(outcome) => (true, None::<String>, Some(outcome.resolved_base)),
+        Err(e) => (
+            false,
+            Some(e.to_string()),
+            // The probe may have failed fast during resolution (unknown
+            // provider, empty api_base) — recover the URL when possible so
+            // the UI can show where the key would have gone.
+            crate::llm::probe::resolve_api_base(&cfg).ok(),
+        ),
     };
 
     Json(serde_json::json!({
         "success": success,
         "latencyMs": latency_ms,
         "error": error,
+        "resolvedApiBase": resolved_base,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
 }

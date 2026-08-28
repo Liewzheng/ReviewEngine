@@ -22,6 +22,23 @@ use review_engine::models::{default_max_tokens, default_temperature, LLMConfig, 
 
 use crate::cli::commands::ProviderAction;
 
+/// Test-only capture of every warning written to stderr, so tests can
+/// assert on terminal-visible output (same pattern as
+/// `config::resolver::resolve::FALLBACK_WARNINGS`).
+#[cfg(test)]
+pub(crate) static STDERR_CAPTURE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Print a warning to stderr. main.rs routes `tracing` into an in-memory
+/// ring buffer plus logs.ndjson, so `tracing::warn!` never reaches the
+/// terminal — CLI warnings must use `eprintln!` (the same reason the
+/// review path does in `config::resolver::resolve`). Under `cfg(test)` the
+/// message is also recorded in [`STDERR_CAPTURE`] for assertions.
+fn warn_stderr(msg: String) {
+    eprintln!("{msg}");
+    #[cfg(test)]
+    STDERR_CAPTURE.lock().unwrap_or_else(|e| e.into_inner()).push(msg);
+}
+
 // ─── Scope & source ────────────────────────────────────────────────
 
 /// The concrete file a scoped command targets.
@@ -109,7 +126,7 @@ pub struct ListedProvider {
 
 /// Parse the raw `[[llm]]` entries out of a config file. A missing file
 /// yields an empty list; an unparsable file or an invalid `llm` section
-/// logs a warning and yields an empty list (mirroring the resolver's
+/// warns on stderr and yields an empty list (mirroring the resolver's
 /// `take_llm` semantics, so `list` agrees with what a review would use).
 pub fn read_llm_entries(path: &Path) -> Result<Vec<LLMConfig>> {
     if !path.exists() {
@@ -117,14 +134,17 @@ pub fn read_llm_entries(path: &Path) -> Result<Vec<LLMConfig>> {
     }
     let content =
         std::fs::read_to_string(path).with_context(|| format!("failed to read config file {}", path.display()))?;
-    Ok(parse_llm_entries(&content))
+    Ok(parse_llm_entries(&content, path))
 }
 
-fn parse_llm_entries(content: &str) -> Vec<LLMConfig> {
+fn parse_llm_entries(content: &str, path: &Path) -> Vec<LLMConfig> {
     let val: toml::Value = match toml::from_str(content) {
         Ok(val) => val,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to parse config file as TOML; treating provider list as empty");
+            warn_stderr(format!(
+                "warning: failed to parse config file {} as TOML: {e}; treating its provider list as empty",
+                path.display()
+            ));
             return Vec::new();
         }
     };
@@ -134,7 +154,10 @@ fn parse_llm_entries(content: &str) -> Vec<LLMConfig> {
     match Vec::<LLMConfig>::deserialize(llm.clone()) {
         Ok(entries) => entries,
         Err(e) => {
-            tracing::warn!(error = %e, "failed to parse [[llm]] array; treating provider list as empty");
+            warn_stderr(format!(
+                "warning: failed to parse [[llm]] array in {}: {e}; treating its provider list as empty",
+                path.display()
+            ));
             Vec::new()
         }
     }
@@ -487,7 +510,17 @@ fn write_config(path: &Path, content: &str) -> Result<()> {
                 .with_context(|| format!("failed to create config directory {}", parent.display()))?;
         }
     }
-    std::fs::write(path, content).with_context(|| format!("failed to write config file {}", path.display()))
+    std::fs::write(path, content).with_context(|| format!("failed to write config file {}", path.display()))?;
+    // The file can hold plaintext API keys, so tighten it to owner-only —
+    // on create (where umask would typically leave 0644) and on update of
+    // an existing file that already contains key material. Windows: no-op.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to set permissions on config file {}", path.display()))?;
+    }
+    Ok(())
 }
 
 // ─── Command handlers ──────────────────────────────────────────────
@@ -572,18 +605,56 @@ pub fn run_remove(name: &str, global: bool, project: bool) -> Result<()> {
     Ok(())
 }
 
+/// `Some(warning)` when the effective probe URL is cleartext `http://` to a
+/// non-loopback host — the bearer key would cross the wire unencrypted.
+/// Loopback targets (localhost, 127.0.0.0/8, ::1) stay quiet so local
+/// providers like Ollama don't trigger false alarms.
+pub(crate) fn cleartext_key_warning(resolved_base: &str) -> Option<String> {
+    let rest = resolved_base.strip_prefix("http://")?;
+    let authority = rest.split(['/', '?']).next().unwrap_or("");
+    // Bracketed IPv6 literals keep their colons inside the brackets.
+    let host = match authority.strip_prefix('[') {
+        Some(inner) => inner.split(']').next().unwrap_or(""),
+        None => authority.split(':').next().unwrap_or(""),
+    };
+    let loopback = host.eq_ignore_ascii_case("localhost")
+        || host.ends_with(".localhost")
+        || host.starts_with("127.")
+        || host == "::1";
+    if loopback {
+        None
+    } else {
+        Some(format!(
+            "warning: api_base {resolved_base} uses cleartext HTTP on a non-localhost host — the API key will be sent unencrypted"
+        ))
+    }
+}
+
 pub async fn run_test(name: &str, global: bool, project: bool) -> Result<()> {
     let (cfg, source) = find_provider(name, scope_from_flags(global, project))?;
+    // Resolve before probing: for an unknown provider with an empty
+    // api_base this fails fast with the api_base-required error, before any
+    // network call could leak the stored key.
+    let resolved_base = review_engine::llm::probe::resolve_api_base(&cfg)?;
+    if let Some(warning) = cleartext_key_warning(&resolved_base) {
+        warn_stderr(warning);
+    }
     let start = std::time::Instant::now();
     match review_engine::llm::probe::probe_llm_connectivity(&cfg).await {
-        Ok(()) => {
+        Ok(outcome) => {
             println!(
-                "✓ provider \"{name}\" {} is reachable ({} ms)",
+                "✓ provider \"{name}\" {} is reachable via {} ({} ms)",
                 source.label(),
+                outcome.resolved_base,
                 start.elapsed().as_millis()
             );
             Ok(())
         }
-        Err(e) => Err(e).with_context(|| format!("provider \"{name}\" {} connectivity test failed", source.label())),
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "provider \"{name}\" {} connectivity test failed (via {resolved_base})",
+                source.label()
+            )
+        }),
     }
 }

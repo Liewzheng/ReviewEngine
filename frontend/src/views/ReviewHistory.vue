@@ -99,18 +99,37 @@ function exportFileName(): string {
   return `review-history-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}.json`
 }
 
+/** Server-side cap on `per_page` — the backend clamps anything larger to 100. */
+const EXPORT_PAGE_SIZE = 100
+/** Hard ceiling for one export file; beyond it the file is flagged truncated. */
+const EXPORT_MAX_ROWS = 10000
+
 /**
  * Export the CURRENTLY FILTERED history list as JSON. Reuses the same query
  * path as the list (`getReviews` — including its queued→pending status
- * translation) with a single large-page request so every match across pages
- * is included. Goes through the service directly instead of the composable
- * so the displayed page is not replaced by the export result.
+ * translation), walking pages of EXPORT_PAGE_SIZE (the backend caps
+ * `per_page` at 100) sequentially until every match is collected or a page
+ * comes back short. Goes through the service directly instead of the
+ * composable so the displayed page is not replaced by the export result.
+ * Totals beyond EXPORT_MAX_ROWS are capped: the payload then carries
+ * `truncated` + `note` metadata and the toast says so.
  */
 async function handleExport() {
   if (exporting.value || exportEmpty.value) return
   exporting.value = true
   try {
-    const data = await getReviews(filters.value, 1, 10000)
+    const first = await getReviews(filters.value, 1, EXPORT_PAGE_SIZE)
+    const items = [...first.items]
+    const target = Math.min(first.total, EXPORT_MAX_ROWS)
+    let page = 1
+    let lastPageSize = first.items.length
+    while (items.length < target && lastPageSize === EXPORT_PAGE_SIZE) {
+      page += 1
+      const data = await getReviews(filters.value, page, EXPORT_PAGE_SIZE)
+      items.push(...data.items)
+      lastPageSize = data.items.length
+    }
+    const truncated = first.total > EXPORT_MAX_ROWS
     const payload = {
       exportedAt: new Date().toISOString(),
       filters: {
@@ -121,8 +140,14 @@ async function handleExport() {
         dateTo: filters.value.dateTo ?? undefined,
         repository: filters.value.repository ?? undefined,
       },
-      total: data.total,
-      items: data.items,
+      total: items.length,
+      items,
+      ...(truncated
+        ? {
+            truncated: true,
+            note: `Filters matched ${first.total} reviews; export is capped at the first ${EXPORT_MAX_ROWS}.`,
+          }
+        : {}),
     }
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' })
     const url = URL.createObjectURL(blob)
@@ -133,7 +158,11 @@ async function handleExport() {
     a.click()
     a.remove()
     URL.revokeObjectURL(url)
-    ElMessage.success(t('history.exportSuccess', { count: data.items.length }))
+    if (truncated) {
+      ElMessage.success(t('history.exportTruncated', { count: items.length, total: first.total }))
+    } else {
+      ElMessage.success(t('history.exportSuccess', { count: items.length }))
+    }
   } catch {
     ElMessage.error(t('history.exportFailed'))
   } finally {

@@ -162,6 +162,7 @@ export default {
     exportEmptyTooltip: 'No reviews match the current filters',
     exportSuccess: 'Exported {count} reviews',
     exportFailed: 'Export failed',
+    exportTruncated: 'Exported the first {count} of {total} matching reviews (export limit reached)',
     searchPlaceholder: 'Search MR title, author, branch...',
     empty: 'No reviews found',
     untitledReview: 'Untitled Review',

@@ -152,6 +152,7 @@ export default {
     exportEmptyTooltip: '현재 필터와 일치하는 리뷰가 없습니다',
     exportSuccess: '{count}개의 리뷰를보냈습니다',
     exportFailed: '보내기에 실패했습니다',
+    exportTruncated: '일치하는 리뷰 {total}개 중 처음 {count}개를보냈습니다(보내기 상한 적용)',
     searchPlaceholder: 'MR 제목, 작성자, 브랜치 검색…',
     empty: '리뷰를 찾을 수 없습니다',
     untitledReview: '제목 없는 리뷰',

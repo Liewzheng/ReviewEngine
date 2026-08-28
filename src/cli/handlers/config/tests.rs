@@ -96,6 +96,16 @@ fn patch_full() -> ProviderPatch {
     }
 }
 
+/// Drain the test-only stderr capture buffer (`provider::STDERR_CAPTURE`),
+/// which `warn_stderr` records into alongside `eprintln!`.
+fn take_captured_stderr() -> Vec<String> {
+    STDERR_CAPTURE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .drain(..)
+        .collect()
+}
+
 // ─── 1. set creates a new project file ─────────────────────────────
 
 #[test]
@@ -448,4 +458,216 @@ async fn test_unknown_provider_errors_without_probing() {
     let err = run_test("ghost", false, false).await.unwrap_err();
     assert!(err.to_string().contains("\"ghost\""), "got: {err}");
     assert!(err.to_string().contains("not found"), "got: {err}");
+}
+
+// ─── 8. unknown provider + empty api_base fails fast, no probe ─────
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_unknown_provider_empty_api_base_fails_fast_without_probing() {
+    let _lock = fs_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(&tmp.path().join("home"));
+    let _cwd = CwdGuard::set(tmp.path());
+    let _env = EnvGuard::unset("LLM_CONFIG");
+
+    // The classic misconfiguration: `set mimo --api-key sk-real` with no
+    // --api-base. The stored key must NOT be silently sent to
+    // api.openai.com — the test must fail fast, before any network call.
+    run_set(
+        "mimo",
+        ProviderPatch {
+            model: Some("mimo-v1".to_string()),
+            api_key: Some("sk-real".to_string()),
+            ..ProviderPatch::default()
+        },
+        false,
+        false,
+    )
+    .unwrap();
+
+    let err = run_test("mimo", false, false).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("api_base is required for provider \"mimo\" (no well-known default)"),
+        "got: {msg}"
+    );
+    // The error is the fail-fast resolution error itself — no connectivity
+    // wrapper, proving no probe was ever attempted.
+    assert!(
+        !msg.contains("connectivity test failed"),
+        "no request may be made for an unknown provider, got: {msg}"
+    );
+}
+
+// ─── 9. known provider + empty api_base uses the well-known default ─
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_known_provider_empty_api_base_surfaces_resolved_default() {
+    let _lock = fs_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(&tmp.path().join("home"));
+    let _cwd = CwdGuard::set(tmp.path());
+    let _env = EnvGuard::unset("LLM_CONFIG");
+
+    run_set(
+        "openai",
+        ProviderPatch {
+            model: Some("gpt-4o".to_string()),
+            api_key: Some("sk-test-123".to_string()),
+            ..ProviderPatch::default()
+        },
+        false,
+        false,
+    )
+    .unwrap();
+
+    // Bogus key against the real OpenAI default: HTTP 401 with network, a
+    // transport error without — either way the probe IS attempted and the
+    // resolved default URL must surface in the failure output.
+    let err = run_test("openai", false, false).await.unwrap_err();
+    let msg = format!("{err:#}");
+    assert!(msg.contains("connectivity test failed"), "got: {msg}");
+    assert!(
+        msg.contains("https://api.openai.com/v1"),
+        "the resolved well-known default must be visible in the failure, got: {msg}"
+    );
+}
+
+// ─── 10. malformed project TOML warns on stderr, user row listed ────
+
+#[test]
+fn list_warns_on_malformed_project_toml_and_shows_user_row() {
+    let _lock = fs_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(&tmp.path().join("home"));
+    let _cwd = CwdGuard::set(tmp.path());
+    let _env = EnvGuard::unset("LLM_CONFIG");
+
+    // Malformed project file (written directly — `set` would refuse it).
+    let project_path = tmp.path().join(".code-audit-config.toml");
+    std::fs::write(&project_path, "this is not = = valid toml").unwrap();
+
+    // A valid user-level entry that must win the fallback.
+    let user_dir = tmp.path().join("home").join(".config").join("review-engine");
+    std::fs::create_dir_all(&user_dir).unwrap();
+    std::fs::write(
+        user_dir.join(".code-audit-config.toml"),
+        "[[llm]]\nprovider = \"user-prov\"\nmodel = \"m\"\napi_key = \"sk-user-secret\"\napi_base = \"https://u\"\n",
+    )
+    .unwrap();
+
+    let _ = take_captured_stderr();
+    let entries = resolved_providers().unwrap();
+
+    // The malformed project file fell back to the user-level entry…
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].source, Source::User);
+    let out = render_provider_table(&entries);
+    assert!(out.contains("user-prov"), "got:\n{out}");
+    assert!(out.contains("[user]"), "got:\n{out}");
+
+    // …and the fallback was announced on stderr, naming the file.
+    let captured = take_captured_stderr().join("\n");
+    assert!(
+        captured.contains(&project_path.display().to_string()),
+        "the warning must name the malformed file, got:\n{captured}"
+    );
+    assert!(
+        captured.contains("treating its provider list as empty"),
+        "got:\n{captured}"
+    );
+}
+
+// ─── 11. config files holding keys are 0600 on unix ─────────────────
+
+#[cfg(unix)]
+#[test]
+fn set_tightens_config_file_permissions_to_0600_on_create_and_update() {
+    let _lock = fs_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(&tmp.path().join("home"));
+    let _cwd = CwdGuard::set(tmp.path());
+    let _env = EnvGuard::unset("LLM_CONFIG");
+
+    use std::os::unix::fs::PermissionsExt;
+    let path = tmp.path().join(".code-audit-config.toml");
+
+    // Create: even under a permissive umask the file must end up 0600.
+    run_set("openai", patch_full(), false, false).unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o600, "newly created config file must be 0600, got {mode:#o}");
+
+    // Update of an existing 0644 file containing key material tightens it.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    run_set(
+        "openai",
+        ProviderPatch {
+            model: Some("gpt-4o-mini".to_string()),
+            ..ProviderPatch::default()
+        },
+        false,
+        false,
+    )
+    .unwrap();
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(
+        mode, 0o600,
+        "updating a 0644 config file must tighten it to 0600, got {mode:#o}"
+    );
+}
+
+// ─── 12. cleartext http:// non-localhost warns but still probes ─────
+
+#[test]
+fn cleartext_key_warning_predicate_loopback_vs_remote() {
+    assert!(cleartext_key_warning("https://api.openai.com/v1").is_none());
+    assert!(cleartext_key_warning("http://localhost:11434").is_none());
+    assert!(cleartext_key_warning("http://127.0.0.1:8080").is_none());
+    assert!(cleartext_key_warning("http://[::1]:8080").is_none());
+    assert!(cleartext_key_warning("http://foo.localhost:8000").is_none());
+    assert!(cleartext_key_warning("http://192.168.1.10:8000").is_some());
+    assert!(cleartext_key_warning("http://llm.internal:8000").is_some());
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_cleartext_http_non_loopback_warns_and_still_probes() {
+    let _lock = fs_lock();
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(&tmp.path().join("home"));
+    let _cwd = CwdGuard::set(tmp.path());
+    let _env = EnvGuard::unset("LLM_CONFIG");
+
+    run_set(
+        "custom",
+        ProviderPatch {
+            // Port 1 on a public DNS name: refused fast with or without
+            // network, and unambiguously a non-loopback cleartext target.
+            api_base: Some("http://example.com:1".to_string()),
+            api_key: Some("sk-test-123".to_string()),
+            ..ProviderPatch::default()
+        },
+        false,
+        false,
+    )
+    .unwrap();
+
+    let _ = take_captured_stderr();
+    let err = run_test("custom", false, false).await.unwrap_err();
+
+    // The cleartext warning reached stderr, naming the URL…
+    let captured = take_captured_stderr().join("\n");
+    assert!(
+        captured.contains("cleartext HTTP"),
+        "the cleartext-key warning must reach stderr, got:\n{captured}"
+    );
+    assert!(captured.contains("http://example.com:1"), "got:\n{captured}");
+
+    // …and the probe was still attempted: the failure is a connectivity
+    // error against that URL, not the api_base-required fail-fast.
+    let msg = format!("{err:#}");
+    assert!(msg.contains("connectivity test failed"), "got: {msg}");
+    assert!(msg.contains("http://example.com:1"), "got: {msg}");
 }

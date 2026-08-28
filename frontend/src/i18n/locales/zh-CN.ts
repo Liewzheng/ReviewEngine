@@ -150,6 +150,7 @@ export default {
     exportEmptyTooltip: '当前筛选结果为空，没有可导出的评审记录',
     exportSuccess: '已导出 {count} 条评审记录',
     exportFailed: '导出失败',
+    exportTruncated: '已导出前 {count} 条评审记录（共 {total} 条匹配，已达导出上限）',
     searchPlaceholder: '搜索 MR 标题、作者、分支…',
     empty: '未找到评审',
     untitledReview: '未命名评审',

@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.9.41] - 2026-08-28
+
+### Fixed
+- **`reng config provider test` could silently send the stored API key to api.openai.com**: when `api_base` was empty, the connectivity probe fell back by provider name with a catch-all `_ => https://api.openai.com/v1` for every unknown provider. The catch-all is deleted — unknown providers with empty `api_base` now fail fast with `api_base is required for provider "<name>" (no well-known default)` before any request is made (known openai/anthropic/ollama defaults unchanged). Both success and failure output now show the resolved base URL (`is reachable via <url>`, `failed (via <url>)`); the two server test endpoints gain an additive `resolvedApiBase` JSON field. Additionally, probing a non-localhost `http://` base now warns on stderr that the key travels unencrypted. (`src/llm/probe.rs`, `src/cli/handlers/config/provider.rs`, `src/server/api/llm.rs`, `src/server/api/config/helpers.rs`)
+- **Malformed project TOML made `config provider list` silently fall back**: the parse warning went to tracing (ring buffer + logs.ndjson), invisible on the terminal, while the `review` path prints its fallback warning via `eprintln!`. The CLI provider module now warns on stderr naming the file and the treat-as-empty behavior, covering `list`, the resolved chain, and `test`. (`src/cli/handlers/config/provider.rs`)
+- **Config files written by `config provider set/remove` had umask permissions (typically 0644)**: any write (create or update) now tightens the file to 0600 on unix — it can hold plaintext API keys. (`src/cli/handlers/config/provider.rs`)
+- **History「导出评审」silently truncated at 100 rows**: the export requested `per_page=10000` but the server caps at 100, so >100 matching rows produced a 100-row file while the toast claimed success. The export now paginates (100/page) until the filtered set is fully collected, up to a 10 000-row ceiling; when the ceiling cuts, the JSON carries `truncated: true` + a note and the toast uses the new `history.exportTruncated` message (6 locales). Failure mid-export emits no partial file. (`frontend/src/views/ReviewHistory.vue`, `frontend/src/i18n/locales/*`)
+
+All four defects were found by a dual-agent boundary audit of the v12 test-case document (see `reports/test-cases/frontend-test-cases-v13-edge-cases-hardening-2026-08-28.xlsx` for the full gap list and regression rows).
+
 ## [0.9.40] - 2026-08-27
 
 ### Added

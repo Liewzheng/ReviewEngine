@@ -154,6 +154,7 @@ export default {
     exportEmptyTooltip: 'Aucune revue ne correspond aux filtres actuels',
     exportSuccess: '{count} revues exportées',
     exportFailed: "Échec de l'export",
+    exportTruncated: "Export des {count} premières revues sur {total} correspondantes (limite d'export atteinte)",
     searchPlaceholder: 'Rechercher par titre de MR, auteur, branche…',
     empty: 'Aucune revue trouvée',
     untitledReview: 'Revue sans titre',

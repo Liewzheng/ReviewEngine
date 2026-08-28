@@ -28,15 +28,20 @@ pub async fn test_config(Json(body): Json<TestConfigRequest>) -> impl axum::resp
     let result = crate::llm::probe::probe_llm_connectivity(&cfg).await;
     let latency_ms = start.elapsed().as_millis() as u64;
 
-    let (success, error) = match result {
-        Ok(_) => (true, None::<String>),
-        Err(e) => (false, Some(e.to_string())),
+    let (success, error, resolved_base) = match result {
+        Ok(outcome) => (true, None::<String>, Some(outcome.resolved_base)),
+        Err(e) => (
+            false,
+            Some(e.to_string()),
+            crate::llm::probe::resolve_api_base(&cfg).ok(),
+        ),
     };
 
     Json(serde_json::json!({
         "success": success,
         "latencyMs": latency_ms,
         "error": error,
+        "resolvedApiBase": resolved_base,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
     .into_response()

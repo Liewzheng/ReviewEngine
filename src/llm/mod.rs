@@ -9,6 +9,7 @@
 //! resolves which LLM configuration to use for a given expert.
 
 pub mod client;
+pub mod probe;
 pub mod provider;
 pub mod rate_limiter;
 

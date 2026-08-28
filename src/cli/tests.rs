@@ -101,7 +101,9 @@ fn serve_tls_requires_both_cert_and_key() {
 fn validate_accepts_config_path() {
     let cli = parse_ok(&["validate", "--config", "/tmp/.code-audit-config.toml"]);
     match cli.command {
-        Some(Commands::Validate { config }) => assert_eq!(config.as_deref(), Some("/tmp/.code-audit-config.toml")),
+        Some(Commands::Validate { config }) => {
+            assert_eq!(config.as_deref(), Some("/tmp/.code-audit-config.toml"))
+        }
         other => panic!("expected Validate, got {other:?}"),
     }
 }
@@ -218,4 +220,141 @@ async fn spawn_progress_if_needed_toggles_on_cli_progress() {
     // Give the spawned display task a tick so it does not leak a pending
     // task past the test.
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+}
+
+#[cfg(test)]
+mod config_provider_parse {
+    use super::super::commands::{Cli, Commands, ConfigNoun, ProviderAction};
+    use super::{parse, parse_ok};
+
+    #[test]
+    fn config_provider_set_parses_all_options() {
+        let cli = parse_ok(&[
+            "config",
+            "provider",
+            "set",
+            "openai",
+            "--model",
+            "gpt-4o",
+            "--api-base",
+            "https://api.openai.com/v1",
+            "--api-key",
+            "sk-x",
+            "--max-tokens",
+            "8192",
+            "--temperature",
+            "0.7",
+            "--disable-thinking",
+            "--global",
+        ]);
+        match cli.command {
+            Some(Commands::Config {
+                noun:
+                    ConfigNoun::Provider {
+                        action:
+                            ProviderAction::Set {
+                                name,
+                                model,
+                                api_base,
+                                api_key,
+                                max_tokens,
+                                temperature,
+                                disable_thinking,
+                                global,
+                                project,
+                            },
+                    },
+            }) => {
+                assert_eq!(name, "openai");
+                assert_eq!(model.as_deref(), Some("gpt-4o"));
+                assert_eq!(api_base.as_deref(), Some("https://api.openai.com/v1"));
+                assert_eq!(api_key.as_deref(), Some("sk-x"));
+                assert_eq!(max_tokens, Some(8192));
+                assert_eq!(temperature, Some(0.7));
+                assert!(disable_thinking);
+                assert!(global);
+                assert!(!project);
+            }
+            other => panic!("expected Config provider Set, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_provider_list_remove_test_parse() {
+        let cli = parse_ok(&["config", "provider", "list"]);
+        match cli.command {
+            Some(Commands::Config {
+                noun:
+                    ConfigNoun::Provider {
+                        action: ProviderAction::List { global, project },
+                    },
+            }) => {
+                assert!(!global);
+                assert!(!project);
+            }
+            other => panic!("expected Config provider List, got {other:?}"),
+        }
+
+        let cli = parse_ok(&["config", "provider", "remove", "openai", "--project"]);
+        match cli.command {
+            Some(Commands::Config {
+                noun:
+                    ConfigNoun::Provider {
+                        action: ProviderAction::Remove { name, global, project },
+                    },
+            }) => {
+                assert_eq!(name, "openai");
+                assert!(!global);
+                assert!(project);
+            }
+            other => panic!("expected Config provider Remove, got {other:?}"),
+        }
+
+        let cli = parse_ok(&["config", "provider", "test", "openai"]);
+        match cli.command {
+            Some(Commands::Config {
+                noun:
+                    ConfigNoun::Provider {
+                        action: ProviderAction::Test { name, .. },
+                    },
+            }) => assert_eq!(name, "openai"),
+            other => panic!("expected Config provider Test, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn config_provider_scope_flags_are_mutually_exclusive() {
+        assert!(parse(&["config", "provider", "list", "--global", "--project"]).is_err());
+        assert!(parse(&["config", "provider", "set", "x", "--global", "--project"]).is_err());
+        assert!(parse(&["config", "provider", "remove", "x", "--global", "--project"]).is_err());
+        assert!(parse(&["config", "provider", "test", "x", "--global", "--project"]).is_err());
+    }
+
+    #[test]
+    fn config_provider_set_requires_name() {
+        assert!(parse(&["config", "provider", "set"]).is_err());
+        assert!(parse(&["config", "provider"]).is_err());
+        let cli: Cli = parse_ok(&["config", "provider", "set", "openai"]);
+        match cli.command {
+            Some(Commands::Config {
+                noun:
+                    ConfigNoun::Provider {
+                        action:
+                            ProviderAction::Set {
+                                name,
+                                model,
+                                api_key,
+                                disable_thinking,
+                                ..
+                            },
+                    },
+            }) => {
+                assert_eq!(name, "openai");
+                assert_eq!(model, None);
+                assert_eq!(api_key, None);
+                assert!(!disable_thinking);
+            }
+            other => panic!("expected Config provider Set, got {other:?}"),
+        }
+    }
 }

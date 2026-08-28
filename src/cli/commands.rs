@@ -433,4 +433,124 @@ pub enum Commands {
         #[arg(long)]
         rollback: bool,
     },
+
+    /// View and edit review-engine configuration (git-config-like)
+    Config {
+        #[command(subcommand)]
+        noun: ConfigNoun,
+    },
+}
+
+/// Top-level nouns for `reng config`.
+#[derive(Subcommand, Debug)]
+pub enum ConfigNoun {
+    /// Manage LLM providers (the `[[llm]]` entries) in config files
+    Provider {
+        #[command(subcommand)]
+        action: ProviderAction,
+    },
+}
+
+/// Actions for `reng config provider`.
+///
+/// Scope semantics mirror `git config`: the default scope for `set`/`remove`
+/// is the project file `.code-audit-config.toml` in the current directory;
+/// `--global` targets the user-level file
+/// `~/.config/review-engine/.code-audit-config.toml`; `--project` selects the
+/// project file explicitly (useful in scripts) and conflicts with `--global`.
+#[derive(Subcommand, Debug)]
+pub enum ProviderAction {
+    /// List configured providers.
+    ///
+    /// Without a scope flag, shows the RESOLVED effective provider list —
+    /// the same resolution the review path uses (project `[[llm]]` →
+    /// user-level fallback → `LLM_CONFIG` env) — with each entry annotated
+    /// by source (`[project]` / `[user]` / `[env]`). With `--global` or
+    /// `--project`, shows only that file's raw `[[llm]]` entries. API keys
+    /// are always masked.
+    List {
+        /// Show only the user-level config file
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+
+        /// Show only the project config file (.code-audit-config.toml in cwd)
+        #[arg(long)]
+        project: bool,
+    },
+
+    /// Add a new provider or update an existing one (matched by name).
+    ///
+    /// Only the fields explicitly passed are changed; an omitted `--api-key`
+    /// KEEPS the stored key (blank = keep, same semantic as the web UI). For
+    /// a new entry, omitted options fall back to the LLMConfig defaults and
+    /// an omitted `--api-key` is stored as an empty string with a warning.
+    Set {
+        /// Provider name (e.g. "openai", "anthropic", "ollama", "deepseek")
+        name: String,
+
+        /// Model identifier (e.g. "gpt-4o", "claude-3-opus")
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Base URL for the provider API (e.g. "https://api.openai.com/v1")
+        #[arg(long)]
+        api_base: Option<String>,
+
+        /// API key / authentication token (omit to keep the stored key)
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Maximum number of tokens in the LLM response
+        #[arg(long)]
+        max_tokens: Option<u32>,
+
+        /// Sampling temperature (0.0–1.0; lower = more deterministic)
+        #[arg(long)]
+        temperature: Option<f32>,
+
+        /// Disable chain-of-thought reasoning (sends "thinking": {"type": "disabled"})
+        #[arg(long)]
+        disable_thinking: bool,
+
+        /// Write to the user-level config file (~/.config/review-engine)
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+
+        /// Write to the project config file explicitly (this is the default)
+        #[arg(long)]
+        project: bool,
+    },
+
+    /// Remove a provider entry (matched by name) from the chosen scope file
+    Remove {
+        /// Provider name to remove
+        name: String,
+
+        /// Remove from the user-level config file (~/.config/review-engine)
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+
+        /// Remove from the project config file explicitly (this is the default)
+        #[arg(long)]
+        project: bool,
+    },
+
+    /// Probe a provider's connectivity with its stored API key.
+    ///
+    /// Without a scope flag the entry is resolved through the chain
+    /// project → user → env; with `--global`/`--project` only that file is
+    /// searched. Prints the probe latency on success; exits non-zero on
+    /// failure so scripts can rely on it.
+    Test {
+        /// Provider name to test
+        name: String,
+
+        /// Test the entry from the user-level config file only
+        #[arg(long, conflicts_with = "project")]
+        global: bool,
+
+        /// Test the entry from the project config file only
+        #[arg(long)]
+        project: bool,
+    },
 }

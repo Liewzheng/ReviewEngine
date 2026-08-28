@@ -285,6 +285,24 @@ impl Default for RiskThresholdConfig {
     }
 }
 
+/// Sentinel masking a configured secret whenever configuration is echoed
+/// back to a user (server `GET /config`, CLI `config provider list/set`).
+/// An empty secret echoes as `""`, so the mask also means "leave unchanged"
+/// on write (see the server `put_config` pipeline and the CLI's blank=keep
+/// `--api-key` semantics).
+pub const API_KEY_MASK: &str = "***";
+
+/// Project a secret for display: the [`API_KEY_MASK`] sentinel when set, an
+/// empty string when unset. Never returns the live secret, so it is safe to
+/// use for any output a user (or log) may see.
+pub fn mask_api_key(secret: &str) -> String {
+    if secret.is_empty() {
+        String::new()
+    } else {
+        API_KEY_MASK.to_string()
+    }
+}
+
 /// Configuration for a single LLM provider connection.
 ///
 /// Multiple `LLMConfig` entries can be specified in config under `[[llm]]`;
@@ -495,10 +513,16 @@ fn default_score_samples() -> usize {
     1
 }
 
-fn default_max_tokens() -> u32 {
+/// Serde default for [`LLMConfig::max_tokens`]; also the fallback the CLI
+/// `config provider set` writes for a new entry when `--max-tokens` is
+/// omitted.
+pub fn default_max_tokens() -> u32 {
     4096
 }
-fn default_temperature() -> f32 {
+/// Serde default for [`LLMConfig::temperature`]; also the fallback the CLI
+/// `config provider set` writes for a new entry when `--temperature` is
+/// omitted.
+pub fn default_temperature() -> f32 {
     0.3
 }
 

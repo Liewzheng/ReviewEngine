@@ -17,6 +17,7 @@ pub mod upgrade_install;
 
 pub use ask::{run_ask, run_ask_local_diff, run_ask_local_repo, run_ask_stdin};
 pub use changelog::run_update_changelog;
+pub use config::provider::run as run_config_provider;
 pub use config::watch_config_file;
 pub use describe::{run_describe, run_describe_local_diff, run_describe_local_repo};
 pub use improve::{run_improve, run_improve_local_diff, run_improve_local_repo};

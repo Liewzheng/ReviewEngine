@@ -1,3 +1,10 @@
+//! Config-related CLI handlers: the `serve` config-file watcher below, and
+//! the `reng config provider` subcommand family in [`provider`].
+
+pub mod provider;
+#[cfg(test)]
+mod tests;
+
 /// Watch a config file for changes and log a warning when modified.
 /// This allows users to restart the app to pick up changes.
 pub async fn watch_config_file(path: std::path::PathBuf) {

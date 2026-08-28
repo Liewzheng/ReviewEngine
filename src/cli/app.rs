@@ -626,6 +626,11 @@ pub async fn run() -> Result<()> {
         } => {
             handlers::run_upgrade(check, yes, version.as_deref(), rollback).await?;
         }
+        Commands::Config { noun } => match noun {
+            super::commands::ConfigNoun::Provider { action } => {
+                handlers::run_config_provider(action).await?;
+            }
+        },
     }
 
     // Give the progress bar display task one last polling cycle (500 ms) so

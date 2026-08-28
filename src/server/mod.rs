@@ -495,7 +495,11 @@ pub async fn serve(
                 let std_listener = tls_listener
                     .into_std()
                     .with_context(|| format!("failed to adopt TLS listener on {tls_addr}"))?;
+                // axum-server 0.8: `from_tcp_rustls` is fallible (the std →
+                // tokio listener conversion can fail) and returns
+                // `io::Result<Server<_>>`.
                 axum_server::tls_rustls::from_tcp_rustls(std_listener, rustls_config)
+                    .with_context(|| format!("failed to initialize TLS server on {tls_addr}"))?
                     .serve(app.into_make_service())
                     .await
                     .with_context(|| format!("server on {tls_addr} terminated unexpectedly"))

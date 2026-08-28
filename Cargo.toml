@@ -1,6 +1,6 @@
 [package]
 name = "review-engine"
-version = "0.9.41"
+version = "0.9.42"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -25,7 +25,9 @@ axum = "0.8"
 # HTTPS (TLS) listener for `serve`; rustls-backed. Use the "no-provider"
 # variant: plain `tls-rustls` enables `rustls/aws-lc-rs` and drags aws-lc-sys
 # into the tree even though the whole project runs on the ring backend.
-axum-server = { version = "0.7", features = ["tls-rustls-no-provider"] }
+# 0.8 replaces the unmaintained `rustls-pemfile` with `rustls-pki-types`
+# `PemObject` (RUSTSEC-2025-0134).
+axum-server = { version = "0.8", features = ["tls-rustls-no-provider"] }
 # rustls CryptoProvider: only the ring backend is compiled in (this dep plus
 # reqwest's `rustls-tls`), so rustls auto-selects it; `server::serve` also
 # installs it explicitly (idempotent) to keep the TLS accept loop deterministic.

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.42] - 2026-08-28
+
+### Security
+- **RUSTSEC-2025-0134 (closes #121)**: upgraded `axum-server` 0.7 → 0.8, which migrated off the unmaintained `rustls-pemfile` onto `rustls-pki-types`' `PemObject` PEM parsing — `rustls-pemfile` is fully out of the dependency tree (`cargo tree -i` confirms zero references). The only API adaptation: `tls_rustls::from_tcp_rustls` now returns `io::Result`. TLS semantics (cert/key paths, ports, ALPN h2+http/1.1, ring backend, HTTP/HTTPS coexistence) unchanged; the TLS integration test (`tls_https_serves_health_and_http_coexists`) exercises the new path end-to-end. (`Cargo.toml`, `src/server/mod.rs`)
+
 ## [0.9.41] - 2026-08-28
 
 ### Fixed

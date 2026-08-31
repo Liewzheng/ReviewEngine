@@ -125,15 +125,7 @@
           <el-form-item prop="webhookSecret">
             <template #label>
               {{ $t('config.gitPlatforms.webhookSecret') }}
-              <el-tooltip :content="$t('config.gitPlatforms.webhookSecretHelp')" placement="top">
-                <el-icon
-                  class="help-icon"
-                  tabindex="0"
-                  :aria-label="$t('config.gitPlatforms.webhookSecretHelp')"
-                >
-                  <InfoFilled />
-                </el-icon>
-              </el-tooltip>
+              <HelpTip :tip="$t('config.gitPlatforms.webhookSecretHelp')" />
             </template>
             <el-input
               v-model="draft.webhookSecret"
@@ -152,18 +144,7 @@
           <el-form-item prop="webhookSigningSecret">
             <template #label>
               {{ $t('config.gitPlatforms.webhookSigningSecret') }}
-              <el-tooltip
-                :content="$t('config.gitPlatforms.webhookSigningSecretHelp')"
-                placement="top"
-              >
-                <el-icon
-                  class="help-icon"
-                  tabindex="0"
-                  :aria-label="$t('config.gitPlatforms.webhookSigningSecretHelp')"
-                >
-                  <InfoFilled />
-                </el-icon>
-              </el-tooltip>
+              <HelpTip :tip="$t('config.gitPlatforms.webhookSigningSecretHelp')" />
             </template>
             <el-input
               v-model="draft.webhookSigningSecret"
@@ -191,10 +172,17 @@
 </template>
 
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue';
+import { computed, h, reactive, ref, type FunctionalComponent } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Connection, Delete, InfoFilled, Plus } from '@element-plus/icons-vue';
-import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
+import {
+  ElIcon,
+  ElMessage,
+  ElMessageBox,
+  ElTooltip,
+  type FormInstance,
+  type FormRules,
+} from 'element-plus';
 import type { GitPlatformConfig } from '../../types/config';
 import { testGitPlatform } from '../../services/config';
 
@@ -235,20 +223,46 @@ const draft = reactive<GitPlatformConfig>({
 /** Placeholder shown for a secret that already has a stored value. */
 const SAVED_SECRET_PLACEHOLDER = '••••••••••';
 
-// GET /config masks saved secrets as the literal string '***' (unsaved = '').
+/** 与后端 API_KEY_MASK（src/server/api/config/types.rs）的契约：已保存密钥以掩码返回 */
+const SECRET_MASK = '***';
+
+// GET /config masks saved secrets as the SECRET_MASK literal (unsaved = '').
 // openEditDialog blanks the draft but keeps the masked value in
-// props.platforms[editingIndex], so '***' there means "this field is stored".
+// props.platforms[editingIndex], so SECRET_MASK there means "this field is stored".
+const hasSavedSecret = (field: string | undefined) => field === SECRET_MASK;
+
 const hasSavedToken = computed(
-  () => dialogMode.value === 'edit' && props.platforms[editingIndex.value]?.token === '***'
+  () => dialogMode.value === 'edit' && hasSavedSecret(props.platforms[editingIndex.value]?.token)
 );
 const hasSavedWebhookSecret = computed(
-  () => dialogMode.value === 'edit' && props.platforms[editingIndex.value]?.webhookSecret === '***'
+  () =>
+    dialogMode.value === 'edit' &&
+    hasSavedSecret(props.platforms[editingIndex.value]?.webhookSecret)
 );
 const hasSavedWebhookSigningSecret = computed(
   () =>
     dialogMode.value === 'edit' &&
-    props.platforms[editingIndex.value]?.webhookSigningSecret === '***'
+    hasSavedSecret(props.platforms[editingIndex.value]?.webhookSigningSecret)
 );
+
+/**
+ * ⓘ help tooltip shown next to a form label. Focusable (tabindex=0) and
+ * triggered by both hover and focus, so keyboard users can reveal it too.
+ */
+const HelpTip: FunctionalComponent<{ tip: string }> = (props) =>
+  h(
+    ElTooltip,
+    { content: props.tip, placement: 'top', trigger: ['hover', 'focus'] },
+    {
+      default: () =>
+        h(
+          ElIcon,
+          { class: 'help-icon', tabindex: 0, 'aria-label': props.tip },
+          { default: () => h(InfoFilled) }
+        ),
+    }
+  );
+HelpTip.props = ['tip'];
 
 // --- Test state ---
 /** Row whose connectivity probe is in flight (null when idle). */

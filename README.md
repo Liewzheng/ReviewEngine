@@ -271,6 +271,16 @@ ReviewEngine ships with a `Dockerfile` and `docker-compose.yml` for containerize
 
 3. Open the web UI at `http://localhost:18080` (or the port you configured).
 
+> **加速拉取（中国大陆用户）/ Faster pulls from mainland China:** direct access to `ghcr.io` from mainland China is extremely slow (measured ~9 KB/s, effectively unusable). Use the Nanjing University open-source mirror instead — it is a transparent proxy of the same image (manifest digest verified byte-identical to `ghcr.io`), measured at ~5 MB/s:
+>
+> ```bash
+> docker pull ghcr.nju.edu.cn/liewzheng/review-engine:latest
+> # Tag it back to the original name, since the compose file references ghcr.io/...
+> docker tag ghcr.nju.edu.cn/liewzheng/review-engine:latest ghcr.io/liewzheng/review-engine:latest
+> ```
+>
+> Public mirror availability changes over time; if this one stops working, check the 1Panel container-mirror monitor (<https://status.1panel.top/>) or search for "容器镜像加速器监控" to find a currently available source.
+
 The image also ships a `reng` symlink next to the `review-engine` binary, so
 commands run inside the container can use the same short alias
 (`docker compose exec <service> reng --version`).

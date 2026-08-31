@@ -73,6 +73,25 @@ curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/insta
 
 > If `~/.local/bin` is not in your `PATH`, add `export PATH="$HOME/.local/bin:$PATH"` to your shell profile.
 
+### Docker（含国内加速）
+
+A multi-architecture (amd64/arm64) image is published to GHCR on every release:
+
+```bash
+docker pull ghcr.io/liewzheng/review-engine:latest
+```
+
+For a compose-based standalone deployment, see [`deploy/standalone-compose.yml`](../deploy/standalone-compose.yml) — it runs from a single file plus this image, no `git clone` required.
+
+**Mainland China users:** direct access to `ghcr.io` is extremely slow (measured ~9 KB/s). Use the Nanjing University open-source mirror — a transparent proxy of the same image (manifest digest verified byte-identical to `ghcr.io`), measured at ~5 MB/s — then tag it back to the original name so compose files that reference `ghcr.io/...` work unchanged:
+
+```bash
+docker pull ghcr.nju.edu.cn/liewzheng/review-engine:latest
+docker tag ghcr.nju.edu.cn/liewzheng/review-engine:latest ghcr.io/liewzheng/review-engine:latest
+```
+
+Public mirror availability changes over time; if this source stops working, check the 1Panel container-mirror monitor (<https://status.1panel.top/>) or search for "容器镜像加速器监控" to find a currently available source.
+
 ---
 
 ## Configure your LLM provider

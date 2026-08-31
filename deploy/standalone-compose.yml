@@ -4,6 +4,13 @@
 # 用法(只需要这一个文件 + 一条 pull 命令,不需要 git clone 整个仓库):
 #
 #   1) docker pull ghcr.io/liewzheng/review-engine:latest
+#      (中国大陆用户:直连 ghcr.io 实测约 9 KB/s 基本不可用,可改用南京大学
+#       开源镜像站(透明代理,manifest digest 与 ghcr.io 逐字节一致,实测约
+#       5 MB/s),拉取后 tag 回原名即可,下方 image: 行无需改动:
+#         docker pull ghcr.nju.edu.cn/liewzheng/review-engine:latest
+#         docker tag ghcr.nju.edu.cn/liewzheng/review-engine:latest ghcr.io/liewzheng/review-engine:latest
+#       公共加速源可用性会变化,若失效可查 1Panel 容器镜像加速器监控
+#       (https://status.1panel.top/)或搜索"容器镜像加速器监控"找当前可用源)
 #   2) 复制本文件到部署目录(如 ~/review-engine/docker-compose.yml),cd 过去:
 #        cd ~/review-engine
 #   3) (可选)首次启动前设置一次性引导 key —— 容器绑 0.0.0.0(非 loopback),

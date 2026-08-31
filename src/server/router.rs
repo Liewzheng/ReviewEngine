@@ -211,7 +211,137 @@ mod tests {
         }
     }
 
-    /// Path → Cache-Control decision table behind `static_cache_control`.
+    /// Regression tests for the unconditional `/webhook/gitlab` mount: the
+    /// route no longer depends on a startup env secret — per-instance webhook
+    /// secrets hot-configured via the UI「Git 平台」(`state.git_platforms`)
+    /// take effect immediately, and with no verification configured anywhere
+    /// the handler rejects with 403 instead of the request falling through to
+    /// the static-file fallback (405).
+    mod gitlab_hot_mount {
+        use super::*;
+        use crate::server::dispatcher::MrDispatcher;
+        use crate::server::gitlab::{gitlab_runtime, GitLabRuntimeConfig, GitLabWebhookHandler, RUNTIME_TEST_LOCK};
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        /// Save/reset/restore the global GitLab runtime so a runtime
+        /// initialised by another test in this process can't shadow the
+        /// handler's (deliberately empty) startup secrets.
+        struct EmptyRuntimeGuard(GitLabRuntimeConfig);
+
+        impl EmptyRuntimeGuard {
+            fn new() -> Self {
+                let saved = gitlab_runtime().read().unwrap().clone();
+                *gitlab_runtime().write().unwrap() = GitLabRuntimeConfig {
+                    webhook_secret: String::new(),
+                    signing_secret: None,
+                    signing_key: None,
+                    token: String::new(),
+                };
+                Self(saved)
+            }
+        }
+
+        impl Drop for EmptyRuntimeGuard {
+            fn drop(&mut self) {
+                *gitlab_runtime().write().unwrap() = self.0.clone();
+            }
+        }
+
+        /// Build the full router with a GitLab handler carrying the given
+        /// startup legacy secret and POST a webhook body to it.
+        async fn post_webhook(
+            state: Arc<AppState>,
+            startup_secret: &str,
+            headers: &[(&str, &str)],
+            body: &str,
+        ) -> (StatusCode, serde_json::Value) {
+            let handler: Arc<dyn WebhookHandler> = Arc::new(
+                GitLabWebhookHandler::new(startup_secret.to_string(), None, MrDispatcher::new(), String::new())
+                    .with_app_state(&state),
+            );
+            let app = build(state, Arc::new(AuthConfig::default()), vec![handler]);
+            let mut builder = Request::builder().method("POST").uri("/webhook/gitlab");
+            for (k, v) in headers {
+                builder = builder.header(*k, *v);
+            }
+            let resp = app
+                .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+                .await
+                .unwrap();
+            let status = resp.status();
+            let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+            (status, serde_json::from_slice(&bytes).unwrap())
+        }
+
+        #[tokio::test]
+        async fn mounted_without_startup_secret_reaches_handler_and_rejects_403() {
+            let _lock = RUNTIME_TEST_LOCK.lock().await;
+            let _guard = EmptyRuntimeGuard::new();
+            let state = Arc::new(AppState::new(vec![]));
+            // No startup secret and no hot-configured platform: the request
+            // must reach the handler and be rejected 403 — before the fix the
+            // route was never mounted and the static fallback answered 405.
+            let (status, body) = post_webhook(state, "", &[], "{}").await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+            assert_eq!(body["error"], "no verification configured");
+        }
+
+        /// With a startup legacy secret configured, the mounted route must
+        /// verify `X-Gitlab-Token` against it — the pre-existing behavior the
+        /// unconditional mount must not regress.
+        #[tokio::test]
+        async fn startup_legacy_secret_verifies_token() {
+            let _lock = RUNTIME_TEST_LOCK.lock().await;
+            let _guard = EmptyRuntimeGuard::new();
+            let state = Arc::new(AppState::new(vec![]));
+            let body = r#"{"project":{"web_url":"http://gitlab.internal:8929/group/proj"}}"#;
+
+            let (status, _) = post_webhook(
+                state.clone(),
+                "startup-secret",
+                &[("X-Gitlab-Token", "wrong-secret")],
+                body,
+            )
+            .await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+
+            let (status, resp_body) =
+                post_webhook(state, "startup-secret", &[("X-Gitlab-Token", "startup-secret")], body).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(resp_body["status"], "ignored");
+        }
+
+        #[tokio::test]
+        async fn hot_configured_platform_secret_verifies_immediately() {
+            let _lock = RUNTIME_TEST_LOCK.lock().await;
+            let _guard = EmptyRuntimeGuard::new();
+            let state = Arc::new(AppState::new(vec![]));
+            // Hot-write a platform with a webhook secret AFTER the handler was
+            // constructed with empty startup secrets — no restart involved.
+            *state.git_platforms.write().unwrap() = vec![crate::models::GitPlatformConfig {
+                name: "testbed".to_string(),
+                platform_type: "gitlab".to_string(),
+                base_url: "http://gitlab.internal:8929".to_string(),
+                token: "glpat-platform".to_string(),
+                webhook_secret: "platform-secret".to_string(),
+                webhook_signing_secret: String::new(),
+            }];
+            let body = r#"{"project":{"web_url":"http://gitlab.internal:8929/group/proj"}}"#;
+
+            // Wrong token is rejected against the platform's secret.
+            let (status, _) = post_webhook(state.clone(), "", &[("X-Gitlab-Token", "wrong-secret")], body).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+
+            // Correct token verifies; with no X-Gitlab-Event header the event
+            // is ignored — proving the request passed verification end-to-end.
+            let (status, resp_body) = post_webhook(state, "", &[("X-Gitlab-Token", "platform-secret")], body).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(resp_body["status"], "ignored");
+        }
+    }
+
     /// The middleware itself is thin (decide, run, stamp on 2xx and 304), so the
     /// decision function carries the contract and is exercised end-to-end by
     /// the integration test in tests/server.rs.

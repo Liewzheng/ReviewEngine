@@ -283,6 +283,15 @@ pub async fn run() -> Result<()> {
             let mut handlers: Vec<Arc<dyn review_engine::server::webhook::WebhookHandler>> = vec![];
             let gitlab_token = gitlab_token_opt.clone().unwrap_or_default();
             let webhook_secret = webhook_secret_opt.clone().unwrap_or_default();
+            // Construct the GitLab webhook handler once: the global runtime
+            // config below and the mounted route share this instance.
+            let gitlab_handler = review_engine::server::gitlab::GitLabWebhookHandler::new(
+                webhook_secret,
+                signing_secret,
+                dispatcher.clone(),
+                gitlab_token,
+            )
+            .with_app_state(&state);
             // Always initialise the global GitLab runtime config from the
             // startup CLI/env values — even when no webhook secret is
             // configured: the REST API's `gitlab_mr` credential fallback
@@ -290,14 +299,7 @@ pub async fn run() -> Result<()> {
             // `X-Gitlab-Token` header) reads the token from the runtime, so
             // `--gitlab-token` / `GITLAB_TOKEN` must land there regardless
             // of webhook setup.
-            review_engine::server::gitlab::init_gitlab_runtime(
-                &review_engine::server::gitlab::GitLabWebhookHandler::new(
-                    webhook_secret.clone(),
-                    signing_secret.clone(),
-                    dispatcher.clone(),
-                    gitlab_token.clone(),
-                ),
-            );
+            review_engine::server::gitlab::init_gitlab_runtime(&gitlab_handler);
             // Load the persisted UI state (ui-state.toml) and apply it
             // through the same code path as PUT /config, so hot-apply and
             // cold-start semantics are identical. A missing/corrupt file
@@ -310,17 +312,15 @@ pub async fn run() -> Result<()> {
                     Err(e) => tracing::warn!("failed to load persisted UI state from {}: {e:#}", path.display()),
                 }
             }
-            if !webhook_secret.is_empty() || signing_secret.is_some() {
-                handlers.push(Arc::new(
-                    review_engine::server::gitlab::GitLabWebhookHandler::new(
-                        webhook_secret,
-                        signing_secret,
-                        dispatcher.clone(),
-                        gitlab_token,
-                    )
-                    .with_app_state(&state),
-                ));
-            }
+            // Mount /webhook/gitlab unconditionally: verification is resolved
+            // per-request — `verify` matches the payload's instance URL against
+            // the hot-configured `state.git_platforms` (UI「Git 平台」), so a
+            // webhook secret added through the UI takes effect without a
+            // restart. With no verification configured anywhere the handler
+            // itself rejects the request with 403 "no verification
+            // configured"; gating the mount on startup env secrets would
+            // instead drop such requests to the static-file fallback (405).
+            handlers.push(Arc::new(gitlab_handler));
             if let Some((tok, secret)) = github_token
                 .or_else(|| std::env::var("GITHUB_TOKEN").ok())
                 .and_then(|tok| {

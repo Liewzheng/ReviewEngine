@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.44] - 2026-08-31
+
+### Fixed
+- **`/webhook/gitlab` no longer requires a startup env secret to be mounted**: the route was registered only when `--gitlab-webhook-secret` / `GITLAB_WEBHOOK_SECRET` was non-empty or a signing secret existed at boot, so a webhook secret hot-configured later through the UI「Git 平台」(per-instance, stored in `state.git_platforms`) never took effect — GitLab POSTs fell through to the static-file fallback and got a 405. The handler is now always constructed and mounted; verification stays fully per-request: the payload's instance URL is matched against the hot-configured platforms, and with no verification configured anywhere the request is rejected 403 `no verification configured` (previously 405 with the route absent). The GitHub handler's mount logic is unchanged. Regression tests cover both directions at the router level: empty startup secrets still reach the handler (403, not 405), and a platform written to `state.git_platforms` verifies `X-Gitlab-Token` immediately. (`src/cli/app.rs`, `src/server/router.rs`)
+
 ## [0.9.43] - 2026-08-31
 
 ### Removed

@@ -420,13 +420,13 @@ export default {
       token: 'Access Token',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: 'Leave empty to keep the saved token',
-      webhookSecret: 'Webhook Secret',
-      webhookSigningSecret: 'Webhook Signing Secret',
+      webhookSecret: 'Secret token',
+      webhookSigningSecret: 'Signing token',
       keepSecretPlaceholder: 'Leave empty to keep the saved value',
       webhookSecretHelp:
-        'Webhook verification secret (X-Gitlab-Token header, used by GitLab versions before 19.0); optional.',
+        'Corresponds to the Secret token field in the GitLab webhook form; sent in plaintext via the X-Gitlab-Token header, weaker than the Signing token, as an optional fallback. You may configure only one of the two, but at least one.',
       webhookSigningSecretHelp:
-        'GitLab 19.0+ signing token (starts with whsec_); optional. Once set, signature verification is enforced.',
+        'The Signing token of GitLab 19.0+ (starts with whsec_, shown only once when GitLab generates it). GitLab uses it to compute HMAC-SHA256 over the request body and sends it via the webhook-signature header. Recommended.',
       test: 'Test',
       testOk: 'Connected — GitLab {version}',
       testFailed: 'Connection failed — {error}',

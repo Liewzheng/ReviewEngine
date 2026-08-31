@@ -121,25 +121,8 @@
             />
           </el-form-item>
         </el-col>
-        <el-col :span="24">
-          <el-form-item prop="webhookSecret">
-            <template #label>
-              {{ $t('config.gitPlatforms.webhookSecret') }}
-              <HelpTip :tip="$t('config.gitPlatforms.webhookSecretHelp')" />
-            </template>
-            <el-input
-              v-model="draft.webhookSecret"
-              show-password
-              :placeholder="
-                dialogMode === 'edit'
-                  ? hasSavedWebhookSecret
-                    ? SAVED_SECRET_PLACEHOLDER
-                    : $t('config.gitPlatforms.keepSecretPlaceholder')
-                  : $t('common.optional')
-              "
-            />
-          </el-form-item>
-        </el-col>
+        <!-- Field order mirrors the GitLab 19+ webhook form: Signing token
+             (recommended) before Secret token (optional fallback). -->
         <el-col :span="24">
           <el-form-item prop="webhookSigningSecret">
             <template #label>
@@ -152,6 +135,25 @@
               :placeholder="
                 dialogMode === 'edit'
                   ? hasSavedWebhookSigningSecret
+                    ? SAVED_SECRET_PLACEHOLDER
+                    : $t('config.gitPlatforms.keepSecretPlaceholder')
+                  : $t('common.optional')
+              "
+            />
+          </el-form-item>
+        </el-col>
+        <el-col :span="24">
+          <el-form-item prop="webhookSecret">
+            <template #label>
+              {{ $t('config.gitPlatforms.webhookSecret') }}
+              <HelpTip :tip="$t('config.gitPlatforms.webhookSecretHelp')" />
+            </template>
+            <el-input
+              v-model="draft.webhookSecret"
+              show-password
+              :placeholder="
+                dialogMode === 'edit'
+                  ? hasSavedWebhookSecret
                     ? SAVED_SECRET_PLACEHOLDER
                     : $t('config.gitPlatforms.keepSecretPlaceholder')
                   : $t('common.optional')

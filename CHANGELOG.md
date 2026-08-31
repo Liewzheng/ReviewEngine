@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.45] - 2026-08-31
+
+### Changed
+- **「添加/编辑 Git 平台」dialog webhook secret fields aligned with the GitLab 19 form naming and order**: the signing-secret field now comes first (label `Signing token` — recommended, sent by GitLab as the `webhook-signature` header, HMAC-SHA256 over the request body), followed by the legacy secret (label `Secret token` — optional fallback, plaintext `X-Gitlab-Token` header). Both labels use the English GitLab product terms in all 6 locales; the i18n key names are unchanged. Help texts corrected: the legacy token is no longer described as "used by GitLab versions before 19.0" — it is a weaker-but-supported alternative to the signing token; either one alone suffices, but at least one must be configured. (`frontend/src/components/Config/GitPlatformsSection.vue`, `frontend/src/i18n/locales/*` ×6)
+
 ## [0.9.44] - 2026-08-31
 
 ### Fixed

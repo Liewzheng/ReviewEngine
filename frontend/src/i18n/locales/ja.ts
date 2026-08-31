@@ -411,13 +411,13 @@ export default {
       token: 'アクセストークン',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: '空欄の場合は保存済みのトークンを保持します',
-      webhookSecret: 'Webhook シークレット',
-      webhookSigningSecret: 'Webhook 署名シークレット',
+      webhookSecret: 'Secret token',
+      webhookSigningSecret: 'Signing token',
       keepSecretPlaceholder: '空欄の場合は保存済みの値を保持します',
       webhookSecretHelp:
-        'Webhook 検証シークレット（X-Gitlab-Token ヘッダー、GitLab 19.0 より前のバージョンで使用）。任意。',
+        'GitLab webhook フォームの Secret token フィールドに対応します。平文で X-Gitlab-Token ヘッダーに載せて送信されるため Signing token より安全性が低く、任意のフォールバックです。どちらか一方だけでも構いませんが、少なくとも 1 つは設定してください。',
       webhookSigningSecretHelp:
-        'GitLab 19.0+ の署名トークン（whsec_ で始まる）。任意。設定すると署名検証が強制されます。',
+        'GitLab 19.0+ の Signing token（whsec_ で始まり、GitLab 生成時に一度だけ表示されます）。GitLab はこれを使ってリクエストボディの HMAC-SHA256 を計算し、webhook-signature ヘッダーで送信します。推奨設定です。',
       test: 'テスト',
       testOk: '接続成功 — GitLab {version}',
       testFailed: '接続失敗 — {error}',

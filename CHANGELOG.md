@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.43] - 2026-08-31
+
+### Removed
+- **Legacy「GitLab 集成」card on the Configuration page**: fully superseded by the「Git 平台」named-instance list (v0.9.33). Four of its fields had no backend consumer and are deleted end-to-end — GitLab URL, 默认项目 (`defaultProject`), 合并请求标签 (`mrLabel`) and 已启用自动评审 (`autoReview`) — from the card component, the frontend `GitLabConfig` type/form model/validation rules, and the backend `UiGitLabConfig`. The card's three remaining secret fields (API token / webhook secret / webhook signing secret) are managed per-instance on Git 平台 entries, or via the `GITLAB_TOKEN` / `GITLAB_WEBHOOK_SECRET` env vars for the implicit default instance. **REST contract change**: `GET /api/v1/config` no longer carries `gitlab.url` / `gitlab.defaultProject` / `gitlab.mrLabel` / `gitlab.autoReview` in its response; inbound `PUT /api/v1/config` bodies still containing these keys are silently ignored (serde tolerates unknown fields — no `deny_unknown_fields`), so older clients keep working. The env/CLI default instance and the persisted `[gitlab]` section in `config.toml` / `ui-state.toml` are unaffected. (`frontend/src/views/Configuration.vue`, deleted `frontend/src/components/Config/GitLabSettingsCard.vue`, `frontend/src/types/config.ts`, `frontend/src/composables/useConfigForm.ts`, `src/server/api/config/types.rs`, `frontend/src/i18n/locales/*` ×6)
+
+### Fixed
+- **「添加 Git 平台」dialog: Webhook Secret and Webhook Signing Secret shared one help text**: both fields rendered the same generic `config.gitPlatforms.webhookHelp` ("Webhook verification secret (optional)."), leaving the two verification mechanisms indistinguishable. The key is split into `webhookSecretHelp` — secret compared against the `X-Gitlab-Token` request header (GitLab versions before 19.0) — and `webhookSigningSecretHelp` — GitLab 19.0+ signing token (starts with `whsec_`); once set, signature verification is enforced. Updated in all 6 locales. (`frontend/src/components/Config/GitPlatformsSection.vue`, `frontend/src/i18n/locales/*` ×6)
+
 ## [0.9.42] - 2026-08-28
 
 ### Security

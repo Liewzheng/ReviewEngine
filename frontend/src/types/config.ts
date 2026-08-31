@@ -1,21 +1,3 @@
-/** GitLab integration configuration for webhook and MR review triggers. */
-export interface GitLabConfig {
-  /** GitLab instance base URL (e.g. `https://gitlab.example.com`). */
-  url: string
-  /** Personal access token for GitLab API authentication. */
-  apiToken: string
-  /** Webhook secret for validating incoming webhook payloads. */
-  webhookSecret: string
-  /** HMAC signing secret for webhook signature verification. */
-  webhookSigningSecret: string
-  /** Default project path (e.g. `group/project`) for auto-review triggers. */
-  defaultProject: string
-  /** MR label that triggers automatic review when applied. */
-  mrLabel: string
-  /** Whether to automatically review new/updated MRs. */
-  autoReview: boolean
-}
-
 /** One entry of the `llm.providers[]` array in GET /config (key masked). */
 export interface LlmProviderConfigEntry {
   /** Provider type identifier (e.g. `openai`, `deepseek`); the entry's identity. */
@@ -121,8 +103,6 @@ export interface GitPlatformConfig {
 
 /** Complete application configuration combining all config sections. */
 export interface AppConfig {
-  /** GitLab integration settings. */
-  gitlab: GitLabConfig
   /** LLM provider settings. */
   llm: LLMConfig
   /** Review quality rules. */
@@ -161,15 +141,6 @@ export interface TestResult {
  */
 export function createMockConfig(): AppConfig {
   return {
-    gitlab: {
-      url: 'https://gitlab.example.com',
-      apiToken: 'glpat-xxxxxxxxxxxxxxxxxxxx',
-      webhookSecret: 'whsec-xxxxxxxxxxxxxxxx',
-      webhookSigningSecret: 'whsec-sign-xxxxxxxxxxxxxxxx',
-      defaultProject: '',
-      mrLabel: 'needs-review',
-      autoReview: true,
-    },
     llm: {
       apiBaseUrl: 'https://api.openai.com/v1',
       openaiApiKey: 'sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',

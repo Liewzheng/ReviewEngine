@@ -126,7 +126,7 @@
                   : $t('common.optional')
               "
             />
-            <div class="form-item-help">{{ $t('config.gitPlatforms.webhookHelp') }}</div>
+            <div class="form-item-help">{{ $t('config.gitPlatforms.webhookSecretHelp') }}</div>
           </el-form-item>
         </el-col>
         <el-col :span="24">
@@ -143,7 +143,7 @@
                   : $t('common.optional')
               "
             />
-            <div class="form-item-help">{{ $t('config.gitPlatforms.webhookHelp') }}</div>
+            <div class="form-item-help">{{ $t('config.gitPlatforms.webhookSigningSecretHelp') }}</div>
           </el-form-item>
         </el-col>
       </el-row>

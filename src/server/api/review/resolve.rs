@@ -33,7 +33,11 @@ pub(crate) fn resolve_gitlab_token(
     // continues to the legacy default (first non-empty token wins), exactly
     // like a blank header falls through to the server-side lookup.
     if let Some(url) = mr_url {
-        if let Some(platform) = crate::models::find_git_platform_for_url(platforms, url) {
+        // Strict match only: the resolved token is SENT to the MR URL's
+        // host:port, so it must never flow to a port that was not explicitly
+        // configured (unlike inbound webhook verification, which folds a
+        // uniquely-matched host — see find_git_platform_for_url).
+        if let Some(platform) = crate::models::find_git_platform_for_url_strict(platforms, url) {
             if !platform.token.trim().is_empty() {
                 return Some(platform.token.clone());
             }

@@ -400,8 +400,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Git 플랫폼',
-      subtitle:
-        '웹훅 수신 및 리뷰 실행에 사용할 Git 플랫폼 인스턴스를 관리합니다(현재 GitLab만 지원).',
       addBtn: '플랫폼 추가',
       empty: '아직 설정된 Git 플랫폼이 없습니다',
       name: '이름',

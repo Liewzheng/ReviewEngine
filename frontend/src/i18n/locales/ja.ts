@@ -401,8 +401,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Git プラットフォーム',
-      subtitle:
-        'Webhook の受信とレビューの実行に使用する Git プラットフォームインスタンスを管理します（現在は GitLab のみ対応）。',
       addBtn: 'プラットフォームを追加',
       empty: 'Git プラットフォームはまだ設定されていません',
       name: '名前',

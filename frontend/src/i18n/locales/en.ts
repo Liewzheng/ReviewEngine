@@ -410,8 +410,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Git Platforms',
-      subtitle:
-        'Manage the Git platform instances used to receive webhooks and trigger reviews (GitLab only for now).',
       addBtn: 'Add Platform',
       empty: 'No Git platforms configured yet',
       name: 'Name',

@@ -14,7 +14,6 @@
       </div>
     </template>
     <div class="card-body">
-      <p class="card-subtitle">{{ $t('config.gitPlatforms.subtitle') }}</p>
       <el-empty
         v-if="platforms.length === 0"
         :description="$t('config.gitPlatforms.empty')"
@@ -36,10 +35,15 @@
               <span v-else class="platform-item-token">{{ $t('config.notSet') }}</span>
             </div>
             <div class="platform-item-actions">
+              <!-- The connectivity probe is a read-only check, so it must stay
+                   clickable in view mode: an explicit :disabled="false" short-
+                   circuits the disabled injected by the surrounding el-form
+                   (useFormDisabled: component prop wins over form context). -->
               <el-button
                 size="small"
                 text
                 :loading="testingIndex === index"
+                :disabled="false"
                 @click="testPlatform(index)"
               >
                 {{ $t('config.gitPlatforms.test') }}
@@ -418,13 +422,6 @@ function confirmRemove(index: number) {
 
 .git-platforms-card :deep(.el-card__body) {
   padding: 16px 20px;
-}
-
-.card-subtitle {
-  font-size: 12px;
-  color: var(--text-secondary);
-  line-height: 1.4;
-  margin: 0 0 16px;
 }
 
 .platforms-list {

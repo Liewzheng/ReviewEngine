@@ -395,7 +395,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Git 平台',
-      subtitle: '管理用於接收 Webhook 並觸發審查的 Git 平台實例（目前僅支援 GitLab）。',
       addBtn: '新增平台',
       empty: '尚未設定 Git 平台',
       name: '名稱',

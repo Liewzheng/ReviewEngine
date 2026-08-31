@@ -405,8 +405,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Plateformes Git',
-      subtitle:
-        'Gérez les instances Git utilisées pour recevoir les webhooks et lancer les revues (GitLab uniquement pour le moment).',
       addBtn: 'Ajouter une plateforme',
       empty: 'Aucune plateforme Git configurée pour le moment',
       name: 'Nom',

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.46] - 2026-08-31
+
+### Fixed
+- **Self-hosted GitLab webhooks no longer fall back to the empty env runtime (403 `no verification configured`) when `external_url` carries a non-default port**: with GitLab served behind a host port mapping (e.g. `external_url = https://gitlab.islet.space:8443`), the webhook payload's `project.web_url` carries `:8443` while the reng Git 平台 entry is configured against the container-reachable `https://gitlab.islet.space` — strict `(host, port)` matching failed and verification fell through. `find_git_platform_for_url` now falls back to a host-only match after strict matching fails, hitting only when the URL's host identifies exactly one entry with webhook verification credentials — token-only entries (REST review routing) neither win the fallback nor make it ambiguous, and ambiguous or unknown hosts still yield `None` (never guess); strict matches keep absolute priority, so same-host/multi-port setups are unaffected. The fallback applies to INBOUND matching only (webhook payload verification); REST `gitlab_mr` token resolution keeps the strict `host[:port]` match via the new `find_git_platform_for_url_strict`, because a resolved token is sent outbound to the MR URL's host:port and must never flow to an unconfigured port. (`src/models/git_platform.rs`, `src/server/api/review/resolve.rs`)
+
 ## [0.9.45] - 2026-08-31
 
 ### Changed

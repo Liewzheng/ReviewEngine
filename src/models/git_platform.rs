@@ -63,10 +63,49 @@ impl GitPlatformConfig {
     }
 }
 
-/// Find the configured platform serving `url` (scheme-less `host[:port]`
-/// match against each entry's `base_url`). Returns `None` when no entry
-/// matches or either URL fails to parse.
+/// Find the configured platform serving `url` for INBOUND purposes (which
+/// instance's credentials verify this webhook payload).
+///
+/// Strict first: scheme-less `host[:port]` match against each entry's
+/// `base_url` (see [`GitPlatformConfig::matches_url`]). When no strict match
+/// exists, fall back to a host-only match — a self-hosted instance is often
+/// reachable at a different port than its advertised `external_url` (e.g.
+/// GitLab behind an `https://host:8443` port mapping while the server is
+/// configured against `https://host` on 443). The fallback considers only
+/// entries with webhook verification credentials (see
+/// [`GitPlatformConfig::has_webhook_verification`]): token-only entries
+/// cannot verify an inbound payload, so they must neither win the fallback
+/// nor make it ambiguous. The fallback hits only when the URL's host
+/// identifies EXACTLY one verification-capable entry; zero or multiple host
+/// matches (or an unparseable URL) yield `None` — never guess.
+///
+/// Callers that SEND credentials to the URL's endpoint (REST `gitlab_mr`
+/// token resolution) must use [`find_git_platform_for_url_strict`] instead:
+/// folding the port there would widen where a configured token is sent.
 pub fn find_git_platform_for_url<'a>(platforms: &'a [GitPlatformConfig], url: &str) -> Option<&'a GitPlatformConfig> {
+    if let Some(strict) = find_git_platform_for_url_strict(platforms, url) {
+        return Some(strict);
+    }
+    let target_host = host_port(url)?.0;
+    let mut host_matches = platforms.iter().filter(|p| {
+        p.has_webhook_verification() && host_port(&p.base_url).is_some_and(|(host, _)| host == target_host)
+    });
+    let hit = host_matches.next()?;
+    if host_matches.next().is_some() {
+        return None;
+    }
+    Some(hit)
+}
+
+/// Strict variant of [`find_git_platform_for_url`]: scheme-less `host[:port]`
+/// match only, no host-only fallback. Use when the matched entry's
+/// credentials are sent OUTBOUND to the URL's host:port (the configured
+/// token must never flow to a port that was not explicitly configured).
+/// Returns `None` when no entry matches or either URL fails to parse.
+pub fn find_git_platform_for_url_strict<'a>(
+    platforms: &'a [GitPlatformConfig],
+    url: &str,
+) -> Option<&'a GitPlatformConfig> {
     platforms.iter().find(|p| p.matches_url(url))
 }
 
@@ -161,6 +200,98 @@ mod tests {
         assert_eq!(hit.map(|p| p.name.as_str()), Some("second"));
         assert!(find_git_platform_for_url(&platforms, "http://unrelated.internal/x").is_none());
         assert!(find_git_platform_for_url(&[], "http://gitlab-a.internal:8929/x").is_none());
+    }
+
+    #[test]
+    fn find_platform_strict_match_wins_over_host_fallback() {
+        let platforms = vec![
+            platform("https://gitlab.internal:8443"),
+            GitPlatformConfig {
+                name: "plain".to_string(),
+                ..platform("https://gitlab.internal")
+            },
+        ];
+        // Port matches exactly → strict hit, even though a host-only
+        // fallback would be ambiguous (two entries share the host).
+        let hit = find_git_platform_for_url(&platforms, "https://gitlab.internal:8443/g/p/-/merge_requests/1");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+        let hit = find_git_platform_for_url(&platforms, "https://gitlab.internal/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("plain"));
+    }
+
+    #[test]
+    fn find_platform_falls_back_to_unique_host_match() {
+        // Platform reachable on 443, but the webhook payload carries the
+        // external_url port mapping (:8443).
+        let platforms = vec![platform("https://gitlab.internal")];
+        let hit = find_git_platform_for_url(&platforms, "https://gitlab.internal:8443/g/p/-/merge_requests/1");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+        // Reverse direction folds too: explicit-port platform, port-less URL.
+        let platforms = vec![platform("https://gitlab.internal:8443")];
+        let hit = find_git_platform_for_url(&platforms, "https://gitlab.internal/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+    }
+
+    #[test]
+    fn find_platform_ambiguous_host_fallback_yields_none() {
+        let platforms = vec![
+            platform("https://gitlab.internal:8443"),
+            GitPlatformConfig {
+                name: "plain".to_string(),
+                ..platform("https://gitlab.internal")
+            },
+        ];
+        // No strict match for :9443 and the host alone is ambiguous → None.
+        assert!(find_git_platform_for_url(&platforms, "https://gitlab.internal:9443/g/p").is_none());
+    }
+
+    fn token_only(base_url: &str, name: &str) -> GitPlatformConfig {
+        GitPlatformConfig {
+            name: name.to_string(),
+            webhook_secret: String::new(),
+            ..platform(base_url)
+        }
+    }
+
+    #[test]
+    fn find_platform_fallback_ignores_token_only_entries() {
+        // Same host: a token-only entry (review routing only) and an entry
+        // with webhook verification credentials. Without the verification
+        // filter the fallback would be ambiguous → None → 403.
+        let platforms = vec![
+            token_only("https://gitlab.internal:8443", "review-only"),
+            platform("https://gitlab.internal"),
+        ];
+        let hit = find_git_platform_for_url(&platforms, "https://gitlab.internal:9443/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+    }
+
+    #[test]
+    fn find_platform_fallback_token_only_sole_host_match_yields_none() {
+        // The only entry on this host cannot verify webhooks → None rather
+        // than a hit whose signature check would fail anyway.
+        let platforms = vec![token_only("https://gitlab.internal", "review-only")];
+        assert!(find_git_platform_for_url(&platforms, "https://gitlab.internal:9443/g/p").is_none());
+    }
+
+    #[test]
+    fn find_platform_unknown_host_stays_none() {
+        let platforms = vec![platform("https://gitlab.internal")];
+        assert!(find_git_platform_for_url(&platforms, "https://elsewhere.example.com:8443/g/p").is_none());
+        assert!(find_git_platform_for_url(&platforms, "not-a-url").is_none());
+    }
+
+    #[test]
+    fn find_platform_strict_never_folds_ports() {
+        // The outbound-credential path stays strict: where the fallback
+        // would fold a unique host, the strict variant yields None.
+        let platforms = vec![platform("https://gitlab.internal")];
+        let url = "https://gitlab.internal:8443/g/p/-/merge_requests/1";
+        assert!(find_git_platform_for_url(&platforms, url).is_some());
+        assert!(find_git_platform_for_url_strict(&platforms, url).is_none());
+        // Strict still matches exactly (default port folds as before).
+        let hit = find_git_platform_for_url_strict(&platforms, "https://gitlab.internal:443/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
     }
 
     #[test]

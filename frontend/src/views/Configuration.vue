@@ -62,16 +62,6 @@
       class="config-form"
       @submit.prevent
     >
-      <!-- GitLab Card -->
-      <GitLabSettingsCard
-        ref="gitlabCardRef"
-        :config="config.gitlab"
-        :is-editing="isEditing"
-        :revealed="revealed"
-        :reveal-countdown="revealCountdown"
-        @reveal="revealField"
-      />
-
       <!-- Git Platforms Card -->
       <GitPlatformsSection
         ref="gitPlatformsCardRef"
@@ -285,7 +275,6 @@ import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
 import { useConfigForm } from '../composables/useConfigForm'
 import type { AppConfig, GitPlatformConfig } from '../types/config'
-import GitLabSettingsCard from '../components/Config/GitLabSettingsCard.vue'
 import GitPlatformsSection from '../components/Config/GitPlatformsSection.vue'
 
 // --- Composables ---
@@ -298,9 +287,6 @@ const {
   formRef,
   configDirty,
   rules,
-  revealed,
-  revealCountdown,
-  revealField,
   patternInputVisible,
   patternInputValue,
   setPatternInputRef,
@@ -321,7 +307,6 @@ const saving = cfg.saving
 const showAdvanced = ref(false)
 
 // Card refs for flash animation
-const gitlabCardRef = ref<HTMLElement>()
 const gitPlatformsCardRef = ref<HTMLElement>()
 const rulesCardRef = ref<HTMLElement>()
 const advancedCardRef = ref<HTMLElement>()
@@ -407,7 +392,7 @@ async function saveChanges() {
     // root node must be reached via `$el` (calling classList on the instance
     // itself throws and lands in the catch above, showing a bogus error
     // notification after a successful save).
-    const cardRefs = [gitlabCardRef, gitPlatformsCardRef, rulesCardRef, advancedCardRef]
+    const cardRefs = [gitPlatformsCardRef, rulesCardRef, advancedCardRef]
     cardRefs.forEach((cardRef) => {
       const el = (cardRef.value as unknown as { $el?: HTMLElement })?.$el
       if (el?.classList) {

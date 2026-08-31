@@ -1,4 +1,4 @@
-import { ref, reactive, computed, watch, nextTick, onUnmounted } from 'vue';
+import { ref, reactive, computed, watch, nextTick } from 'vue';
 import { ElNotification, type FormInstance, type FormRules } from 'element-plus';
 import { useI18n } from 'vue-i18n';
 import { useConfig } from './useConfig';
@@ -6,15 +6,6 @@ import type { AppConfig } from '../types/config';
 
 /** Blank form model; empty secret/URL fields mean "keep the stored value". */
 const defaultConfig: AppConfig = {
-  gitlab: {
-    url: '',
-    apiToken: '',
-    webhookSecret: '',
-    webhookSigningSecret: '',
-    defaultProject: '',
-    mrLabel: '',
-    autoReview: false,
-  },
   llm: {
     apiBaseUrl: 'https://api.openai.com/v1',
     openaiApiKey: '',
@@ -53,15 +44,11 @@ const defaultConfig: AppConfig = {
 // experts from the loaded config when the backend provides them.
 const DEFAULT_REQUIRED_EXPERTS = ['Security', 'Performance', 'Quality'];
 
-/** Secrets that can be temporarily revealed in read-only mode. */
-export type RevealableField = 'apiToken' | 'webhookSecret' | 'webhookSigningSecret';
-
 /**
- * Composable for the main Configuration form (GitLab / Rules / Advanced).
+ * Composable for the main Configuration form (Git platforms / Rules / Advanced).
  *
  * Owns the editable `config` model, edit-mode snapshotting, dirty tracking,
- * validation rules, secret reveal timers, and the excluded-pattern tag
- * input. LLM provider management lives on the /llm page (unified provider
+ * validation rules, and the excluded-pattern tag input. LLM provider management lives on the /llm page (unified provider
  * cards with immediate per-card persistence — see `useProviderCards`); the
  * `llm` section is loaded here only so the full config model stays complete,
  * and Configuration.vue drops it from its save payload.
@@ -80,19 +67,6 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
 
   const config = reactive<AppConfig>(defaultConfig);
   const originalConfig = ref<AppConfig | null>(null);
-
-  // --- Reveal state for read-only mode ---
-  const revealed = reactive({
-    apiToken: false,
-    webhookSecret: false,
-    webhookSigningSecret: false,
-  });
-  const revealCountdown = reactive({
-    apiToken: 0,
-    webhookSecret: 0,
-    webhookSigningSecret: 0,
-  });
-  const revealTimers = reactive<Record<string, number>>({});
 
   // --- Tag input state ---
   const patternInputVisible = ref(false);
@@ -113,63 +87,7 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
   });
 
   // --- Validation ---
-  // URL fields are only validated when a value is present: GET /config does not
-  // echo every value (e.g. the GitLab URL is never mapped by the backend), so an
-  // empty field means "keep the stored value", never a validation error.
-  function validateUrl(_rule: any, value: string, callback: Function) {
-    if (!value || !value.trim()) {
-      callback();
-      return;
-    }
-    try {
-      new URL(value);
-      callback();
-    } catch {
-      callback(new Error(t('config.validation.invalidUrl')));
-    }
-  }
-
   const rules = computed<FormRules>(() => ({
-    'gitlab.url': [
-      // GitLab URL may not be echoed by GET /config (not yet configured, or the
-      // backend does not map it); empty = "keep the stored value", never a
-      // validation error.
-      { validator: validateUrl, trigger: 'blur' },
-    ],
-    'gitlab.apiToken': [
-      {
-        validator: (_rule: any, value: string, callback: Function) => {
-          // GET /config returns the `***` mask when a token is configured; that
-          // sentinel means "keep the stored token" and must never be
-          // length-flagged. An empty value means "clear the token" (explicit
-          // intent), also valid. Only a genuinely new token is length-checked.
-          if (!value || value === '***' || value.length >= 10) {
-            callback();
-            return;
-          }
-          callback(new Error(t('config.validation.tokenMinLength')));
-        },
-        trigger: 'blur',
-      },
-    ],
-    'gitlab.defaultProject': [
-      {
-        // Free-text project path; empty means "not set", otherwise it must
-        // look like `group/project` (namespace/path, no extra slashes).
-        validator: (_rule: any, value: string, callback: Function) => {
-          if (!value || !value.trim()) {
-            callback();
-            return;
-          }
-          if (/^[^\s/]+\/[^\s/]+$/.test(value.trim())) {
-            callback();
-          } else {
-            callback(new Error(t('config.validation.invalidProjectPath')));
-          }
-        },
-        trigger: 'blur',
-      },
-    ],
     'rules.requiredExperts': [
       {
         validator: (_rule: any, value: any, callback: any) => {
@@ -265,24 +183,6 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     });
   }
 
-  /**
-   * Reveal a secret in read-only mode for 5 seconds, then auto-hide it.
-   * Re-revealing resets the countdown.
-   */
-  function revealField(field: RevealableField) {
-    revealed[field] = true;
-    revealCountdown[field] = 5;
-    if (revealTimers[field]) clearInterval(revealTimers[field]);
-    revealTimers[field] = window.setInterval(() => {
-      revealCountdown[field]--;
-      if (revealCountdown[field] <= 0) {
-        clearInterval(revealTimers[field]);
-        revealed[field] = false;
-        delete revealTimers[field];
-      }
-    }, 1000);
-  }
-
   // --- Pattern tag input ---
   function showPatternInput() {
     patternInputVisible.value = true;
@@ -304,10 +204,6 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     config.rules.excludedPatterns.splice(index, 1);
   }
 
-  onUnmounted(() => {
-    Object.values(revealTimers).forEach(clearInterval);
-  });
-
   return {
     config,
     isEditing,
@@ -315,9 +211,6 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     formRef,
     configDirty,
     rules,
-    revealed,
-    revealCountdown,
-    revealField,
     patternInputVisible,
     patternInputValue,
     setPatternInputRef,

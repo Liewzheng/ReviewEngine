@@ -312,15 +312,12 @@ export default {
     refreshedTitle: 'Actualisé',
     refreshed: 'Configuration actualisée',
     notSet: '(non défini)',
-    revealCountdown: 'Visible pendant {count} s…',
     noChangesToSave: 'Aucune modification à enregistrer',
     llmNotConfiguredBanner:
       "Aucun LLM utilisable n'est encore configuré — les revues nécessitent un LLM pour s'exécuter. Renseignez l'URL de base de l'API et la clé dans « Paramètres LLM » ci-dessous, ou ajoutez-en un dans « Fournisseurs LLM supplémentaires ».",
     validation: {
       invalidUrl: 'Veuillez saisir une URL valide',
-      invalidProjectPath: 'Utilisez le format groupe/projet (p. ex. my-group/my-project)',
       title: 'Erreur de validation',
-      tokenMinLength: 'Le jeton API doit contenir au moins 10 caractères',
       modelRequired: 'Le modèle par défaut est requis',
       expertRequired: 'Au moins un expert est requis',
       fixBeforeSave: "Veuillez corriger les erreurs de validation avant d'enregistrer",
@@ -332,26 +329,6 @@ export default {
         'Vous avez des modifications non enregistrées. Les abandonner et quitter ?',
       discard: 'Abandonner',
       stay: 'Rester',
-    },
-    gitlab: {
-      title: 'Intégration GitLab',
-      url: 'URL GitLab',
-      urlPlaceholder: 'https://gitlab.example.com (laisser vide pour conserver)',
-      apiTokenPlaceholder: 'glpat-... (*** conserve ; vide efface)',
-      revealApiTokenAria: 'Afficher le jeton API',
-      webhookSecret: 'Secret webhook',
-      revealWebhookAria: 'Afficher le secret webhook',
-      webhookSigningSecret: 'Secret de signature webhook',
-      revealSigningAria: 'Afficher le secret de signature webhook',
-      signingPlaceholder:
-        'Collez le jeton de signature GitLab 19.0+ complet (commence par whsec_...)',
-      signingHelp: 'Incluez le préfixe whsec_ lors du collage du jeton.',
-      defaultProject: 'Projet par défaut',
-      defaultProjectPlaceholder: 'group/project',
-      defaultProjectHelp:
-        "Chemin complet du projet incluant l'espace de noms, p. ex. my-group/my-project.",
-      mrLabel: 'Étiquette de merge request',
-      autoReview: 'Revue automatique activée',
     },
     llm: {
       title: 'Paramètres LLM',
@@ -428,8 +405,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Plateformes Git',
-      subtitle:
-        'Gérez les instances Git utilisées pour recevoir les webhooks et lancer les revues (GitLab uniquement pour le moment).',
       addBtn: 'Ajouter une plateforme',
       empty: 'Aucune plateforme Git configurée pour le moment',
       name: 'Nom',
@@ -443,7 +418,10 @@ export default {
       webhookSecret: 'Secret de webhook',
       webhookSigningSecret: 'Secret de signature du webhook',
       keepSecretPlaceholder: 'Laisser vide pour conserver la valeur enregistrée',
-      webhookHelp: 'Secret de vérification du webhook (facultatif).',
+      webhookSecretHelp:
+        'Secret de vérification du webhook (en-tête X-Gitlab-Token, utilisé par GitLab avant la version 19.0) ; facultatif.',
+      webhookSigningSecretHelp:
+        'Jeton de signature GitLab 19.0+ (commence par whsec_) ; facultatif. Une fois configuré, la vérification de signature est forcée.',
       test: 'Tester',
       testOk: 'Connexion réussie — GitLab {version}',
       testFailed: 'Échec de la connexion — {error}',

@@ -310,15 +310,12 @@ export default {
     refreshedTitle: '새로고침됨',
     refreshed: '설정을 새로고침했습니다',
     notSet: '（설정되지 않음）',
-    revealCountdown: '{count}초 동안 표시…',
     noChangesToSave: '저장할 변경 사항이 없습니다',
     llmNotConfiguredBanner:
       '아직 사용 가능한 LLM이 구성되지 않았습니다 — 리뷰를 실행하려면 LLM이 필요합니다. 아래 "LLM 설정"에서 API 기본 URL과 키를 입력하거나 "추가 LLM 제공자"에서 추가하세요.',
     validation: {
       invalidUrl: '유효한 URL을 입력하세요',
-      invalidProjectPath: 'group/project 형식으로 입력하세요 (예: my-group/my-project)',
       title: '검증 오류',
-      tokenMinLength: 'API 토큰은 10자 이상이어야 합니다',
       modelRequired: '기본 모델이 필요합니다',
       expertRequired: '전문가가 1명 이상 필요합니다',
       fixBeforeSave: '저장 전에 검증 오류를 수정하세요',
@@ -329,25 +326,6 @@ export default {
       discardConfirm: '저장되지 않은 변경 사항이 있습니다. 버리고 나가시겠습니까?',
       discard: '버리기',
       stay: '이 페이지에 머무르기',
-    },
-    gitlab: {
-      title: 'GitLab 통합',
-      url: 'GitLab URL',
-      urlPlaceholder: 'https://gitlab.example.com（비워두면 현재 값 유지）',
-      apiTokenPlaceholder: 'glpat-...（*** 현재 값 유지, 비우면 삭제）',
-      revealApiTokenAria: 'API 토큰 표시',
-      webhookSecret: 'Webhook 시크릿',
-      revealWebhookAria: 'Webhook 시크릿 표시',
-      webhookSigningSecret: 'Webhook 서명 시크릿',
-      revealSigningAria: 'Webhook 서명 시크릿 표시',
-      signingPlaceholder:
-        '전체 GitLab 19.0+ 서명 토큰을 붙여넣으세요（whsec_로 시작）',
-      signingHelp: '토큰을 붙여넣을 때 whsec_ 접두사를 포함하세요.',
-      defaultProject: '기본 프로젝트',
-      defaultProjectPlaceholder: 'group/project',
-      defaultProjectHelp: '네임스페이스를 포함한 전체 프로젝트 경로 (예: my-group/my-project).',
-      mrLabel: '병합 요청 라벨',
-      autoReview: '자동 리뷰 활성화됨',
     },
     llm: {
       title: 'LLM 설정',
@@ -422,8 +400,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Git 플랫폼',
-      subtitle:
-        '웹훅 수신 및 리뷰 실행에 사용할 Git 플랫폼 인스턴스를 관리합니다(현재 GitLab만 지원).',
       addBtn: '플랫폼 추가',
       empty: '아직 설정된 Git 플랫폼이 없습니다',
       name: '이름',
@@ -437,7 +413,10 @@ export default {
       webhookSecret: 'Webhook 시크릿',
       webhookSigningSecret: 'Webhook 서명 시크릿',
       keepSecretPlaceholder: '비워 두면 저장된 값이 유지됩니다',
-      webhookHelp: 'Webhook 검증 시크릿(선택 사항).',
+      webhookSecretHelp:
+        'Webhook 검증 시크릿(X-Gitlab-Token 헤더, GitLab 19.0 이전 버전에서 사용). 선택 사항.',
+      webhookSigningSecretHelp:
+        'GitLab 19.0+ 서명 토큰(whsec_로 시작). 선택 사항. 설정하면 서명 검증이 강제됩니다.',
       test: '테스트',
       testOk: '연결 성공 — GitLab {version}',
       testFailed: '연결 실패 — {error}',

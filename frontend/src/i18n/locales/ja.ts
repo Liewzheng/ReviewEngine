@@ -311,15 +311,12 @@ export default {
     refreshedTitle: '再読み込みしました',
     refreshed: '設定を再読み込みしました',
     notSet: '（未設定）',
-    revealCountdown: '表示時間 {count} 秒…',
     noChangesToSave: '保存する変更がありません',
     llmNotConfiguredBanner:
       '利用可能な LLM がまだ設定されていません — レビューの実行には LLM が必要です。下の「LLM 設定」で API ベース URL とキーを入力するか、「追加の LLM プロバイダー」で追加してください。',
     validation: {
       invalidUrl: '有効な URL を入力してください',
-      invalidProjectPath: 'group/project 形式で入力してください（例: my-group/my-project）',
       title: '検証エラー',
-      tokenMinLength: 'API トークンは 10 文字以上にしてください',
       modelRequired: 'デフォルトモデルは必須です',
       expertRequired: 'エキスパートが 1 人以上必要です',
       fixBeforeSave: '保存する前に検証エラーを修正してください',
@@ -330,25 +327,6 @@ export default {
       discardConfirm: '未保存の変更があります。破棄して移動しますか？',
       discard: '破棄',
       stay: 'このページに留まる',
-    },
-    gitlab: {
-      title: 'GitLab 統合',
-      url: 'GitLab URL',
-      urlPlaceholder: 'https://gitlab.example.com（空欄の場合は現在の値を保持）',
-      apiTokenPlaceholder: 'glpat-...（*** は現在の値を保持、空欄は削除）',
-      revealApiTokenAria: 'API トークンを表示',
-      webhookSecret: 'Webhook シークレット',
-      revealWebhookAria: 'Webhook シークレットを表示',
-      webhookSigningSecret: 'Webhook 署名シークレット',
-      revealSigningAria: 'Webhook 署名シークレットを表示',
-      signingPlaceholder:
-        'GitLab 19.0+ の署名トークン全体を貼り付け（whsec_ で始まる）',
-      signingHelp: 'トークンを貼り付けるときは whsec_ プレフィックスを含めてください。',
-      defaultProject: 'デフォルトプロジェクト',
-      defaultProjectPlaceholder: 'group/project',
-      defaultProjectHelp: '名前空間を含む完全なプロジェクトパス（例: my-group/my-project）。',
-      mrLabel: 'マージリクエストラベル',
-      autoReview: '自動レビューを有効化',
     },
     llm: {
       title: 'LLM 設定',
@@ -423,8 +401,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Git プラットフォーム',
-      subtitle:
-        'Webhook の受信とレビューの実行に使用する Git プラットフォームインスタンスを管理します（現在は GitLab のみ対応）。',
       addBtn: 'プラットフォームを追加',
       empty: 'Git プラットフォームはまだ設定されていません',
       name: '名前',
@@ -438,7 +414,10 @@ export default {
       webhookSecret: 'Webhook シークレット',
       webhookSigningSecret: 'Webhook 署名シークレット',
       keepSecretPlaceholder: '空欄の場合は保存済みの値を保持します',
-      webhookHelp: 'Webhook 検証シークレット（任意）。',
+      webhookSecretHelp:
+        'Webhook 検証シークレット（X-Gitlab-Token ヘッダー、GitLab 19.0 より前のバージョンで使用）。任意。',
+      webhookSigningSecretHelp:
+        'GitLab 19.0+ の署名トークン（whsec_ で始まる）。任意。設定すると署名検証が強制されます。',
       test: 'テスト',
       testOk: '接続成功 — GitLab {version}',
       testFailed: '接続失敗 — {error}',

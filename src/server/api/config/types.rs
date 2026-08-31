@@ -56,19 +56,11 @@ pub(crate) fn default_git_platform_type() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct UiGitLabConfig {
     #[serde(default)]
-    pub url: String,
-    #[serde(default)]
     pub api_token: String,
     #[serde(default)]
     pub webhook_secret: String,
     #[serde(default)]
     pub webhook_signing_secret: String,
-    #[serde(default)]
-    pub default_project: String,
-    #[serde(default)]
-    pub mr_label: String,
-    #[serde(default)]
-    pub auto_review: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]

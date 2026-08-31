@@ -320,15 +320,12 @@ export default {
     refreshedTitle: 'Refreshed',
     refreshed: 'Configuration refreshed',
     notSet: '(not set)',
-    revealCountdown: 'Visible for {count}s...',
     noChangesToSave: 'No changes to save',
     llmNotConfiguredBanner:
       'No usable LLM configured yet — reviews need an LLM to run. Fill in the API Base URL and key under "LLM Settings" below, or add one under "Additional LLM Providers".',
     validation: {
       invalidUrl: 'Please enter a valid URL',
-      invalidProjectPath: 'Use the format group/project (e.g. my-group/my-project)',
       title: 'Validation Error',
-      tokenMinLength: 'API Token must be at least 10 characters',
       modelRequired: 'Default Model is required',
       expertRequired: 'At least one expert is required',
       fixBeforeSave: 'Please fix validation errors before saving',
@@ -339,26 +336,6 @@ export default {
       discardConfirm: 'You have unsaved changes. Discard and leave?',
       discard: 'Discard',
       stay: 'Stay',
-    },
-    gitlab: {
-      title: 'GitLab Integration',
-      url: 'GitLab URL',
-      urlPlaceholder: 'https://gitlab.example.com (leave empty to keep)',
-      apiTokenPlaceholder: 'glpat-... (*** keeps current; empty clears)',
-      revealApiTokenAria: 'Reveal API Token',
-      webhookSecret: 'Webhook Secret',
-      revealWebhookAria: 'Reveal Webhook Secret',
-      webhookSigningSecret: 'Webhook Signing Secret',
-      revealSigningAria: 'Reveal Webhook Signing Secret',
-      signingPlaceholder:
-        'Paste the full GitLab 19.0+ signing token (starts with whsec_...)',
-      signingHelp: 'Include the whsec_ prefix when pasting the token.',
-      defaultProject: 'Default Project',
-      defaultProjectPlaceholder: 'group/project',
-      defaultProjectHelp:
-        'Full project path including the namespace, e.g. my-group/my-project.',
-      mrLabel: 'Merge Request Label',
-      autoReview: 'Auto-review enabled',
     },
     llm: {
       title: 'LLM Settings',
@@ -433,8 +410,6 @@ export default {
     },
     gitPlatforms: {
       title: 'Git Platforms',
-      subtitle:
-        'Manage the Git platform instances used to receive webhooks and trigger reviews (GitLab only for now).',
       addBtn: 'Add Platform',
       empty: 'No Git platforms configured yet',
       name: 'Name',
@@ -448,7 +423,10 @@ export default {
       webhookSecret: 'Webhook Secret',
       webhookSigningSecret: 'Webhook Signing Secret',
       keepSecretPlaceholder: 'Leave empty to keep the saved value',
-      webhookHelp: 'Webhook verification secret (optional).',
+      webhookSecretHelp:
+        'Webhook verification secret (X-Gitlab-Token header, used by GitLab versions before 19.0); optional.',
+      webhookSigningSecretHelp:
+        'GitLab 19.0+ signing token (starts with whsec_); optional. Once set, signature verification is enforced.',
       test: 'Test',
       testOk: 'Connected — GitLab {version}',
       testFailed: 'Connection failed — {error}',

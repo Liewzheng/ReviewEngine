@@ -109,41 +109,69 @@
               show-password
               :placeholder="
                 dialogMode === 'edit'
-                  ? $t('config.gitPlatforms.keepTokenPlaceholder')
+                  ? hasSavedToken
+                    ? SAVED_SECRET_PLACEHOLDER
+                    : $t('config.gitPlatforms.keepTokenPlaceholder')
                   : $t('config.gitPlatforms.tokenPlaceholder')
               "
             />
           </el-form-item>
         </el-col>
         <el-col :span="24">
-          <el-form-item :label="$t('config.gitPlatforms.webhookSecret')" prop="webhookSecret">
+          <el-form-item prop="webhookSecret">
+            <template #label>
+              {{ $t('config.gitPlatforms.webhookSecret') }}
+              <el-tooltip :content="$t('config.gitPlatforms.webhookSecretHelp')" placement="top">
+                <el-icon
+                  class="help-icon"
+                  tabindex="0"
+                  :aria-label="$t('config.gitPlatforms.webhookSecretHelp')"
+                >
+                  <InfoFilled />
+                </el-icon>
+              </el-tooltip>
+            </template>
             <el-input
               v-model="draft.webhookSecret"
               show-password
               :placeholder="
                 dialogMode === 'edit'
-                  ? $t('config.gitPlatforms.keepSecretPlaceholder')
+                  ? hasSavedWebhookSecret
+                    ? SAVED_SECRET_PLACEHOLDER
+                    : $t('config.gitPlatforms.keepSecretPlaceholder')
                   : $t('common.optional')
               "
             />
-            <div class="form-item-help">{{ $t('config.gitPlatforms.webhookSecretHelp') }}</div>
           </el-form-item>
         </el-col>
         <el-col :span="24">
-          <el-form-item
-            :label="$t('config.gitPlatforms.webhookSigningSecret')"
-            prop="webhookSigningSecret"
-          >
+          <el-form-item prop="webhookSigningSecret">
+            <template #label>
+              {{ $t('config.gitPlatforms.webhookSigningSecret') }}
+              <el-tooltip
+                :content="$t('config.gitPlatforms.webhookSigningSecretHelp')"
+                placement="top"
+              >
+                <el-icon
+                  class="help-icon"
+                  tabindex="0"
+                  :aria-label="$t('config.gitPlatforms.webhookSigningSecretHelp')"
+                >
+                  <InfoFilled />
+                </el-icon>
+              </el-tooltip>
+            </template>
             <el-input
               v-model="draft.webhookSigningSecret"
               show-password
               :placeholder="
                 dialogMode === 'edit'
-                  ? $t('config.gitPlatforms.keepSecretPlaceholder')
+                  ? hasSavedWebhookSigningSecret
+                    ? SAVED_SECRET_PLACEHOLDER
+                    : $t('config.gitPlatforms.keepSecretPlaceholder')
                   : $t('common.optional')
               "
             />
-            <div class="form-item-help">{{ $t('config.gitPlatforms.webhookSigningSecretHelp') }}</div>
           </el-form-item>
         </el-col>
       </el-row>
@@ -161,7 +189,7 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { Connection, Delete, Plus } from '@element-plus/icons-vue';
+import { Connection, Delete, InfoFilled, Plus } from '@element-plus/icons-vue';
 import { ElMessage, ElMessageBox, type FormInstance, type FormRules } from 'element-plus';
 import type { GitPlatformConfig } from '../../types/config';
 import { testGitPlatform } from '../../services/config';
@@ -199,6 +227,24 @@ const draft = reactive<GitPlatformConfig>({
   webhookSecret: '',
   webhookSigningSecret: '',
 });
+
+/** Placeholder shown for a secret that already has a stored value. */
+const SAVED_SECRET_PLACEHOLDER = '••••••••••';
+
+// GET /config masks saved secrets as the literal string '***' (unsaved = '').
+// openEditDialog blanks the draft but keeps the masked value in
+// props.platforms[editingIndex], so '***' there means "this field is stored".
+const hasSavedToken = computed(
+  () => dialogMode.value === 'edit' && props.platforms[editingIndex.value]?.token === '***'
+);
+const hasSavedWebhookSecret = computed(
+  () => dialogMode.value === 'edit' && props.platforms[editingIndex.value]?.webhookSecret === '***'
+);
+const hasSavedWebhookSigningSecret = computed(
+  () =>
+    dialogMode.value === 'edit' &&
+    props.platforms[editingIndex.value]?.webhookSigningSecret === '***'
+);
 
 // --- Test state ---
 /** Row whose connectivity probe is in flight (null when idle). */
@@ -451,12 +497,19 @@ function confirmRemove(index: number) {
   flex-shrink: 0;
 }
 
-/* Helper text below form inputs (webhook secret hint) */
-.form-item-help {
-  font-size: 12px;
-  color: var(--text-secondary);
-  margin-top: 6px;
-  line-height: 1.4;
+/* Info icon next to form labels; hover/focus reveals the tooltip */
+.help-icon {
+  margin-left: 4px;
+  font-size: 14px;
+  vertical-align: text-bottom;
+  color: var(--el-text-color-secondary);
+  cursor: help;
+}
+
+.help-icon:focus-visible {
+  outline: 2px solid var(--el-color-primary);
+  outline-offset: 1px;
+  border-radius: 50%;
 }
 
 :deep(.el-dialog__body) {

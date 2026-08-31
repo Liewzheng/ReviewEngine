@@ -410,13 +410,13 @@ export default {
       token: '액세스 토큰',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: '비워 두면 저장된 토큰이 유지됩니다',
-      webhookSecret: 'Webhook 시크릿',
-      webhookSigningSecret: 'Webhook 서명 시크릿',
+      webhookSecret: 'Secret token',
+      webhookSigningSecret: 'Signing token',
       keepSecretPlaceholder: '비워 두면 저장된 값이 유지됩니다',
       webhookSecretHelp:
-        'Webhook 검증 시크릿(X-Gitlab-Token 헤더, GitLab 19.0 이전 버전에서 사용). 선택 사항.',
+        'GitLab webhook 폼의 Secret token 필드에 해당합니다. 평문으로 X-Gitlab-Token 헤더에 실려 전송되므로 Signing token보다 보안이 약하며, 선택적 폴백입니다. 둘 중 하나만 설정해도 되지만 최소 하나는 설정해야 합니다.',
       webhookSigningSecretHelp:
-        'GitLab 19.0+ 서명 토큰(whsec_로 시작). 선택 사항. 설정하면 서명 검증이 강제됩니다.',
+        'GitLab 19.0+의 Signing token(whsec_로 시작하며, GitLab이 생성할 때 한 번만 표시됨). GitLab은 이 토큰으로 요청 본문의 HMAC-SHA256을 계산해 webhook-signature 헤더로 보냅니다. 권장 설정입니다.',
       test: '테스트',
       testOk: '연결 성공 — GitLab {version}',
       testFailed: '연결 실패 — {error}',

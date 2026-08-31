@@ -415,13 +415,13 @@ export default {
       token: "Jeton d'accès",
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: 'Laisser vide pour conserver le jeton enregistré',
-      webhookSecret: 'Secret de webhook',
-      webhookSigningSecret: 'Secret de signature du webhook',
+      webhookSecret: 'Secret token',
+      webhookSigningSecret: 'Signing token',
       keepSecretPlaceholder: 'Laisser vide pour conserver la valeur enregistrée',
       webhookSecretHelp:
-        'Secret de vérification du webhook (en-tête X-Gitlab-Token, utilisé par GitLab avant la version 19.0) ; facultatif.',
+        "Correspond au champ Secret token du formulaire webhook GitLab ; envoyé en clair dans l'en-tête X-Gitlab-Token, moins sûr que le Signing token, comme solution de repli facultative. Un seul des deux suffit, mais au moins l'un d'eux.",
       webhookSigningSecretHelp:
-        'Jeton de signature GitLab 19.0+ (commence par whsec_) ; facultatif. Une fois configuré, la vérification de signature est forcée.',
+        'Le Signing token de GitLab 19.0+ (commence par whsec_, affiché une seule fois lors de sa génération par GitLab). GitLab calcule avec ce jeton un HMAC-SHA256 du corps de la requête, envoyé via l\u2019en-tête webhook-signature. Recommandé.',
       test: 'Tester',
       testOk: 'Connexion réussie — GitLab {version}',
       testFailed: 'Échec de la connexion — {error}',

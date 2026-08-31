@@ -405,11 +405,13 @@ export default {
       token: '存取權杖',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: '留空則保留已儲存的 Token',
-      webhookSecret: 'Webhook 金鑰',
-      webhookSigningSecret: 'Webhook 簽章金鑰',
+      webhookSecret: 'Secret token',
+      webhookSigningSecret: 'Signing token',
       keepSecretPlaceholder: '留空則保留已儲存的金鑰',
-      webhookSecretHelp: 'Webhook 驗簽金鑰（X-Gitlab-Token，GitLab 19.0 之前版本使用），可選。',
-      webhookSigningSecretHelp: 'GitLab 19.0+ 簽章權杖（以 whsec_ 開頭），可選；設定後將強制簽章校驗。',
+      webhookSecretHelp:
+        '對應 GitLab webhook 表單的 Secret token 欄位，以明文放在 X-Gitlab-Token 標頭中傳送，安全性弱於 Signing token，作為可選兜底。兩者可只配其一，至少配一個。',
+      webhookSigningSecretHelp:
+        'GitLab 19.0+ 的 Signing token（whsec_ 開頭，GitLab 產生時僅顯示一次）。GitLab 用它對請求本體計算 HMAC-SHA256 並透過 webhook-signature 標頭傳送，建議配置。',
       test: '測試',
       testOk: '連線成功 — GitLab {version}',
       testFailed: '連線失敗 — {error}',

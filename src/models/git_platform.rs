@@ -25,6 +25,14 @@ pub struct GitPlatformConfig {
     /// Instance base URL (e.g. `https://gitlab.example.com`, port allowed).
     #[serde(default)]
     pub base_url: String,
+    /// Container-reachable base URL for REVIEW-time pulls (e.g.
+    /// `https://gitlab.islet.space` on the NAS's container-internal 443 when
+    /// `base_url` is the payload's external `https://gitlab.islet.space:8443`).
+    /// Optional — empty means "unconfigured": review pulls fall back to
+    /// `base_url`. NOT part of the payload-matching identity (`base_url` is);
+    /// changing it does not change which instance a webhook matches.
+    #[serde(default)]
+    pub internal_base_url: String,
     /// API token (live secret — the UI only ever sees the `***` mask).
     #[serde(default)]
     pub token: String,
@@ -34,6 +42,12 @@ pub struct GitPlatformConfig {
     /// GitLab 19+ webhook signing secret (`whsec_...`, Standard Webhooks).
     #[serde(default)]
     pub webhook_signing_secret: String,
+    /// Project `path_with_namespace` allowlist for webhook-triggered
+    /// reviews. Empty = every project is allowed; otherwise only projects
+    /// whose `path_with_namespace` is listed can trigger a review on this
+    /// platform.
+    #[serde(default)]
+    pub allowed_projects: Vec<String>,
 }
 
 fn default_platform_type() -> String {
@@ -48,6 +62,13 @@ impl GitPlatformConfig {
     /// verification for their host — the runtime default keeps applying.
     pub fn has_webhook_verification(&self) -> bool {
         !self.webhook_secret.is_empty() || !self.webhook_signing_secret.is_empty()
+    }
+
+    /// True when `path` (a project's `path_with_namespace`) is allowed to
+    /// trigger reviews for this platform. An empty allowlist permits every
+    /// project; otherwise the path must appear verbatim in the list.
+    pub fn allows_project(&self, path: &str) -> bool {
+        self.allowed_projects.is_empty() || self.allowed_projects.iter().any(|p| p == path)
     }
 
     /// True when `url` belongs to this instance: the scheme-less
@@ -146,10 +167,26 @@ mod tests {
             name: "testbed".to_string(),
             platform_type: "gitlab".to_string(),
             base_url: base_url.to_string(),
+            internal_base_url: String::new(),
             token: "glpat-platform".to_string(),
             webhook_secret: "wh-secret".to_string(),
             webhook_signing_secret: String::new(),
+            allowed_projects: Vec::new(),
         }
+    }
+
+    #[test]
+    fn allows_project_semantics() {
+        let mut p = platform("http://gitlab.internal");
+        // Empty allowlist permits every project.
+        assert!(p.allows_project("anything/any"));
+        assert!(p.allows_project(""));
+        p.allowed_projects = vec!["group/proj".to_string(), "group/other".to_string()];
+        assert!(p.allows_project("group/proj"));
+        assert!(p.allows_project("group/other"));
+        assert!(!p.allows_project("group/nope"));
+        assert!(!p.allows_project(""));
+        assert!(!p.allows_project("GROUP/PROJ"), "matching is exact, not case-folded");
     }
 
     #[test]
@@ -332,5 +369,30 @@ base_url = "http://gitlab.internal"
         .unwrap();
         assert_eq!(parsed.platform_type, "gitlab");
         assert!(parsed.token.is_empty());
+    }
+
+    #[test]
+    fn toml_round_trip_persists_internal_base_url() {
+        // Configured internal_base_url is written verbatim (snake_case) and
+        // round-trips.
+        let mut p = platform("http://gitlab.internal:8929");
+        p.internal_base_url = "https://gitlab.islet.space".to_string();
+        let text = toml::to_string(&p).unwrap();
+        assert!(
+            text.contains("internal_base_url = \"https://gitlab.islet.space\""),
+            "got: {text}"
+        );
+        let back: GitPlatformConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back, p);
+        // An absent key (legacy file) deserializes as unconfigured — never a
+        // hard error.
+        let legacy: GitPlatformConfig = toml::from_str(
+            r#"
+name = "x"
+base_url = "http://gitlab.internal"
+"#,
+        )
+        .unwrap();
+        assert!(legacy.internal_base_url.is_empty());
     }
 }

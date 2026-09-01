@@ -79,7 +79,8 @@ related:
 > GitLab 上游凭证，与 §7 的 API 鉴权头 `Authorization: Bearer` / `X-API-Key` 相互独立，
 > 同一请求可同时携带两者（注意区分：`/webhook/gitlab` 入站回调上的同名头承载的是 webhook
 > secret，与此处含义不同，两者互不影响）。请求头缺失时，服务端回退使用服务器侧已配置的
-> GitLab token（§3 配置 / CLI `--gitlab-token` / 环境变量 `GITLAB_TOKEN`）；两者都缺失时
+> GitLab token（优先 Web UI **Git 平台** 条目 / `ui-state.toml`；`--gitlab-token` /
+> `GITLAB_TOKEN` 已降级为 fallback-only，仅在服务器侧无该值时生效并打 deprecation 警告）；都缺失时
 > 返回 `400`。token 永远不会在响应或日志中返回（遵循 `***` 掩码约定，见 §3）。
 > `llm_configs` 中的 `api_key` 同属敏感字段：只允许经 §7 已认证的 `/api/v1` 通道提交，
 > 同样不得回显。

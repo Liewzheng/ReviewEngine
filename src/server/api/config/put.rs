@@ -87,6 +87,36 @@ fn mask_or_empty(secret: &str) -> String {
     }
 }
 
+/// Normalise a submitted `allowedProjects` list: trim every entry, drop
+/// blank/whitespace-only entries, and de-duplicate (first occurrence wins,
+/// order preserved). No format validation — any non-empty string is kept.
+fn sanitize_allowed_projects(allowed: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    allowed
+        .iter()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| seen.insert(s.clone()))
+        .collect()
+}
+
+/// True when `raw` is an absolute http(s) URL carrying a non-empty authority.
+///
+/// Shared by the `baseUrl` and `internalBaseUrl` checks. The authority check
+/// closes a `url`-crate quirk: `http:///host` parses successfully with host
+/// "host" (the empty authority is collapsed), so the original string must
+/// carry a non-empty authority between `scheme://` and the next `/`.
+fn is_absolute_http_url(raw: &str) -> bool {
+    reqwest::Url::parse(raw)
+        .ok()
+        .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
+        .filter(|_| {
+            raw.split_once("://")
+                .is_some_and(|(_, rest)| !rest.is_empty() && !rest.starts_with('/'))
+        })
+        .is_some()
+}
+
 /// Resolve the submitted `gitPlatforms` array into the new live set.
 ///
 /// Semantics: when the `gitPlatforms` key is present, the submitted array
@@ -135,25 +165,32 @@ fn resolve_git_platforms(
         // baseUrl keys both the credential routing (host:port matching at
         // review/webhook time) and the secret-keep below, so an empty,
         // unparseable, or non-http(s) value is a hard 422 — never a silently
-        // stored broken entry. The authority check closes a `url`-crate
-        // quirk: `http:///host` parses successfully with host "host" (the
-        // empty authority is collapsed), so the original string must carry a
-        // non-empty authority between `scheme://` and the next `/`.
-        let valid_base = reqwest::Url::parse(&base_url)
-            .ok()
-            .filter(|u| matches!(u.scheme(), "http" | "https") && u.host_str().is_some())
-            .filter(|_| {
-                base_url
-                    .split_once("://")
-                    .is_some_and(|(_, rest)| !rest.is_empty() && !rest.starts_with('/'))
-            });
-        if valid_base.is_none() {
+        // stored broken entry.
+        if !is_absolute_http_url(&base_url) {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
                 Json(serde_json::json!({
                     "error": format!(
                         "invalid baseUrl '{}' for git platform '{}': expected an absolute http(s) URL",
                         p.base_url, name
+                    )
+                })),
+            ));
+        }
+        // internalBaseUrl is optional (empty = unconfigured, review pulls fall
+        // back to baseUrl) and validated with the same rule as baseUrl when
+        // non-empty: a non-http(s) / unparseable value is a hard 422. It is
+        // NOT part of the secret-keep match key below — changing it does not
+        // change which instance an entry is (payload matching keys off
+        // baseUrl), so credentials carry over across an internalBaseUrl edit.
+        let internal_base_url = p.internal_base_url.trim().trim_end_matches('/').to_string();
+        if !internal_base_url.is_empty() && !is_absolute_http_url(&internal_base_url) {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid internalBaseUrl '{}' for git platform '{}': expected an absolute http(s) URL",
+                        p.internal_base_url, name
                     )
                 })),
             ));
@@ -173,9 +210,11 @@ fn resolve_git_platforms(
             name: name.to_string(),
             platform_type,
             base_url,
+            internal_base_url,
             token: keep(&p.token, |s| &s.token),
             webhook_secret: keep(&p.webhook_secret, |s| &s.webhook_secret),
             webhook_signing_secret: keep(&p.webhook_signing_secret, |s| &s.webhook_signing_secret),
+            allowed_projects: sanitize_allowed_projects(&p.allowed_projects),
         };
         match resolved.iter_mut().find(|e| e.name == entry.name) {
             Some(slot) => *slot = entry,
@@ -378,9 +417,11 @@ pub(crate) fn apply_ui_config(
             name: p.name.clone(),
             platform_type: p.platform_type.clone(),
             base_url: p.base_url.clone(),
+            internal_base_url: p.internal_base_url.clone(),
             token: mask_or_empty(&p.token),
             webhook_secret: mask_or_empty(&p.webhook_secret),
             webhook_signing_secret: mask_or_empty(&p.webhook_signing_secret),
+            allowed_projects: p.allowed_projects.clone(),
         })
         .collect();
 

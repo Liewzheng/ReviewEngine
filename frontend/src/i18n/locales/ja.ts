@@ -408,6 +408,10 @@ export default {
       type: 'タイプ',
       baseUrl: 'ベース URL',
       baseUrlPlaceholder: 'https://gitlab.example.com',
+      internalBaseUrl: '内部 URL',
+      internalBaseUrlPlaceholder: 'コンテナ内から実際に到達可能な URL（任意）',
+      internalBaseUrlHelp:
+        'external（ベース URL）は GitLab ペイロードに現れ、webhook マッチングに使われるアドレスです。internal は reng が実際にアクセスできるアドレス（例: コンテナ内ネットワーク）で、レビューデータの取得に使われます。空欄の場合はベース URL を使用します。',
       token: 'アクセストークン',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: '空欄の場合は保存済みのトークンを保持します',
@@ -418,6 +422,10 @@ export default {
         'GitLab webhook フォームの Secret token フィールドに対応します。平文で X-Gitlab-Token ヘッダーに載せて送信されるため Signing token より安全性が低く、任意のフォールバックです。どちらか一方だけでも構いませんが、少なくとも 1 つは設定してください。',
       webhookSigningSecretHelp:
         'GitLab 19.0+ の Signing token（whsec_ で始まり、GitLab 生成時に一度だけ表示されます）。GitLab はこれを使ってリクエストボディの HMAC-SHA256 を計算し、webhook-signature ヘッダーで送信します。推奨設定です。',
+      allowedProjects: '許可プロジェクト',
+      allowedProjectsPlaceholder: '1 行に 1 プロジェクトパス（例: group/project）、空欄 = すべて',
+      allowedProjectsHelp:
+        'システムフックはすべてのプロジェクトに適用されます。このホワイトリストでレビュー対象のプロジェクトを限定できます。空欄 = すべてのプロジェクト。',
       test: 'テスト',
       testOk: '接続成功 — GitLab {version}',
       testFailed: '接続失敗 — {error}',

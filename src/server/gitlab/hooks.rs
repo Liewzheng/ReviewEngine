@@ -10,6 +10,8 @@ pub struct MrHookPayload {
     pub mr_iid: u64,
     pub sha: String,
     pub gitlab_token: String,
+    /// `project.path_with_namespace` of the MR's project (empty when absent).
+    pub path_with_namespace: String,
 }
 
 /// Parse and validate an MR webhook body into its essential fields.
@@ -20,14 +22,24 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
     })?;
 
     let action = parsed["object_attributes"]["action"].as_str().unwrap_or("").to_string();
+    // System hooks (admin-level) carry the FULL MR URL in
+    // `object_attributes.url`; project webhooks lack it and fall back to
+    // `project.web_url + /-/merge_requests/{iid}`.
+    let object_attr_url = parsed["object_attributes"]["url"].as_str().unwrap_or("").to_string();
     let project_url = parsed["project"]["web_url"].as_str().unwrap_or("").to_string();
     let mr_iid = parsed["object_attributes"]["iid"].as_u64().unwrap_or(0);
-    let mr_url = if !project_url.is_empty() && mr_iid > 0 {
+    let mr_url = if !object_attr_url.is_empty() {
+        object_attr_url
+    } else if !project_url.is_empty() && mr_iid > 0 {
         format!("{}/-/merge_requests/{}", project_url, mr_iid)
     } else {
         String::new()
     };
     let sha = parsed["object_attributes"]["last_commit"]["id"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let path_with_namespace = parsed["project"]["path_with_namespace"]
         .as_str()
         .unwrap_or("")
         .to_string();
@@ -38,6 +50,7 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
         mr_iid,
         sha,
         gitlab_token: gitlab_token.to_string(),
+        path_with_namespace,
     })
 }
 
@@ -101,12 +114,78 @@ pub async fn dispatch_mr_event(dispatcher: &MrDispatcher, mr_url: &str, sha: &st
     }
 }
 
+/// Rewrite a payload MR URL onto a configured platform's reachable base URL.
+///
+/// GitLab webhook payloads carry the instance's `external_url` (e.g.
+/// `http://localhost:8929` on a dev box, `https://gitlab.islet.space:8443` on
+/// a NAS) — often NOT reachable from inside the review container, where
+/// `localhost` is the container itself and `:8443` is an external port
+/// mapping. The configured platform's `base_url` is the endpoint the server
+/// actually reaches (e.g. `http://host.docker.internal:8929`,
+/// `https://gitlab.islet.space` on the container-internal 443), so the
+/// payload URL's path (query included) is re-hosted onto it.
+///
+/// Applies to both system hooks (`object_attributes.url`, already a full MR
+/// URL) and project-level webhooks (the `project.web_url +
+/// /-/merge_requests/{iid}` construction) — `web_url` is the same
+/// `external_url` and just as likely to be unreachable.
+///
+/// **Fail-safe**: an unparseable payload URL or base URL returns the payload
+/// URL unchanged (legacy behavior) — this function never panics.
+pub(crate) fn rewrite_url_to_platform(url: &str, base_url: &str) -> String {
+    let Ok(payload) = reqwest::Url::parse(url.trim()) else {
+        return url.to_string();
+    };
+    let Ok(base) = reqwest::Url::parse(base_url.trim()) else {
+        return url.to_string();
+    };
+    let mut path = payload.path().to_string();
+    if let Some(query) = payload.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+    // `reqwest::Url` normalizes a host-only URL to a trailing `/`; strip it so
+    // the payload's path appends cleanly (trailing-slash base_urls work too).
+    format!("{}{}", base.as_str().trim_end_matches('/'), path)
+}
+
+/// The review-time reachable base for `platform`: `internal_base_url` when
+/// configured (the container-reachable endpoint, e.g. the NAS's internal 443
+/// while the payload carries the external :8443), else `base_url`. The
+/// fail-safe in [`rewrite_url_to_platform`] keeps the payload URL verbatim
+/// when the chosen target does not parse.
+fn review_base_url(platform: &crate::models::GitPlatformConfig) -> &str {
+    if platform.internal_base_url.is_empty() {
+        &platform.base_url
+    } else {
+        &platform.internal_base_url
+    }
+}
+
 pub async fn handle_mr_hook(
     body: &str,
     dispatcher: &MrDispatcher,
     gitlab_token: &str,
+    platform: Option<crate::models::GitPlatformConfig>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_mr_hook_payload(body, gitlab_token)?;
+
+    // Project allowlist gate, before any dispatch: a non-empty allowlist on
+    // the matched platform that does not contain this payload's
+    // `project.path_with_namespace` ignores the event wholesale. An unmatched
+    // payload (or a platform without verification credentials) yields `None`
+    // → empty allowlist → every project allowed (legacy behavior).
+    let allowed_projects: &[String] = platform.as_ref().map(|p| p.allowed_projects.as_slice()).unwrap_or(&[]);
+    if !allowed_projects.is_empty() && !allowed_projects.contains(&payload.path_with_namespace) {
+        tracing::info!(
+            project = %payload.path_with_namespace,
+            "MR hook ignored: project not in allowlist"
+        );
+        return Ok(Json(serde_json::json!({
+            "status": "ignored",
+            "reason": "project not in allowlist",
+        })));
+    }
 
     tracing::info!("MR !{} webhook received: action={}", payload.mr_iid, payload.action);
 
@@ -128,9 +207,20 @@ pub async fn handle_mr_hook(
             })));
         }
 
+        // The payload's MR URL is GitLab's `external_url`, often unreachable
+        // from inside the review container. When a git platform matched this
+        // payload, re-host the URL onto the platform's reachable base
+        // (`internal_base_url` when configured, else `base_url`); the SAME
+        // rewritten URL becomes the dispatch dedup key (consistency).
+        // Unmatched → keep the payload URL (legacy behavior).
+        let review_url = platform
+            .as_ref()
+            .map(|p| rewrite_url_to_platform(&payload.mr_url, review_base_url(p)))
+            .unwrap_or_else(|| payload.mr_url.clone());
+
         dispatch_mr_event(
             dispatcher,
-            &payload.mr_url,
+            &review_url,
             &payload.sha,
             &payload.gitlab_token,
             payload.mr_iid,
@@ -167,10 +257,30 @@ pub fn note_starts_with_command(note: &str, cmd: &str) -> bool {
     rest.is_empty() || rest.starts_with('/')
 }
 
+/// Extract the merge request iid from the tail of a system-hook note/MR URL
+/// like `https://gitlab.example.com/group/proj/-/merge_requests/123`. Matches
+/// the LAST `/-/merge_requests/` marker and parses the leading digit run that
+/// follows (query strings / trailing segments are ignored). `None` when the
+/// marker is absent or carries no numeric id.
+pub(crate) fn mr_iid_from_url(url: &str) -> Option<u64> {
+    const MARKER: &str = "/-/merge_requests/";
+    let idx = url.rfind(MARKER)?;
+    let digits: String = url[idx + MARKER.len()..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
 pub async fn handle_note_hook(
     body: &str,
     dispatcher: &MrDispatcher,
     gitlab_token: &str,
+    platform: Option<crate::models::GitPlatformConfig>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse Note hook: {}", e);
@@ -183,11 +293,33 @@ pub async fn handle_note_hook(
     // Check for commands like /review, /describe. Matched on a path-segment
     // boundary so `/reviewer` / `/reviewxyz` never trigger a review.
     if note_starts_with_command(&note_lower, "/review") || note_starts_with_command(&note_lower, "/describe") {
-        let project_url = parsed["project"]["web_url"].as_str().unwrap_or("").to_string();
-        let mr_iid = parsed["merge_request"]["iid"]
+        // Project allowlist gate before any review dispatch.
+        let path = parsed["project"]["path_with_namespace"].as_str().unwrap_or("");
+        let allowed_projects: &[String] = platform.as_ref().map(|p| p.allowed_projects.as_slice()).unwrap_or(&[]);
+        if !allowed_projects.is_empty() && !allowed_projects.iter().any(|p| p == path) {
+            tracing::info!(project = %path, "note hook ignored: project not in allowlist");
+            return Ok(Json(serde_json::json!({
+                "status": "ignored",
+                "reason": "project not in allowlist",
+            })));
+        }
+        // System hooks lack `project.web_url`; fall back to `project.homepage`.
+        let project_url = parsed["project"]["web_url"]
+            .as_str()
+            .or_else(|| parsed["project"]["homepage"].as_str())
+            .unwrap_or("")
+            .to_string();
+        let mut mr_iid = parsed["merge_request"]["iid"]
             .as_u64()
             .or_else(|| parsed["object_attributes"]["noteable_iid"].as_u64())
             .unwrap_or(0);
+        // System hook notes may omit an iid; extract it from the
+        // `object_attributes.url` tail (`/-/merge_requests/{iid}`).
+        if mr_iid == 0 {
+            if let Some(iid) = parsed["object_attributes"]["url"].as_str().and_then(mr_iid_from_url) {
+                mr_iid = iid;
+            }
+        }
         let mr_url = if !project_url.is_empty() && mr_iid > 0 {
             format!("{}/-/merge_requests/{}", project_url, mr_iid)
         } else {
@@ -195,7 +327,15 @@ pub async fn handle_note_hook(
         };
 
         if !mr_url.is_empty() && !gitlab_token.is_empty() {
-            let url = mr_url;
+            // Same rewrite as the MR hook: re-host the note's MR URL onto the
+            // matched platform's reachable base (`internal_base_url` when
+            // configured, else `base_url`; the note URL is built from
+            // `project.web_url`/`homepage` — GitLab's external_url).
+            // Unmatched → payload URL unchanged (legacy behavior).
+            let url = platform
+                .as_ref()
+                .map(|p| rewrite_url_to_platform(&mr_url, review_base_url(p)))
+                .unwrap_or(mr_url);
             let token = gitlab_token.to_string();
             let sha = format!("note_{}", uuid::Uuid::new_v4());
 

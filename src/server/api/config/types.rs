@@ -40,12 +40,24 @@ pub struct UiGitPlatformConfig {
     pub platform_type: String,
     #[serde(default)]
     pub base_url: String,
+    /// Container-reachable base URL for review-time pulls (REST field
+    /// `internalBaseUrl`). Optional — empty = unconfigured (fall back to
+    /// `baseUrl`). Mirrors
+    /// [`crate::models::GitPlatformConfig::internal_base_url`]; NOT part of
+    /// the webhook-matching identity.
+    #[serde(default)]
+    pub internal_base_url: String,
     #[serde(default)]
     pub token: String,
     #[serde(default)]
     pub webhook_secret: String,
     #[serde(default)]
     pub webhook_signing_secret: String,
+    /// Project `path_with_namespace` allowlist for webhook-triggered reviews
+    /// (REST field `allowedProjects`). Empty = every project. Mirrors
+    /// [`crate::models::GitPlatformConfig::allowed_projects`].
+    #[serde(default)]
+    pub allowed_projects: Vec<String>,
 }
 
 pub(crate) fn default_git_platform_type() -> String {

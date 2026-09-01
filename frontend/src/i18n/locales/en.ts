@@ -417,6 +417,10 @@ export default {
       type: 'Type',
       baseUrl: 'Base URL',
       baseUrlPlaceholder: 'https://gitlab.example.com',
+      internalBaseUrl: 'Internal URL',
+      internalBaseUrlPlaceholder: 'Internally reachable URL (optional)',
+      internalBaseUrlHelp:
+        'The external (Base URL) is the address that appears in GitLab payloads and is used for webhook matching; the internal URL is the address reng can actually reach (e.g. a container-internal network) and is used to fetch review data. Leave empty to use the Base URL.',
       token: 'Access Token',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: 'Leave empty to keep the saved token',
@@ -427,6 +431,10 @@ export default {
         'Corresponds to the Secret token field in the GitLab webhook form; sent in plaintext via the X-Gitlab-Token header, weaker than the Signing token, as an optional fallback. You may configure only one of the two, but at least one.',
       webhookSigningSecretHelp:
         'The Signing token of GitLab 19.0+ (starts with whsec_, shown only once when GitLab generates it). GitLab uses it to compute HMAC-SHA256 over the request body and sends it via the webhook-signature header. Recommended.',
+      allowedProjects: 'Allowed projects',
+      allowedProjectsPlaceholder: 'One project path per line (e.g. group/project), leave empty = all',
+      allowedProjectsHelp:
+        'System-level hooks apply to all projects; use this whitelist to restrict which projects are reviewed. Empty = all projects.',
       test: 'Test',
       testOk: 'Connected — GitLab {version}',
       testFailed: 'Connection failed — {error}',

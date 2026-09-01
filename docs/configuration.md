@@ -164,21 +164,33 @@ A running server (`review-engine serve`, default port 8080) also exposes a brows
 
 The page is read-only until you click **Edit**. It is organized into cards:
 
-- **GitLab** — instance URL, API token, webhook secret, webhook signing secret (the `whsec_...` value, see [GitLab webhook](integrations/gitlab.md)), default project, MR label, and the auto-review switch.
-- **LLM** — the primary provider: API base URL, API key, default model, max tokens, temperature, timeout, and retry attempts. Once a base URL and key are filled in, the model dropdown auto-populates from `POST /api/v1/config/models`. **Test connection** calls `POST /api/v1/config/test` and reports success with latency or the error.
-- **Additional LLM providers** — the fallback list (`[[llm]]` entries beyond the primary). Add, expand to edit, or delete entries; changes go through `POST`/`PUT`/`DELETE /api/v1/llm/providers` when you save.
+- **Git 平台 (Git Platforms)** — one entry per configured Git host: name, type, Base URL, internal URL (optional), access token, Secret token / Signing token (`whsec_...`, see [GitLab webhook](integrations/gitlab.md)), and the allowed-projects allowlist. Entries are hot-effective: they drive both webhook verification and review-time GitLab API pulls without a restart.
 - **Review rules** — minimum passing score (`minScore`), max review duration, block-on-critical, auto-comment-on-pass, comment template, excluded file patterns, and required experts.
 - **Advanced** (collapsed by default) — log level and retention, SSE heartbeat interval, max concurrent reviews, request timeout, metrics toggle, debug mode.
 
+LLM providers are managed on a separate **LLM page** (`/#/llm`): the primary provider and the fallback list (`[[llm]]` entries), each with API base URL, key, default model, max tokens, temperature, timeout, and retry attempts. The model dropdown auto-populates from `POST /api/v1/config/models`; **Test connection** calls `POST /api/v1/config/test` and reports success with latency or the error. Provider changes go through `POST`/`PUT`/`DELETE /api/v1/llm/providers` when you save.
+
 ### Secret handling
 
-`GET /api/v1/config` never returns a live secret: a configured LLM API key or GitLab API token comes back as the mask sentinel `***`. In read-only mode, secret fields display as dots; the reveal button only ever shows this mask, never the real value. On save:
+`GET /api/v1/config` never returns a live secret: a configured LLM API key, Git platform access token, or webhook secret comes back as the mask sentinel `***`. In read-only mode, secret fields display as dots; the reveal button only ever shows this mask, never the real value. On save:
 
 - `***` (or leaving the field blank for LLM keys) means **keep the stored value**;
 - a real value replaces the stored secret;
-- an empty GitLab API token explicitly **clears** the token.
+- an empty Git platform access token explicitly **clears** the token.
 
-A token set via `--gitlab-token` or `GITLAB_TOKEN` at startup also appears as `***`, so an unrelated UI save cannot silently wipe it.
+A token set via `--gitlab-token` / `GITLAB_TOKEN` at startup (or a webhook secret via `--gitlab-webhook-secret`, `--gitlab-webhook-signing-secret`, or the `GITLAB_WEBHOOK_*` variables) also appears as `***`, so an unrelated UI save cannot silently wipe it.
+
+#### Secrets are encrypted at rest
+
+Secrets saved through the Web UI (git platform tokens, webhook secrets, legacy GitLab credentials) are **encrypted at rest** in `ui-state.toml`: the on-disk value carries an `enc:` prefix (ChaCha20-Poly1305, fresh random nonce per value). The master key lives in a separate `secrets.key` file (32 random bytes, mode `0600`) next to `ui-state.toml` and is auto-generated on the first save.
+
+- **Back up `secrets.key` together with `ui-state.toml`.** Losing the key makes stored secrets unrecoverable; after a loss, re-enter the secrets in the Web UI (which writes new encrypted values under a regenerated key).
+- **Old plaintext files migrate automatically**: a `ui-state.toml` written by an earlier version loads fine, and the next save encrypts everything.
+- Encryption covers Git credentials only; LLM API keys remain plaintext at rest.
+
+#### env / CLI GitLab credentials are fallback-only
+
+`GITLAB_TOKEN`, `GITLAB_WEBHOOK_SECRET`, `GITLAB_WEBHOOK_SIGNING_SECRET` and the corresponding `--gitlab-*` flags are **deprecated to fallback-only**: they take effect only when the persisted UI state holds no value for that field, and each such use logs a deprecation warning. The Web UI (`ui-state.toml`) is the authoritative source for webhook verification and review credentials and is hot-effective.
 
 ### Editing and saving
 

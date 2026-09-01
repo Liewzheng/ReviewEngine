@@ -4,7 +4,7 @@ review-engine fits into existing Git workflows through webhooks, CI pipelines, a
 
 ## Guides
 
-- [GitLab webhook setup](gitlab.md) — trigger reviews from MR events and `/review`, `/improve`, `/describe` comments.
+- [GitLab webhook setup](gitlab.md) — trigger reviews from project webhooks or a single admin-level System Hook (MR events, `/review`, `/improve`, `/describe` comments), with per-project filtering and dual-network URL support.
 - [GitHub webhook setup](github.md) — trigger reviews from PR events and comment commands.
 - [CI pipeline examples](ci-examples.md) — run review-engine in GitLab CI or GitHub Actions.
 

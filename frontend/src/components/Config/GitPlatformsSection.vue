@@ -107,6 +107,18 @@
           </el-form-item>
         </el-col>
         <el-col :span="24">
+          <el-form-item prop="internalBaseUrl">
+            <template #label>
+              {{ $t('config.gitPlatforms.internalBaseUrl') }}
+              <HelpTip :tip="$t('config.gitPlatforms.internalBaseUrlHelp')" />
+            </template>
+            <el-input
+              v-model="draft.internalBaseUrl"
+              :placeholder="$t('config.gitPlatforms.internalBaseUrlPlaceholder')"
+            />
+          </el-form-item>
+        </el-col>
+        <el-col :span="24">
           <el-form-item :label="$t('config.gitPlatforms.token')" prop="token">
             <el-input
               v-model="draft.token"
@@ -158,6 +170,21 @@
                     : $t('config.gitPlatforms.keepSecretPlaceholder')
                   : $t('common.optional')
               "
+            />
+          </el-form-item>
+        </el-col>
+        <el-col :span="24">
+          <el-form-item prop="allowedProjects">
+            <template #label>
+              {{ $t('config.gitPlatforms.allowedProjects') }}
+              <HelpTip :tip="$t('config.gitPlatforms.allowedProjectsHelp')" />
+            </template>
+            <el-input
+              v-model="draft.allowedProjectsText"
+              type="textarea"
+              :rows="3"
+              resize="vertical"
+              :placeholder="$t('config.gitPlatforms.allowedProjectsPlaceholder')"
             />
           </el-form-item>
         </el-col>
@@ -213,13 +240,19 @@ const dialogMode = ref<'add' | 'edit'>('add');
 /** Index of the row being edited; -1 when adding. */
 const editingIndex = ref(-1);
 const dialogFormRef = ref<FormInstance>();
-const draft = reactive<GitPlatformConfig>({
+/** Draft state for the add/edit dialog: the `GitPlatformConfig` contract plus
+ * the newline-joined textarea mirror of `allowedProjects`. */
+type GitPlatformDraft = GitPlatformConfig & { allowedProjectsText: string };
+const draft = reactive<GitPlatformDraft>({
   name: '',
   type: 'gitlab',
   baseUrl: '',
+  internalBaseUrl: '',
   token: '',
   webhookSecret: '',
   webhookSigningSecret: '',
+  allowedProjects: [],
+  allowedProjectsText: '',
 });
 
 /** Placeholder shown for a secret that already has a stored value. */
@@ -270,14 +303,17 @@ HelpTip.props = ['tip'];
 /** Row whose connectivity probe is in flight (null when idle). */
 const testingIndex = ref<number | null>(null);
 
-function blankDraft(): GitPlatformConfig {
+function blankDraft(): GitPlatformDraft {
   return {
     name: '',
     type: 'gitlab',
     baseUrl: '',
+    internalBaseUrl: '',
     token: '',
     webhookSecret: '',
     webhookSigningSecret: '',
+    allowedProjects: [],
+    allowedProjectsText: '',
   };
 }
 
@@ -293,13 +329,20 @@ function openEditDialog(index: number) {
   // Secret fields start blank: the backend keeps the stored secret for a
   // matching name when the submitted value is empty or the `***` mask, so a
   // blank field here means "leave unchanged" (see the placeholder text).
+  // allowedProjects round-trips through the textarea as one path per line;
+  // an empty (or previously empty) list shows an empty textarea (= all).
   Object.assign(draft, {
     name: platform.name,
     type: platform.type,
     baseUrl: platform.baseUrl,
+    // internalBaseUrl is plain config, never masked: empty means "fall back to
+    // baseUrl", so it round-trips as-is (old entries may lack the field).
+    internalBaseUrl: platform.internalBaseUrl ?? '',
     token: '',
     webhookSecret: '',
     webhookSigningSecret: '',
+    allowedProjects: platform.allowedProjects ?? [],
+    allowedProjectsText: (platform.allowedProjects ?? []).join('\n'),
   });
   dialogMode.value = 'edit';
   editingIndex.value = index;
@@ -351,9 +394,22 @@ async function confirmDialog() {
       // probe's normalized form (the masked-token fallback matches on the
       // exact baseUrl string).
       baseUrl: draft.baseUrl.trim().replace(/\/+$/, ''),
+      // Internal URL is submitted trimmed but otherwise verbatim: the backend
+      // treats it as "reng's reachable address", empty = fall back to baseUrl.
+      internalBaseUrl: draft.internalBaseUrl.trim(),
       token: draft.token,
       webhookSecret: draft.webhookSecret,
       webhookSigningSecret: draft.webhookSigningSecret,
+      // One project path per line; trim whitespace, drop blank lines, and
+      // keep the first occurrence of each path. Empty result = all projects.
+      allowedProjects: Array.from(
+        new Set(
+          draft.allowedProjectsText
+            .split('\n')
+            .map((line) => line.trim())
+            .filter(Boolean)
+        )
+      ),
     };
     if (dialogMode.value === 'edit') {
       const original = props.platforms[editingIndex.value];

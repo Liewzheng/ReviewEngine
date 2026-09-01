@@ -407,6 +407,10 @@ export default {
       type: '유형',
       baseUrl: '기본 URL',
       baseUrlPlaceholder: 'https://gitlab.example.com',
+      internalBaseUrl: '내부 URL',
+      internalBaseUrlPlaceholder: '컨테이너 내부에서 실제로 접근 가능한 URL(선택 사항)',
+      internalBaseUrlHelp:
+        'external(기본 URL)은 GitLab 페이로드에 나타나며 webhook 매칭에 사용되는 주소입니다. internal은 reng이 실제로 접근할 수 있는 주소(예: 컨테이너 내부 네트워크)로, 리뷰 데이터를 가져올 때 사용됩니다. 비워 두면 기본 URL을 사용합니다.',
       token: '액세스 토큰',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: '비워 두면 저장된 토큰이 유지됩니다',
@@ -417,6 +421,10 @@ export default {
         'GitLab webhook 폼의 Secret token 필드에 해당합니다. 평문으로 X-Gitlab-Token 헤더에 실려 전송되므로 Signing token보다 보안이 약하며, 선택적 폴백입니다. 둘 중 하나만 설정해도 되지만 최소 하나는 설정해야 합니다.',
       webhookSigningSecretHelp:
         'GitLab 19.0+의 Signing token(whsec_로 시작하며, GitLab이 생성할 때 한 번만 표시됨). GitLab은 이 토큰으로 요청 본문의 HMAC-SHA256을 계산해 webhook-signature 헤더로 보냅니다. 권장 설정입니다.',
+      allowedProjects: '허용 프로젝트',
+      allowedProjectsPlaceholder: '줄마다 프로젝트 경로 하나(예: group/project), 비워 두면 = 전체',
+      allowedProjectsHelp:
+        '시스템 훅은 모든 프로젝트에 적용됩니다. 이 화이트리스트로 리뷰 대상 프로젝트를 제한할 수 있습니다. 비워 두면 = 모든 프로젝트.',
       test: '테스트',
       testOk: '연결 성공 — GitLab {version}',
       testFailed: '연결 실패 — {error}',

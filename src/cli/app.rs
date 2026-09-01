@@ -244,11 +244,13 @@ pub async fn run() -> Result<()> {
                 Vec::new()
             };
             review_engine::config::apply_llm_env_fallback(&mut config);
-            // Track which GitLab credentials came from CLI flags / env vars:
-            // those sources win over the persisted ui-state.toml (precedence:
-            // config.toml < ui-state.toml < env), so they are injected as
-            // overrides when the file is replayed below and skipped when the
-            // file is saved.
+            // Track which GitLab credentials came from CLI flags / env vars.
+            // Since the persistence-file priority inversion these are
+            // FALLBACK-ONLY: they take effect only when ui-state.toml holds
+            // no value for the field, and each such use logs a deprecation
+            // warning (configure the credential in the Web UI instead). They
+            // are passed as overrides to the replay below and never saved to
+            // the file.
             let gitlab_token_opt = gitlab_token
                 .or_else(|| std::env::var("GITLAB_TOKEN").ok())
                 .filter(|s| !s.is_empty());

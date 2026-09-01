@@ -324,9 +324,11 @@ mod tests {
                 name: "testbed".to_string(),
                 platform_type: "gitlab".to_string(),
                 base_url: "http://gitlab.internal:8929".to_string(),
+                internal_base_url: String::new(),
                 token: "glpat-platform".to_string(),
                 webhook_secret: "platform-secret".to_string(),
                 webhook_signing_secret: String::new(),
+                allowed_projects: Vec::new(),
             }];
             let body = r#"{"project":{"web_url":"http://gitlab.internal:8929/group/proj"}}"#;
 

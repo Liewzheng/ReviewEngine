@@ -93,12 +93,20 @@ export interface GitPlatformConfig {
   type: GitPlatformType
   /** Instance base URL (e.g. `https://gitlab.example.com`). */
   baseUrl: string
+  /** Internal address reachable from reng's network (e.g. container-internal
+   * URL); used to fetch review data. Empty = fall back to `baseUrl`. */
+  internalBaseUrl: string
   /** API access token; `***` when the backend reports it as configured. */
   token: string
   /** Webhook verification secret; `***` when configured, empty when unset. */
   webhookSecret: string
   /** Webhook signing secret; `***` when configured, empty when unset. */
   webhookSigningSecret: string
+  /**
+   * Whitelist of `path_with_namespace` project paths allowed to participate in
+   * reviews via this platform's system-level hooks. Empty array = all projects.
+   */
+  allowedProjects: string[]
 }
 
 /** Complete application configuration combining all config sections. */

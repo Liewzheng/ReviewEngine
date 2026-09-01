@@ -605,6 +605,54 @@ async fn put_get_git_platforms_round_trip() {
     assert!(!serialized.contains("wh-platform"), "secret leaked in {serialized}");
 }
 
+/// `allowedProjects` (camelCase) is carried through PUT → stored model and
+/// back to GET, sanitized: entries are trimmed, blank/whitespace-only items
+/// dropped, duplicates removed (first occurrence wins, order preserved). No
+/// format validation — any non-empty string is kept.
+#[tokio::test]
+async fn put_git_platforms_allowed_projects_sanitized_and_round_trips() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": "glpat-platform",
+                "webhookSecret": "wh-platform",
+                "allowedProjects": [" group/a ", "   ", "", "group/b", "group/a", "group/b", "group/c "]
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = stored_platform(&state, "testbed").expect("platform must be stored");
+    assert_eq!(
+        stored.allowed_projects,
+        vec!["group/a", "group/b", "group/c"],
+        "trimmed, de-duplicated, blank entries dropped"
+    );
+
+    // GET projects the allowlist back in camelCase (omitted field default: []).
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let entry = &body["gitPlatforms"][0];
+    assert_eq!(
+        entry["allowedProjects"],
+        serde_json::json!(["group/a", "group/b", "group/c"])
+    );
+    let serialized = serde_json::to_string(&body).unwrap();
+    assert!(
+        serialized.contains("allowedProjects"),
+        "camelCase field missing: {serialized}"
+    );
+}
+
 /// Masked (`***`) or blank secrets on an entry with the SAME (name, baseUrl)
 /// keep the stored secret; a real value replaces it.
 #[tokio::test]
@@ -766,6 +814,81 @@ async fn put_git_platforms_invalid_base_url_rejected() {
         state.git_platforms.read().unwrap().is_empty(),
         "rejected updates must not persist"
     );
+}
+
+/// `internalBaseUrl` round-trips: PUT stores it on the model, GET projects it
+/// back in camelCase, and it is never masked (it is not a secret).
+#[tokio::test]
+async fn put_get_git_platforms_internal_base_url_round_trip() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let mut p = testbed_platform_json();
+    p["internalBaseUrl"] = serde_json::json!("https://gitlab.islet.space");
+    let resp = put_config(State(state.clone()), Json(serde_json::json!({ "gitPlatforms": [p] })))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = stored_platform(&state, "testbed").expect("platform must be stored");
+    assert_eq!(stored.internal_base_url, "https://gitlab.islet.space");
+    assert_eq!(stored.base_url, "http://gitlab.internal:8929");
+
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let entry = &body["gitPlatforms"][0];
+    assert_eq!(entry["internalBaseUrl"], "https://gitlab.islet.space");
+    let serialized = serde_json::to_string(&body).unwrap();
+    assert!(
+        serialized.contains("internalBaseUrl"),
+        "camelCase field missing: {serialized}"
+    );
+}
+
+/// `internalBaseUrl` is optional and validated like baseUrl when non-empty:
+/// empty / whitespace-only (treated as empty = unconfigured) is accepted and
+/// stored empty; a non-absolute / non-http(s) / authority-less value fails the
+/// whole PUT with 422 and nothing persists.
+#[tokio::test]
+async fn put_git_platforms_internal_base_url_validation() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    // Empty and whitespace-only are accepted → stored as unconfigured.
+    for internal in ["", "   "] {
+        let mut p = testbed_platform_json();
+        p["internalBaseUrl"] = serde_json::json!(internal);
+        let resp = put_config(State(state.clone()), Json(serde_json::json!({ "gitPlatforms": [p] })))
+            .await
+            .into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "internalBaseUrl {internal:?} must be allowed"
+        );
+        assert!(
+            stored_platform(&state, "testbed").unwrap().internal_base_url.is_empty(),
+            "empty/whitespace internalBaseUrl stores as unconfigured"
+        );
+    }
+
+    // Non-absolute / non-http(s) / authority-less values → 422.
+    for internal in ["not a url", "ftp://gitlab.internal", "http:///no-host"] {
+        let mut bad = testbed_platform_json();
+        bad["internalBaseUrl"] = serde_json::json!(internal);
+        let resp = put_config(State(state.clone()), Json(serde_json::json!({ "gitPlatforms": [bad] })))
+            .await
+            .into_response();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "internalBaseUrl {internal:?} must be rejected"
+        );
+    }
+    // The accepted (empty) value survives; the rejected ones never landed.
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert!(stored.internal_base_url.is_empty());
 }
 
 /// Full-replace semantics: the submitted array replaces the whole set — an
@@ -939,9 +1062,11 @@ async fn git_platform_probe_falls_back_to_stored_token_when_masked() {
         name: "testbed".to_string(),
         platform_type: "gitlab".to_string(),
         base_url: server.uri(),
+        internal_base_url: String::new(),
         token: "glpat-stored".to_string(),
         webhook_secret: String::new(),
         webhook_signing_secret: String::new(),
+        allowed_projects: Vec::new(),
     }];
 
     for token in [API_KEY_MASK, ""] {

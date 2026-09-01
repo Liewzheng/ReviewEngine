@@ -246,14 +246,18 @@ pub struct AppState {
 impl AppState {
     /// Create a new `AppState` with the given LLM configs.
     ///
-    /// All optional fields are initialised to `None`; set them directly
-    /// or with builder-style methods as needed.
+    /// Optional fields except `task_store` are initialised to `None`; set
+    /// them directly or with builder-style methods as needed. The task store
+    /// is created eagerly so EVERY `AppState` can record review tasks — the
+    /// old `None` default left webhook-dispatched reviews (and every test
+    /// state) without a store, which is what made the dashboard / queue /
+    /// `/reviews` pages empty.
     pub fn new(llm_configs: Vec<LLMConfig>) -> Self {
         Self {
             llm_configs: RwLock::new(llm_configs),
             registry: None,
             progress_map: None,
-            task_store: None,
+            task_store: Some(Arc::new(TaskStore::new())),
             app_config: RwLock::new(None),
             log_collector: None,
             ui_config: RwLock::new(UiConfig::default()),
@@ -277,7 +281,10 @@ mod tests {
         assert!(state.llm_configs.read().unwrap().is_empty());
         assert!(state.registry.is_none());
         assert!(state.progress_map.is_none());
-        assert!(state.task_store.is_none());
+        // The task store is initialized eagerly so every AppState can record
+        // review tasks (webhook + REST); the old `None` default is what made
+        // the dashboard / queue / reviews pages empty.
+        assert!(state.task_store.is_some());
         assert!(state.app_config.read().unwrap().is_none());
         assert!(state.log_collector.is_none());
         assert!(state.feedback_store.is_none());

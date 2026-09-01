@@ -59,7 +59,13 @@ const activeTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.
 const queuedTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'queued'))
 const failedTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'failed'))
 const cancelledTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'cancelled'))
-const allTasks = computed(() => queue.items.value)
+const completedTasks = computed(() => queue.items.value.filter((t: QueueTask) => t.status === 'completed'))
+// The backend returns every status (including `completed`) when no status
+// filter is passed. Completed tasks are rendered in their own section below,
+// so the "no tasks" placeholder must cover the full list — otherwise a
+// completed-only result suppresses the placeholder while the four active
+// sections stay empty, leaving a blank page.
+const hasAnyTasks = computed(() => queue.items.value.length > 0)
 
 // --- Load queue data ---
 const loadQueueData = async () => {
@@ -461,8 +467,33 @@ onUnmounted(() => {
         </TransitionGroup>
       </div>
 
+      <!-- Recently Completed Tasks -->
+      <div
+        v-if="completedTasks.length > 0"
+        class="task-section"
+      >
+        <div class="section-header">
+          <div class="section-title">
+            <span>{{ $t('queue.sections.completed') }}</span>
+            <el-badge :value="completedTasks.length" type="success" />
+          </div>
+        </div>
+        <TransitionGroup name="task" tag="div" class="task-grid">
+          <TaskCard
+            v-for="task in completedTasks"
+            :key="task.id"
+            :task="task"
+            :is-paused="isPaused"
+            :was-updated="recentlyUpdated.includes(task.id)"
+            @cancel="handleCancel"
+            @retry="handleRetry"
+            @view-logs="handleViewLogs"
+          />
+        </TransitionGroup>
+      </div>
+
       <!-- Global Empty State -->
-      <div v-if="allTasks.length === 0" class="global-empty">
+      <div v-if="!hasAnyTasks" class="global-empty">
         <el-empty :description="$t('queue.empty')">
           <template #image>
             <el-icon :size="64" color="var(--text-secondary)"><InfoFilled /></el-icon>

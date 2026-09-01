@@ -456,6 +456,51 @@ async fn test_list_reviews_merges_camelcase_and_keeps_snakecase() {
     assert!(item.get("rawComment").is_none(), "list items must not carry rawComment");
 }
 
+/// The exact webhook defect: a webhook-dispatched review records a task entry
+/// (via `record_task_started` / `record_task_outcome` — the same helpers the
+/// GitLab hook path uses) that then surfaces in `/api/v1/reviews`. Before the
+/// TaskStore wiring, webhook reviews never created an entry, so this list was
+/// empty no matter how many MRs were reviewed.
+#[tokio::test]
+async fn webhook_recorded_task_surfaces_in_list_reviews() {
+    let state = state_with_store();
+    let store = state.task_store.clone().unwrap();
+
+    // Enqueue-time knowledge is only the MR URL + commit SHA (the dispatch
+    // dedup key); title/branch/author are absent for webhook tasks.
+    let mr_url = "http://gitlab.internal:8929/group/proj/-/merge_requests/7";
+    let sha = "abc123";
+    let id = crate::server::gitlab::record_task_started(&store, mr_url, sha).await;
+    let outcome: anyhow::Result<()> = Ok(());
+    crate::server::gitlab::record_task_outcome(&store, id, mr_url, sha, &outcome).await;
+
+    let params = ListParams {
+        status: None,
+        page: None,
+        per_page: None,
+        q: None,
+        project: None,
+        repository: None,
+        date_from: None,
+        date_to: None,
+    };
+    let resp = list_reviews(State(state), Query(params)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["total"], 1, "the webhook-recorded task must be listed");
+    let item = &json["items"][0];
+    assert_eq!(item["task_id"], id.to_string());
+    assert_eq!(item["status"], "completed");
+    assert_eq!(item["gitlab_mr_url"], mr_url);
+    assert_eq!(item["commit_sha"], sha);
+    assert_eq!(
+        item["gitlabMrUrl"], mr_url,
+        "camelCase key must mirror the snake_case one"
+    );
+}
+
 #[tokio::test]
 async fn test_absent_metadata_is_null_in_both_naming_schemes() {
     let state = state_with_store();

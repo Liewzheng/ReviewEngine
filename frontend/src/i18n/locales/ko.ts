@@ -283,6 +283,7 @@ export default {
       queued: '대기 중 태스크',
       failed: '실패한 태스크',
       cancelled: '취소된 태스크',
+      completed: '최근 완료된 태스크',
     },
     empty: '대기열에 태스크가 없습니다',
     emptyHint: '대기열이 비어 있습니다. 새 태스크가 여기에 표시됩니다.',

@@ -1,7 +1,10 @@
 use axum::{http::StatusCode, Json};
 use serde_json::Value;
+use std::sync::Arc;
+use uuid::Uuid;
 
 use super::super::dispatcher::MrDispatcher;
+use crate::server::task_queue::{SourceMeta, TaskState, TaskStore};
 
 /// Parsed payload from a GitLab Merge Request webhook event.
 pub struct MrHookPayload {
@@ -54,14 +57,104 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
     })
 }
 
-/// Spawn a background task that runs the full review for an MR.
-pub fn spawn_mr_review_task(dispatcher: &MrDispatcher, mr_url: String, sha: String, gitlab_token: String, mr_iid: u64) {
+/// Create a task-store entry for a webhook-dispatched MR review and mark it
+/// Running.
+///
+/// `mr_url` / `sha` are the dispatch dedup key: the dispatcher has already
+/// accepted this exact URL+SHA pair (dedup happens before
+/// [`spawn_mr_review_task`]), so each actually-started review records exactly
+/// one entry. `mr_title`/`project`/… are unknown at enqueue time and stay
+/// absent — the review pipeline does not currently back-fill them.
+pub async fn record_task_started(store: &TaskStore, mr_url: &str, sha: &str) -> Uuid {
+    let meta = SourceMeta {
+        gitlab_mr_url: Some(mr_url.to_string()),
+        commit_sha: Some(sha.to_string()),
+        ..SourceMeta::default()
+    };
+    let task_id = store.create(Some(meta)).await;
+    store.start(task_id).await;
+    task_id
+}
+
+/// Record the outcome of a webhook-dispatched MR review in the task store.
+///
+/// `Ok` → `Completed` with a result summary (MR URL + SHA); `Err` → `Failed`
+/// with the error message. `completed_at` is set by [`TaskStore::update`].
+pub async fn record_task_outcome(
+    store: &TaskStore,
+    task_id: Uuid,
+    mr_url: &str,
+    sha: &str,
+    outcome: &anyhow::Result<()>,
+) {
+    match outcome {
+        Ok(()) => {
+            store
+                .update(
+                    task_id,
+                    TaskState::Completed,
+                    Some(serde_json::json!({
+                        "mr_url": mr_url,
+                        "sha": sha,
+                        "summary": "review completed",
+                    })),
+                    None,
+                )
+                .await;
+        }
+        Err(e) => {
+            store
+                .update(task_id, TaskState::Failed, None, Some(format!("{e:#}")))
+                .await;
+        }
+    }
+}
+
+/// Execute a webhook-dispatched MR review on a detached task, recording its
+/// lifecycle in the task store when one is available.
+///
+/// With a store: creates a Running task entry (MR URL + commit SHA), runs the
+/// review, then marks it Completed (with a summary result) or Failed (with the
+/// error message). Without a store this is exactly the legacy behavior — run,
+/// log, and release the dispatcher's dedup on failure.
+async fn run_webhook_review(
+    task_store: Option<Arc<TaskStore>>,
+    dispatcher: &MrDispatcher,
+    mr_url: String,
+    sha: String,
+    gitlab_token: String,
+    mr_iid: u64,
+) {
+    let task_id = if let Some(store) = task_store.as_ref() {
+        Some(record_task_started(store, &mr_url, &sha).await)
+    } else {
+        None
+    };
+
+    let outcome = run_review_for_mr(&mr_url, &gitlab_token, Some(dispatcher), Some(&mr_url), Some(&sha)).await;
+    if let Err(e) = &outcome {
+        tracing::error!("Review failed for MR !{}: {:?}", mr_iid, e);
+        dispatcher.reset(&mr_url).await;
+    }
+
+    if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
+        record_task_outcome(store, id, &mr_url, &sha, &outcome).await;
+    }
+}
+
+/// Spawn a background task that runs the full review for an MR, recording its
+/// lifecycle in the task store when one is available.
+pub fn spawn_mr_review_task(
+    dispatcher: &MrDispatcher,
+    mr_url: String,
+    sha: String,
+    gitlab_token: String,
+    mr_iid: u64,
+    task_store: Option<Arc<TaskStore>>,
+) {
     let d = dispatcher.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_review_for_mr(&mr_url, &gitlab_token, Some(&d), Some(&mr_url), Some(&sha)).await {
-            tracing::error!("Review failed for MR !{}: {:?}", mr_iid, e);
-            d.reset(&mr_url).await;
-        }
+        run_webhook_review(task_store, &d, mr_url, sha, gitlab_token, mr_iid).await;
     });
 }
 
@@ -72,6 +165,7 @@ pub async fn handle_mr_in_progress(
     sha: &str,
     gitlab_token: &str,
     mr_iid: u64,
+    task_store: Option<Arc<TaskStore>>,
 ) {
     tracing::info!("MR !{} review in progress, waiting...", mr_iid);
     dispatcher.wait(mr_url).await;
@@ -84,6 +178,7 @@ pub async fn handle_mr_in_progress(
                 sha.to_string(),
                 gitlab_token.to_string(),
                 mr_iid,
+                task_store,
             );
         }
         _ => {
@@ -94,7 +189,14 @@ pub async fn handle_mr_in_progress(
 
 /// Dispatch an MR webhook event to start or defer a review based on the
 /// dispatcher state.
-pub async fn dispatch_mr_event(dispatcher: &MrDispatcher, mr_url: &str, sha: &str, gitlab_token: &str, mr_iid: u64) {
+pub async fn dispatch_mr_event(
+    dispatcher: &MrDispatcher,
+    mr_url: &str,
+    sha: &str,
+    gitlab_token: &str,
+    mr_iid: u64,
+    task_store: Option<Arc<TaskStore>>,
+) {
     match dispatcher.try_start(mr_url, sha).await {
         super::super::dispatcher::ShouldStart::Go => {
             spawn_mr_review_task(
@@ -103,13 +205,14 @@ pub async fn dispatch_mr_event(dispatcher: &MrDispatcher, mr_url: &str, sha: &st
                 sha.to_string(),
                 gitlab_token.to_string(),
                 mr_iid,
+                task_store,
             );
         }
         super::super::dispatcher::ShouldStart::AlreadyReviewed => {
             tracing::info!("Skipping MR !{}: already reviewed at SHA {}", mr_iid, sha);
         }
         super::super::dispatcher::ShouldStart::InProgress => {
-            handle_mr_in_progress(dispatcher, mr_url, sha, gitlab_token, mr_iid).await;
+            handle_mr_in_progress(dispatcher, mr_url, sha, gitlab_token, mr_iid, task_store).await;
         }
     }
 }
@@ -167,6 +270,7 @@ pub async fn handle_mr_hook(
     dispatcher: &MrDispatcher,
     gitlab_token: &str,
     platform: Option<crate::models::GitPlatformConfig>,
+    task_store: Option<Arc<TaskStore>>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_mr_hook_payload(body, gitlab_token)?;
 
@@ -224,6 +328,7 @@ pub async fn handle_mr_hook(
             &payload.sha,
             &payload.gitlab_token,
             payload.mr_iid,
+            task_store,
         )
         .await;
     }
@@ -281,6 +386,7 @@ pub async fn handle_note_hook(
     dispatcher: &MrDispatcher,
     gitlab_token: &str,
     platform: Option<crate::models::GitPlatformConfig>,
+    task_store: Option<Arc<TaskStore>>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse Note hook: {}", e);
@@ -344,11 +450,9 @@ pub async fn handle_note_hook(
                     let d = dispatcher.clone();
                     let u = url;
                     let s = sha;
+                    let note_iid = mr_iid;
                     tokio::spawn(async move {
-                        if let Err(e) = run_review_for_mr(&u, &token, Some(&d), Some(&u), Some(&s)).await {
-                            tracing::error!("Review from note failed: {:?}", e);
-                            d.reset(&u).await;
-                        }
+                        run_webhook_review(task_store, &d, u, s, token, note_iid).await;
                     });
                 }
                 _ => {
@@ -375,4 +479,81 @@ pub async fn handle_push_hook(body: &str) -> Result<Json<Value>, StatusCode> {
     Ok(Json(serde_json::json!({
         "status": "received",
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::task_queue::TaskStore;
+
+    const MR_URL: &str = "http://gitlab.internal:8929/group/proj/-/merge_requests/7";
+    const SHA: &str = "abc123";
+
+    #[tokio::test]
+    async fn record_task_started_creates_running_entry_with_mr_meta() {
+        let store = TaskStore::new();
+        let id = record_task_started(&store, MR_URL, SHA).await;
+
+        let entry = store.get(id).await.expect("task must exist");
+        assert_eq!(entry.state, TaskState::Running, "started review must be running");
+        assert!(entry.started_at.is_some(), "started review must record started_at");
+        assert_eq!(entry.source_meta.gitlab_mr_url.as_deref(), Some(MR_URL));
+        assert_eq!(entry.source_meta.commit_sha.as_deref(), Some(SHA));
+        // Enqueue-time metadata beyond URL+SHA is unknown for webhooks.
+        assert!(entry.source_meta.mr_title.is_none());
+        assert!(entry.source_meta.project.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_task_outcome_success_marks_completed_with_summary() {
+        let store = TaskStore::new();
+        let id = record_task_started(&store, MR_URL, SHA).await;
+        let outcome: anyhow::Result<()> = Ok(());
+
+        record_task_outcome(&store, id, MR_URL, SHA, &outcome).await;
+
+        let entry = store.get(id).await.expect("task must exist");
+        assert_eq!(entry.state, TaskState::Completed);
+        assert!(entry.completed_at.is_some(), "completed task must record completed_at");
+        let result = entry
+            .result
+            .expect("completed webhook task must carry a result summary");
+        assert_eq!(result["mr_url"], MR_URL);
+        assert_eq!(result["sha"], SHA);
+        assert_eq!(result["summary"], "review completed");
+        assert!(entry.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_task_outcome_failure_marks_failed_with_error() {
+        let store = TaskStore::new();
+        let id = record_task_started(&store, MR_URL, SHA).await;
+        let outcome: anyhow::Result<()> = Err(anyhow::anyhow!("provider unreachable"));
+
+        record_task_outcome(&store, id, MR_URL, SHA, &outcome).await;
+
+        let entry = store.get(id).await.expect("task must exist");
+        assert_eq!(entry.state, TaskState::Failed);
+        assert!(entry.completed_at.is_some(), "failed task must record completed_at");
+        assert!(entry.result.is_none());
+        let error = entry.error.expect("failed task must carry an error message");
+        assert!(error.contains("provider unreachable"), "got error: {error}");
+    }
+
+    /// The dispatcher dedups by URL+SHA before `spawn_mr_review_task`, so a
+    /// single actually-started review must record exactly one entry through
+    /// the full start → outcome cycle (never two).
+    #[tokio::test]
+    async fn full_cycle_records_exactly_one_entry() {
+        let store = TaskStore::new();
+        let id = record_task_started(&store, MR_URL, SHA).await;
+        let outcome: anyhow::Result<()> = Ok(());
+        record_task_outcome(&store, id, MR_URL, SHA, &outcome).await;
+
+        let (items, total) = store.list(None, 1, 100, None, None, None, None, None).await;
+        assert_eq!(total, 1, "one dispatch must record exactly one entry");
+        assert_eq!(items[0].task_id, id);
+        assert_eq!(items[0].state, TaskState::Completed);
+        assert_eq!(items[0].source_meta.commit_sha.as_deref(), Some(SHA));
+    }
 }

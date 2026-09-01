@@ -284,6 +284,7 @@ export default {
       queued: '待機タスク',
       failed: '失敗タスク',
       cancelled: 'キャンセル済みタスク',
+      completed: '最近完了タスク',
     },
     empty: 'キューにタスクがありません',
     emptyHint: 'キューは現在空です。新しいタスクはここに表示されます。',

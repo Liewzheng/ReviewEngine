@@ -279,6 +279,7 @@ export default {
       queued: '排队任务',
       failed: '失败任务',
       cancelled: '已取消任务',
+      completed: '最近完成任务',
     },
     empty: '队列中没有任务',
     emptyHint: '队列当前为空。新任务将显示在这里。',

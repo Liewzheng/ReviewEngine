@@ -293,6 +293,7 @@ export default {
       queued: 'Queued Tasks',
       failed: 'Failed Tasks',
       cancelled: 'Cancelled Tasks',
+      completed: 'Recently Completed Tasks',
     },
     empty: 'No tasks in queue',
     emptyHint: 'The queue is currently empty. New tasks will appear here.',

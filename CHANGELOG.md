@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.48] - 2026-09-01
+
+### Added
+- **Queue/TaskStore integration for webhook-triggered reviews**: MR reviews triggered by GitLab webhooks are now visible in the live queue and history. Each webhook creates a task entry that tracks `pending` → `running` → `completed`/`failed`, broadcasts SSE events, and surfaces on the Queue Monitor and Recent Reviews dashboard. (`src/server/state.rs`, `src/server/gitlab/hooks.rs`, `src/server/task_queue.rs`, `src/server/api/dashboard.rs`, `src/server/api/queue.rs`)
+- **System hook verification fallback for single platforms**: when a GitLab System Hook payload carries no URL, or its URL does not match any configured platform, verification succeeds if exactly one platform has webhook credentials. This handles the GitLab "Test" button and payloads from instances with a single reachable endpoint. (`src/server/gitlab/handler.rs`)
+
+### Fixed
+- **Queue Monitor no longer appears blank when only completed tasks exist**: completed tasks are now shown under a "Recently completed" section, and the empty-state check counts all tasks instead of only active ones. (`frontend/src/views/QueueMonitor.vue`)
+
 ## [0.9.47] - 2026-09-01
 
 ### Added

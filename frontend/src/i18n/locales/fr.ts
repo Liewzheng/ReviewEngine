@@ -412,6 +412,10 @@ export default {
       type: 'Type',
       baseUrl: 'URL de base',
       baseUrlPlaceholder: 'https://gitlab.example.com',
+      internalBaseUrl: 'URL interne',
+      internalBaseUrlPlaceholder: 'URL réellement accessible (facultatif)',
+      internalBaseUrlHelp:
+        "L'URL externe (URL de base) est l'adresse qui apparaît dans les payloads GitLab et sert à la correspondance des webhooks. L'URL interne est l'adresse réellement accessible par reng (par exemple le réseau interne du conteneur) et sert à récupérer les données de revue. Laissez vide pour utiliser l'URL de base.",
       token: "Jeton d'accès",
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: 'Laisser vide pour conserver le jeton enregistré',
@@ -422,6 +426,11 @@ export default {
         "Correspond au champ Secret token du formulaire webhook GitLab ; envoyé en clair dans l'en-tête X-Gitlab-Token, moins sûr que le Signing token, comme solution de repli facultative. Un seul des deux suffit, mais au moins l'un d'eux.",
       webhookSigningSecretHelp:
         'Le Signing token de GitLab 19.0+ (commence par whsec_, affiché une seule fois lors de sa génération par GitLab). GitLab calcule avec ce jeton un HMAC-SHA256 du corps de la requête, envoyé via l\u2019en-tête webhook-signature. Recommandé.',
+      allowedProjects: 'Projets autorisés',
+      allowedProjectsPlaceholder:
+        'Un chemin de projet par ligne (ex. group/project), vide = tous',
+      allowedProjectsHelp:
+        'Les hooks système s\u2019appliquent à tous les projets ; utilisez cette liste blanche pour limiter les projets examinés. Vide = tous les projets.',
       test: 'Tester',
       testOk: 'Connexion réussie — GitLab {version}',
       testFailed: 'Échec de la connexion — {error}',

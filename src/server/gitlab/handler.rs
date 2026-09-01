@@ -37,16 +37,39 @@ pub struct GitLabWebhookHandler {
 }
 
 /// Extract the instance URL identifying which git platform a webhook payload
-/// belongs to: GitLab MR/Note hooks carry `project.web_url`, Push hooks
-/// carry `repository.homepage`. `None` when the body carries neither (or is
-/// not JSON) — the caller then uses the runtime default.
-fn payload_instance_url(body: &str) -> Option<String> {
+/// belongs to. GitLab project-level MR/Note hooks carry `project.web_url`;
+/// admin-level System Hooks carry no `project.web_url`, so the chain falls
+/// back through `project.homepage` → `repository.homepage` → (for MR/Note
+/// events) the full URL in `object_attributes.url`. `None` when the body
+/// carries none of these (or is not JSON) — the caller then uses the runtime
+/// default.
+pub(crate) fn payload_instance_url(body: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(body).ok()?;
     parsed["project"]["web_url"]
         .as_str()
+        .or_else(|| parsed["project"]["homepage"].as_str())
         .or_else(|| parsed["repository"]["homepage"].as_str())
+        .or_else(|| parsed["object_attributes"]["url"].as_str())
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// Extract the event name from a System Hook payload. GitLab 19.2+ system
+/// hooks send **`event_type`** (`merge_request`/`note`/`push`) instead of
+/// `event_name`; older versions and the docs send `event_name`. Prefer
+/// `event_name`, fall back to `event_type`. Empty string when neither is
+/// present (or the body is not JSON / the value is not a string) — the caller
+/// treats that as an unknown event and ignores it.
+pub(crate) fn system_hook_event_name(body: &str) -> String {
+    let parsed: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    parsed["event_name"]
+        .as_str()
+        .or_else(|| parsed["event_type"].as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 impl GitLabWebhookHandler {
@@ -92,6 +115,23 @@ impl GitLabWebhookHandler {
             }
             _ => fallback,
         }
+    }
+
+    /// Return the configured git platform matched by `body`'s instance URL,
+    /// but only when that platform can verify webhooks (same rule as
+    /// `effective_config_for_body`: token-only entries do not take over).
+    /// `None` when the body carries no instance URL, no platform matches, or
+    /// the match lacks verification credentials. Used by `handle_event` to
+    /// resolve the matched platform's `allowed_projects` allowlist AND its
+    /// `base_url` (for rewriting payload MR URLs onto the reachable endpoint
+    /// before review dispatch).
+    pub(crate) fn matched_platform(&self, body: &str) -> Option<crate::models::GitPlatformConfig> {
+        let state = self.app_state.as_ref()?.upgrade()?;
+        let url = payload_instance_url(body)?;
+        let platforms = state.git_platforms.read().unwrap().clone();
+        crate::models::find_git_platform_for_url(&platforms, &url)
+            .filter(|p| p.has_webhook_verification())
+            .cloned()
     }
 
     /// Create a new GitLab webhook handler.
@@ -262,6 +302,35 @@ impl GitLabWebhookHandler {
 
         Ok(())
     }
+
+    /// Route a GitLab System Hook (admin-level) payload by its event name
+    /// (`system_hook_event_name`: `event_name`, falling back to `event_type`
+    /// for GitLab 19.2+): `merge_request`/`note`/`push` map to the
+    /// corresponding project hook handlers (they share the same payload
+    /// shape); any other event name is ignored with a debug log.
+    async fn handle_system_hook(
+        &self,
+        body: &str,
+        token: &str,
+        platform: Option<crate::models::GitPlatformConfig>,
+    ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+        let event_name = system_hook_event_name(body);
+        match event_name.as_str() {
+            "merge_request" => super::handle_mr_hook(body, &self.dispatcher, token, platform)
+                .await
+                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "note" => super::handle_note_hook(body, &self.dispatcher, token, platform)
+                .await
+                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "push" => super::handle_push_hook(body)
+                .await
+                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            other => {
+                tracing::debug!("Ignoring unknown GitLab System Hook event_name: {}", other);
+                Ok(Json(serde_json::json!({ "status": "ignored" })))
+            }
+        }
+    }
 }
 
 #[async_trait]
@@ -322,17 +391,26 @@ impl WebhookHandler for GitLabWebhookHandler {
         // resolved per payload: a body whose instance URL matches a
         // configured git platform dispatches with that platform's token.
         let token = self.effective_config_for_body(body).token.clone();
+        // The matched git platform (if any) drives BOTH the project
+        // `allowed_projects` allowlist and the review URL rewrite (re-hosting
+        // the payload's `external_url` onto the platform's reachable
+        // `base_url` before dispatch). Resolved ONCE here — a single payload
+        // parse — and handed to the hook, which uses it for both. `None` when
+        // no platform matched (or none can verify) → empty allowlist (every
+        // project allowed) and the payload URL kept verbatim (legacy).
+        let platform = self.matched_platform(body);
 
         match event {
-            "Merge Request Hook" => super::handle_mr_hook(body, &self.dispatcher, &token)
+            "Merge Request Hook" => super::handle_mr_hook(body, &self.dispatcher, &token, platform)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "Note Hook" => super::handle_note_hook(body, &self.dispatcher, &token)
+            "Note Hook" => super::handle_note_hook(body, &self.dispatcher, &token, platform)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
             "Push Hook" => super::handle_push_hook(body)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "System Hook" => self.handle_system_hook(body, &token, platform).await,
             _ => {
                 tracing::debug!("Ignoring unsupported GitLab event: {}", event);
                 Ok(Json(serde_json::json!({ "status": "ignored" })))

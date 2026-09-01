@@ -7,9 +7,12 @@
 //! ([`super::put::apply_ui_config`]), so hot-apply and cold-start semantics
 //! (masked-secret keep, provider rebuild, GitLab runtime sync) are identical.
 //!
-//! Precedence: `config.toml` < `ui-state.toml` < env vars — a value supplied
-//! via CLI flag / environment always wins over the persisted UI state (see
-//! [`UiStateEnvOverrides`]).
+//! Precedence for gitlab credentials: `env/CLI < ui-state.toml` — the
+//! persisted file is the authoritative source; env vars / CLI flags are
+//! fallback-only, used just when the file's value is empty, and each such
+//! use logs a deprecation warning (configure the credential in the Web UI
+//! instead). For the LLM provider list env still wins wholesale:
+//! `config.toml < ui-state.toml < env` (see [`UiStateEnvOverrides`]).
 //!
 //! **This file records UI INTENT, not the effective runtime state.** Values
 //! sourced from env/CLI (tracked in [`UiStateEnvOverrides`], consulted at
@@ -18,15 +21,19 @@
 //! location and resurrect env-derived entries on a clean-env restart,
 //! changing the provider set the user actually saved.
 //!
-//! Threat model: secrets the USER saved via the UI (LLM keys, git platform
-//! tokens, webhook secrets) are stored PLAINTEXT here — the same threat
-//! model as the user-managed `.code-audit-config.toml`. The file is
-//! therefore written atomically with `0600` permissions (like `auth.toml`).
+//! Threat model: git credentials the USER saved via the UI (git platform
+//! tokens, webhook secrets, legacy GitLab fields) are encrypted at rest with
+//! a per-config-dir local key (`secrets.key`, 32 random bytes, `0600`); only
+//! the persistence boundary encrypts/decrypts, the in-memory/runtime path
+//! stays plaintext. LLM API keys remain plaintext at rest (outside the scope
+//! of the encrypted-secrets change). The file and the key are written
+//! atomically with `0600` permissions on Unix.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::secrets::{self, ENC_PREFIX};
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::AppState;
 
@@ -42,7 +49,7 @@ pub const UI_STATE_FILE_NAME: &str = "ui-state.toml";
 /// non-secret fields matter there: rules, advanced, URLs, model choices).
 /// Live secrets live in the top-level `llm` / `git_platforms` / `gitlab`
 /// sections, mirroring their authoritative in-memory stores.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct UiStateFile {
     /// UI projection; `Option` so a hand-written file without `[ui]` does
     /// not replay serde defaults over the startup config.
@@ -160,8 +167,9 @@ fn is_env_derived_llm(entry: &LLMConfig, env_entries: &[LLMConfig]) -> bool {
 
 /// Persist a resolved legacy scalar unless it equals the env/CLI-supplied
 /// value — in that case it is env-derived, not UI intent, and is stored as
-/// unset. (While the env value is set it wins at load time anyway, so
-/// nothing the user sees changes.)
+/// unset. (At load time the env value is only a fallback for an empty file
+/// value, so the same credential still lands in the runtime — nothing the
+/// user sees changes.)
 fn strip_env_value(resolved: &str, env: Option<&String>) -> String {
     match env {
         Some(v) if v == resolved => String::new(),
@@ -216,13 +224,69 @@ pub fn resolve_ui_state_path() -> Option<PathBuf> {
     Some(dir.join(UI_STATE_FILE_NAME))
 }
 
+/// At-rest form of a [`UiStateFile`]: git platform and legacy GitLab secrets
+/// are encrypted with the local key (empty values stay empty). LLM API keys
+/// and the masked `ui` projection are written as-is — they are outside the
+/// scope of the encrypted-secrets change.
+fn encrypt_ui_state(state: &UiStateFile, key: &[u8; 32]) -> anyhow::Result<UiStateFile> {
+    let mut out = state.clone();
+    for p in &mut out.git_platforms {
+        p.token = encrypt_non_empty(&p.token, key)?;
+        p.webhook_secret = encrypt_non_empty(&p.webhook_secret, key)?;
+        p.webhook_signing_secret = encrypt_non_empty(&p.webhook_signing_secret, key)?;
+    }
+    out.gitlab.token = encrypt_non_empty(&out.gitlab.token, key)?;
+    out.gitlab.webhook_secret = encrypt_non_empty(&out.gitlab.webhook_secret, key)?;
+    out.gitlab.webhook_signing_secret = encrypt_non_empty(&out.gitlab.webhook_signing_secret, key)?;
+    Ok(out)
+}
+
+fn encrypt_non_empty(value: &str, key: &[u8; 32]) -> anyhow::Result<String> {
+    if value.is_empty() {
+        Ok(String::new())
+    } else {
+        secrets::encrypt_secret(value, key)
+    }
+}
+
+/// Undo [`encrypt_ui_state`] in place. Non-`enc:` values (legacy plaintext)
+/// pass through unchanged via [`secrets::decrypt_secret`].
+fn decrypt_ui_state(state: &mut UiStateFile, key: &[u8; 32]) -> anyhow::Result<()> {
+    for p in &mut state.git_platforms {
+        p.token = secrets::decrypt_secret(&p.token, key)?;
+        p.webhook_secret = secrets::decrypt_secret(&p.webhook_secret, key)?;
+        p.webhook_signing_secret = secrets::decrypt_secret(&p.webhook_signing_secret, key)?;
+    }
+    state.gitlab.token = secrets::decrypt_secret(&state.gitlab.token, key)?;
+    state.gitlab.webhook_secret = secrets::decrypt_secret(&state.gitlab.webhook_secret, key)?;
+    state.gitlab.webhook_signing_secret = secrets::decrypt_secret(&state.gitlab.webhook_signing_secret, key)?;
+    Ok(())
+}
+
+/// True when the file carries at least one `enc:` value, i.e. decryption is
+/// required at load time. A legacy all-plaintext file needs no key at all.
+fn has_encrypted_secrets(state: &UiStateFile) -> bool {
+    state.git_platforms.iter().any(|p| {
+        p.token.starts_with(ENC_PREFIX)
+            || p.webhook_secret.starts_with(ENC_PREFIX)
+            || p.webhook_signing_secret.starts_with(ENC_PREFIX)
+    }) || state.gitlab.token.starts_with(ENC_PREFIX)
+        || state.gitlab.webhook_secret.starts_with(ENC_PREFIX)
+        || state.gitlab.webhook_signing_secret.starts_with(ENC_PREFIX)
+}
+
 /// Persist the UI state atomically (temp file + rename) with `0600`
 /// permissions on Unix, so a crash mid-write never leaves a truncated file.
-pub fn save_ui_state(path: &Path, state: &UiStateFile) -> std::io::Result<()> {
+/// Git credentials are encrypted at rest with the local `secrets.key`
+/// (auto-created on first save); the in-memory [`UiStateFile`] is untouched.
+pub fn save_ui_state(path: &Path, state: &UiStateFile) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let content = toml::to_string_pretty(state).map_err(std::io::Error::other)?;
+    let key_path = secrets::key_path_for(path);
+    let key = secrets::load_or_create_key(&key_path)?;
+    let encrypted = encrypt_ui_state(state, &key)?;
+    let content = toml::to_string_pretty(&encrypted)?;
     let tmp_path = path.with_extension("tmp");
     std::fs::write(&tmp_path, content)?;
     #[cfg(unix)]
@@ -238,6 +302,11 @@ pub fn save_ui_state(path: &Path, state: &UiStateFile) -> std::io::Result<()> {
 /// file is an error — the caller logs it and continues startup with
 /// config.toml/env values (ignoring it silently would look like "the UI
 /// forgot my settings" with no explanation).
+///
+/// `enc:` values are decrypted back to plaintext so the replay path sees the
+/// same in-memory shape as before. A legacy all-plaintext file needs no key
+/// and loads as-is. An `enc:` value with no key file (or a decrypt failure)
+/// is a hard error naming `secrets.key` — never a panic, never silent.
 pub fn load_ui_state(path: &Path) -> anyhow::Result<Option<UiStateFile>> {
     let content = match std::fs::read_to_string(path) {
         Ok(content) => content,
@@ -246,15 +315,30 @@ pub fn load_ui_state(path: &Path) -> anyhow::Result<Option<UiStateFile>> {
             anyhow::bail!("failed to read ui-state file {}: {e}", path.display());
         }
     };
-    let parsed: UiStateFile = toml::from_str(&content)
+    let mut parsed: UiStateFile = toml::from_str(&content)
         .map_err(|e| anyhow::anyhow!("failed to parse ui-state file {}: {e}", path.display()))?;
+    if has_encrypted_secrets(&parsed) {
+        let key_path = secrets::key_path_for(path);
+        let key = secrets::load_key(&key_path)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} holds encrypted secrets but the decryption key {} is missing; \
+                 re-enter the secrets in the web UI and save again to restore them",
+                path.display(),
+                key_path.display()
+            )
+        })?;
+        decrypt_ui_state(&mut parsed, &key)
+            .map_err(|e| anyhow::anyhow!("failed to decrypt secrets in {}: {e}", path.display()))?;
+    }
     Ok(Some(parsed))
 }
 
-/// Values the environment (CLI flags / env vars) supplied at startup. They
-/// win over the persisted file: the replay injects them in place of the
-/// file's values (or skips the section), so
-/// `config.toml < ui-state.toml < env` holds.
+/// Values the environment (CLI flags / env vars) supplied at startup. Since
+/// the persistence-file priority inversion these are FALLBACK-ONLY for the
+/// gitlab legacy credentials: the replay uses them only when the file's
+/// value is empty (logging a deprecation warning) — the file's values are
+/// authoritative. `llm_from_env` still wins wholesale for the LLM provider
+/// list, where `config.toml < ui-state.toml < env` holds.
 ///
 /// The same tracking is consulted at SAVE time ([`UiStateFile::from_applied`])
 /// to keep env-derived values out of the file: env is never persisted.
@@ -292,7 +376,8 @@ pub fn load_and_apply_ui_state(state: &AppState, path: &Path, overrides: &UiStat
 
 /// Build the `PUT /config`-equivalent JSON payload from the persisted file,
 /// injecting live secrets (the file's `ui` section only carries masks) and
-/// applying env precedence.
+/// applying env/CLI values as a DEPRECATED fallback only where the file's
+/// gitlab values are empty.
 fn replay_payload(file: &UiStateFile, overrides: &UiStateEnvOverrides) -> serde_json::Value {
     let mut value = match &file.ui {
         Some(ui) => serde_json::to_value(ui).unwrap_or_else(|_| serde_json::json!({})),
@@ -302,22 +387,42 @@ fn replay_payload(file: &UiStateFile, overrides: &UiStateEnvOverrides) -> serde_
         return value;
     };
 
-    // Legacy GitLab: env/CLI values win; otherwise the persisted ones. The
-    // section is only replayed when some source supplies a credential —
-    // otherwise it is dropped so the merge keeps the startup projection and
-    // the apply path cannot clear an env-seeded runtime with an empty token.
-    let gitlab_token = overrides
-        .gitlab_token
-        .clone()
-        .unwrap_or_else(|| file.gitlab.token.clone());
-    let gitlab_webhook_secret = overrides
-        .gitlab_webhook_secret
-        .clone()
-        .unwrap_or_else(|| file.gitlab.webhook_secret.clone());
-    let gitlab_signing_secret = overrides
-        .gitlab_webhook_signing_secret
-        .clone()
-        .unwrap_or_else(|| file.gitlab.webhook_signing_secret.clone());
+    // Legacy GitLab: the persisted file is now the AUTHORITATIVE source —
+    // the Web UI / ui-state.toml is the single source of truth for webhook
+    // verification and dispatch config. env/CLI values are FALLBACK-ONLY:
+    // used only when the file's value is empty, and every such use is
+    // DEPRECATED — log a warning telling the user to configure the
+    // credential in the Web UI instead. The section is still only replayed
+    // when some source supplies a credential; otherwise it is dropped so the
+    // merge keeps the startup projection and the apply path cannot clear the
+    // runtime with an empty token.
+    fn env_fallback(value: &str, env: &Option<String>, field: &str) -> String {
+        if !value.is_empty() {
+            return value.to_string();
+        }
+        match env {
+            Some(v) => {
+                tracing::warn!(
+                    "gitlab {field} from env/CLI is deprecated: configure it in the Web UI \
+                     (the persisted ui-state.toml is the authoritative source for gitlab \
+                     credentials; file values take precedence over env/CLI)"
+                );
+                v.clone()
+            }
+            None => String::new(),
+        }
+    }
+    let gitlab_token = env_fallback(&file.gitlab.token, &overrides.gitlab_token, "token");
+    let gitlab_webhook_secret = env_fallback(
+        &file.gitlab.webhook_secret,
+        &overrides.gitlab_webhook_secret,
+        "webhook secret",
+    );
+    let gitlab_signing_secret = env_fallback(
+        &file.gitlab.webhook_signing_secret,
+        &overrides.gitlab_webhook_signing_secret,
+        "webhook signing secret",
+    );
     if !gitlab_token.is_empty() || !gitlab_webhook_secret.is_empty() || !gitlab_signing_secret.is_empty() {
         let mut section: UiGitLabConfig = file.ui.as_ref().map(|u| u.gitlab.clone()).unwrap_or_default();
         section.api_token = gitlab_token;
@@ -376,9 +481,11 @@ fn replay_payload(file: &UiStateFile, overrides: &UiStateEnvOverrides) -> serde_
                 name: p.name.clone(),
                 platform_type: p.platform_type.clone(),
                 base_url: p.base_url.clone(),
+                internal_base_url: p.internal_base_url.clone(),
                 token: p.token.clone(),
                 webhook_secret: p.webhook_secret.clone(),
                 webhook_signing_secret: p.webhook_signing_secret.clone(),
+                allowed_projects: p.allowed_projects.clone(),
             })
             .collect();
         if let Ok(v) = serde_json::to_value(&platforms) {
@@ -430,9 +537,11 @@ mod tests {
                 name: "testbed".to_string(),
                 platform_type: "gitlab".to_string(),
                 base_url: "http://gitlab.internal:8929".to_string(),
+                internal_base_url: String::new(),
                 token: "glpat-platform".to_string(),
                 webhook_secret: "wh-secret".to_string(),
                 webhook_signing_secret: String::new(),
+                allowed_projects: Vec::new(),
             }],
             gitlab: PersistedGitlabConfig {
                 token: "glpat-legacy".to_string(),
@@ -496,6 +605,183 @@ mod tests {
         let path = dir.path().join(UI_STATE_FILE_NAME);
         std::fs::write(&path, "this is = not [ valid toml").unwrap();
         assert!(load_ui_state(&path).is_err());
+    }
+
+    // ── Secret encryption at rest (config key storage) ──
+
+    #[test]
+    fn encrypt_decrypt_round_trip() {
+        let key = [7u8; 32];
+        let plain = "glpat-super-secret";
+        let enc = secrets::encrypt_secret(plain, &key).unwrap();
+        assert!(
+            enc.starts_with(ENC_PREFIX),
+            "encrypted value must carry the enc: prefix: {enc}"
+        );
+        assert_eq!(secrets::decrypt_secret(&enc, &key).unwrap(), plain);
+        // A fresh nonce per call: same plaintext, different ciphertext.
+        let enc2 = secrets::encrypt_secret(plain, &key).unwrap();
+        assert_ne!(enc, enc2);
+    }
+
+    #[test]
+    fn decrypt_passes_through_legacy_plaintext() {
+        let key = [9u8; 32];
+        assert_eq!(secrets::decrypt_secret("glpat-plain", &key).unwrap(), "glpat-plain");
+        assert_eq!(secrets::decrypt_secret("", &key).unwrap(), "");
+        // A value that merely CONTAINS enc: mid-string is plaintext.
+        assert_eq!(secrets::decrypt_secret("abc enc: def", &key).unwrap(), "abc enc: def");
+    }
+
+    #[test]
+    fn decrypt_corrupt_encrypted_value_is_an_error() {
+        let key = [9u8; 32];
+        let enc = secrets::encrypt_secret("secret", &key).unwrap();
+        // Wrong key => AEAD authentication failure.
+        assert!(secrets::decrypt_secret(&enc, &[8u8; 32]).is_err());
+        // Truncated payload and invalid base64 are both corruption.
+        assert!(secrets::decrypt_secret("enc:AAAA", &key).is_err());
+        assert!(secrets::decrypt_secret("enc:!!!", &key).is_err());
+    }
+
+    /// First save auto-creates `secrets.key` next to ui-state.toml: 0600 on
+    /// Unix, exactly 32 bytes, written atomically (no leftover temp file).
+    #[test]
+    fn save_creates_local_key_with_0600_and_32_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join(UI_STATE_FILE_NAME);
+        save_ui_state(&path, &sample_state_file()).unwrap();
+
+        let key_path = secrets::key_path_for(&path);
+        assert!(key_path.exists(), "secrets.key must be created on first save");
+        let meta = std::fs::metadata(&key_path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "secrets.key must be 0600, got {mode:o}");
+        }
+        let bytes = std::fs::read(&key_path).unwrap();
+        assert_eq!(bytes.len(), 32, "key must be exactly 32 bytes");
+        assert!(!key_path.with_extension("key.tmp").exists());
+    }
+
+    /// Save encrypts git credentials at rest (file carries only `enc:`
+    /// values), and load decrypts them back to plaintext — memory and the
+    /// replay path stay plaintext.
+    #[test]
+    fn save_load_round_trip_encrypts_secrets_at_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        save_ui_state(&path, &sample_state_file()).unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains(ENC_PREFIX), "at-rest secrets must be encrypted: {raw}");
+        // base64 uses no '-', so none of these plaintexts can be a substring
+        // of any enc: value.
+        assert!(
+            !raw.contains("glpat-platform"),
+            "plaintext token must not be at rest: {raw}"
+        );
+        assert!(
+            !raw.contains("wh-secret"),
+            "plaintext webhook secret must not be at rest: {raw}"
+        );
+        assert!(
+            !raw.contains("glpat-legacy"),
+            "plaintext legacy token must not be at rest: {raw}"
+        );
+        assert!(
+            !raw.contains("legacy-wh"),
+            "plaintext legacy webhook secret must not be at rest: {raw}"
+        );
+        // Non-secret fields stay plaintext on disk.
+        assert!(raw.contains("http://gitlab.internal:8929"));
+
+        let loaded = load_ui_state(&path).unwrap().expect("file must load");
+        assert_eq!(loaded.git_platforms[0].token, "glpat-platform");
+        assert_eq!(loaded.git_platforms[0].webhook_secret, "wh-secret");
+        assert_eq!(loaded.git_platforms[0].base_url, "http://gitlab.internal:8929");
+        assert_eq!(loaded.gitlab.token, "glpat-legacy");
+        assert_eq!(loaded.gitlab.webhook_secret, "legacy-wh");
+        // Empty secrets round-trip as empty (never encrypted, never enc:).
+        assert!(loaded.git_platforms[0].webhook_signing_secret.is_empty());
+        assert!(loaded.gitlab.webhook_signing_secret.is_empty());
+    }
+
+    /// Legacy all-plaintext file: loads fine with NO key file present — the
+    /// transparent migration path. The next save encrypts it.
+    #[test]
+    fn load_legacy_plaintext_file_without_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let plain = r#"
+[[git_platforms]]
+name = "old"
+type = "gitlab"
+base_url = "https://old.internal"
+token = "glpat-old-plain"
+webhook_secret = "old-wh"
+
+[gitlab]
+token = "glpat-legacy-plain"
+webhook_secret = "legacy-wh-plain"
+"#;
+        std::fs::write(&path, plain).unwrap();
+        assert!(
+            !secrets::key_path_for(&path).exists(),
+            "precondition: no key file anywhere in the temp dir"
+        );
+        let loaded = load_ui_state(&path).unwrap().expect("plaintext file must load");
+        assert_eq!(loaded.git_platforms[0].token, "glpat-old-plain");
+        assert_eq!(loaded.git_platforms[0].webhook_secret, "old-wh");
+        assert_eq!(loaded.gitlab.token, "glpat-legacy-plain");
+        assert_eq!(loaded.gitlab.webhook_secret, "legacy-wh-plain");
+    }
+
+    /// An `enc:` value with no `secrets.key` must fail loudly with a message
+    /// pointing at the missing key and the recovery path — never a panic,
+    /// never a silent swallow.
+    #[test]
+    fn load_encrypted_file_without_key_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let enc = secrets::encrypt_secret("glpat-then-key-lost", &[0x42u8; 32]).unwrap();
+        let toml = format!(
+            "[[git_platforms]]\nname = \"p\"\ntype = \"gitlab\"\nbase_url = \"https://p.internal\"\ntoken = \"{enc}\"\n"
+        );
+        std::fs::write(&path, toml).unwrap();
+        assert!(
+            !secrets::key_path_for(&path).exists(),
+            "precondition: no key file (key was never written to disk)"
+        );
+
+        let err = load_ui_state(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("secrets.key"),
+            "error must point at the missing key: {msg}"
+        );
+        assert!(msg.contains("re-enter"), "error must explain recovery: {msg}");
+    }
+
+    /// A corrupt key file (wrong length) is an error, not a silent regenerate.
+    #[test]
+    fn load_encrypted_file_with_corrupt_key_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let enc = secrets::encrypt_secret("glpat-then-key-lost", &[0x42u8; 32]).unwrap();
+        let toml = format!(
+            "[[git_platforms]]\nname = \"p\"\ntype = \"gitlab\"\nbase_url = \"https://p.internal\"\ntoken = \"{enc}\"\n"
+        );
+        std::fs::write(&path, toml).unwrap();
+        let key_path = secrets::key_path_for(&path);
+        std::fs::write(&key_path, [0u8; 16]).unwrap();
+
+        let err = load_ui_state(&path).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("corrupted"), "corrupt key must be reported: {msg}");
+        assert!(msg.contains("32 bytes"), "message must name the expected length: {msg}");
     }
 
     #[tokio::test]
@@ -566,7 +852,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn env_overrides_win_over_persisted_file() {
+    async fn persisted_file_wins_over_env_overrides() {
         let _lock = RUNTIME_TEST_LOCK.lock().await;
         let _guard = RuntimeGuard::new();
         // Startup runtime seeded from env, as `init_gitlab_runtime` does.
@@ -593,23 +879,67 @@ mod tests {
         let state = Arc::new(fresh_state(env_llm.clone()));
         let overrides = UiStateEnvOverrides {
             gitlab_token: Some("glpat-env".to_string()),
+            gitlab_webhook_secret: Some("wh-env".to_string()),
             llm_from_env: true,
             ..Default::default()
         };
         load_and_apply_ui_state(&state, &path, &overrides).unwrap();
 
-        // Env token wins over the persisted legacy token.
+        // The persisted file is the authoritative source for gitlab: its
+        // values win even when env/CLI supplies different ones.
+        let rt = crate::server::gitlab::gitlab_runtime().read().unwrap().clone();
+        assert_eq!(rt.token, "glpat-legacy", "file token must beat the env override");
         assert_eq!(
-            crate::server::gitlab::gitlab_runtime().read().unwrap().token,
-            "glpat-env"
+            rt.webhook_secret, "legacy-wh",
+            "file webhook secret must beat the env override"
         );
-        // Env LLM wins wholesale over the persisted provider list.
+        // LLM is unchanged by the inversion: env still wins wholesale.
         let llm = state.llm_configs.read().unwrap().clone();
         assert_eq!(llm.len(), 1);
         assert_eq!(llm[0].api_key, "sk-env", "persisted sk-live must not override env");
         assert_eq!(llm[0].model, "gpt-env");
         // Platforms have no env source: the persisted entry applies.
         assert_eq!(state.git_platforms.read().unwrap()[0].name, "testbed");
+    }
+
+    #[tokio::test]
+    async fn env_fallback_used_only_when_file_value_empty() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        // Startup runtime seeded from env, as `init_gitlab_runtime` does.
+        *crate::server::gitlab::gitlab_runtime().write().unwrap() = crate::server::gitlab::GitLabRuntimeConfig {
+            webhook_secret: String::new(),
+            signing_secret: None,
+            signing_key: None,
+            token: String::new(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        // Construct the UiStateFile directly with PLAINTEXT values (no
+        // save_ui_state, so no at-rest encryption): the gitlab section is
+        // entirely empty, so the replay must fall back to env/CLI.
+        let file = UiStateFile {
+            ui: None,
+            llm: vec![],
+            git_platforms: vec![],
+            gitlab: PersistedGitlabConfig::default(),
+        };
+        std::fs::write(&path, toml::to_string(&file).unwrap()).unwrap();
+
+        let state = Arc::new(fresh_state(vec![]));
+        let overrides = UiStateEnvOverrides {
+            gitlab_token: Some("glpat-env".to_string()),
+            gitlab_webhook_secret: Some("wh-env".to_string()),
+            ..Default::default()
+        };
+        // Must apply without panicking and land the env fallback values.
+        load_and_apply_ui_state(&state, &path, &overrides).unwrap();
+        let rt = crate::server::gitlab::gitlab_runtime().read().unwrap().clone();
+        assert_eq!(rt.token, "glpat-env", "env fallback fills an empty file token");
+        assert_eq!(
+            rt.webhook_secret, "wh-env",
+            "env fallback fills an empty file webhook secret"
+        );
     }
 
     #[test]

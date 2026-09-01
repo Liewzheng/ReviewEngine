@@ -165,3 +165,12 @@ sudo chown -R <容器UID>:<容器UID> bin frontend-dist auth config reports tls
 #   docker run --rm --entrypoint id ghcr.io/liewzheng/review-engine:latest review-engine
 # v0.9.13+ 镜像固定 9001。Docker Desktop(macOS/Windows)自动处理,无此问题。
 ```
+
+### 备份/迁移时,ui-state.toml 里为什么是 `enc:` 开头?`secrets.key` 丢了怎么办?
+
+网页里填的 Git 平台 token 和 webhook 密钥,**保存时会先加密再写盘**(ChaCha20-Poly1305),所以 `ui-state.toml` 里看到的是一串 `enc:` 开头的密文,不是明文。解密用的主密钥单独存在同目录的 `secrets.key` 文件里(32 字节随机数,权限 0600,第一次保存时自动生成)。
+
+- **备份必须成对**:`ui-state.toml` 和 `secrets.key` 要一起备份、一起恢复(它们在同一个目录)。
+- **只备份了 `ui-state.toml`、丢了 `secrets.key`** → 重启后服务器解不开那些 `enc:` 值,会明确报错提示 key 缺失/被换/损坏(不会悄悄吞掉)。此时**没有别的恢复办法**,只能在网页的 **Git 平台** 卡片里把 token 和 webhook 密钥重新填一遍保存——保存时会在新生成的 `secrets.key` 下重新加密。
+- **旧版本写的明文文件不受影响**:老版本落盘的明文值照常读取,下次保存时全部自动加密(透明迁移)。
+- 加密只覆盖 Git 凭证(token / webhook 密钥);LLM API key 仍是明文落盘。

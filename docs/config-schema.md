@@ -233,6 +233,36 @@ max_tpm = 200000
 window_seconds = 60
 ```
 
+## `[[git_platforms]]` (Web UI, persisted to `ui-state.toml`)
+
+Git platform instances are **not** read from `.code-audit-config.toml`: they are managed in the Web UI (**Git 平台** card) and persisted to `ui-state.toml` in the config directory (default `~/.config/review-engine/ui-state.toml`, overridable via `REVIEW_UI_STATE_FILE` or `REVIEW_ENGINE_CONFIG_DIR`) as `[[git_platforms]]` entries. They are hot-effective and drive webhook verification, review-time GitLab API pulls, admin-level System Hook dispatch, and per-platform project filtering. Only `type = "gitlab"` is implemented today.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `name` | string | `""` | Unique, user-chosen instance name; the merge key for `PUT /api/v1/config` |
+| `type` | string | `"gitlab"` | Platform kind; only `gitlab` is implemented |
+| `base_url` | string | `""` | Instance URL as it appears in GitLab payloads (`external_url`); used to **match** inbound webhooks (Web UI field `baseUrl`) |
+| `internal_base_url` | string (optional) | `""` | Container-reachable URL for review-time GitLab API pulls (Web UI field `internalBaseUrl`). Empty = fall back to `base_url`, then to the payload URL. Not part of webhook matching |
+| `token` | string | `""` | GitLab API token. Encrypted at rest (`enc:` prefix) |
+| `webhook_secret` | string | `""` | Legacy webhook secret (`X-Gitlab-Token` header verification). Encrypted at rest |
+| `webhook_signing_secret` | string | `""` | GitLab 19+ signing token (`whsec_...`, Standard Webhooks). Encrypted at rest |
+| `allowed_projects` | string[] (optional) | `[]` | `path_with_namespace` allowlist for webhook-triggered reviews (Web UI field `allowedProjects`). Empty = every project allowed; non-empty = only listed projects trigger reviews (unlisted projects' events get `200 ignored`); exact, case-sensitive matching |
+
+Non-empty secrets are stored encrypted; on-disk values carry an `enc:` prefix and must never be hand-edited. See [`docs/configuration.md`](configuration.md) for the backup rule (`secrets.key` must be backed up with `ui-state.toml`).
+
+```toml
+# ui-state.toml (Web-UI-managed; do not hand-edit secrets)
+[[git_platforms]]
+name = "gitlab-main"
+type = "gitlab"
+base_url = "https://gitlab.example.com"
+internal_base_url = ""                       # optional; empty = use base_url
+token = "enc:<base64(nonce‖ciphertext‖tag)>"
+webhook_secret = "enc:<...>"
+webhook_signing_secret = "enc:<...>"
+allowed_projects = ["group/project-a", "group/project-b"]   # empty = all projects
+```
+
 ## Configuration Loading Order
 
 1. Built-in defaults (`docs/code-audit-default.toml`) with environment overrides

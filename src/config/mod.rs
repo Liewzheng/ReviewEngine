@@ -12,6 +12,7 @@
 
 pub mod defaults;
 pub mod resolver;
+pub mod secrets;
 
 pub use defaults::*;
 pub use resolver::*;

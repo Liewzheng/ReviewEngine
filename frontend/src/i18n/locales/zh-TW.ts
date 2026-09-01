@@ -402,6 +402,10 @@ export default {
       type: '類型',
       baseUrl: 'Base URL',
       baseUrlPlaceholder: 'https://gitlab.example.com',
+      internalBaseUrl: '內部位址',
+      internalBaseUrlPlaceholder: '容器內實際可達位址（選填）',
+      internalBaseUrlHelp:
+        'external（Base URL）是 GitLab payload 中出現的位址，用於 webhook 比對；internal 是 reng 實際可存取的位址（如容器內網），用於拉取評審資料。留空則使用 Base URL。',
       token: '存取權杖',
       tokenPlaceholder: 'glpat-...',
       keepTokenPlaceholder: '留空則保留已儲存的 Token',
@@ -412,6 +416,10 @@ export default {
         '對應 GitLab webhook 表單的 Secret token 欄位，以明文放在 X-Gitlab-Token 標頭中傳送，安全性弱於 Signing token，作為可選兜底。兩者可只配其一，至少配一個。',
       webhookSigningSecretHelp:
         'GitLab 19.0+ 的 Signing token（whsec_ 開頭，GitLab 產生時僅顯示一次）。GitLab 用它對請求本體計算 HMAC-SHA256 並透過 webhook-signature 標頭傳送，建議配置。',
+      allowedProjects: '允許的專案',
+      allowedProjectsPlaceholder: '每行一個專案路徑（如 group/project），留空 = 全部',
+      allowedProjectsHelp:
+        '系統級 hook 會涵蓋所有專案，用此白名單限定參與評審的專案。留空 = 全部專案。',
       test: '測試',
       testOk: '連線成功 — GitLab {version}',
       testFailed: '連線失敗 — {error}',

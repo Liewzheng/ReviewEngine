@@ -5,6 +5,7 @@ use base64::Engine;
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
+use std::sync::Arc;
 
 use super::super::dispatcher::MrDispatcher;
 use super::super::webhook::WebhookHandler;
@@ -72,6 +73,25 @@ pub(crate) fn system_hook_event_name(body: &str) -> String {
         .to_string()
 }
 
+/// The "unique verification platform" fallback: when EXACTLY ONE configured
+/// git platform can verify webhooks ([`crate::models::GitPlatformConfig::has_webhook_verification`]),
+/// return it; `None` when zero or multiple entries are verification-capable
+/// (or the list is empty). Used when a payload carries no instance URL —
+/// GitLab System Hooks' **Test** button sends a sample payload with no
+/// `project`/URL at all — or its URL matched no platform: a single
+/// verification-capable entry is unambiguous, so it safely takes over; zero
+/// or multiple entries keep the runtime default — never guess.
+pub(crate) fn unique_verification_platform(
+    platforms: &[crate::models::GitPlatformConfig],
+) -> Option<crate::models::GitPlatformConfig> {
+    let mut verification = platforms.iter().filter(|p| p.has_webhook_verification());
+    let hit = verification.next()?.clone();
+    if verification.next().is_some() {
+        return None;
+    }
+    Some(hit)
+}
+
 impl GitLabWebhookHandler {
     /// Return the effective runtime config: if the global was initialised
     /// (e.g. from the UI) use that, otherwise fall back to `self.*` so
@@ -88,50 +108,86 @@ impl GitLabWebhookHandler {
             .unwrap_or_else(|| GitLabRuntimeConfig::from_handler(self))
     }
 
-    /// Return the effective config for a specific webhook body: when the
-    /// payload's project/repository URL host matches a configured git
-    /// platform, THAT platform's webhook_secret / signing_secret / token
-    /// take over both verification and review dispatch; otherwise the
-    /// runtime default applies.
+    /// Return the effective config for a specific webhook body.
     ///
-    /// A matched platform WITHOUT any webhook verification credential
-    /// (token-only entry, configured for REST review routing) deliberately
-    /// does not take over: webhooks for its host keep the runtime default,
-    /// so adding an instance for routing never breaks an existing webhook
-    /// setup for the same host.
+    /// Resolution order:
+    /// 1. **URL match** — when the payload carries an instance URL
+    ///    (`project.web_url` / `project.homepage` / `repository.homepage` /
+    ///    `object_attributes.url`) and it matches a configured git platform
+    ///    (strict host[:port], with `find_git_platform_for_url`'s unique-host
+    ///    port fold), THAT platform's webhook_secret / signing_secret / token
+    ///    take over both verification and review dispatch. Multi-platform
+    ///    semantics are unchanged. A URL-matched entry WITHOUT webhook
+    ///    verification (token-only, configured for REST review routing)
+    ///    deliberately does not take over — webhooks for its host keep the
+    ///    runtime default, so adding an instance for routing never breaks an
+    ///    existing webhook setup for the same host.
+    /// 2. **Unique verification platform fallback** — when the payload has no
+    ///    instance URL, or its URL matched no platform (host mismatch, e.g.
+    ///    `base_url` = `host.docker.internal` while the payload carries
+    ///    `localhost`), exactly ONE verification-capable platform
+    ///    (`unique_verification_platform`) unambiguously takes over. This is
+    ///    what makes GitLab System Hooks' **Test** button work: it sends a
+    ///    sample payload with no URL, which used to resolve to no platform →
+    ///    403 "no verification configured". Zero or multiple
+    ///    verification-capable entries keep the runtime default — never guess.
     pub(crate) fn effective_config_for_body(&self, body: &str) -> GitLabRuntimeConfig {
         let fallback = self.effective_config();
         let Some(state) = self.app_state.as_ref().and_then(|w| w.upgrade()) else {
             return fallback;
         };
-        let Some(url) = payload_instance_url(body) else {
-            return fallback;
-        };
         let platforms = state.git_platforms.read().unwrap().clone();
-        match crate::models::find_git_platform_for_url(&platforms, &url) {
-            Some(platform) if platform.has_webhook_verification() => {
-                tracing::debug!(platform = %platform.name, "gitlab webhook matched configured git platform");
-                GitLabRuntimeConfig::from_platform(platform)
+        // A payload carrying an instance URL resolves strictly by URL: the
+        // URL-matched verification-capable platform wins regardless of how
+        // many entries exist; a token-only URL match keeps the runtime default
+        // (the host has no verification setup on purpose — never the fallback).
+        if let Some(url) = payload_instance_url(body) {
+            if let Some(platform) = crate::models::find_git_platform_for_url(&platforms, &url) {
+                if platform.has_webhook_verification() {
+                    tracing::debug!(platform = %platform.name, "gitlab webhook matched configured git platform");
+                    return GitLabRuntimeConfig::from_platform(platform);
+                }
+                return fallback;
             }
-            _ => fallback,
         }
+        // No URL, or the URL matched no platform: when exactly ONE platform can
+        // verify webhooks it unambiguously takes over; zero or multiple keep
+        // the runtime default — never guess.
+        if let Some(platform) = unique_verification_platform(&platforms) {
+            tracing::debug!(platform = %platform.name, "gitlab webhook fell back to unique verification platform");
+            return GitLabRuntimeConfig::from_platform(&platform);
+        }
+        fallback
     }
 
-    /// Return the configured git platform matched by `body`'s instance URL,
-    /// but only when that platform can verify webhooks (same rule as
-    /// `effective_config_for_body`: token-only entries do not take over).
-    /// `None` when the body carries no instance URL, no platform matches, or
-    /// the match lacks verification credentials. Used by `handle_event` to
-    /// resolve the matched platform's `allowed_projects` allowlist AND its
-    /// `base_url` (for rewriting payload MR URLs onto the reachable endpoint
-    /// before review dispatch).
+    /// Return the configured git platform for `body`'s webhook, or `None`.
+    ///
+    /// Mirrors `effective_config_for_body`'s resolution order so the platform
+    /// driving the `allowed_projects` allowlist AND its `base_url` (rewriting
+    /// payload MR URLs onto the reachable endpoint before review dispatch) is
+    /// the same one whose credentials verified the body:
+    /// 1. URL-matched verification-capable platform (`None` when the match is
+    ///    token-only — it must not take over);
+    /// 2. else the unique verification platform fallback
+    ///    (`unique_verification_platform`), so a no-URL payload (System Hooks
+    ///    **Test** button) or a host-mismatch payload (localhost vs
+    ///    `host.docker.internal`) still resolves to the single
+    ///    verification-capable entry and its allowlist + reachable URL.
+    /// `None` when there is no AppState, no platform matched and no unique
+    /// verification platform exists → empty allowlist (every project allowed)
+    /// and the payload URL kept verbatim (legacy).
     pub(crate) fn matched_platform(&self, body: &str) -> Option<crate::models::GitPlatformConfig> {
         let state = self.app_state.as_ref()?.upgrade()?;
-        let url = payload_instance_url(body)?;
         let platforms = state.git_platforms.read().unwrap().clone();
-        crate::models::find_git_platform_for_url(&platforms, &url)
-            .filter(|p| p.has_webhook_verification())
-            .cloned()
+        if let Some(url) = payload_instance_url(body) {
+            if let Some(platform) = crate::models::find_git_platform_for_url(&platforms, &url) {
+                if platform.has_webhook_verification() {
+                    return Some(platform.clone());
+                }
+                return None;
+            }
+        }
+        unique_verification_platform(&platforms)
     }
 
     /// Create a new GitLab webhook handler.
@@ -313,13 +369,14 @@ impl GitLabWebhookHandler {
         body: &str,
         token: &str,
         platform: Option<crate::models::GitPlatformConfig>,
+        task_store: Option<Arc<crate::server::task_queue::TaskStore>>,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         let event_name = system_hook_event_name(body);
         match event_name.as_str() {
-            "merge_request" => super::handle_mr_hook(body, &self.dispatcher, token, platform)
+            "merge_request" => super::handle_mr_hook(body, &self.dispatcher, token, platform, task_store.clone())
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "note" => super::handle_note_hook(body, &self.dispatcher, token, platform)
+            "note" => super::handle_note_hook(body, &self.dispatcher, token, platform, task_store.clone())
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
             "push" => super::handle_push_hook(body)
@@ -399,18 +456,26 @@ impl WebhookHandler for GitLabWebhookHandler {
         // no platform matched (or none can verify) → empty allowlist (every
         // project allowed) and the payload URL kept verbatim (legacy).
         let platform = self.matched_platform(body);
+        // The shared task store (weak-handled via AppState) so webhook-dispatched
+        // reviews record a task entry: create → running → completed/failed. `None`
+        // in tests and legacy paths — the review still runs, just without a record.
+        let task_store = self
+            .app_state
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .and_then(|s| s.task_store.clone());
 
         match event {
-            "Merge Request Hook" => super::handle_mr_hook(body, &self.dispatcher, &token, platform)
+            "Merge Request Hook" => super::handle_mr_hook(body, &self.dispatcher, &token, platform, task_store.clone())
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "Note Hook" => super::handle_note_hook(body, &self.dispatcher, &token, platform)
+            "Note Hook" => super::handle_note_hook(body, &self.dispatcher, &token, platform, task_store.clone())
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
             "Push Hook" => super::handle_push_hook(body)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "System Hook" => self.handle_system_hook(body, &token, platform).await,
+            "System Hook" => self.handle_system_hook(body, &token, platform, task_store).await,
             _ => {
                 tracing::debug!("Ignoring unsupported GitLab event: {}", event);
                 Ok(Json(serde_json::json!({ "status": "ignored" })))

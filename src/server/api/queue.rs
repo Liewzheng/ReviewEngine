@@ -227,3 +227,110 @@ fn task_to_queue_task(entry: &TaskEntry) -> serde_json::Value {
         "errorMessage": entry.error,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    /// AppState with the store deliberately cleared — the only way the
+    /// `None` fallback paths are reachable now that `AppState::new`
+    /// initialises a store eagerly.
+    fn state_without_store() -> Arc<AppState> {
+        let mut state = AppState::new(vec![]);
+        state.task_store = None;
+        Arc::new(state)
+    }
+
+    fn state_with_store() -> Arc<AppState> {
+        Arc::new(AppState::new(vec![]))
+    }
+
+    async fn body_of(response: impl IntoResponse) -> serde_json::Value {
+        let resp = response.into_response();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// `None` fallback: the stats endpoint keeps serving the documented
+    /// defaults instead of 503 — a pure guard, unreachable in production
+    /// where the store is always present.
+    #[tokio::test]
+    async fn stats_without_store_falls_back_to_defaults() {
+        let json = body_of(get_queue_stats(State(state_without_store())).await).await;
+        assert_eq!(json["active"], 0);
+        assert_eq!(json["queued"], 0);
+        assert_eq!(json["failed"], 0);
+        assert_eq!(json["totalDepth"], 0);
+        assert_eq!(json["maxConcurrent"], 8);
+        assert_eq!(json["queueCapacity"], 16);
+        assert_eq!(json["failedLast24h"], 0);
+        assert_eq!(json["totalLast24h"], 0);
+        assert_eq!(json["isPaused"], false);
+    }
+
+    /// With a store the stats reflect the real task store — the fix that makes
+    /// the queue page show actual activity instead of hardcoded zeros.
+    #[tokio::test]
+    async fn stats_with_store_reflects_real_entries() {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+        let id = store.create(None).await;
+        store.update(id, TaskState::Running, None, None).await;
+        let failed = store.create(None).await;
+        store
+            .update(failed, TaskState::Failed, None, Some("boom".to_string()))
+            .await;
+
+        let json = body_of(get_queue_stats(State(state)).await).await;
+        assert_eq!(json["active"], 1);
+        assert_eq!(json["queued"], 0);
+        assert_eq!(json["failed"], 1);
+        assert_eq!(json["totalDepth"], 1);
+        assert_eq!(json["maxConcurrent"], 8);
+        assert_eq!(json["queueCapacity"], 16);
+        assert_eq!(json["failedLast24h"], 1);
+        assert_eq!(json["totalLast24h"], 2);
+    }
+
+    #[tokio::test]
+    async fn tasks_without_store_returns_503() {
+        let resp = get_queue_tasks(
+            State(state_without_store()),
+            Query(QueueTaskParams {
+                status: None,
+                page: None,
+                per_page: None,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let json = body_of(resp).await;
+        assert_eq!(json["error"], "task store not initialized");
+    }
+
+    #[tokio::test]
+    async fn tasks_with_store_returns_real_entries() {
+        let state = state_with_store();
+        let store = state.task_store.clone().unwrap();
+        let id = store.create(None).await;
+        store.update(id, TaskState::Completed, None, None).await;
+
+        let json = body_of(
+            get_queue_tasks(
+                State(state),
+                Query(QueueTaskParams {
+                    status: None,
+                    page: None,
+                    per_page: None,
+                }),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(json["total"], 1);
+        assert_eq!(json["items"][0]["id"], id.to_string());
+        assert_eq!(json["items"][0]["status"], "completed");
+    }
+}

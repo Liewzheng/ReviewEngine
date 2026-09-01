@@ -101,20 +101,28 @@ impl TaskStore {
     pub fn new() -> Self {
         let (tx, _) = tokio::sync::broadcast::channel(256);
         let inner: Arc<RwLock<HashMap<Uuid, TaskEntry>>> = Arc::new(RwLock::new(HashMap::new()));
-        let cleanup_inner = Arc::clone(&inner);
 
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
-            loop {
-                interval.tick().await;
-                let cutoff = chrono::Utc::now() - chrono::Duration::minutes(30);
-                let mut map = cleanup_inner.write().await;
-                map.retain(|_, entry| match entry.completed_at {
-                    Some(t) if t < cutoff => false,
-                    _ => true,
-                });
-            }
-        });
+        // Only start the background reaper when a Tokio runtime is present.
+        // `TaskStore::new()` is also reached from `AppState::new()`, which sync
+        // unit tests construct without a runtime — `tokio::spawn` would panic
+        // there. The store is fully functional without the reaper (completed
+        // entries just aren't auto-reaped); `cleanup_expired()` covers the
+        // manual path.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let cleanup_inner = Arc::clone(&inner);
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+                loop {
+                    interval.tick().await;
+                    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(30);
+                    let mut map = cleanup_inner.write().await;
+                    map.retain(|_, entry| match entry.completed_at {
+                        Some(t) if t < cutoff => false,
+                        _ => true,
+                    });
+                }
+            });
+        }
 
         Self {
             inner,

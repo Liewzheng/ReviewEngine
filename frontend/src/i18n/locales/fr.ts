@@ -285,6 +285,7 @@ export default {
       queued: 'Tâches en file',
       failed: 'Tâches en échec',
       cancelled: 'Tâches annulées',
+      completed: 'Tâches récemment terminées',
     },
     empty: 'Aucune tâche dans la file',
     emptyHint: 'La file est actuellement vide. Les nouvelles tâches apparaîtront ici.',

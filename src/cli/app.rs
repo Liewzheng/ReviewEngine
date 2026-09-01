@@ -261,7 +261,6 @@ pub async fn run() -> Result<()> {
                 .or_else(|| std::env::var("GITLAB_WEBHOOK_SIGNING_SECRET").ok())
                 .filter(|s| !s.is_empty());
             let mut app_state = review_engine::server::AppState::new(config.llm.clone());
-            app_state.task_store = Some(Arc::new(review_engine::server::task_queue::TaskStore::new()));
             app_state.app_config = std::sync::RwLock::new(Some(Arc::new(config.clone())));
             app_state.registry = Some(review_engine::metrics::REGISTRY.clone());
             app_state.progress_map = Some(progress_map.clone());

@@ -1,6 +1,7 @@
 use super::super::dispatcher::{MrDispatcher, ShouldStart};
 use super::handler::payload_instance_url;
 use super::handler::system_hook_event_name;
+use super::handler::unique_verification_platform;
 use super::handler::HmacSha256;
 use super::hooks::{mr_iid_from_url, rewrite_url_to_platform};
 use super::*;
@@ -703,17 +704,29 @@ async fn webhook_platform_match_selects_platform_config() {
 }
 
 /// An unmatched payload host (or a body without an instance URL) keeps the
-/// runtime default — the pre-multi-platform behavior.
+/// runtime default whenever the unique-verification fallback cannot decide:
+/// with MULTIPLE verification-capable platforms there is no single entry to
+/// fall back to, so the pre-multi-platform default applies (never guess).
 #[tokio::test]
 async fn webhook_unmatched_host_keeps_default_config() {
     let _lock = super::RUNTIME_TEST_LOCK.lock().await;
     let _guard = EmptyRuntimeGuard::new();
-    let state = state_with_platforms(vec![platform_entry(
-        "testbed",
-        "http://gitlab.internal:8929",
-        "glpat-platform",
-        "platform-secret",
-    )]);
+    // Two verification-capable platforms on unrelated hosts: an unmatched URL
+    // (or no URL at all) is ambiguous → runtime default, not either platform.
+    let state = state_with_platforms(vec![
+        platform_entry(
+            "testbed",
+            "http://gitlab.internal:8929",
+            "glpat-platform",
+            "platform-secret",
+        ),
+        platform_entry(
+            "other",
+            "http://gitlab-other.internal:8929",
+            "glpat-other",
+            "other-secret",
+        ),
+    ]);
     let handler = GitLabWebhookHandler::new(
         "default-secret".to_string(),
         None,
@@ -779,17 +792,29 @@ async fn webhook_without_app_state_uses_default_config() {
 
 /// End-to-end verification per matched platform: the platform's webhook
 /// secret verifies requests for its host; the default secret is rejected
-/// there (and vice versa for an unmatched host).
+/// there (and vice versa for an unmatched host — with TWO verification
+/// platforms the unique-verification fallback cannot guess, so the default
+/// applies there).
 #[tokio::test]
 async fn webhook_verify_uses_matched_platform_secret() {
     let _lock = super::RUNTIME_TEST_LOCK.lock().await;
     let _guard = EmptyRuntimeGuard::new();
-    let state = state_with_platforms(vec![platform_entry(
-        "testbed",
-        "http://gitlab.internal:8929",
-        "glpat-platform",
-        "platform-secret",
-    )]);
+    // Two verification-capable platforms on unrelated hosts: PLATFORM_BODY
+    // strictly matches "testbed"; the unmatched host is ambiguous → default.
+    let state = state_with_platforms(vec![
+        platform_entry(
+            "testbed",
+            "http://gitlab.internal:8929",
+            "glpat-platform",
+            "platform-secret",
+        ),
+        platform_entry(
+            "other",
+            "http://gitlab-other.internal:8929",
+            "glpat-other",
+            "other-secret",
+        ),
+    ]);
     let handler = GitLabWebhookHandler::new(
         "default-secret".to_string(),
         None,
@@ -845,8 +870,12 @@ async fn webhook_signing_verify_uses_matched_platform_key() {
     headers.insert("webhook-signature", sig.parse().unwrap());
     assert!(handler.verify(&headers, PLATFORM_BODY).await.is_ok());
 
-    // The same signature against a different body (unmatched host) must not
-    // verify — the default config has no signing secret at all.
+    // Unmatched host with a SINGLE verification-capable platform: the unique
+    // verification platform fallback takes over, so the same platform signing
+    // key verifies the re-hosted body — the host-mismatch path (base_url vs
+    // payload localhost) that the fallback exists to fix. The legacy default
+    // token in the header is irrelevant: the platform config has signing
+    // configured (and no legacy secret), so the signature path verifies.
     let other_body = PLATFORM_BODY.replace("gitlab.internal:8929", "other.internal:8929");
     let message_id = "msg-2";
     let sig = sign_message(raw_key, message_id, unix_now(), &other_body);
@@ -856,11 +885,161 @@ async fn webhook_signing_verify_uses_matched_platform_key() {
     headers.insert("webhook-signature", sig.parse().unwrap());
     let mut headers_legacy = headers.clone();
     headers_legacy.insert("X-Gitlab-Token", "default-secret".parse().unwrap());
-    // With the legacy default secret present, the unmatched host falls back
-    // to the legacy check when the signature header... is present — but the
-    // default has no signing secret configured, so the legacy token path
-    // applies and verifies.
     assert!(handler.verify(&headers_legacy, &other_body).await.is_ok());
+}
+
+// ── Unique verification platform fallback (System Hooks Test button) ──
+
+/// GitLab System Hooks' **Test** button sends a SAMPLE payload with no URL at
+/// all (`event_name`/`project_id`/`changes`/`refs` only — no `project`
+/// object, no `repository`, nothing to match). With exactly ONE
+/// verification-capable platform configured, that platform unambiguously
+/// takes over both verification config and `matched_platform` — the fix for
+/// the Test button 403.
+#[tokio::test]
+async fn no_url_payload_falls_back_to_unique_verification_platform() {
+    let _lock = super::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = EmptyRuntimeGuard::new();
+    let state = state_with_platforms(vec![platform_entry(
+        "testbed",
+        "http://host.docker.internal:8929",
+        "glpat-platform",
+        "platform-secret",
+    )]);
+    let handler = GitLabWebhookHandler::new(
+        "default-secret".to_string(),
+        None,
+        MrDispatcher::new(),
+        "glpat-default".to_string(),
+    )
+    .with_app_state(&state);
+
+    // Real captured shape of the System Hooks Test button payload.
+    let body = r#"{"event_name":"merge_request","project_id":123,"changes":[],"refs":[]}"#;
+    assert_eq!(payload_instance_url(body), None);
+
+    let cfg = handler.effective_config_for_body(body);
+    assert_eq!(cfg.webhook_secret, "platform-secret");
+    assert_eq!(cfg.token, "glpat-platform");
+
+    let platform = handler.matched_platform(body).unwrap();
+    assert_eq!(platform.name, "testbed");
+    assert_eq!(platform.base_url, "http://host.docker.internal:8929");
+
+    // End-to-end: the platform's secret verifies the Test payload.
+    let mut headers = HeaderMap::new();
+    headers.insert("X-Gitlab-Token", "platform-secret".parse().unwrap());
+    assert!(handler.verify(&headers, body).await.is_ok());
+}
+
+/// No-URL payload + TWO verification-capable platforms → the fallback cannot
+/// guess: the runtime default applies and `matched_platform` is `None`.
+#[tokio::test]
+async fn no_url_payload_two_verification_platforms_keeps_default() {
+    let _lock = super::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = EmptyRuntimeGuard::new();
+    let state = state_with_platforms(vec![
+        platform_entry("a", "http://gitlab-a.internal:8929", "glpat-a", "secret-a"),
+        platform_entry("b", "http://gitlab-b.internal:8929", "glpat-b", "secret-b"),
+    ]);
+    let handler = GitLabWebhookHandler::new(
+        "default-secret".to_string(),
+        None,
+        MrDispatcher::new(),
+        "glpat-default".to_string(),
+    )
+    .with_app_state(&state);
+
+    let body = r#"{"event_name":"merge_request","project_id":123}"#;
+    let cfg = handler.effective_config_for_body(body);
+    assert_eq!(cfg.webhook_secret, "default-secret");
+    assert_eq!(cfg.token, "glpat-default");
+    assert!(handler.matched_platform(body).is_none());
+}
+
+/// No-URL payload + a single token-only platform (no webhook verification
+/// credentials) → the fallback ignores it (it cannot verify): runtime default.
+#[tokio::test]
+async fn no_url_payload_token_only_platform_keeps_default() {
+    let _lock = super::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = EmptyRuntimeGuard::new();
+    let state = state_with_platforms(vec![platform_entry(
+        "routing-only",
+        "http://gitlab.internal:8929",
+        "glpat-platform",
+        "", // no webhook secret
+    )]);
+    let handler = GitLabWebhookHandler::new(
+        "default-secret".to_string(),
+        None,
+        MrDispatcher::new(),
+        "glpat-default".to_string(),
+    )
+    .with_app_state(&state);
+
+    let body = r#"{"event_name":"merge_request","project_id":123}"#;
+    let cfg = handler.effective_config_for_body(body);
+    assert_eq!(cfg.webhook_secret, "default-secret");
+    assert_eq!(cfg.token, "glpat-default");
+    assert!(handler.matched_platform(body).is_none());
+}
+
+/// A payload WITH an instance URL still resolves strictly by URL first (the
+/// fallback must never override a URL match — multi-platform URL semantics
+/// unchanged), and the single-platform host mismatch — payload carries
+/// `localhost`, `base_url` is `host.docker.internal` — is exactly the case the
+/// unique fallback fixes.
+#[tokio::test]
+async fn url_payload_prefers_strict_match_and_host_mismatch_falls_back() {
+    let _lock = super::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = EmptyRuntimeGuard::new();
+    let state = state_with_platforms(vec![platform_entry(
+        "testbed",
+        "http://host.docker.internal:8929",
+        "glpat-platform",
+        "platform-secret",
+    )]);
+    let handler = GitLabWebhookHandler::new(
+        "default-secret".to_string(),
+        None,
+        MrDispatcher::new(),
+        "glpat-default".to_string(),
+    )
+    .with_app_state(&state);
+
+    // URL matches the platform's base_url → strict match wins over the
+    // fallback (regression: multi-platform URL semantics unchanged).
+    let matching_body = PLATFORM_BODY.replace("gitlab.internal:8929", "host.docker.internal:8929");
+    let cfg = handler.effective_config_for_body(&matching_body);
+    assert_eq!(cfg.webhook_secret, "platform-secret");
+    assert_eq!(handler.matched_platform(&matching_body).unwrap().name, "testbed");
+
+    // Host mismatch: the payload's external_url is `localhost`, the platform's
+    // base_url is `host.docker.internal` → URL matches no platform → the
+    // unique verification platform still takes over (verification AND
+    // allowlist/rewrite resolution).
+    let localhost_body = PLATFORM_BODY.replace("gitlab.internal:8929", "localhost:8929");
+    let cfg = handler.effective_config_for_body(&localhost_body);
+    assert_eq!(cfg.webhook_secret, "platform-secret");
+    assert_eq!(handler.matched_platform(&localhost_body).unwrap().name, "testbed");
+}
+
+/// `unique_verification_platform` boundary: exactly one verification-capable
+/// entry wins regardless of surrounding token-only entries; zero or multiple
+/// verification-capable entries (or an empty list) yield `None`.
+#[test]
+fn unique_verification_platform_requires_exactly_one() {
+    let verifying = |name: &str| platform_entry(name, "http://gitlab.internal:8929", "tok", "wh-secret");
+    let token_only = |name: &str| platform_entry(name, "http://gitlab.internal:8929", "tok", "");
+    // Exactly one verification-capable entry → it (token-only entries ignored).
+    let hit = unique_verification_platform(&[token_only("routing"), verifying("verifying"), token_only("routing-2")]);
+    assert_eq!(hit.map(|p| p.name), Some("verifying".to_string()));
+    // Two verification-capable entries → ambiguous → None.
+    assert!(unique_verification_platform(&[verifying("a"), verifying("b")]).is_none());
+    // Zero verification-capable entries (all token-only) → None.
+    assert!(unique_verification_platform(&[token_only("a"), token_only("b")]).is_none());
+    // Empty list → None.
+    assert!(unique_verification_platform(&[]).is_none());
 }
 
 // ── System Hooks (admin-level) ─────────────────────────────────────

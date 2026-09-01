@@ -262,4 +262,43 @@ mod tests {
         assert_eq!(by_id["00000000-0000-0000-0000-000000000004"], "failed");
         assert_eq!(by_id["00000000-0000-0000-0000-000000000005"], "cancelled");
     }
+
+    /// `None` fallback: without a store the dashboard serves documented
+    /// defaults (zero KPIs, empty recent reviews, offline health) instead of
+    /// 503 — a pure guard, unreachable in production where the store is
+    /// always present.
+    #[tokio::test]
+    async fn dashboard_without_store_serves_defaults() {
+        let mut state = AppState::new(vec![]);
+        state.task_store = None;
+        let resp = get_dashboard(State(std::sync::Arc::new(state))).await.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["kpis"]["reviewsThisWeek"], 0);
+        assert_eq!(json["kpis"]["activeQueue"], 0);
+        assert!(json["recentReviews"].as_array().unwrap().is_empty());
+        assert_eq!(json["health"]["overall"], "offline");
+    }
+
+    /// With a store the dashboard reflects the real task store — completed
+    /// reviews from the webhook path surface as recentReviews (the exact
+    /// defect this fix closes).
+    #[tokio::test]
+    async fn dashboard_with_store_shows_webhook_recorded_review() {
+        let state = AppState::new(vec![]);
+        let store = state.task_store.clone().unwrap();
+        let id = store.create(None).await;
+        store.update(id, TaskState::Completed, None, None).await;
+
+        let resp = get_dashboard(State(std::sync::Arc::new(state))).await.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["kpis"]["reviewsThisWeek"], 1);
+        let recent = json["recentReviews"].as_array().unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0]["id"], id.to_string());
+        assert_eq!(recent[0]["status"], "completed");
+    }
 }

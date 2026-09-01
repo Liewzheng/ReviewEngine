@@ -279,6 +279,7 @@ export default {
       queued: '排隊任務',
       failed: '失敗任務',
       cancelled: '已取消任務',
+      completed: '最近完成任務',
     },
     empty: '佇列中沒有任務',
     emptyHint: '佇列目前為空。新任務會顯示在這裡。',

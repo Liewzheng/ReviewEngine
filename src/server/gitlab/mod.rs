@@ -17,7 +17,8 @@ pub use super::webhook::WebhookHandler;
 pub use handler::GitLabWebhookHandler;
 pub use hooks::{
     dispatch_mr_event, handle_mr_hook, handle_mr_in_progress, handle_note_hook, handle_push_hook,
-    note_starts_with_command, parse_mr_hook_payload, spawn_mr_review_task, MrHookPayload,
+    note_starts_with_command, parse_mr_hook_payload, record_task_outcome, record_task_started, spawn_mr_review_task,
+    MrHookPayload,
 };
 
 use std::sync::{OnceLock, RwLock};

@@ -26,6 +26,9 @@ import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 import MarkdownView from '../components/common/MarkdownView.vue'
 
+/* Dev-only flag: raw expert responses are hidden in release builds */
+const isDev = import.meta.env.DEV
+
 /* ─────────────── Router & Composable ─────────────── */
 const route = useRoute()
 const router = useRouter()
@@ -749,7 +752,7 @@ watch(() => route.query, () => {
               <div class="expert-markdown">
                 <MarkdownView :source="exp.summary" />
               </div>
-              <details v-if="exp.details" class="raw-toggle">
+              <details v-if="exp.details && isDev" class="raw-toggle">
                 <summary class="raw-toggle-summary">{{ $t('history.drawer.rawResponse') }}</summary>
                 <pre class="raw-response-block">{{ exp.details }}</pre>
               </details>

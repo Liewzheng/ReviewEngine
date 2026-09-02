@@ -7,6 +7,7 @@
 - History detail panel now displays expert results for webhook-driven tasks: the task store persists the full `ReviewOutput` (including per-expert reports) when a webhook review completes. (`src/server/mod.rs`, `src/server/task_queue.rs`)
 - History detail panel now renders expert report Markdown (headings, bold/inline code, fenced code blocks, lists, GFM tables) instead of showing raw source: new `MarkdownView` component parses with `marked` and sanitizes with DOMPurify before `v-html`. (`frontend/src/components/common/MarkdownView.vue`, `frontend/src/views/ReviewHistory.vue`)
 - History detail expert rows keep the status and score badges column-aligned regardless of score digit count (83 vs 100): both pills get a fixed-width floor so their right edges line up across rows. (`frontend/src/views/ReviewHistory.vue`)
+- The expert "Raw Response" `<details>` block is now dev-only: hidden in release builds (`import.meta.env.DEV`), kept when running `npm run dev`. (`frontend/src/views/ReviewHistory.vue`)
 
 ## [0.9.48] - 2026-09-01
 

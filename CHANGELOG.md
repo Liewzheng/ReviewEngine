@@ -9,6 +9,7 @@
 - History detail expert rows keep the status and score badges column-aligned regardless of score digit count (83 vs 100): both pills get a fixed-width floor so their right edges line up across rows. (`frontend/src/views/ReviewHistory.vue`)
 - The expert "Raw Response" `<details>` block is now dev-only: hidden in release builds (`import.meta.env.DEV`), kept when running `npm run dev`. (`frontend/src/views/ReviewHistory.vue`)
 - The History detail drawer's "API Response" tab (task-level raw `ReviewOutput` JSON) is now dev-only as well, so release builds expose no raw JSON debug panels. (`frontend/src/views/ReviewHistory.vue`)
+- History list layout tweaks: status/score columns narrowed (100/72), the "created" column shows a two-line absolute timestamp (locale date + `HH:mm:ss`) instead of relative time, and the project tag was removed from the MR title cell since the standalone project column already shows it. (`frontend/src/views/ReviewHistory.vue`)
 
 ## [0.9.48] - 2026-09-01
 

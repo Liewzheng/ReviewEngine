@@ -32,7 +32,7 @@ const isDev = import.meta.env.DEV
 /* ─────────────── Router & Composable ─────────────── */
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const reviews = useReviews()
 
 const loading = reviews.loading
@@ -332,19 +332,24 @@ function formatDuration(ms: number): string {
   return `${min}m ${rem}s`
 }
 
-function formatRelativeTime(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
-  if (diffSec < 60) return t('history.time.justNow')
-  if (diffSec < 3600) return t('history.time.minutesAgo', { n: Math.floor(diffSec / 60) })
-  if (diffSec < 86400) return t('history.time.hoursAgo', { n: Math.floor(diffSec / 3600) })
-  if (diffSec < 604800) return t('history.time.daysAgo', { n: Math.floor(diffSec / 86400) })
-  return d.toLocaleDateString()
-}
-
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString()
+}
+
+/* Absolute timestamps for the list "created" column — two stacked lines so the
+   cell stays compact without a tooltip: locale-aware date on top, HH:mm:ss
+   below. `month: 'short'` renders CJK locales as e.g. `2026年9月2日`. */
+function formatCreatedDate(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(locale.value, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function formatCreatedTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 function getInitials(name: string): string {
@@ -535,7 +540,6 @@ watch(() => route.query, () => {
           <el-table-column :label="$t('history.columns.mrTitle')" min-width="240" sortable :sort-by="['mrTitle']">
             <template #default="{ row }">
               <div class="title-cell">
-                <el-tag size="small" type="info" class="project-tag">{{ row.project }}</el-tag>
                 <div class="title-text">
                   <div class="mr-title">{{ row.mrTitle }}</div>
                   <div class="branch-name">
@@ -565,13 +569,13 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.status')" width="120" sortable :sort-by="['status']">
+          <el-table-column :label="$t('history.columns.status')" width="100" sortable :sort-by="['status']">
             <template #default="{ row }">
               <StatusBadge :status="row.status" size="small" />
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.score')" width="90" align="center" sortable :sort-by="['assessment.score']">
+          <el-table-column :label="$t('history.columns.score')" width="72" align="center" sortable :sort-by="['assessment.score']">
             <template #default="{ row }">
               <el-tooltip
                 v-if="row.status === 'completed' && row.assessment"
@@ -594,9 +598,10 @@ watch(() => route.query, () => {
 
           <el-table-column :label="$t('history.columns.created')" width="150" sortable :sort-by="['createdAt']">
             <template #default="{ row }">
-              <el-tooltip :content="formatDate(row.createdAt)" placement="top">
-                <span class="created-text">{{ formatRelativeTime(row.createdAt) }}</span>
-              </el-tooltip>
+              <span class="created-text">
+                <span class="created-date">{{ formatCreatedDate(row.createdAt) }}</span>
+                <span class="created-time">{{ formatCreatedTime(row.createdAt) }}</span>
+              </span>
             </template>
           </el-table-column>
 
@@ -881,11 +886,6 @@ watch(() => route.query, () => {
   gap: 8px;
 }
 
-.project-tag {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
 .title-text {
   display: flex;
   flex-direction: column;
@@ -951,8 +951,24 @@ watch(() => route.query, () => {
 }
 
 .created-text {
-  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.created-date {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.created-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--text-secondary);
+  line-height: 1.3;
+  white-space: nowrap;
 }
 
 .actions-group {

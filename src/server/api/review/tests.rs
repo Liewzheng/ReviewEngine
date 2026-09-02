@@ -10,7 +10,8 @@ use uuid::Uuid;
 
 use super::handlers::{delete_review, get_review, list_reviews, rerun_review, submit_review};
 use super::resolve::{resolve_gitlab_token, resolve_source, GITLAB_TOKEN_HEADER, MAX_STATIC_DIFF_BYTES};
-use super::task::{source_meta_from_mr_info, task_to_status, ListParams};
+use super::task::{task_to_status, ListParams};
+use crate::server::task_queue::source_meta_from_mr_info;
 
 #[tokio::test]
 async fn test_resolve_source_static_diff_within_limit() {
@@ -470,9 +471,17 @@ async fn webhook_recorded_task_surfaces_in_list_reviews() {
     // dedup key); title/branch/author are absent for webhook tasks.
     let mr_url = "http://gitlab.internal:8929/group/proj/-/merge_requests/7";
     let sha = "abc123";
-    let id = crate::server::gitlab::record_task_started(&store, mr_url, sha).await;
-    let outcome: anyhow::Result<()> = Ok(());
-    crate::server::gitlab::record_task_outcome(&store, id, mr_url, sha, &outcome).await;
+    let id = crate::server::task_queue::record_task_started(
+        &store,
+        crate::server::task_queue::SourceMeta {
+            gitlab_mr_url: Some(mr_url.to_string()),
+            commit_sha: Some(sha.to_string()),
+            ..crate::server::task_queue::SourceMeta::default()
+        },
+    )
+    .await;
+    let outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(crate::models::ReviewOutput::new(vec![]));
+    crate::server::task_queue::record_task_outcome(&store, id, &outcome).await;
 
     let params = ListParams {
         status: None,

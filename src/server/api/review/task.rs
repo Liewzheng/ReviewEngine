@@ -147,31 +147,7 @@ pub(crate) fn source_meta_from_request(source: &ReviewSource) -> SourceMeta {
     }
 }
 
-/// Map the MR metadata resolved by the review pipeline (`MRInfo`, fetched
-/// from the provider API) onto task source metadata for the History UI.
-/// Empty strings map to `None` — a missing value must stay absent rather
-/// than be persisted as `""`. Paired with [`TaskStore::fill_source_meta`]'s
-/// fill-only-blank semantics so enqueue-time values are never clobbered.
-pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMeta {
-    fn non_empty(s: &str) -> Option<String> {
-        let trimmed = s.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    }
-    SourceMeta {
-        mr_title: non_empty(&info.title),
-        branch: non_empty(&info.source_branch),
-        target_branch: non_empty(&info.target_branch),
-        author_name: info.pr_author.clone(),
-        commit_sha: non_empty(&info.git_hash),
-        ..SourceMeta::default()
-    }
-}
-
-use crate::server::task_queue::TaskStore;
+use crate::server::task_queue::{source_meta_from_mr_info, TaskStore};
 use crate::server::AppState;
 use serde::Deserialize;
 use std::sync::Arc;

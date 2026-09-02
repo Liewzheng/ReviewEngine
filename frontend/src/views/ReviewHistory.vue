@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Search,
@@ -24,11 +24,15 @@ import type { ReviewListItem, HistoryFilters, RiskLevel } from '../types/history
 import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
+import MarkdownView from '../components/common/MarkdownView.vue'
+
+/* Dev-only flag: raw expert responses are hidden in release builds */
+const isDev = import.meta.env.DEV
 
 /* ─────────────── Router & Composable ─────────────── */
 const route = useRoute()
 const router = useRouter()
-const { t } = useI18n()
+const { t, locale } = useI18n()
 const reviews = useReviews()
 
 const loading = reviews.loading
@@ -238,6 +242,32 @@ async function openDrawer(row: ReviewListItem) {
   }
 }
 
+/*
+ * Element Plus measures the collapse panel height inside a single
+ * requestAnimationFrame callback and only clears the inline `max-height: 0`
+ * when the transition ends. If the renderer produces no frame between the
+ * toggle and that callback (backgrounded/occluded page, frame-on-demand
+ * automation), the wrap is left at `max-height: 0` with content present but
+ * invisible. Timers still run when frames don't, so re-check once the EP
+ * transition window (~300ms) has passed and release any wrap that is stuck.
+ */
+let expertCollapseRepairTimer: ReturnType<typeof setTimeout> | undefined
+function handleExpertCollapseChange() {
+  clearTimeout(expertCollapseRepairTimer)
+  expertCollapseRepairTimer = setTimeout(() => {
+    document
+      .querySelectorAll<HTMLElement>('.el-drawer .el-collapse-item.is-active .el-collapse-item__wrap')
+      .forEach((wrap) => {
+        if (wrap.style.maxHeight === '0px' && wrap.scrollHeight > 0) {
+          wrap.style.maxHeight = ''
+          wrap.style.paddingTop = ''
+          wrap.style.paddingBottom = ''
+        }
+      })
+  }, 400)
+}
+onBeforeUnmount(() => clearTimeout(expertCollapseRepairTimer))
+
 /* ─────────────── Actions ─────────────── */
 function rerunConfirmMessage(row: { mrTitle: string; gitlabMrUrl?: string }): string {
   const title = (row.mrTitle || '').trim()
@@ -328,19 +358,24 @@ function formatDuration(ms: number): string {
   return `${min}m ${rem}s`
 }
 
-function formatRelativeTime(iso: string): string {
-  const d = new Date(iso)
-  const now = new Date()
-  const diffSec = Math.floor((now.getTime() - d.getTime()) / 1000)
-  if (diffSec < 60) return t('history.time.justNow')
-  if (diffSec < 3600) return t('history.time.minutesAgo', { n: Math.floor(diffSec / 60) })
-  if (diffSec < 86400) return t('history.time.hoursAgo', { n: Math.floor(diffSec / 3600) })
-  if (diffSec < 604800) return t('history.time.daysAgo', { n: Math.floor(diffSec / 86400) })
-  return d.toLocaleDateString()
-}
-
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString()
+}
+
+/* Absolute timestamps for the list "created" column — two stacked lines so the
+   cell stays compact without a tooltip: locale-aware date on top, HH:mm:ss
+   below. `month: 'short'` renders CJK locales as e.g. `2026年9月2日`. */
+function formatCreatedDate(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleDateString(locale.value, { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function formatCreatedTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
 function getInitials(name: string): string {
@@ -531,7 +566,6 @@ watch(() => route.query, () => {
           <el-table-column :label="$t('history.columns.mrTitle')" min-width="240" sortable :sort-by="['mrTitle']">
             <template #default="{ row }">
               <div class="title-cell">
-                <el-tag size="small" type="info" class="project-tag">{{ row.project }}</el-tag>
                 <div class="title-text">
                   <div class="mr-title">{{ row.mrTitle }}</div>
                   <div class="branch-name">
@@ -561,13 +595,13 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.status')" width="120" sortable :sort-by="['status']">
+          <el-table-column :label="$t('history.columns.status')" width="100" sortable :sort-by="['status']">
             <template #default="{ row }">
               <StatusBadge :status="row.status" size="small" />
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.score')" width="90" align="center" sortable :sort-by="['assessment.score']">
+          <el-table-column :label="$t('history.columns.score')" width="72" align="center" sortable :sort-by="['assessment.score']">
             <template #default="{ row }">
               <el-tooltip
                 v-if="row.status === 'completed' && row.assessment"
@@ -590,9 +624,10 @@ watch(() => route.query, () => {
 
           <el-table-column :label="$t('history.columns.created')" width="150" sortable :sort-by="['createdAt']">
             <template #default="{ row }">
-              <el-tooltip :content="formatDate(row.createdAt)" placement="top">
-                <span class="created-text">{{ formatRelativeTime(row.createdAt) }}</span>
-              </el-tooltip>
+              <span class="created-text">
+                <span class="created-date">{{ formatCreatedDate(row.createdAt) }}</span>
+                <span class="created-time">{{ formatCreatedTime(row.createdAt) }}</span>
+              </span>
             </template>
           </el-table-column>
 
@@ -725,7 +760,7 @@ watch(() => route.query, () => {
 
         <!-- Expert Results -->
         <h4 class="drawer-section-title">{{ $t('history.drawer.expertResults') }}</h4>
-        <el-collapse>
+        <el-collapse @change="handleExpertCollapseChange">
           <el-collapse-item
             v-for="exp in selectedReview.experts"
             :key="exp.expertId"
@@ -744,9 +779,11 @@ watch(() => route.query, () => {
             </template>
             <div class="expert-content">
               <!-- `summary` carries the curated pre-rendered Markdown report;
-                   pre-wrap keeps its structure readable without a renderer. -->
-              <div class="expert-markdown">{{ exp.summary }}</div>
-              <details v-if="exp.details" class="raw-toggle">
+                   MarkdownView renders it (marked -> DOMPurify sanitized). -->
+              <div class="expert-markdown">
+                <MarkdownView :source="exp.summary" />
+              </div>
+              <details v-if="exp.details && isDev" class="raw-toggle">
                 <summary class="raw-toggle-summary">{{ $t('history.drawer.rawResponse') }}</summary>
                 <pre class="raw-response-block">{{ exp.details }}</pre>
               </details>
@@ -769,7 +806,8 @@ watch(() => route.query, () => {
               <p v-else class="empty-text">{{ $t('history.drawer.noComment') }}</p>
             </div>
           </el-tab-pane>
-          <el-tab-pane :label="$t('history.drawer.tabs.apiResponse')">
+          <!-- API Response 仅 dev 构建显示（避免 release 暴露原始接口响应） -->
+          <el-tab-pane v-if="isDev" :label="$t('history.drawer.tabs.apiResponse')">
             <div class="raw-panel">
               <pre class="json-block">{{ JSON.stringify(selectedReview.rawApiResponse, null, 2) }}</pre>
             </div>
@@ -874,11 +912,6 @@ watch(() => route.query, () => {
   gap: 8px;
 }
 
-.project-tag {
-  flex-shrink: 0;
-  margin-top: 2px;
-}
-
 .title-text {
   display: flex;
   flex-direction: column;
@@ -944,8 +977,24 @@ watch(() => route.query, () => {
 }
 
 .created-text {
-  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.created-date {
+  font-size: 12px;
+  color: var(--text-primary);
+  line-height: 1.35;
+  white-space: nowrap;
+}
+
+.created-time {
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--text-secondary);
+  line-height: 1.3;
+  white-space: nowrap;
 }
 
 .actions-group {
@@ -1074,6 +1123,28 @@ watch(() => route.query, () => {
   gap: 8px;
 }
 
+/* Column alignment for the status + score badges on each expert row.
+   Both pills get a fixed-width floor so their right edges form two straight
+   lines across rows regardless of the score's digit count (83 vs 100).
+   `min-width` (not `width`) so longer status texts (other statuses/locales)
+   still grow the pill instead of being clipped; el-tag centers its content
+   once the pill is wider than its text. */
+.expert-meta > .el-tag:first-child {
+  /* ~3 CJK glyphs (e.g. 已跳过) @12px + small-tag padding 7+7 + border 1+1 */
+  min-width: 54px;
+}
+
+.expert-meta > .el-tag + .el-tag {
+  /* widest possible score "100" (3 digits) + same tag chrome */
+  min-width: 42px;
+}
+
+/* Row without a score tag: keep the status badge on the same line as rows
+   that do have a score by reserving the score column (42px) + the gap (8px). */
+.expert-meta > .el-tag:only-child {
+  margin-right: 50px;
+}
+
 .expert-content {
   padding: 8px 0;
   display: flex;
@@ -1091,7 +1162,6 @@ watch(() => route.query, () => {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
   font-family: var(--font-sans);
-  white-space: pre-wrap;
   word-break: break-word;
 }
 

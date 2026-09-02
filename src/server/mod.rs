@@ -68,32 +68,12 @@ pub(crate) fn build_review_output_from_reports(
     }
 }
 
-/// Shared review execution logic used by both GitLab and GitHub webhook handlers.
+/// Resolve the MR/PR metadata and diff for a webhook-dispatched review.
 ///
-/// Creates the appropriate provider from the URL, fetches the MR/PR info and diff,
-/// runs the expert team, then:
-///
-/// 1. **Aggregator** — if `report.aggregated` is enabled _and_ an `"aggregator"` expert
-///    exists in the team, runs it synchronously after all experts complete.
-///    - **Success:** the aggregated report is merged into the [`ReviewOutput`](crate::models::ReviewOutput) and published alongside individual findings.
-///    - **Failure:** fail-soft — logs a warning via `tracing::warn!`, sets aggregator output to `None`, _and_ continues with reports-only (all experts' findings are still published). The review itself is not aborted.
-///
-/// 2. **Output** — built by [`build_review_output_from_reports`](crate::server::build_review_output_from_reports) from expert reports and the optional aggregator result, then published via [`publish_review`].
-///
-/// Finally, notifies the dispatcher of completion.
-pub(crate) async fn run_review_common(
-    url: &str,
-    token: &str,
-    dispatcher: Option<&MrDispatcher>,
-    dispatch_key: Option<&str>,
-    sha: Option<&str>,
-) -> anyhow::Result<()> {
-    use crate::config;
-    use crate::team::orchestrator;
-
-    let config = config::resolve_config(None).await?;
-
-    // Determine provider type from URL
+/// Creates the appropriate provider from the URL and fetches the MR info and
+/// diff in one place so callers can back-fill task source metadata before the
+/// (possibly long) expert run starts.
+pub(crate) async fn resolve_review_source(url: &str, token: &str) -> anyhow::Result<(crate::models::MRInfo, String)> {
     let provider: Box<dyn GitProvider> = if url.contains("github.com") || url.contains(".github.") {
         Box::new(crate::git_provider::github::GitHubProvider::new(token, url)?)
     } else {
@@ -102,13 +82,43 @@ pub(crate) async fn run_review_common(
 
     let mr_info = provider.fetch_mr_info().await?;
     let diff = provider.fetch_diff().await?;
+    Ok((mr_info, diff))
+}
+
+/// Shared review execution logic used by both GitLab and GitHub webhook handlers.
+///
+/// Runs the expert team against the already-resolved `mr_info` and `diff`, then:
+///
+/// 1. **Aggregator** — if `report.aggregated` is enabled _and_ an `"aggregator"` expert
+///    exists in the team, runs it synchronously after all experts complete.
+///    - **Success:** the aggregated report is merged into the [`ReviewOutput`](crate::models::ReviewOutput) and published alongside individual findings.
+///    - **Failure:** fail-soft — logs a warning via `tracing::warn!`, sets aggregator output to `None`, _and_ continues with reports-only (all experts' findings are still published). The review itself is not aborted.
+///
+/// 2. **Output** — built by [`build_review_output_from_reports`](crate::server::build_review_output_from_reports) from expert reports and the optional aggregator result, then published via [`publish_review`].
+///
+/// Finally, notifies the dispatcher of completion and returns the constructed
+/// [`ReviewOutput`] (so the task store can persist expert reports for the
+/// History detail panel).
+pub(crate) async fn run_review_common(
+    url: &str,
+    token: &str,
+    dispatcher: Option<&MrDispatcher>,
+    dispatch_key: Option<&str>,
+    sha: Option<&str>,
+    mr_info: crate::models::MRInfo,
+    diff: String,
+) -> anyhow::Result<crate::models::ReviewOutput> {
+    use crate::config;
+    use crate::team::orchestrator;
+
+    let config = config::resolve_config(None).await?;
 
     if diff.is_empty() {
         tracing::info!("No diff changes, skipping review");
         if let (Some(d), Some(key), Some(s)) = (dispatcher, dispatch_key, sha) {
             d.complete(key, s).await;
         }
-        return Ok(());
+        return Ok(crate::models::ReviewOutput::new(vec![]));
     }
 
     // Set up LLM configs
@@ -189,7 +199,7 @@ pub(crate) async fn run_review_common(
     // Log completion
     tracing::info!("Review completed for: {}", url);
 
-    Ok(())
+    Ok(output)
 }
 
 // ─── 单元测试 ────────────────────────────────

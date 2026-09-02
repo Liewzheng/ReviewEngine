@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.9.49] - 2026-09-02
+
+### Fixed
+- Webhook-triggered reviews (GitLab/GitHub) now record full source metadata from the payload and back-fill authoritative fields from `MRInfo`, so the History list no longer shows `Untitled`/`unknown` for MR title, project, or author. (`src/server/gitlab/hooks.rs`, `src/server/github.rs`, `src/server/task_queue.rs`)
+- History detail panel now displays expert results for webhook-driven tasks: the task store persists the full `ReviewOutput` (including per-expert reports) when a webhook review completes. (`src/server/mod.rs`, `src/server/task_queue.rs`)
+- History detail panel now renders expert report Markdown (headings, bold/inline code, fenced code blocks, lists, GFM tables) instead of showing raw source: new `MarkdownView` component parses with `marked` and sanitizes with DOMPurify before `v-html`. (`frontend/src/components/common/MarkdownView.vue`, `frontend/src/views/ReviewHistory.vue`)
+- History detail expert rows keep the status and score badges column-aligned regardless of score digit count (83 vs 100): both pills get a fixed-width floor so their right edges line up across rows. (`frontend/src/views/ReviewHistory.vue`)
+- The expert "Raw Response" `<details>` block is now dev-only: hidden in release builds (`import.meta.env.DEV`), kept when running `npm run dev`. (`frontend/src/views/ReviewHistory.vue`)
+- The History detail drawer's "API Response" tab (task-level raw `ReviewOutput` JSON) is now dev-only as well, so release builds expose no raw JSON debug panels. (`frontend/src/views/ReviewHistory.vue`)
+- History list layout tweaks: status/score columns narrowed (100/72), the "created" column shows a two-line absolute timestamp (locale date + `HH:mm:ss`) instead of relative time, and the project tag was removed from the MR title cell since the standalone project column already shows it. (`frontend/src/views/ReviewHistory.vue`)
+- History expert panels now self-heal in frame-starved environments: Element Plus measures collapse height inside a requestAnimationFrame callback, so backgrounded/occluded pages could leave an expanded panel stuck at `max-height: 0` with content invisible; a 400ms post-toggle check releases any stuck wrap. (`frontend/src/views/ReviewHistory.vue`)
+
 ## [0.9.48] - 2026-09-01
 
 ### Added

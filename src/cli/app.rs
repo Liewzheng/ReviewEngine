@@ -333,11 +333,10 @@ pub async fn run() -> Result<()> {
                     Some((tok, secret))
                 })
             {
-                handlers.push(Arc::new(review_engine::server::github::GitHubWebhookHandler::new(
-                    secret,
-                    dispatcher.clone(),
-                    tok,
-                )));
+                handlers.push(Arc::new(
+                    review_engine::server::github::GitHubWebhookHandler::new(secret, dispatcher.clone(), tok)
+                        .with_app_state(&state),
+                ));
             }
 
             // Config file watching for hot-reload (server only). Spawned last,

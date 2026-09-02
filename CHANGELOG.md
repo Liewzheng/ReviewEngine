@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.9.50] - 2026-09-02
+
+### Added
+- **E2E teardown contract**: every E2E round must now end with a one-command cleanup that restores the testbed to its clean baseline — closes all open MRs (no merge) on `review-lab/e2e-security`, deletes `e2e/*` test branches, revokes temporary `e2e-*`/`*accept*` PATs (the long-lived root token is whitelisted), removes verified `/tmp/e2e-*` clones, and closes webbridge test tab sessions. The script is idempotent, dry-run by default (`--yes` to execute), never aborts remaining steps on a single failure, and exits with the failed-step count. Contract doc codifies when to run, red lines (never delete the project itself, `main`, long-lived tokens, container configs, or the user's own browser tabs), and how teardown hooks into test-case records as fixed case E2E-TD-001. (`tests/e2e/teardown.sh`, `tests/e2e/TEARDOWN.md`)
+
 ## [0.9.49] - 2026-09-02
 
 ### Fixed

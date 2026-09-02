@@ -35,6 +35,30 @@ pub struct SourceMeta {
     pub commit_sha: Option<String>,
 }
 
+/// Map the MR metadata resolved by the review pipeline (`MRInfo`, fetched
+/// from the provider API) onto task source metadata for the History UI.
+/// Empty strings map to `None` — a missing value must stay absent rather
+/// than be persisted as `""`. Paired with [`TaskStore::fill_source_meta`]'s
+/// fill-only-blank semantics so enqueue-time values are never clobbered.
+pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMeta {
+    fn non_empty(s: &str) -> Option<String> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    }
+    SourceMeta {
+        mr_title: non_empty(&info.title),
+        branch: non_empty(&info.source_branch),
+        target_branch: non_empty(&info.target_branch),
+        author_name: info.pr_author.clone(),
+        commit_sha: non_empty(&info.git_hash),
+        ..SourceMeta::default()
+    }
+}
+
 /// A single review task record stored in the queue.
 ///
 /// Created when a review request arrives; mutated as the task progresses
@@ -547,6 +571,45 @@ impl TaskStore {
     pub async fn active_count(&self) -> usize {
         let map = self.inner.read().await;
         map.values().filter(|e| e.state == TaskState::Running).count()
+    }
+}
+
+/// Create a task-store entry from `source_meta` and mark it [`TaskState::Running`].
+///
+/// Webhook-dispatched reviews call this after the dispatcher has accepted the
+/// URL+SHA pair, so each actually-started review records exactly one entry.
+pub async fn record_task_started(store: &TaskStore, meta: SourceMeta) -> Uuid {
+    let task_id = store.create(Some(meta)).await;
+    store.start(task_id).await;
+    task_id
+}
+
+/// Record the outcome of a webhook-dispatched review in the task store.
+///
+/// `Ok(output)` → [`TaskState::Completed`] with the full [`ReviewOutput`] JSON
+/// as the result (so the History detail panel can render expert reports).
+/// `Err` → [`TaskState::Failed`] with the error message.
+pub async fn record_task_outcome(
+    store: &TaskStore,
+    task_id: Uuid,
+    outcome: &anyhow::Result<crate::models::ReviewOutput>,
+) {
+    match outcome {
+        Ok(output) => match serde_json::to_value(output) {
+            Ok(result) => {
+                store.update(task_id, TaskState::Completed, Some(result), None).await;
+            }
+            Err(e) => {
+                let message = format!("failed to serialize ReviewOutput: {e:#}");
+                tracing::warn!("{message}");
+                store.update(task_id, TaskState::Failed, None, Some(message)).await;
+            }
+        },
+        Err(e) => {
+            store
+                .update(task_id, TaskState::Failed, None, Some(format!("{e:#}")))
+                .await;
+        }
     }
 }
 

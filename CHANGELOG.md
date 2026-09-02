@@ -5,6 +5,7 @@
 ### Fixed
 - Webhook-triggered reviews (GitLab/GitHub) now record full source metadata from the payload and back-fill authoritative fields from `MRInfo`, so the History list no longer shows `Untitled`/`unknown` for MR title, project, or author. (`src/server/gitlab/hooks.rs`, `src/server/github.rs`, `src/server/task_queue.rs`)
 - History detail panel now displays expert results for webhook-driven tasks: the task store persists the full `ReviewOutput` (including per-expert reports) when a webhook review completes. (`src/server/mod.rs`, `src/server/task_queue.rs`)
+- History detail panel now renders expert report Markdown (headings, bold/inline code, fenced code blocks, lists, GFM tables) instead of showing raw source: new `MarkdownView` component parses with `marked` and sanitizes with DOMPurify before `v-html`. (`frontend/src/components/common/MarkdownView.vue`, `frontend/src/views/ReviewHistory.vue`)
 
 ## [0.9.48] - 2026-09-01
 

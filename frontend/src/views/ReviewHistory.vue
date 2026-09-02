@@ -24,6 +24,7 @@ import type { ReviewListItem, HistoryFilters, RiskLevel } from '../types/history
 import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
+import MarkdownView from '../components/common/MarkdownView.vue'
 
 /* ─────────────── Router & Composable ─────────────── */
 const route = useRoute()
@@ -744,8 +745,10 @@ watch(() => route.query, () => {
             </template>
             <div class="expert-content">
               <!-- `summary` carries the curated pre-rendered Markdown report;
-                   pre-wrap keeps its structure readable without a renderer. -->
-              <div class="expert-markdown">{{ exp.summary }}</div>
+                   MarkdownView renders it (marked -> DOMPurify sanitized). -->
+              <div class="expert-markdown">
+                <MarkdownView :source="exp.summary" />
+              </div>
               <details v-if="exp.details" class="raw-toggle">
                 <summary class="raw-toggle-summary">{{ $t('history.drawer.rawResponse') }}</summary>
                 <pre class="raw-response-block">{{ exp.details }}</pre>
@@ -1091,7 +1094,6 @@ watch(() => route.query, () => {
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
   font-family: var(--font-sans);
-  white-space: pre-wrap;
   word-break: break-word;
 }
 

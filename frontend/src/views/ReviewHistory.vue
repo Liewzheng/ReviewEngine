@@ -1077,6 +1077,28 @@ watch(() => route.query, () => {
   gap: 8px;
 }
 
+/* Column alignment for the status + score badges on each expert row.
+   Both pills get a fixed-width floor so their right edges form two straight
+   lines across rows regardless of the score's digit count (83 vs 100).
+   `min-width` (not `width`) so longer status texts (other statuses/locales)
+   still grow the pill instead of being clipped; el-tag centers its content
+   once the pill is wider than its text. */
+.expert-meta > .el-tag:first-child {
+  /* ~3 CJK glyphs (e.g. 已跳过) @12px + small-tag padding 7+7 + border 1+1 */
+  min-width: 54px;
+}
+
+.expert-meta > .el-tag + .el-tag {
+  /* widest possible score "100" (3 digits) + same tag chrome */
+  min-width: 42px;
+}
+
+/* Row without a score tag: keep the status badge on the same line as rows
+   that do have a score by reserving the score column (42px) + the gap (8px). */
+.expert-meta > .el-tag:only-child {
+  margin-right: 50px;
+}
+
 .expert-content {
   padding: 8px 0;
   display: flex;

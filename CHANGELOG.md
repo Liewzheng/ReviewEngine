@@ -10,6 +10,7 @@
 - The expert "Raw Response" `<details>` block is now dev-only: hidden in release builds (`import.meta.env.DEV`), kept when running `npm run dev`. (`frontend/src/views/ReviewHistory.vue`)
 - The History detail drawer's "API Response" tab (task-level raw `ReviewOutput` JSON) is now dev-only as well, so release builds expose no raw JSON debug panels. (`frontend/src/views/ReviewHistory.vue`)
 - History list layout tweaks: status/score columns narrowed (100/72), the "created" column shows a two-line absolute timestamp (locale date + `HH:mm:ss`) instead of relative time, and the project tag was removed from the MR title cell since the standalone project column already shows it. (`frontend/src/views/ReviewHistory.vue`)
+- History expert panels now self-heal in frame-starved environments: Element Plus measures collapse height inside a requestAnimationFrame callback, so backgrounded/occluded pages could leave an expanded panel stuck at `max-height: 0` with content invisible; a 400ms post-toggle check releases any stuck wrap. (`frontend/src/views/ReviewHistory.vue`)
 
 ## [0.9.48] - 2026-09-01
 

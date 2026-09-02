@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted } from 'vue'
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Search,
@@ -241,6 +241,32 @@ async function openDrawer(row: ReviewListItem) {
     drawerOpen.value = true
   }
 }
+
+/*
+ * Element Plus measures the collapse panel height inside a single
+ * requestAnimationFrame callback and only clears the inline `max-height: 0`
+ * when the transition ends. If the renderer produces no frame between the
+ * toggle and that callback (backgrounded/occluded page, frame-on-demand
+ * automation), the wrap is left at `max-height: 0` with content present but
+ * invisible. Timers still run when frames don't, so re-check once the EP
+ * transition window (~300ms) has passed and release any wrap that is stuck.
+ */
+let expertCollapseRepairTimer: ReturnType<typeof setTimeout> | undefined
+function handleExpertCollapseChange() {
+  clearTimeout(expertCollapseRepairTimer)
+  expertCollapseRepairTimer = setTimeout(() => {
+    document
+      .querySelectorAll<HTMLElement>('.el-drawer .el-collapse-item.is-active .el-collapse-item__wrap')
+      .forEach((wrap) => {
+        if (wrap.style.maxHeight === '0px' && wrap.scrollHeight > 0) {
+          wrap.style.maxHeight = ''
+          wrap.style.paddingTop = ''
+          wrap.style.paddingBottom = ''
+        }
+      })
+  }, 400)
+}
+onBeforeUnmount(() => clearTimeout(expertCollapseRepairTimer))
 
 /* ─────────────── Actions ─────────────── */
 function rerunConfirmMessage(row: { mrTitle: string; gitlabMrUrl?: string }): string {
@@ -734,7 +760,7 @@ watch(() => route.query, () => {
 
         <!-- Expert Results -->
         <h4 class="drawer-section-title">{{ $t('history.drawer.expertResults') }}</h4>
-        <el-collapse>
+        <el-collapse @change="handleExpertCollapseChange">
           <el-collapse-item
             v-for="exp in selectedReview.experts"
             :key="exp.expertId"

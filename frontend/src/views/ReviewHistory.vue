@@ -775,7 +775,8 @@ watch(() => route.query, () => {
               <p v-else class="empty-text">{{ $t('history.drawer.noComment') }}</p>
             </div>
           </el-tab-pane>
-          <el-tab-pane :label="$t('history.drawer.tabs.apiResponse')">
+          <!-- API Response 仅 dev 构建显示（避免 release 暴露原始接口响应） -->
+          <el-tab-pane v-if="isDev" :label="$t('history.drawer.tabs.apiResponse')">
             <div class="raw-panel">
               <pre class="json-block">{{ JSON.stringify(selectedReview.rawApiResponse, null, 2) }}</pre>
             </div>

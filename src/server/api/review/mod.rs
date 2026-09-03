@@ -2,6 +2,7 @@
 //!
 //! @module review-engine: part of the CodeReview Board virtual engineering team
 
+pub(crate) mod discussion;
 mod handlers;
 mod resolve;
 mod task;

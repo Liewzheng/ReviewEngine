@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::super::dispatcher::MrDispatcher;
+use crate::server::api::review::discussion::DiscussionTap;
 use crate::server::task_queue::{record_task_outcome, record_task_started, SourceMeta, TaskStore};
 use crate::store::traits::{DiscussionNote, DiscussionStore};
 use crate::store::SqlxStore;
@@ -107,6 +108,7 @@ async fn run_webhook_review(
     gitlab_token: String,
     mr_iid: u64,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     let task_id = if let Some(store) = task_store.as_ref() {
         Some(record_task_started(store, source_meta).await)
@@ -115,11 +117,22 @@ async fn run_webhook_review(
     };
 
     let outcome = async {
-        let (info, diff) = super::super::resolve_review_source(&mr_url, &gitlab_token).await?;
+        let (mut info, diff) = super::super::resolve_review_source(&mr_url, &gitlab_token).await?;
         if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
             store
                 .fill_source_meta(id, crate::server::task_queue::source_meta_from_mr_info(&info))
                 .await;
+            // §7.2 discussion-context injection: best-effort, `None`
+            // degrades to the 0.9 prompt. Requires the live task row
+            // (`review_contexts.task_id` FK), hence tied to the task store.
+            if let Some(tap) = tap.as_ref() {
+                if let Some(section) = tap
+                    .inject(id, &info.project_path, u64::from(info.mr_iid), &gitlab_token, &mr_url)
+                    .await
+                {
+                    info.discussion_context = Some(section);
+                }
+            }
         }
         super::super::run_review_common(
             &mr_url,
@@ -154,10 +167,11 @@ pub fn spawn_mr_review_task(
     mr_iid: u64,
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     let d = dispatcher.clone();
     tokio::spawn(async move {
-        run_webhook_review(task_store, &d, mr_url, sha, gitlab_token, mr_iid, source_meta).await;
+        run_webhook_review(task_store, &d, mr_url, sha, gitlab_token, mr_iid, source_meta, tap).await;
     });
 }
 
@@ -170,6 +184,7 @@ pub async fn handle_mr_in_progress(
     mr_iid: u64,
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     tracing::info!("MR !{} review in progress, waiting...", mr_iid);
     dispatcher.wait(mr_url).await;
@@ -184,6 +199,7 @@ pub async fn handle_mr_in_progress(
                 mr_iid,
                 task_store,
                 source_meta,
+                tap,
             );
         }
         _ => {
@@ -202,6 +218,7 @@ pub async fn dispatch_mr_event(
     mr_iid: u64,
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     match dispatcher.try_start(mr_url, sha).await {
         super::super::dispatcher::ShouldStart::Go => {
@@ -213,13 +230,24 @@ pub async fn dispatch_mr_event(
                 mr_iid,
                 task_store,
                 source_meta,
+                tap,
             );
         }
         super::super::dispatcher::ShouldStart::AlreadyReviewed => {
             tracing::info!("Skipping MR !{}: already reviewed at SHA {}", mr_iid, sha);
         }
         super::super::dispatcher::ShouldStart::InProgress => {
-            handle_mr_in_progress(dispatcher, mr_url, sha, gitlab_token, mr_iid, task_store, source_meta).await;
+            handle_mr_in_progress(
+                dispatcher,
+                mr_url,
+                sha,
+                gitlab_token,
+                mr_iid,
+                task_store,
+                source_meta,
+                tap,
+            )
+            .await;
         }
     }
 }
@@ -291,7 +319,7 @@ pub(crate) fn rewrite_url_to_platform(url: &str, base_url: &str) -> String {
 /// while the payload carries the external :8443), else `base_url`. The
 /// fail-safe in [`rewrite_url_to_platform`] keeps the payload URL verbatim
 /// when the chosen target does not parse.
-fn review_base_url(platform: &crate::models::GitPlatformConfig) -> &str {
+pub(crate) fn review_base_url(platform: &crate::models::GitPlatformConfig) -> &str {
     if platform.internal_base_url.is_empty() {
         &platform.base_url
     } else {
@@ -305,6 +333,7 @@ pub async fn handle_mr_hook(
     gitlab_token: &str,
     platform: Option<crate::models::GitPlatformConfig>,
     task_store: Option<Arc<TaskStore>>,
+    db: Option<Arc<SqlxStore>>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_mr_hook_payload(body, gitlab_token)?;
 
@@ -358,6 +387,12 @@ pub async fn handle_mr_hook(
 
         let source_meta = source_meta_from_payload(&payload);
 
+        // §7.2 discussion tap: the DB handle plus platform identity, built
+        // against the (rewritten) review URL so the API fallback and the
+        // self-echo guard target the reachable instance. `None` without a
+        // DB → 0.9 behaviour.
+        let tap = db.map(|db| DiscussionTap::new(db, platform.as_ref(), &review_url));
+
         dispatch_mr_event(
             dispatcher,
             &review_url,
@@ -366,6 +401,7 @@ pub async fn handle_mr_hook(
             payload.mr_iid,
             task_store,
             source_meta,
+            tap,
         )
         .await;
     }
@@ -378,7 +414,7 @@ pub async fn handle_mr_hook(
 
 /// True when `note` (already lowercased) begins with a slash command whose
 /// first path segment is exactly `cmd` — i.e. `/review` and `/review/123`
-/// match, but `/reviewer` / `/reviewxyz` do not. The command must be followed
+/// match, but `/reviewer` / `reviewxyz` do not. The command must be followed
 /// by a path separator (`/`) or the end of the note, so prefix lookalikes
 /// never trigger a review (`^/review(/|$)` semantics).
 pub fn note_starts_with_command(note: &str, cmd: &str) -> bool {
@@ -386,6 +422,19 @@ pub fn note_starts_with_command(note: &str, cmd: &str) -> bool {
         return false;
     };
     rest.is_empty() || rest.starts_with('/')
+}
+
+/// True when a note body (already lowercased) is a `/review` or `/describe`
+/// command. Command notes are user intent: they always ingest (§7.1) and
+/// survive the self-echo filter of the discussion-context tap (§7.2).
+pub(crate) fn is_command_note(body_lower: &str) -> bool {
+    note_starts_with_command(body_lower, "/review") || note_starts_with_command(body_lower, "/describe")
+}
+
+/// True when `body` is one of our own published review reports (self-echo
+/// guard (a) of §7.1).
+pub(crate) fn is_self_report(body: &str) -> bool {
+    body.starts_with(crate::publisher::REVIEW_REPORT_PREFIX)
 }
 
 /// Extract the merge request iid from the tail of a system-hook note/MR URL
@@ -412,7 +461,7 @@ pub(crate) fn mr_iid_from_url(url: &str) -> Option<u64> {
 /// `object_attributes.created_at` from a note webhook. GitLab sends either
 /// RFC 3339 or its legacy `"2026-09-03 10:00:00 UTC"` format; both decode to
 /// UTC. `None` when absent/unparseable (the caller falls back to now()).
-fn parse_note_created_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+pub(crate) fn parse_note_created_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
     let raw = raw?;
     if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
         return Some(dt.with_timezone(&chrono::Utc));
@@ -424,7 +473,7 @@ fn parse_note_created_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::U
 
 /// `scheme://host[:port]` of a URL — the instance root for instance-level
 /// API calls derived from a payload URL.
-fn url_origin(url: &str) -> Option<String> {
+pub(crate) fn url_origin(url: &str) -> Option<String> {
     let (scheme, rest) = url.split_once("://")?;
     let host = rest.split('/').next().unwrap_or("");
     if host.is_empty() {
@@ -435,15 +484,45 @@ fn url_origin(url: &str) -> Option<String> {
 }
 
 /// Self-echo guard (b) of §7.1: the GitLab user id this service's token
-/// posts as, per platform ("default" for the unmatched/runtime-token path).
-/// Resolved LAZILY on the first note hook (GET /user) and cached for the
-/// process lifetime; only successes are cached, so a transient API failure
-/// retries on the next note instead of permanently disabling the guard.
-/// The platform set is runtime-mutable (PUT /config), which is why this is
-/// not resolved once at startup.
+/// posts as, per platform key ("default" for the unmatched/runtime-token
+/// path). Resolved LAZILY (GET /user) and cached for the process lifetime;
+/// only successes are cached, so a transient API failure retries on the
+/// next call instead of permanently disabling the guard. The platform set
+/// is runtime-mutable (PUT /config), which is why this is not resolved once
+/// at startup. Shared with the §7.2 discussion-context tap (same guard
+/// applies to API-fallback notes). `None` when the token or instance base
+/// is empty, or the lookup fails — the guard is inactive, never an error.
 static SELF_USER_IDS: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, u64>>> =
     std::sync::OnceLock::new();
 
+pub(crate) async fn self_user_id_cached(platform_name: &str, gitlab_token: &str, instance_base: &str) -> Option<u64> {
+    if gitlab_token.is_empty() || instance_base.is_empty() {
+        return None;
+    }
+    let cache = SELF_USER_IDS.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(id) = cache.lock().await.get(platform_name) {
+        return Some(*id);
+    }
+    let client = crate::git_provider::gitlab::client::Client::for_instance(gitlab_token, instance_base);
+    match client.get_current_user_id().await {
+        Ok(id) => {
+            cache.lock().await.insert(platform_name.to_string(), id);
+            Some(id)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not resolve the service's own GitLab user id ({platform_name}): {e:#}; \
+                 self-echo guard (b) inactive for this call"
+            );
+            None
+        }
+    }
+}
+
+/// Resolve the instance base + platform key for a note webhook payload, then
+/// delegate to [`self_user_id_cached`]. The instance to ask: the matched
+/// platform's reachable base (internal when configured, mirroring the review
+/// URL rewrite), else the origin of the payload's own URLs.
 async fn resolve_self_user_id(
     platform: Option<&crate::models::GitPlatformConfig>,
     gitlab_token: &str,
@@ -455,13 +534,6 @@ async fn resolve_self_user_id(
     let key = platform
         .map(|p| p.name.clone())
         .unwrap_or_else(|| "default".to_string());
-    let cache = SELF_USER_IDS.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
-    if let Some(id) = cache.lock().await.get(&key) {
-        return Some(*id);
-    }
-    // The instance to ask: the matched platform's reachable base (internal
-    // when configured, mirroring the review URL rewrite), else the origin of
-    // the payload's own URLs.
     let instance_base = match platform {
         Some(p) => review_base_url(p).to_string(),
         None => {
@@ -472,20 +544,7 @@ async fn resolve_self_user_id(
             url_origin(url)?
         }
     };
-    let client = crate::git_provider::gitlab::client::Client::for_instance(gitlab_token, &instance_base);
-    match client.get_current_user_id().await {
-        Ok(id) => {
-            cache.lock().await.insert(key, id);
-            Some(id)
-        }
-        Err(e) => {
-            tracing::warn!(
-                "could not resolve the service's own GitLab user id ({key}): {e:#}; \
-                 self-echo guard (b) inactive for this note"
-            );
-            None
-        }
-    }
+    self_user_id_cached(&key, gitlab_token, &instance_base).await
 }
 
 /// Persist one note-webhook payload into `mr_discussions` (§7.1).
@@ -526,12 +585,10 @@ async fn ingest_note(
     };
 
     let body = attrs["note"].as_str().unwrap_or("");
-    let body_lower = body.to_lowercase();
-    let is_command =
-        note_starts_with_command(&body_lower, "/review") || note_starts_with_command(&body_lower, "/describe");
+    let is_command = is_command_note(&body.to_lowercase());
     if !is_command {
         // (a) our own published review report.
-        if body.starts_with(crate::publisher::REVIEW_REPORT_PREFIX) {
+        if is_self_report(body) {
             tracing::debug!("note hook ingestion skipped: self-published review report");
             return;
         }
@@ -660,8 +717,10 @@ pub async fn handle_note_hook(
                     let u = url;
                     let s = sha;
                     let note_iid = mr_iid;
+                    // §7.2 discussion tap (same wiring as the MR hook).
+                    let tap = db.clone().map(|db| DiscussionTap::new(db, platform.as_ref(), &u));
                     tokio::spawn(async move {
-                        run_webhook_review(task_store, &d, u, s, token, note_iid, source_meta).await;
+                        run_webhook_review(task_store, &d, u, s, token, note_iid, source_meta, tap).await;
                     });
                 }
                 _ => {

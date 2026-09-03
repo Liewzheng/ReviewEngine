@@ -487,6 +487,33 @@ impl ReviewStore for SqlxStore {
             .transpose()
             .with_context(|| format!("decode review row {task_id}"))
     }
+
+    async fn upsert_review_context(
+        &self,
+        task_id: uuid::Uuid,
+        kind: &str,
+        content: &str,
+        content_hash: &str,
+        token_estimate: i64,
+    ) -> Result<()> {
+        ::sqlx::query(
+            "INSERT INTO review_contexts (task_id, kind, content, content_hash, token_estimate, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (task_id, kind) DO UPDATE SET \
+             content = excluded.content, content_hash = excluded.content_hash, \
+             token_estimate = excluded.token_estimate",
+        )
+        .bind(task_id.to_string())
+        .bind(kind)
+        .bind(content)
+        .bind(content_hash)
+        .bind(token_estimate)
+        .bind(encode_ts(&Utc::now()))
+        .execute(self.pool())
+        .await
+        .with_context(|| format!("upsert review_context {kind} for {task_id}"))?;
+        Ok(())
+    }
 }
 
 // ─── DiscussionStore (mr_discussions, step 6a) ───

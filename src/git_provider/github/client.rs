@@ -145,6 +145,7 @@ impl Client {
             merge_commit_sha: pr.merge_commit_sha,
             pr_author: Some(pr.user.login),
             pr_author_id: Some(pr.user.id),
+            discussion_context: None,
         })
     }
 

@@ -99,6 +99,10 @@ impl PromptEngine {
             "constraints": constraints,
             "lead_context": lead_section,
             "file_contents": file_contents,
+            // 0.10.0 §7.2: pre-review MR discussion history, injected between
+            // the fixed MR/project context and the diff. None → the `{% if %}`
+            // block collapses and the prompt is byte-identical to 0.9.
+            "discussion_context": mr.discussion_context.as_deref(),
         });
 
         let user = self.env.get_template("review_user")?.render(&ctx_user)?;
@@ -382,6 +386,34 @@ mod tests {
         assert!(system.contains("effort"));
         assert!(system.contains("line_end"));
         assert!(system.contains("Downgrade code-quality or style findings"));
+    }
+
+    /// 0.10.0 §7.2: a populated `discussion_context` renders between the
+    /// fixed MR/project context and the diff ("Code Changes"), and `None`
+    /// collapses the block entirely (0.9-identical prompt).
+    #[test]
+    fn test_review_prompt_discussion_context_placement() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let settings = make_test_app_config(None);
+
+        let mut mr = make_test_mr();
+        mr.discussion_context = Some("## MR Discussion History\n\n- [alice @ 2026-09-03]: lgtm\n".to_string());
+        let (_system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
+            .unwrap();
+
+        assert!(user.contains("## MR Discussion History"), "section must render");
+        let pos_section = user.find("## MR Discussion History").unwrap();
+        let pos_diff = user.find("## Code Changes").unwrap();
+        assert!(pos_section < pos_diff, "discussion history must precede the diff");
+
+        // None → no section, and the prompt matches the 0.9 shape.
+        let mr = make_test_mr();
+        let (_system, user_none) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
+            .unwrap();
+        assert!(!user_none.contains("MR Discussion History"));
     }
 
     #[test]

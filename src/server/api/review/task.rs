@@ -187,6 +187,24 @@ pub(crate) async fn enqueue_review(
     let webhook = request.webhook;
     let cfg = state.app_config.read().unwrap().clone();
 
+    // 0.10.0 §7.2: pre-review discussion tap, GitLab MR sources only. Built
+    // synchronously before the spawn so the git_platforms RwLock guard never
+    // crosses an .await. `None` when no DB is wired → exact 0.9 behaviour.
+    let (mr_url, tap) = match &source {
+        ReviewSource::GitLabMr { url } => {
+            let tap = state.db.clone().map(|db| {
+                let platform = {
+                    let platforms = state.git_platforms.read().unwrap();
+                    crate::models::find_git_platform_for_url_strict(&platforms, url).cloned()
+                };
+                super::discussion::DiscussionTap::new(db, platform.as_ref(), url)
+            });
+            (Some(url.clone()), tap)
+        }
+        _ => (None, None),
+    };
+    let token_for_tap = gitlab_token.clone();
+
     tokio::spawn(async move {
         while !store_clone.can_start_new_task().await {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -211,11 +229,24 @@ pub(crate) async fn enqueue_review(
         // later fails. Fill happens before the (possibly long) expert run and
         // only touches fields still blank, so enqueue-time values win.
         let outcome = match super::resolve::resolve_source(source, gitlab_token, &cfg).await {
-            Ok(resolved) => {
-                if let Some(ref info) = resolved.mr_info {
+            Ok(mut resolved) => {
+                if let Some(ref mut info) = resolved.mr_info {
                     store_clone
                         .fill_source_meta(task_id, source_meta_from_mr_info(info))
                         .await;
+                    // §7.2: inject the MR discussion history into the prompt
+                    // context. Best-effort — any failure degrades to `None`
+                    // and the review runs with the 0.9 prompt.
+                    if let (Some(tap), Some(url), Some(token)) =
+                        (tap.as_ref(), mr_url.as_deref(), token_for_tap.as_deref())
+                    {
+                        if let Some(section) = tap
+                            .inject(task_id, &info.project_path, u64::from(info.mr_iid), token, url)
+                            .await
+                        {
+                            info.discussion_context = Some(section);
+                        }
+                    }
                 }
                 super::resolve::run_review(resolved, config_toml, llm_configs).await
             }

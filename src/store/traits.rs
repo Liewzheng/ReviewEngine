@@ -123,6 +123,21 @@ pub trait ReviewStore: Send + Sync {
 
     /// Single history row; `None` when the task is unknown.
     async fn get_review(&self, task_id: Uuid) -> Result<Option<TaskEntry>>;
+
+    /// Upsert one rendered prompt-context section into `review_contexts`
+    /// (design/persistence.md §7.2). Keyed by `(task_id, kind)`; a re-run of
+    /// the same task rewrites the row. `content_hash` is the sha256 hex of
+    /// `content` (prefix-stability/reuse checks), `token_estimate` a cheap
+    /// `len/4` heuristic. Best-effort: callers log failures and continue —
+    /// the context is still injected into the prompt either way.
+    async fn upsert_review_context(
+        &self,
+        task_id: Uuid,
+        kind: &str,
+        content: &str,
+        content_hash: &str,
+        token_estimate: i64,
+    ) -> Result<()>;
 }
 
 /// Handler-normalized history-list parameters (design/persistence.md §8.1 —

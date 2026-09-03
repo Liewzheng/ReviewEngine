@@ -309,6 +309,7 @@ impl Client {
             merge_commit_sha: None,
             pr_author,
             pr_author_id,
+            discussion_context: None,
         })
     }
 
@@ -714,16 +715,31 @@ pub struct Discussion {
 }
 
 /// A single note within a discussion.
+///
+/// `system` / `created_at` / author `username` are consumed by the 0.10.0
+/// review-time discussion-context tap (§7.2); all default when absent so
+/// older fixtures and partial payloads still parse.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct DiscussionNote {
     pub id: i64,
     pub body: String,
     pub author: NoteAuthor,
+    /// GitLab system notes ("added 1 commit") — noise, filtered out (§7.1).
+    #[serde(default)]
+    pub system: bool,
+    /// RFC 3339 (or GitLab legacy) creation timestamp; parsed by the caller
+    /// (`parse_note_created_at`), which falls back to now() when absent.
+    #[serde(default)]
+    pub created_at: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct NoteAuthor {
     pub id: u64,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 fn encode_project_path(path: &str) -> String {

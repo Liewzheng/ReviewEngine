@@ -221,6 +221,12 @@ pub struct MRInfo {
     pub pr_author: Option<String>,
     /// Author's platform-specific unique ID (GitHub user.id / GitLab user.id).
     pub pr_author_id: Option<u64>,
+    /// Rendered MR discussion-history section injected into review prompts
+    /// (0.10.0 §7.2). Filled by the pre-review discussion tap (DB-first,
+    /// GitLab API fallback); `None` = no context injected (0.9 behaviour).
+    /// Runtime-only: never serialized into task records or the DB.
+    #[serde(skip, default)]
+    pub discussion_context: Option<String>,
 }
 
 impl MRInfo {
@@ -239,6 +245,7 @@ impl MRInfo {
             merge_commit_sha: None,
             pr_author: None,
             pr_author_id: None,
+            discussion_context: None,
         }
     }
 }

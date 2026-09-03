@@ -374,9 +374,11 @@ impl GitLabWebhookHandler {
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         let event_name = system_hook_event_name(body);
         match event_name.as_str() {
-            "merge_request" => super::handle_mr_hook(body, &self.dispatcher, token, platform, task_store.clone())
-                .await
-                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "merge_request" => {
+                super::handle_mr_hook(body, &self.dispatcher, token, platform, task_store.clone(), db.clone())
+                    .await
+                    .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"}))))
+            }
             "note" => super::handle_note_hook(body, &self.dispatcher, token, platform, task_store.clone(), db)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -466,9 +468,11 @@ impl WebhookHandler for GitLabWebhookHandler {
         let db = app_state.and_then(|s| s.db.clone());
 
         match event {
-            "Merge Request Hook" => super::handle_mr_hook(body, &self.dispatcher, &token, platform, task_store.clone())
-                .await
-                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "Merge Request Hook" => {
+                super::handle_mr_hook(body, &self.dispatcher, &token, platform, task_store.clone(), db.clone())
+                    .await
+                    .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"}))))
+            }
             "Note Hook" => {
                 super::handle_note_hook(body, &self.dispatcher, &token, platform, task_store.clone(), db.clone())
                     .await

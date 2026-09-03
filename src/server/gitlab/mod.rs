@@ -19,6 +19,11 @@ pub use hooks::{
     dispatch_mr_event, handle_mr_hook, handle_mr_in_progress, handle_note_hook, handle_push_hook,
     note_starts_with_command, parse_mr_hook_payload, spawn_mr_review_task, MrHookPayload,
 };
+// §7.2 discussion-context tap shares the note-ingestion helpers (self-echo
+// guards, instance-base derivation, timestamp parsing).
+pub(crate) use hooks::{
+    is_command_note, is_self_report, parse_note_created_at, review_base_url, self_user_id_cached, url_origin,
+};
 
 use std::sync::{OnceLock, RwLock};
 

@@ -1074,6 +1074,9 @@ mod tests {
             async fn get_review(&self, _: Uuid) -> anyhow::Result<Option<TaskEntry>> {
                 anyhow::bail!("db down")
             }
+            async fn upsert_review_context(&self, _: Uuid, _: &str, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
         }
 
         let failing = Arc::new(FailingStore::default());

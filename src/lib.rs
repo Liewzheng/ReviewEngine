@@ -37,6 +37,9 @@ pub mod publisher;
 pub mod repo;
 pub mod scoring;
 pub mod server;
+/// Persistence layer (0.10.0): sqlx `Any` pool serving PostgreSQL and SQLite
+/// from one code path. See `design/persistence.md`.
+pub mod store;
 pub mod team;
 pub mod tokenizer;
 

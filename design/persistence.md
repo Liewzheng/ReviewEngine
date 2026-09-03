@@ -70,11 +70,13 @@
 | upsert | `ON CONFLICT ... DO UPDATE/NOTHING` | 同语法（≥3.24） | 两端一致，直接用；sqlx 内置 libsqlite3 版本远高于此 |
 | `RETURNING` | 支持 | ≥3.35 支持 | **一律不用**。主键全部由 Rust 侧生成（UUID v4），写后无需回读；避免 Any 下两端 decode 行为差异 |
 | JSON 列 | 原生 JSONB | TEXT | **DDL 用 TEXT，绑定用 `String`**：store 层 `serde_json::to_string` 后按 TEXT 绑定，读出再 `from_str`。若声明 PG JSONB 列而 SQLite 是 TEXT，`serde_json::Value` 在 PG 端会按 JSONB 编码、绑到 TEXT 列报类型错——应用层序列化是唯一两头都稳的做法 |
-| 布尔 | 原生 BOOL | 0/1 | DDL `BOOLEAN`，sqlx Any 的 `bool` 编解码两端兼容 |
-| 时间戳 | TIMESTAMPTZ | 无原生类型（NUMERIC 亲和） | DDL `TIMESTAMP`；**值一律 Rust 侧 chrono 生成**，不写 `CURRENT_TIMESTAMP` 默认值，两端时间戳格式由应用层统一 |
+| 布尔 | 原生 BOOL | 0/1 | **DDL 用 `INTEGER` 存 0/1**，绑定侧转 `bool`。原方案 `BOOLEAN` 被证伪：Any 驱动对 SQLite 只认 Null/Int4/Integer/Float/Blob/Text 五类声明类型，`BOOLEAN` 列读出直接报错（验证点 A 实测） |
+| 时间戳 | TEXT | TEXT | **DDL 用 TEXT**，存 Rust 侧 chrono 生成的固定宽度 RFC 3339 UTC 串（如 `2026-09-03T10:00:00.000000Z`），**字典序 == 时间序**。原因（验证点 A/D 落地结论）：sqlx 0.8 Any 驱动没有 chrono 的 `Type<Any>` 实现，且 SQLite 端拒绝对声明类型为 `TIMESTAMP` 的列做 String 解码（smoke test 实测）；PG 端 TEXT 列无需 CAST |
 | 模糊搜索 | `ILIKE` | `LIKE` 仅 ASCII 不敏感 | 统一 `LOWER(col) LIKE LOWER(?)`，行为两端一致 |
 | 外键 | 默认启用 | 需 `PRAGMA foreign_keys=ON` | SQLite 连接串带 `?...` 参数或建池后执行 PRAGMA（见 §4.3） |
 | 自增主键 | SERIAL/IDENTITY | AUTOINCREMENT | **都不用**：全部自然键/UUID 文本主键，绕开方言差异 |
+
+补充：`uuid` 与 `chrono` 同样无 `Type<Any>` 实现，UUID 主键按 TEXT 绑定（值仍由 Rust 侧生成，同 `RETURNING` 行约定），无影响。
 
 ### 3.2 建表 SQL 草案（`migrations/0001_init.sql`）
 
@@ -92,9 +94,9 @@ CREATE TABLE reviews (
     result        TEXT,                        -- ReviewOutput JSON
     error         TEXT,
     progress      INTEGER,                     -- 0-100，仅终态时快照；进行中的实时进度不入库
-    created_at    TIMESTAMP NOT NULL,
-    started_at    TIMESTAMP,
-    completed_at  TIMESTAMP
+    created_at    TEXT NOT NULL,
+    started_at    TEXT,
+    completed_at  TEXT
 );
 CREATE INDEX idx_reviews_created_at ON reviews (created_at DESC);
 CREATE INDEX idx_reviews_state      ON reviews (state);
@@ -107,7 +109,7 @@ CREATE TABLE expert_reports (
     report      TEXT NOT NULL,                 -- ExpertReport JSON
     duration_ms INTEGER,                       -- 首版可为 NULL：TaskEntry 目前不记 per-expert 耗时，
                                                -- 需执行器补计时后再填充（见 §5.4 注意点）
-    created_at  TIMESTAMP NOT NULL,
+    created_at  TEXT NOT NULL,
     PRIMARY KEY (task_id, expert_name)
 );
 
@@ -119,8 +121,8 @@ CREATE TABLE mr_discussions (
     note_id    BIGINT NOT NULL,
     author     TEXT NOT NULL DEFAULT '',
     body       TEXT NOT NULL,
-    created_at TIMESTAMP NOT NULL,             -- note 的创建时间，非入库时间
-    ingested_at TIMESTAMP NOT NULL,            -- 入库时间，排序兜底
+    created_at TEXT NOT NULL,             -- note 的创建时间，非入库时间
+    ingested_at TEXT NOT NULL,            -- 入库时间，排序兜底
     PRIMARY KEY (platform, project, mr_iid, note_id)  -- 幂等键
 );
 CREATE INDEX idx_mr_discussions_mr ON mr_discussions (platform, project, mr_iid, created_at);
@@ -132,7 +134,7 @@ CREATE TABLE review_contexts (
     content        TEXT NOT NULL,              -- 渲染后的上下文本（前缀稳定）
     content_hash   TEXT NOT NULL,              -- sha256 hex；同 MR 二次评审 hash 相同即复用
     token_estimate INTEGER NOT NULL DEFAULT 0,
-    created_at     TIMESTAMP NOT NULL,
+    created_at     TEXT NOT NULL,
     PRIMARY KEY (task_id, kind)
 );
 CREATE INDEX idx_review_contexts_hash ON review_contexts (content_hash);
@@ -147,9 +149,9 @@ CREATE TABLE git_platforms (
     token                  TEXT NOT NULL DEFAULT '',  -- enc: 加密
     webhook_secret         TEXT NOT NULL DEFAULT '',  -- enc: 加密
     webhook_signing_secret TEXT NOT NULL DEFAULT '',  -- enc: 加密
-    enabled                BOOLEAN NOT NULL DEFAULT TRUE,
+    enabled                INTEGER NOT NULL DEFAULT 1,  -- 布尔列用 INTEGER 0/1，见 §3.1 布尔行
     raw                    TEXT NOT NULL DEFAULT '{}',  -- 扩展兜底：allowed_projects 等未列化字段
-    updated_at             TIMESTAMP NOT NULL
+    updated_at             TEXT NOT NULL
 );
 
 -- ── LLM 实例（[[llm]] 区段入库；api_key 顺带收进加密边界）──
@@ -162,7 +164,7 @@ CREATE TABLE llm_providers (
     max_tokens   INTEGER NOT NULL DEFAULT 4096,
     temperature  REAL NOT NULL DEFAULT 0.7,
     raw          TEXT NOT NULL DEFAULT '{}',   -- 扩展兜底：disable_thinking 等
-    updated_at   TIMESTAMP NOT NULL
+    updated_at   TEXT NOT NULL
 );
 CREATE UNIQUE INDEX idx_llm_providers_provider ON llm_providers (provider);
 
@@ -170,7 +172,7 @@ CREATE UNIQUE INDEX idx_llm_providers_provider ON llm_providers (provider);
 CREATE TABLE app_settings (
     key        TEXT PRIMARY KEY,               -- 如 'ui'、'gitlab'、'rules'、'advanced'
     value      TEXT NOT NULL,                  -- JSON
-    updated_at TIMESTAMP NOT NULL
+    updated_at TEXT NOT NULL
 );
 ```
 
@@ -359,10 +361,10 @@ output.aggregated.map(|a| a.markdown)
 
 ## 11. 待验证点（实现前确认，不确定处不猜）
 
-- **验证点 A**：sqlx 0.8 `Any` 驱动的 `?` 占位符 PG 翻译行为、以及 `Migrator` 在 `AnyPool` 上的行为（含 `_sqlx_migrations` 锁表在 SQLite 上的表现）。方法：步骤 1 的 smoke test，双后端各跑。
+- **验证点 A**（✅ 已验证，sqlx 0.8.6 smoke test）：`?` 占位符 PG 翻译、`Migrator` 在 `AnyPool` 上的行为均正常；SQLite 侧通过，PG 侧留 `#[ignore]` 入口待有实例时跑。附带结论：Any 驱动无 chrono/uuid 的 `Type<Any>` 实现，SQLite 拒绝对 `TIMESTAMP` 声明列做 String 解码——时间戳/uuid 一律 TEXT 绑定（§3.1 已按此定稿）。
 - **验证点 B**：`config/resolver/` 是否从 config.toml 承载 `git_platforms`（§6.3 表中标注待核实）。方法：`Grep "git_platforms" src/config/`。
 - **验证点 C**：评审报告的固定前缀常量位置（§7.1 自噬防护条件 a）。方法：`Grep` publisher/output 模块的报告头部模板。
-- **验证点 D**：`Any` 驱动下 `chrono::DateTime<Utc>` 绑到 SQLite `TIMESTAMP` 列的存储格式与排序正确性（字典序 = 时间序是分页 `ORDER BY created_at` 的前提）。方法：步骤 4 的 round-trip 测试里断言排序。
+- **验证点 D**（✅ 已验证）：通过。固定宽度 RFC 3339 UTC 串按 TEXT 存储，字典序 == 时间序，`ORDER BY created_at` 排序正确（分页前提成立）。
 
 ## 12. 验收标准清单
 

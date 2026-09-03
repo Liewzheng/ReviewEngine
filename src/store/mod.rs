@@ -35,6 +35,37 @@ use chrono::{DateTime, SecondsFormat, Utc};
 /// Embedded migrations (compiled in via `sqlx::migrate!`).
 static MIGRATOR: ::sqlx::migrate::Migrator = ::sqlx::migrate!("./migrations");
 
+/// Which storage backend a [`SqlxStore`] pool talks to, recorded at connect
+/// time from the URL (design/persistence.md §4.3). Surfaced read-only via
+/// `GET /api/v1/system/health` as `storage_backend`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// `postgres://` / `postgresql://` URL.
+    Postgresql,
+    /// Everything else (embedded SQLite, incl. in-memory).
+    Sqlite,
+}
+
+impl BackendKind {
+    /// Wire value exposed to the API layer (`"postgresql"` / `"sqlite"`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgresql => "postgresql",
+            Self::Sqlite => "sqlite",
+        }
+    }
+}
+
+/// URL discrimination per design/persistence.md §4.3: `postgres://` /
+/// `postgresql://` → PostgreSQL; anything else → SQLite.
+fn backend_kind_of(url: &str) -> BackendKind {
+    if url.starts_with("postgres://") || url.starts_with("postgresql://") {
+        BackendKind::Postgresql
+    } else {
+        BackendKind::Sqlite
+    }
+}
+
 /// SQLx store backed by an `Any` pool (PostgreSQL or SQLite).
 ///
 /// Besides pool construction / SQLite pragmas / migrations, the store holds
@@ -44,6 +75,7 @@ static MIGRATOR: ::sqlx::migrate::Migrator = ::sqlx::migrate!("./migrations");
 #[derive(Debug, Clone)]
 pub struct SqlxStore {
     pool: ::sqlx::AnyPool,
+    kind: BackendKind,
     pub(crate) key: [u8; 32],
 }
 
@@ -69,17 +101,17 @@ impl SqlxStore {
     /// available to tests that need a stable key without a config dir).
     pub async fn connect_with_key(url: &str, key: [u8; 32]) -> Result<Self> {
         ::sqlx::any::install_default_drivers();
-        let is_postgres = url.starts_with("postgres://") || url.starts_with("postgresql://");
+        let kind = backend_kind_of(url);
         let pool = ::sqlx::any::AnyPoolOptions::new().connect(url).await.with_context(|| {
             format!(
                 "failed to connect to database ({url_scheme})",
                 url_scheme = scheme_of(url)
             )
         })?;
-        if !is_postgres {
+        if kind == BackendKind::Sqlite {
             apply_sqlite_pragmas(&pool).await?;
         }
-        Ok(Self { pool, key })
+        Ok(Self { pool, kind, key })
     }
 
     /// Connect to the default embedded SQLite database under `config_dir`
@@ -111,7 +143,11 @@ impl SqlxStore {
             .await
             .context("failed to open in-memory sqlite database")?;
         apply_sqlite_pragmas(&pool).await?;
-        Ok(Self { pool, key })
+        Ok(Self {
+            pool,
+            kind: BackendKind::Sqlite,
+            key,
+        })
     }
 
     /// Apply the embedded migrations (idempotent — already-applied
@@ -119,6 +155,12 @@ impl SqlxStore {
     pub async fn migrate(&self) -> Result<()> {
         MIGRATOR.run(&self.pool).await.context("database migration failed")?;
         Ok(())
+    }
+
+    /// The storage backend this pool talks to, recorded at connect time
+    /// (PostgreSQL or SQLite).
+    pub fn backend_kind(&self) -> BackendKind {
+        self.kind
     }
 
     /// Access the underlying pool (used by trait implementations in
@@ -170,6 +212,35 @@ mod tests {
     use super::*;
     use ::sqlx::Row;
     use chrono::TimeZone;
+
+    /// URL discrimination per §4.3: `postgres://` / `postgresql://` →
+    /// PostgreSQL, everything else → SQLite. Pure-function-level coverage of
+    /// the `"postgresql"` wire value (a live PG is not available in unit
+    /// tests; the end-to-end PG smoke test is `migrate_on_postgres_smoke`).
+    #[test]
+    fn backend_kind_discriminates_by_url_scheme() {
+        assert_eq!(
+            backend_kind_of("postgres://u:p@db.example/review"),
+            BackendKind::Postgresql
+        );
+        assert_eq!(
+            backend_kind_of("postgresql://u:p@db.example/review"),
+            BackendKind::Postgresql
+        );
+        assert_eq!(BackendKind::Postgresql.as_str(), "postgresql");
+
+        assert_eq!(backend_kind_of("sqlite:///tmp/review.db?mode=rwc"), BackendKind::Sqlite);
+        assert_eq!(backend_kind_of("sqlite::memory:"), BackendKind::Sqlite);
+        assert_eq!(BackendKind::Sqlite.as_str(), "sqlite");
+    }
+
+    /// An in-memory SQLite store reports the sqlite backend kind.
+    #[tokio::test]
+    async fn in_memory_store_reports_sqlite_backend_kind() {
+        let store = SqlxStore::new_in_memory().await.unwrap();
+        assert_eq!(store.backend_kind(), BackendKind::Sqlite);
+        assert_eq!(store.backend_kind().as_str(), "sqlite");
+    }
 
     /// 验证点 A(a): in-memory SQLite + migrate creates the schema, and a
     /// second migrate run is an idempotent no-op.

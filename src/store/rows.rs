@@ -376,3 +376,37 @@ pub(crate) fn expert_report_rows(task_id: &Uuid, result: &Value, created_at: Str
         })
         .collect()
 }
+
+// ─── Discussion domain (step 6a): mr_discussions ⇄ DiscussionNote ───
+
+use crate::store::traits::DiscussionNote;
+
+/// Raw decode target for `SELECT platform, project, mr_iid, note_id, author,
+/// body, created_at FROM mr_discussions`, in column order.
+pub(crate) type DiscussionRowTuple = (String, String, i64, i64, String, String, String);
+
+fn u64_from_i64(value: i64, what: &str) -> Result<u64> {
+    u64::try_from(value).with_context(|| format!("mr_discussions.{what} out of range: {value}"))
+}
+
+/// `DiscussionNote.mr_iid` / `note_id` as bindable i64 (BIGINT columns).
+pub(crate) fn discussion_ids(note: &DiscussionNote) -> Result<(i64, i64)> {
+    Ok((
+        i64::try_from(note.mr_iid).with_context(|| format!("mr_iid out of range: {}", note.mr_iid))?,
+        i64::try_from(note.note_id).with_context(|| format!("note_id out of range: {}", note.note_id))?,
+    ))
+}
+
+pub(crate) fn discussion_from_row(
+    (platform, project, mr_iid, note_id, author, body, created_at): DiscussionRowTuple,
+) -> Result<DiscussionNote> {
+    Ok(DiscussionNote {
+        platform,
+        project,
+        mr_iid: u64_from_i64(mr_iid, "mr_iid")?,
+        note_id: u64_from_i64(note_id, "note_id")?,
+        author,
+        body,
+        created_at: decode_ts(&created_at).context("mr_discussions.created_at")?,
+    })
+}

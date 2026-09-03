@@ -175,7 +175,7 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
                 .context("Failed to create GitLabProvider")?
         };
 
-    let mut md = String::from("# CodeReview Board\n\n");
+    let mut md = String::from(crate::publisher::REVIEW_REPORT_PREFIX);
     for report in &output.reports {
         // render_expert_section appends the parse-failure / raw-response
         // annotations that the pre-rendered `markdown` does not carry, so a

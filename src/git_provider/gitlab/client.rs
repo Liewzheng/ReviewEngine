@@ -131,6 +131,20 @@ impl Client {
         Ok(client)
     }
 
+    /// Client scoped to a whole GitLab instance (no project/MR binding), for
+    /// instance-level endpoints such as `GET /user`. `instance_base` is the
+    /// instance root (e.g. `https://gitlab.example.com`); `/api/v4` is
+    /// appended here.
+    pub fn for_instance(gitlab_token: &str, instance_base: &str) -> Self {
+        Self {
+            http: HttpClient::new(),
+            base_url: format!("{}/api/v4", instance_base.trim_end_matches('/')),
+            project_path: String::new(),
+            mr_iid: 0,
+            gitlab_token: gitlab_token.to_string(),
+        }
+    }
+
     fn encoded_project_path(&self) -> String {
         encode_project_path(&self.project_path)
     }

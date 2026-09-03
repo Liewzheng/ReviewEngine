@@ -16,7 +16,7 @@ use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
 use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 use super::rows;
-use super::traits::{ConfigStore, ReviewListQuery, ReviewStore};
+use super::traits::{ConfigStore, DiscussionNote, DiscussionStore, ReviewListQuery, ReviewStore};
 use super::{encode_ts, SqlxStore};
 
 const LEGACY_GITLAB_KEY: &str = "gitlab";
@@ -489,6 +489,56 @@ impl ReviewStore for SqlxStore {
     }
 }
 
+// ─── DiscussionStore (mr_discussions, step 6a) ───
+
+#[async_trait]
+impl DiscussionStore for SqlxStore {
+    async fn upsert_note(&self, note: &DiscussionNote) -> Result<()> {
+        let (mr_iid, note_id) = rows::discussion_ids(note)?;
+        ::sqlx::query(
+            "INSERT INTO mr_discussions (platform, project, mr_iid, note_id, author, body, created_at, ingested_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT (platform, project, mr_iid, note_id) DO UPDATE SET \
+             body = excluded.body, author = excluded.author",
+        )
+        .bind(&note.platform)
+        .bind(&note.project)
+        .bind(mr_iid)
+        .bind(note_id)
+        .bind(&note.author)
+        .bind(&note.body)
+        .bind(encode_ts(&note.created_at))
+        .bind(encode_ts(&Utc::now()))
+        .execute(self.pool())
+        .await
+        .with_context(|| {
+            format!(
+                "upsert mr_discussion note {} for {} !{}",
+                note.note_id, note.project, note.mr_iid
+            )
+        })?;
+        Ok(())
+    }
+
+    async fn list_notes(&self, platform: &str, project: &str, mr_iid: u64) -> Result<Vec<DiscussionNote>> {
+        let mr_iid = i64::try_from(mr_iid).with_context(|| format!("mr_iid out of range: {mr_iid}"))?;
+        let rows = ::sqlx::query_as::<_, rows::DiscussionRowTuple>(
+            "SELECT platform, project, mr_iid, note_id, author, body, created_at FROM mr_discussions \
+             WHERE platform = ? AND project = ? AND mr_iid = ? ORDER BY created_at, note_id",
+        )
+        .bind(platform)
+        .bind(project)
+        .bind(mr_iid)
+        .fetch_all(self.pool())
+        .await
+        .with_context(|| format!("list mr_discussions for {project} !{mr_iid}"))?;
+        rows.into_iter()
+            .map(rows::discussion_from_row)
+            .collect::<Result<Vec<_>>>()
+            .context("decode mr_discussions rows")
+    }
+}
+
 /// Shared WHERE clause + positional binds for the history list (§8.1). All
 /// bind values are Strings so the COUNT and the page SELECT can share them.
 ///
@@ -883,5 +933,62 @@ mod tests {
         assert_eq!(decoded.source_meta.project.as_deref(), Some("g/p"));
         assert_eq!(decoded.created_at, entry.created_at);
         assert!(decoded.expert_name.is_none(), "live-only field is not persisted");
+    }
+
+    // ─── DiscussionStore (step 6a) ───
+
+    fn note(note_id: u64, created_at: &str, body: &str) -> DiscussionNote {
+        DiscussionNote {
+            platform: "default".into(),
+            project: "group/proj".into(),
+            mr_iid: 7,
+            note_id,
+            author: "alice".into(),
+            body: body.into(),
+            created_at: DateTime::parse_from_rfc3339(created_at).unwrap().with_timezone(&Utc),
+        }
+    }
+
+    /// list_notes orders by (created_at, note_id) ascending — the
+    /// append-only order §7.2's context renderer relies on.
+    #[tokio::test]
+    async fn discussion_notes_round_trip_and_ordering() {
+        let store = fresh_store().await;
+        // Insert out of order, including two notes sharing a timestamp
+        // (note_id breaks the tie).
+        store
+            .upsert_note(&note(3, "2026-09-03T10:00:02Z", "third"))
+            .await
+            .unwrap();
+        store
+            .upsert_note(&note(1, "2026-09-03T10:00:00Z", "first"))
+            .await
+            .unwrap();
+        store
+            .upsert_note(&note(5, "2026-09-03T10:00:02Z", "fourth"))
+            .await
+            .unwrap();
+        store
+            .upsert_note(&note(2, "2026-09-03T10:00:00Z", "second"))
+            .await
+            .unwrap();
+        // A different platform / MR must not leak into the result.
+        let mut other = note(9, "2026-08-01T00:00:00Z", "other");
+        other.platform = "public".into();
+        store.upsert_note(&other).await.unwrap();
+
+        let notes = store.list_notes("default", "group/proj", 7).await.unwrap();
+        let bodies: Vec<&str> = notes.iter().map(|n| n.body.as_str()).collect();
+        assert_eq!(bodies, vec!["first", "second", "third", "fourth"]);
+        assert_eq!(notes[0].created_at.to_rfc3339(), "2026-09-03T10:00:00+00:00");
+
+        // Edit via upsert keeps position, updates body.
+        let mut edited = note(2, "2026-09-03T10:00:00Z", "second (edited)");
+        edited.author = "bob".into();
+        store.upsert_note(&edited).await.unwrap();
+        let notes = store.list_notes("default", "group/proj", 7).await.unwrap();
+        assert_eq!(notes.len(), 4);
+        assert_eq!(notes[1].body, "second (edited)");
+        assert_eq!(notes[1].author, "bob");
     }
 }

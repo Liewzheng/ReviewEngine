@@ -139,3 +139,37 @@ pub struct ReviewListQuery {
     pub date_from: Option<DateTime<Utc>>,
     pub date_to: Option<DateTime<Utc>>,
 }
+
+/// One MR discussion note (`mr_discussions` row, design/persistence.md
+/// §3.2). The primary key `(platform, project, mr_iid, note_id)` is the
+/// idempotency key: webhook redelivery dedups, note edits update in place.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiscussionNote {
+    /// `GitPlatformConfig.name` of the instance the note came from
+    /// ("default" when no platform matched the payload).
+    pub platform: String,
+    /// `project.path_with_namespace`.
+    pub project: String,
+    pub mr_iid: u64,
+    pub note_id: u64,
+    pub author: String,
+    pub body: String,
+    /// The note's own creation time (from the webhook payload), NOT the
+    /// ingestion time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Persistence boundary for MR discussion notes (design/persistence.md
+/// §7.1). Written by the Note webhook handler; read by the review-time
+/// context injection (§7.2, step 6b).
+#[async_trait]
+pub trait DiscussionStore: Send + Sync {
+    /// Idempotent upsert on `(platform, project, mr_iid, note_id)`:
+    /// redelivery dedups; an edited note updates `body` / `author`.
+    async fn upsert_note(&self, note: &DiscussionNote) -> Result<()>;
+
+    /// All notes of one MR, ordered `(created_at, note_id)` ascending — the
+    /// append-only order the context-injection renderer (§7.2) relies on for
+    /// prefix-stable output.
+    async fn list_notes(&self, platform: &str, project: &str, mr_iid: u64) -> Result<Vec<DiscussionNote>>;
+}

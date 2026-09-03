@@ -370,13 +370,14 @@ impl GitLabWebhookHandler {
         token: &str,
         platform: Option<crate::models::GitPlatformConfig>,
         task_store: Option<Arc<crate::server::task_queue::TaskStore>>,
+        db: Option<Arc<crate::store::SqlxStore>>,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         let event_name = system_hook_event_name(body);
         match event_name.as_str() {
             "merge_request" => super::handle_mr_hook(body, &self.dispatcher, token, platform, task_store.clone())
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "note" => super::handle_note_hook(body, &self.dispatcher, token, platform, task_store.clone())
+            "note" => super::handle_note_hook(body, &self.dispatcher, token, platform, task_store.clone(), db)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
             "push" => super::handle_push_hook(body)
@@ -459,23 +460,24 @@ impl WebhookHandler for GitLabWebhookHandler {
         // The shared task store (weak-handled via AppState) so webhook-dispatched
         // reviews record a task entry: create → running → completed/failed. `None`
         // in tests and legacy paths — the review still runs, just without a record.
-        let task_store = self
-            .app_state
-            .as_ref()
-            .and_then(|w| w.upgrade())
-            .and_then(|s| s.task_store.clone());
+        // The DB handle (0.10.0) feeds Note-hook ingestion; `None` = 0.9 behaviour.
+        let app_state = self.app_state.as_ref().and_then(|w| w.upgrade());
+        let task_store = app_state.as_ref().and_then(|s| s.task_store.clone());
+        let db = app_state.and_then(|s| s.db.clone());
 
         match event {
             "Merge Request Hook" => super::handle_mr_hook(body, &self.dispatcher, &token, platform, task_store.clone())
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "Note Hook" => super::handle_note_hook(body, &self.dispatcher, &token, platform, task_store.clone())
-                .await
-                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "Note Hook" => {
+                super::handle_note_hook(body, &self.dispatcher, &token, platform, task_store.clone(), db.clone())
+                    .await
+                    .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"}))))
+            }
             "Push Hook" => super::handle_push_hook(body)
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "System Hook" => self.handle_system_hook(body, &token, platform, task_store).await,
+            "System Hook" => self.handle_system_hook(body, &token, platform, task_store, db).await,
             _ => {
                 tracing::debug!("Ignoring unsupported GitLab event: {}", event);
                 Ok(Json(serde_json::json!({ "status": "ignored" })))

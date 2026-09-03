@@ -16,7 +16,7 @@ use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
 use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 use super::rows;
-use super::traits::{ConfigStore, ReviewStore};
+use super::traits::{ConfigStore, ReviewListQuery, ReviewStore};
 use super::{encode_ts, SqlxStore};
 
 const LEGACY_GITLAB_KEY: &str = "gitlab";
@@ -437,6 +437,101 @@ impl ReviewStore for SqlxStore {
         .context("interrupted-task sweep failed")?;
         Ok(res.rows_affected())
     }
+
+    async fn list_reviews(&self, query: &ReviewListQuery) -> Result<(Vec<TaskEntry>, u64)> {
+        let (where_sql, binds) = review_where(query);
+
+        let count_sql = format!("SELECT COUNT(*) FROM reviews {where_sql}");
+        let mut count_q = ::sqlx::query_scalar::<_, i64>(&count_sql);
+        for value in &binds {
+            count_q = count_q.bind(value);
+        }
+        let total = count_q.fetch_one(self.pool()).await.context("count reviews")?;
+
+        // Every bind value in `binds` is a String (state/q/project/repository
+        // and both timestamps), so the COUNT and the page SELECT share the
+        // same positional parameter list; LIMIT/OFFSET trail as two more.
+        let offset = query.page.saturating_sub(1).saturating_mul(query.per_page);
+        let list_sql = format!(
+            "SELECT {} FROM reviews {where_sql} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",
+            rows::REVIEW_COLUMNS
+        );
+        let mut list_q = ::sqlx::query_as::<_, rows::ReviewRowTuple>(&list_sql);
+        for value in &binds {
+            list_q = list_q.bind(value);
+        }
+        let rows = list_q
+            .bind(query.per_page as i64)
+            .bind(offset as i64)
+            .fetch_all(self.pool())
+            .await
+            .context("list reviews")?;
+        let entries = rows
+            .into_iter()
+            .map(|tuple| rows::review_from_row(tuple.into()))
+            .collect::<Result<Vec<_>>>()
+            .context("decode reviews rows")?;
+        Ok((entries, total as u64))
+    }
+
+    async fn get_review(&self, task_id: uuid::Uuid) -> Result<Option<TaskEntry>> {
+        let row = ::sqlx::query_as::<_, rows::ReviewRowTuple>(&format!(
+            "SELECT {} FROM reviews WHERE task_id = ?",
+            rows::REVIEW_COLUMNS
+        ))
+        .bind(task_id.to_string())
+        .fetch_optional(self.pool())
+        .await
+        .with_context(|| format!("load review {task_id}"))?;
+        row.map(|tuple| rows::review_from_row(tuple.into()))
+            .transpose()
+            .with_context(|| format!("decode review row {task_id}"))
+    }
+}
+
+/// Shared WHERE clause + positional binds for the history list (§8.1). All
+/// bind values are Strings so the COUNT and the page SELECT can share them.
+///
+/// `q` keeps the 0.9 semantics — a case-insensitive literal substring match
+/// — applied to the serialized `source_meta` TEXT (design prescribes
+/// `LOWER(...) LIKE LOWER(?)`; LIKE wildcards in the needle are escaped so
+/// the match stays literal).
+fn review_where(query: &ReviewListQuery) -> (String, Vec<String>) {
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
+    if let Some(status) = &query.status {
+        clauses.push("state = ?");
+        binds.push(rows::task_state_str(status).to_string());
+    }
+    if let Some(q) = &query.q {
+        clauses.push("LOWER(source_meta) LIKE LOWER(?) ESCAPE '\\'");
+        let needle = q.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        binds.push(format!("%{needle}%"));
+    }
+    if let Some(project) = &query.project {
+        clauses.push("project = ?");
+        binds.push(project.clone());
+    }
+    if let Some(repository) = &query.repository {
+        clauses.push("repository = ?");
+        binds.push(repository.clone());
+    }
+    if let Some(from) = &query.date_from {
+        // Fixed-width RFC 3339 UTC: lexicographic compare == chronological
+        // compare (§3.1 timestamp row).
+        clauses.push("created_at >= ?");
+        binds.push(encode_ts(from));
+    }
+    if let Some(to) = &query.date_to {
+        clauses.push("created_at <= ?");
+        binds.push(encode_ts(to));
+    }
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+    (where_sql, binds)
 }
 
 #[cfg(test)]

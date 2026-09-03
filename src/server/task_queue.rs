@@ -1065,6 +1065,15 @@ mod tests {
             async fn mark_interrupted(&self, _: chrono::DateTime<chrono::Utc>) -> anyhow::Result<u64> {
                 anyhow::bail!("db down")
             }
+            async fn list_reviews(
+                &self,
+                _: &crate::store::traits::ReviewListQuery,
+            ) -> anyhow::Result<(Vec<TaskEntry>, u64)> {
+                anyhow::bail!("db down")
+            }
+            async fn get_review(&self, _: Uuid) -> anyhow::Result<Option<TaskEntry>> {
+                anyhow::bail!("db down")
+            }
         }
 
         let failing = Arc::new(FailingStore::default());

@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 use crate::server::AppState;
+use crate::store::traits::{ReviewListQuery, ReviewStore};
 
 use super::super::types::{ReviewRequest, ReviewSource};
 use super::resolve;
@@ -205,20 +206,48 @@ pub(crate) async fn submit_review(
 }
 
 pub(crate) async fn get_review(State(state): State<Arc<AppState>>, Path(task_id): Path<Uuid>) -> impl IntoResponse {
-    let store = match &state.task_store {
-        Some(s) => s,
-        None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "task store not initialized"),
-    };
-    match store.get(task_id).await {
-        Some(entry) => {
-            let mut status_value = serde_json::to_value(task_to_status(&entry)).unwrap_or_default();
-            if let Ok(detail_value) = serde_json::to_value(build_review_detail(&entry)) {
-                merge_camel_case_fields(&mut status_value, &detail_value);
-            }
-            (StatusCode::OK, Json(status_value)).into_response()
-        }
-        None => error_response(StatusCode::NOT_FOUND, "task not found"),
+    if state.task_store.is_none() && state.db.is_none() {
+        return error_response(StatusCode::SERVICE_UNAVAILABLE, "task store not initialized");
     }
+    let live_entry = match &state.task_store {
+        Some(s) => s.get(task_id).await,
+        None => None,
+    };
+    let entry = if let Some(db) = &state.db {
+        // 0.10.0 (§8.1): the DB is the history source. An in-memory hit only
+        // overlays the two live-only fields (progress / current expert) that
+        // write-through deliberately never persists mid-flight.
+        match db.get_review(task_id).await {
+            Ok(Some(mut entry)) => {
+                if let Some(live) = &live_entry {
+                    entry.progress = live.progress;
+                    entry.expert_name = live.expert_name.clone();
+                }
+                entry
+            }
+            Ok(None) => match live_entry {
+                // Write-through failure edge: the task is alive in memory but
+                // never landed in the DB — serve it rather than 404.
+                Some(entry) => entry,
+                None => return error_response(StatusCode::NOT_FOUND, "task not found"),
+            },
+            Err(e) => {
+                tracing::error!("failed to load review {task_id} from the database: {e:#}");
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to load review");
+            }
+        }
+    } else {
+        // db=None (REVIEW_DISABLE_DB=1, tests): the 0.9 pure in-memory path.
+        match live_entry {
+            Some(entry) => entry,
+            None => return error_response(StatusCode::NOT_FOUND, "task not found"),
+        }
+    };
+    let mut status_value = serde_json::to_value(task_to_status(&entry)).unwrap_or_default();
+    if let Ok(detail_value) = serde_json::to_value(build_review_detail(&entry)) {
+        merge_camel_case_fields(&mut status_value, &detail_value);
+    }
+    (StatusCode::OK, Json(status_value)).into_response()
 }
 
 pub(crate) async fn rerun_review(
@@ -326,19 +355,42 @@ pub(crate) async fn list_reviews(
             .map(|dt| dt.with_timezone(&chrono::Utc))
     });
 
-    let (items, total) = store
-        .list(
-            status,
+    // 0.10.0 (§8.1): with persistence active the DB is the data source
+    // (in-flight tasks are present via write-through — no memory merge).
+    // db=None keeps the 0.9 in-memory path (REVIEW_DISABLE_DB=1, tests).
+    let (entries, total) = if let Some(db) = &state.db {
+        let query = ReviewListQuery {
+            status: status.clone(),
             page,
             per_page,
-            params.q.as_deref(),
-            params.project.as_deref(),
-            params.repository.as_deref(),
+            q: params.q.clone(),
+            project: params.project.clone(),
+            repository: params.repository.clone(),
             date_from,
             date_to,
-        )
-        .await;
-    let items: Vec<serde_json::Value> = items
+        };
+        match db.list_reviews(&query).await {
+            Ok(result) => result,
+            Err(e) => {
+                tracing::error!("failed to list reviews from the database: {e:#}");
+                return error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to load review history");
+            }
+        }
+    } else {
+        store
+            .list(
+                status,
+                page,
+                per_page,
+                params.q.as_deref(),
+                params.project.as_deref(),
+                params.repository.as_deref(),
+                date_from,
+                date_to,
+            )
+            .await
+    };
+    let items: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
             let mut status_value = serde_json::to_value(task_to_status(entry)).unwrap_or_default();

@@ -252,9 +252,64 @@ pub(crate) fn task_entry_to_row(entry: &TaskEntry) -> Result<ReviewRow> {
     })
 }
 
-/// Decode a `reviews` row back into a [`TaskEntry`]. Used by tests now and
-/// by the history read path in the next step (§8.1).
-#[allow(dead_code)]
+/// Column list of the shared `reviews` SELECT used by the read path
+/// (`sqlx.rs`); the order matches [`ReviewRowTuple`].
+pub(crate) const REVIEW_COLUMNS: &str = "task_id, state, source_meta, project, repository, request, \
+     result, error, progress, created_at, started_at, completed_at";
+
+/// Raw decode target for a `SELECT {REVIEW_COLUMNS}` query, in column order.
+#[allow(clippy::type_complexity)]
+pub(crate) type ReviewRowTuple = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<i64>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+impl From<ReviewRowTuple> for ReviewRow {
+    fn from(
+        (
+            task_id,
+            state,
+            source_meta,
+            project,
+            repository,
+            request,
+            result,
+            error,
+            progress,
+            created_at,
+            started_at,
+            completed_at,
+        ): ReviewRowTuple,
+    ) -> Self {
+        Self {
+            task_id,
+            state,
+            source_meta,
+            project,
+            repository,
+            request,
+            result,
+            error,
+            progress,
+            created_at,
+            started_at,
+            completed_at,
+        }
+    }
+}
+
+/// Decode a `reviews` row back into a [`TaskEntry`]. Used by the history
+/// read path (`ReviewStore::list_reviews` / `get_review`, §8.1) and by tests.
 pub(crate) fn review_from_row(row: ReviewRow) -> Result<TaskEntry> {
     fn opt_ts(raw: Option<String>, what: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         raw.as_deref()

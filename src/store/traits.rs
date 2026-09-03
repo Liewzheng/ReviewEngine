@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
-use crate::server::task_queue::{SourceMeta, TaskEntry};
+use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 
 /// Persistence boundary for UI-managed configuration.
 ///
@@ -114,4 +114,28 @@ pub trait ReviewStore: Send + Sync {
     /// previous process died becomes `failed` with
     /// `error='interrupted: server restarted'`. Returns affected rows.
     async fn mark_interrupted(&self, now: DateTime<Utc>) -> Result<u64>;
+
+    /// History list (§8.1): newest first (`ORDER BY created_at DESC`),
+    /// paginated, plus the total row count under the same filters. The DB is
+    /// the only data source — in-flight tasks are present via write-through,
+    /// no memory merge.
+    async fn list_reviews(&self, query: &ReviewListQuery) -> Result<(Vec<TaskEntry>, u64)>;
+
+    /// Single history row; `None` when the task is unknown.
+    async fn get_review(&self, task_id: Uuid) -> Result<Option<TaskEntry>>;
+}
+
+/// Handler-normalized history-list parameters (design/persistence.md §8.1 —
+/// the DB takes over what `TaskStore::list` filtered in memory in 0.9):
+/// `page` is 1-based (≥ 1), `per_page` is already clamped to ≤ 100.
+#[derive(Debug, Clone, Default)]
+pub struct ReviewListQuery {
+    pub status: Option<TaskState>,
+    pub page: u64,
+    pub per_page: u64,
+    pub q: Option<String>,
+    pub project: Option<String>,
+    pub repository: Option<String>,
+    pub date_from: Option<DateTime<Utc>>,
+    pub date_to: Option<DateTime<Utc>>,
 }

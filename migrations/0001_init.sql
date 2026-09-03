@@ -1,12 +1,13 @@
 -- 0.10.0 持久化首版：7 表。方言约束见 design/persistence.md §3.1：
---   占位符统一 `?`；不用 RETURNING（主键 Rust 侧 UUID）；JSON 列一律 TEXT；
---   布尔用 BOOLEAN。
+--   占位符统一 `?`；不用 RETURNING（主键 Rust 侧 UUID）；JSON 列一律 TEXT。
 -- 时间戳列：与设计文档 §3.2 草案的 TIMESTAMP 不同，一律 TEXT，存 Rust 侧
 --   chrono 生成的固定宽度 RFC 3339 UTC 串（2026-09-03T10:00:00.000000Z）。
---   原因（验证点 A/D 落地结论）：sqlx Any 驱动没有 chrono 的 Type<Any> 实现，
---   且 SQLite 端拒绝对声明类型为 TIMESTAMP/Datetime 的列做 String 解码；
---   固定宽度 UTC 串字典序 == 时间序，ORDER BY / 范围过滤语义不变。
---   PG 端 TEXT 列天然接受该串，无需 CAST。
+-- 布尔列：同理不用 BOOLEAN，一律 INTEGER 0/1。
+--   原因（验证点 A/D 落地结论）：sqlx Any 驱动对 SQLite 只认
+--   Null/Int4/Integer/Float/Blob/Text 五类声明类型，BOOLEAN / TIMESTAMP
+--   列读不出来，chrono/bool 也没有 Type<Any> 实现；固定宽度 UTC 串
+--   字典序 == 时间序，ORDER BY / 范围过滤语义不变。PG 端 TEXT / INTEGER
+--   列天然接受这些值，无需 CAST。
 
 -- ── 评审任务（TaskEntry 的持久投影）──
 CREATE TABLE reviews (
@@ -76,7 +77,10 @@ CREATE TABLE git_platforms (
     token                  TEXT NOT NULL DEFAULT '',  -- enc: 加密
     webhook_secret         TEXT NOT NULL DEFAULT '',  -- enc: 加密
     webhook_signing_secret TEXT NOT NULL DEFAULT '',  -- enc: 加密
-    enabled                BOOLEAN NOT NULL DEFAULT TRUE,
+    -- 设计文档 §3.1 写的是 BOOLEAN，但 Any 驱动无法解码 SQLite 声明类型为
+    -- Bool 的列（验证点 A 实证；Any 只认 Null/Int4/Integer/Float/Blob/Text），
+    -- 故用 INTEGER 0/1，绑定侧转 bool。
+    enabled                INTEGER NOT NULL DEFAULT 1,
     raw                    TEXT NOT NULL DEFAULT '{}',  -- 扩展兜底：allowed_projects 等未列化字段
     updated_at             TEXT NOT NULL
 );

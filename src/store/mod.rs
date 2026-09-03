@@ -17,9 +17,11 @@
 //!   Fixed-width UTC `Z` formatting keeps lexicographic order ==
 //!   chronological order, which `ORDER BY created_at` pagination relies on.
 //!
-//! This step ships only the connection/migration skeleton plus the
-//! verification-point-A smoke tests. Domain traits (`ReviewStore` /
-//! `ConfigStore` / `DiscussionStore`) and row codecs land in later steps.
+//! Shipped so far: connection/migration skeleton, verification-point-A/D
+//! smoke tests, and the configuration domain ([`traits::ConfigStore`]
+//! implemented on [`SqlxStore`] in [`sqlx`], row codecs + the `enc:`
+//! boundary in [`rows`]). `ReviewStore` / `DiscussionStore` land in later
+//! steps.
 
 pub mod rows;
 pub mod sqlx;
@@ -35,12 +37,14 @@ static MIGRATOR: ::sqlx::migrate::Migrator = ::sqlx::migrate!("./migrations");
 
 /// SQLx store backed by an `Any` pool (PostgreSQL or SQLite).
 ///
-/// Business methods are added in later steps behind the domain traits in
-/// [`traits`]; this type currently owns pool construction, SQLite pragmas,
-/// and migrations.
+/// Besides pool construction / SQLite pragmas / migrations, the store holds
+/// the at-rest encryption key (`secrets.key`, per config dir): the `enc:`
+/// boundary lives in [`rows`], and PG deployments still read the key from
+/// the server-local config dir (design/persistence.md §6.2).
 #[derive(Debug, Clone)]
 pub struct SqlxStore {
     pool: ::sqlx::AnyPool,
+    pub(crate) key: [u8; 32],
 }
 
 impl SqlxStore {
@@ -52,7 +56,18 @@ impl SqlxStore {
     ///
     /// For SQLite, after the pool is built the connection pragmas required by
     /// the schema are applied: WAL journal, foreign keys on, 5 s busy timeout.
+    /// The secrets key resolves via the standard config-dir resolution
+    /// (`persist::resolve_ui_state_path` → `key_path_for`).
     pub async fn connect(url: &str) -> Result<Self> {
+        let state_path = crate::server::api::config::persist::resolve_ui_state_path()
+            .context("cannot resolve the config dir for the secrets key")?;
+        let key = crate::config::secrets::load_or_create_key(&crate::config::secrets::key_path_for(&state_path))?;
+        Self::connect_with_key(url, key).await
+    }
+
+    /// Connect with an explicit secrets key (used by [`Self::connect`] and
+    /// available to tests that need a stable key without a config dir).
+    pub async fn connect_with_key(url: &str, key: [u8; 32]) -> Result<Self> {
         ::sqlx::any::install_default_drivers();
         let is_postgres = url.starts_with("postgres://") || url.starts_with("postgresql://");
         let pool = ::sqlx::any::AnyPoolOptions::new().connect(url).await.with_context(|| {
@@ -64,23 +79,31 @@ impl SqlxStore {
         if !is_postgres {
             apply_sqlite_pragmas(&pool).await?;
         }
-        Ok(Self { pool })
+        Ok(Self { pool, key })
     }
 
     /// Connect to the default embedded SQLite database under `config_dir`
-    /// (`sqlite://{config_dir}/review.db?mode=rwc`, created on demand).
+    /// (`sqlite://{config_dir}/review.db?mode=rwc`, created on demand); the
+    /// secrets key is `{config_dir}/secrets.key`, created on first use.
     pub async fn connect_default(config_dir: &Path) -> Result<Self> {
         std::fs::create_dir_all(config_dir)
             .with_context(|| format!("failed to create config dir {}", config_dir.display()))?;
+        let key = crate::config::secrets::load_or_create_key(
+            &config_dir.join(crate::config::secrets::SECRETS_KEY_FILE_NAME),
+        )?;
         let url = format!("sqlite://{}/review.db?mode=rwc", config_dir.display());
-        Self::connect(&url).await
+        Self::connect_with_key(&url, key).await
     }
 
     /// In-memory SQLite store for unit tests.
     ///
     /// `max_connections(1)` is mandatory: with a larger pool each connection
-    /// would be an independent in-memory database.
+    /// would be an independent in-memory database. Uses an ephemeral random
+    /// key — enough for round-trip tests, but nothing persists between
+    /// instances.
     pub async fn new_in_memory() -> Result<Self> {
+        let mut key = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut key);
         ::sqlx::any::install_default_drivers();
         let pool = ::sqlx::any::AnyPoolOptions::new()
             .max_connections(1)
@@ -88,7 +111,7 @@ impl SqlxStore {
             .await
             .context("failed to open in-memory sqlite database")?;
         apply_sqlite_pragmas(&pool).await?;
-        Ok(Self { pool })
+        Ok(Self { pool, key })
     }
 
     /// Apply the embedded migrations (idempotent — already-applied
@@ -130,14 +153,12 @@ async fn apply_sqlite_pragmas(pool: &::sqlx::AnyPool) -> Result<()> {
 /// chrono `Type` impls, so values cross as fixed-width RFC 3339 UTC strings
 /// (`2026-09-03T10:00:00.000000Z`); lexicographic order == chronological
 /// order, which `ORDER BY created_at` pagination relies on.
-// Used by tests now; the trait implementations (later steps) are the real
-// consumers, hence the allow to keep non-test builds warning-free.
-#[allow(dead_code)]
 pub(crate) fn encode_ts(ts: &DateTime<Utc>) -> String {
     ts.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
-/// Decode a timestamp produced by [`encode_ts`].
+/// Decode a timestamp produced by [`encode_ts`]. Used by tests and by the
+/// review-domain codecs (later steps).
 #[allow(dead_code)]
 pub(crate) fn decode_ts(s: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(s)

@@ -279,7 +279,47 @@ pub async fn run() -> Result<()> {
                 llm_from_env: !env_llm_entries.is_empty(),
                 llm_entries: env_llm_entries,
             });
+            // 0.10.0 persistence (design/persistence.md §6.1, strict order):
+            // 1) resolve DB URL → pool → migrate (failure aborts startup;
+            //    REVIEW_DISABLE_DB=1 bypasses to 0.9 behaviour);
+            // 2) TODO(梁序, step 4): §5.3 interrupted sweep — UPDATE reviews
+            //    SET state='failed', error='interrupted: server restarted',
+            //    completed_at=? WHERE state IN ('pending','running') goes
+            //    here, after migrate and before the config replay;
+            // 3) one-shot ui-state.toml import (single transaction; failure
+            //    keeps the file and falls back to the file replay below);
+            // 4) replay the DB state through the same apply_ui_config path.
+            app_state.db = review_engine::server::api::config::persist::bootstrap_database()
+                .await?
+                .map(Arc::new);
             let state = Arc::new(app_state);
+            let mut config_replayed = false;
+            if let Some(store) = state.db.clone() {
+                let overrides = state.ui_state_env.clone().unwrap_or_default();
+                if let Some(path) = state.ui_state_path.clone() {
+                    match review_engine::server::api::config::persist::import_ui_state_into_db(&store, &path).await {
+                        Ok(true) => {}
+                        Ok(false) => {}
+                        Err(e) => tracing::error!(
+                            "ui-state.toml import failed: {e:#}; the file is untouched, \
+                             falling back to the file replay path"
+                        ),
+                    }
+                }
+                match review_engine::server::api::config::persist::load_and_apply_ui_state_from_db(
+                    &state, &store, &overrides,
+                )
+                .await
+                {
+                    Ok(applied) => {
+                        config_replayed = applied;
+                        if applied {
+                            tracing::info!("applied UI state from the database");
+                        }
+                    }
+                    Err(e) => tracing::warn!("failed to replay UI state from the database: {e:#}"),
+                }
+            }
             let dispatcher = review_engine::server::dispatcher::MrDispatcher::persistent();
             let mut handlers: Vec<Arc<dyn review_engine::server::webhook::WebhookHandler>> = vec![];
             let gitlab_token = gitlab_token_opt.clone().unwrap_or_default();
@@ -301,16 +341,22 @@ pub async fn run() -> Result<()> {
             // `--gitlab-token` / `GITLAB_TOKEN` must land there regardless
             // of webhook setup.
             review_engine::server::gitlab::init_gitlab_runtime(&gitlab_handler);
-            // Load the persisted UI state (ui-state.toml) and apply it
-            // through the same code path as PUT /config, so hot-apply and
-            // cold-start semantics are identical. A missing/corrupt file
-            // never blocks startup — it just reverts to config.toml/env.
-            if let Some(path) = state.ui_state_path.clone() {
-                let overrides = state.ui_state_env.clone().unwrap_or_default();
-                match review_engine::server::api::config::persist::load_and_apply_ui_state(&state, &path, &overrides) {
-                    Ok(true) => tracing::info!("applied persisted UI state from {}", path.display()),
-                    Ok(false) => {}
-                    Err(e) => tracing::warn!("failed to load persisted UI state from {}: {e:#}", path.display()),
+            // Load the persisted UI state and apply it through the same code
+            // path as PUT /config, so hot-apply and cold-start semantics are
+            // identical. When the DB replay above already applied (or the DB
+            // is active but empty after a failed import), the file replay is
+            // the fallback. A missing/corrupt file never blocks startup — it
+            // just reverts to config.toml/env.
+            if !config_replayed {
+                if let Some(path) = state.ui_state_path.clone() {
+                    let overrides = state.ui_state_env.clone().unwrap_or_default();
+                    match review_engine::server::api::config::persist::load_and_apply_ui_state(
+                        &state, &path, &overrides,
+                    ) {
+                        Ok(true) => tracing::info!("applied persisted UI state from {}", path.display()),
+                        Ok(false) => {}
+                        Err(e) => tracing::warn!("failed to load persisted UI state from {}: {e:#}", path.display()),
+                    }
                 }
             }
             // Mount /webhook/gitlab unconditionally: verification is resolved

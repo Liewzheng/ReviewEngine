@@ -14,7 +14,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 
 use crate::models::{GitPlatformConfig, LLMConfig};
-use crate::server::api::config::persist::PersistedGitlabConfig;
+use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
 
 /// Persistence boundary for UI-managed configuration.
 ///
@@ -54,6 +54,18 @@ pub trait ConfigStore: Send + Sync {
 
     /// Upsert an arbitrary JSON setting.
     async fn save_setting(&self, key: &str, value: &serde_json::Value) -> Result<()>;
+
+    /// Atomically persist a whole [`UiStateFile`] snapshot in ONE
+    /// transaction: git_platforms + llm_providers are replaced wholesale, the
+    /// legacy `gitlab` settings row is upserted (an all-empty value deletes
+    /// the row — unset is unset), and the `ui` projection is upserted when
+    /// present (`None` leaves any existing `ui` row untouched).
+    ///
+    /// Used by the `PUT /config` save path (§6.2) and by the one-shot
+    /// ui-state.toml import (§6.1): for the import, all-or-nothing is a hard
+    /// requirement — a partial import must roll back so the next startup can
+    /// retry against the still-present file.
+    async fn save_ui_state(&self, state: &UiStateFile) -> Result<()>;
 
     /// True when git_platforms + llm_providers + app_settings are all empty
     /// — the trigger condition for the one-shot `ui-state.toml` import

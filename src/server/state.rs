@@ -237,6 +237,11 @@ pub struct AppState {
     pub ui_state_env: Option<crate::server::api::config::persist::UiStateEnvOverrides>,
     /// Finding feedback store for user verdicts (optional).
     pub feedback_store: Option<Arc<FeedbackStore>>,
+    /// Persistent database handle (0.10.0; PG primary / SQLite fallback).
+    /// `None` = 0.9 behaviour (pure in-memory + ui-state.toml file), used by
+    /// tests, embedded use, and the `REVIEW_DISABLE_DB=1` escape hatch. Set
+    /// after pool + migrate succeed at startup, before the config replay.
+    pub db: Option<Arc<crate::store::SqlxStore>>,
     /// Self-upgrade single-flight store + GitHub check cache + install method.
     pub upgrade: UpgradeStore,
     /// In-memory models.dev catalog cache (24h TTL enforced by handlers).
@@ -265,6 +270,7 @@ impl AppState {
             ui_state_path: None,
             ui_state_env: None,
             feedback_store: None,
+            db: None,
             upgrade: UpgradeStore::new(),
             catalog: CatalogStore::new(),
         }

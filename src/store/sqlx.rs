@@ -12,13 +12,102 @@ use async_trait::async_trait;
 use chrono::Utc;
 
 use crate::models::{GitPlatformConfig, LLMConfig};
-use crate::server::api::config::persist::PersistedGitlabConfig;
+use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
 
 use super::rows;
 use super::traits::ConfigStore;
 use super::{encode_ts, SqlxStore};
 
 const LEGACY_GITLAB_KEY: &str = "gitlab";
+const UI_KEY: &str = "ui";
+
+type AnyTx<'a> = ::sqlx::Transaction<'a, ::sqlx::Any>;
+
+/// DELETE + re-INSERT the whole git_platforms set inside `tx`.
+async fn replace_git_platforms_in(tx: &mut AnyTx<'_>, platforms: &[GitPlatformConfig], key: &[u8; 32]) -> Result<()> {
+    let now = encode_ts(&Utc::now());
+    ::sqlx::query("DELETE FROM git_platforms")
+        .execute(&mut **tx)
+        .await
+        .context("clear git_platforms")?;
+    for platform in platforms {
+        let row = rows::git_platform_to_row(platform, uuid::Uuid::new_v4().to_string(), now.clone(), key)?;
+        ::sqlx::query(
+            "INSERT INTO git_platforms (id, name, type, base_url, internal_base_url, token, \
+             webhook_secret, webhook_signing_secret, enabled, raw, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.id)
+        .bind(&row.name)
+        .bind(&row.platform_type)
+        .bind(&row.base_url)
+        .bind(&row.internal_base_url)
+        .bind(&row.token)
+        .bind(&row.webhook_secret)
+        .bind(&row.webhook_signing_secret)
+        .bind(i64::from(row.enabled))
+        .bind(&row.raw)
+        .bind(&row.updated_at)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("insert git_platform {:?}", platform.name))?;
+    }
+    Ok(())
+}
+
+/// DELETE + re-INSERT the whole llm_providers set inside `tx`.
+async fn replace_llm_providers_in(tx: &mut AnyTx<'_>, providers: &[LLMConfig], key: &[u8; 32]) -> Result<()> {
+    let now = encode_ts(&Utc::now());
+    ::sqlx::query("DELETE FROM llm_providers")
+        .execute(&mut **tx)
+        .await
+        .context("clear llm_providers")?;
+    for (position, config) in providers.iter().enumerate() {
+        let row = rows::llm_to_row(config, position, uuid::Uuid::new_v4().to_string(), now.clone(), key)?;
+        ::sqlx::query(
+            "INSERT INTO llm_providers (id, provider, model, api_base, api_key, max_tokens, \
+             temperature, raw, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.id)
+        .bind(&row.provider)
+        .bind(&row.model)
+        .bind(&row.api_base)
+        .bind(&row.api_key)
+        .bind(row.max_tokens)
+        .bind(row.temperature)
+        .bind(&row.raw)
+        .bind(&row.updated_at)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("insert llm_provider {:?}", config.provider))?;
+    }
+    Ok(())
+}
+
+/// Upsert one app_settings row inside `tx`. Syntax is shared by PG and
+/// SQLite (≥3.24); no RETURNING.
+async fn upsert_setting_in(tx: &mut AnyTx<'_>, key: &str, value: &serde_json::Value) -> Result<()> {
+    ::sqlx::query(
+        "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) \
+         ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .bind(key)
+    .bind(value.to_string())
+    .bind(encode_ts(&Utc::now()))
+    .execute(&mut **tx)
+    .await
+    .with_context(|| format!("failed to save app_setting {key:?}"))?;
+    Ok(())
+}
+
+async fn delete_setting_in(tx: &mut AnyTx<'_>, key: &str) -> Result<()> {
+    ::sqlx::query("DELETE FROM app_settings WHERE key = ?")
+        .bind(key)
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("failed to delete app_setting {key:?}"))?;
+    Ok(())
+}
 
 #[async_trait]
 impl ConfigStore for SqlxStore {
@@ -84,34 +173,8 @@ impl ConfigStore for SqlxStore {
     }
 
     async fn replace_git_platforms(&self, platforms: &[GitPlatformConfig]) -> Result<()> {
-        let now = encode_ts(&Utc::now());
         let mut tx = self.pool().begin().await.context("begin replace_git_platforms")?;
-        ::sqlx::query("DELETE FROM git_platforms")
-            .execute(&mut *tx)
-            .await
-            .context("clear git_platforms")?;
-        for platform in platforms {
-            let row = rows::git_platform_to_row(platform, uuid::Uuid::new_v4().to_string(), now.clone(), &self.key)?;
-            ::sqlx::query(
-                "INSERT INTO git_platforms (id, name, type, base_url, internal_base_url, token, \
-                 webhook_secret, webhook_signing_secret, enabled, raw, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&row.id)
-            .bind(&row.name)
-            .bind(&row.platform_type)
-            .bind(&row.base_url)
-            .bind(&row.internal_base_url)
-            .bind(&row.token)
-            .bind(&row.webhook_secret)
-            .bind(&row.webhook_signing_secret)
-            .bind(i64::from(row.enabled))
-            .bind(&row.raw)
-            .bind(&row.updated_at)
-            .execute(&mut *tx)
-            .await
-            .with_context(|| format!("insert git_platform {:?}", platform.name))?;
-        }
+        replace_git_platforms_in(&mut tx, platforms, &self.key).await?;
         tx.commit().await.context("commit replace_git_platforms")?;
         Ok(())
     }
@@ -149,37 +212,8 @@ impl ConfigStore for SqlxStore {
     }
 
     async fn replace_llm_providers(&self, providers: &[LLMConfig]) -> Result<()> {
-        let now = encode_ts(&Utc::now());
         let mut tx = self.pool().begin().await.context("begin replace_llm_providers")?;
-        ::sqlx::query("DELETE FROM llm_providers")
-            .execute(&mut *tx)
-            .await
-            .context("clear llm_providers")?;
-        for (position, config) in providers.iter().enumerate() {
-            let row = rows::llm_to_row(
-                config,
-                position,
-                uuid::Uuid::new_v4().to_string(),
-                now.clone(),
-                &self.key,
-            )?;
-            ::sqlx::query(
-                "INSERT INTO llm_providers (id, provider, model, api_base, api_key, max_tokens, \
-                 temperature, raw, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            )
-            .bind(&row.id)
-            .bind(&row.provider)
-            .bind(&row.model)
-            .bind(&row.api_base)
-            .bind(&row.api_key)
-            .bind(row.max_tokens)
-            .bind(row.temperature)
-            .bind(&row.raw)
-            .bind(&row.updated_at)
-            .execute(&mut *tx)
-            .await
-            .with_context(|| format!("insert llm_provider {:?}", config.provider))?;
-        }
+        replace_llm_providers_in(&mut tx, providers, &self.key).await?;
         tx.commit().await.context("commit replace_llm_providers")?;
         Ok(())
     }
@@ -207,17 +241,30 @@ impl ConfigStore for SqlxStore {
     }
 
     async fn save_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
-        // Upsert syntax is shared by PG and SQLite (≥3.24); no RETURNING.
-        ::sqlx::query(
-            "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) \
-             ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-        )
-        .bind(key)
-        .bind(value.to_string())
-        .bind(encode_ts(&Utc::now()))
-        .execute(self.pool())
-        .await
-        .with_context(|| format!("failed to save app_setting {key:?}"))?;
+        let mut tx = self.pool().begin().await.context("begin save_setting")?;
+        upsert_setting_in(&mut tx, key, value).await?;
+        tx.commit().await.context("commit save_setting")?;
+        Ok(())
+    }
+
+    async fn save_ui_state(&self, state: &UiStateFile) -> Result<()> {
+        let mut tx = self.pool().begin().await.context("begin save_ui_state")?;
+        replace_git_platforms_in(&mut tx, &state.git_platforms, &self.key).await?;
+        replace_llm_providers_in(&mut tx, &state.llm, &self.key).await?;
+        let gitlab = &state.gitlab;
+        if gitlab.token.is_empty() && gitlab.webhook_secret.is_empty() && gitlab.webhook_signing_secret.is_empty() {
+            // Unset is unset: an all-empty legacy gitlab value removes the row
+            // instead of storing an empty JSON shell.
+            delete_setting_in(&mut tx, LEGACY_GITLAB_KEY).await?;
+        } else {
+            let value = rows::legacy_gitlab_to_value(gitlab, &self.key)?;
+            upsert_setting_in(&mut tx, LEGACY_GITLAB_KEY, &value).await?;
+        }
+        if let Some(ui) = &state.ui {
+            let value = serde_json::to_value(ui).context("serialize ui projection")?;
+            upsert_setting_in(&mut tx, UI_KEY, &value).await?;
+        }
+        tx.commit().await.context("commit save_ui_state")?;
         Ok(())
     }
 

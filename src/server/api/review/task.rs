@@ -72,7 +72,15 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
                         },
                     })
                     .collect();
-                let raw_comment = output.aggregated.as_ref().map(|agg| agg.markdown.clone());
+                let raw_comment = output
+                    .aggregated
+                    .as_ref()
+                    .map(|agg| agg.markdown.clone())
+                    // §8.3: no aggregator output → fall back to the lead
+                    // consolidation TL;DR so the "full comment" tab is not
+                    // empty; empty strings degrade to None (empty state).
+                    .or_else(|| output.consolidated.as_ref().map(|c| c.assessment.tl_dr.clone()))
+                    .filter(|s| !s.is_empty());
                 (experts, raw_comment)
             }
             Err(_) => (Vec::new(), None),
@@ -290,4 +298,106 @@ pub(crate) async fn enqueue_review(
         }
     });
     task_id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{AggregatedReport, OverallAssessment, ReviewOutput, RiskLevel};
+    use crate::server::task_queue::SourceMeta;
+    use crate::team::lead_consolidator::ConsolidatedReport;
+
+    fn entry_with_result(result: Option<serde_json::Value>) -> TaskEntry {
+        TaskEntry {
+            task_id: uuid::Uuid::new_v4(),
+            state: TaskState::Completed,
+            created_at: chrono::Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result,
+            error: None,
+            request: None,
+            source_meta: SourceMeta::default(),
+            progress: None,
+            expert_name: None,
+        }
+    }
+
+    fn consolidated_with_tl_dr(tl_dr: &str) -> ConsolidatedReport {
+        ConsolidatedReport {
+            findings: Vec::new(),
+            low_confidence_removed: 0,
+            duplicates_merged: 0,
+            conflicts: Vec::new(),
+            assessment: OverallAssessment {
+                score: 80,
+                risk_level: RiskLevel::Low,
+                lead_override: None,
+                tl_dr: tl_dr.to_string(),
+                unverified: false,
+                coverage_insufficient: false,
+            },
+            consensus_reached: true,
+            total_files: 0,
+            reviewed_files: 0,
+            unreviewed_files: Vec::new(),
+            coverage: None,
+            adjudicated_removed: Vec::new(),
+        }
+    }
+
+    fn aggregated_with_markdown(markdown: &str) -> AggregatedReport {
+        AggregatedReport {
+            findings: Vec::new(),
+            markdown: markdown.to_string(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+        }
+    }
+
+    /// §8.3 regression: the aggregator markdown wins when both are present.
+    #[test]
+    fn raw_comment_prefers_aggregated_markdown() {
+        let mut output = ReviewOutput::new(Vec::new());
+        output.aggregated = Some(aggregated_with_markdown("# Aggregated"));
+        output.consolidated = Some(consolidated_with_tl_dr("tldr"));
+        let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
+
+        let detail = build_review_detail(&entry);
+        assert_eq!(detail.raw_comment.as_deref(), Some("# Aggregated"));
+    }
+
+    /// §8.3: no aggregator output → the consolidation TL;DR fills the
+    /// "full comment" tab.
+    #[test]
+    fn raw_comment_falls_back_to_consolidated_tl_dr() {
+        let mut output = ReviewOutput::new(Vec::new());
+        output.consolidated = Some(consolidated_with_tl_dr("TL;DR: looks fine"));
+        let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
+
+        let detail = build_review_detail(&entry);
+        assert_eq!(detail.raw_comment.as_deref(), Some("TL;DR: looks fine"));
+    }
+
+    /// §8.3: neither source present (or only empty strings) → None, the
+    /// pre-fix empty-state semantics.
+    #[test]
+    fn raw_comment_none_when_nothing_to_show() {
+        // Both absent.
+        let output = ReviewOutput::new(Vec::new());
+        let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
+        assert!(build_review_detail(&entry).raw_comment.is_none());
+
+        // Present but empty → filtered out, same empty state.
+        let mut output = ReviewOutput::new(Vec::new());
+        output.aggregated = Some(aggregated_with_markdown(""));
+        output.consolidated = Some(consolidated_with_tl_dr(""));
+        let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
+        assert!(build_review_detail(&entry).raw_comment.is_none());
+
+        // No parseable result at all.
+        let entry = entry_with_result(None);
+        assert!(build_review_detail(&entry).raw_comment.is_none());
+    }
 }

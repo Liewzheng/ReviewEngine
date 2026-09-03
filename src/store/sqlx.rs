@@ -9,13 +9,14 @@
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
+use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 use super::rows;
-use super::traits::ConfigStore;
+use super::traits::{ConfigStore, ReviewStore};
 use super::{encode_ts, SqlxStore};
 
 const LEGACY_GITLAB_KEY: &str = "gitlab";
@@ -281,6 +282,163 @@ impl ConfigStore for SqlxStore {
     }
 }
 
+// ─── ReviewStore (reviews / expert_reports, step 4) ───
+
+/// Warn when a per-task UPDATE matched no row — the create write-through
+/// must have failed earlier, so the task's history is already lost; the
+/// warning keeps that visible without failing the review path.
+fn warn_missing_row(op: &str, task_id: &uuid::Uuid, rows_affected: u64) {
+    if rows_affected == 0 {
+        tracing::warn!("{op}: no reviews row for task {task_id} (earlier write-through presumably failed)");
+    }
+}
+
+#[async_trait]
+impl ReviewStore for SqlxStore {
+    async fn create(&self, entry: &TaskEntry) -> Result<()> {
+        let row = rows::task_entry_to_row(entry)?;
+        ::sqlx::query(
+            "INSERT INTO reviews (task_id, state, source_meta, project, repository, request, \
+             result, error, progress, created_at, started_at, completed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&row.task_id)
+        .bind(&row.state)
+        .bind(&row.source_meta)
+        .bind(&row.project)
+        .bind(&row.repository)
+        .bind(&row.request)
+        .bind(&row.result)
+        .bind(&row.error)
+        .bind(row.progress)
+        .bind(&row.created_at)
+        .bind(&row.started_at)
+        .bind(&row.completed_at)
+        .execute(self.pool())
+        .await
+        .with_context(|| format!("insert review {}", row.task_id))?;
+        Ok(())
+    }
+
+    async fn mark_started(&self, task_id: uuid::Uuid, started_at: DateTime<Utc>) -> Result<()> {
+        let res = ::sqlx::query("UPDATE reviews SET state = 'running', started_at = ? WHERE task_id = ?")
+            .bind(encode_ts(&started_at))
+            .bind(task_id.to_string())
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("mark review {task_id} started"))?;
+        warn_missing_row("mark_started", &task_id, res.rows_affected());
+        Ok(())
+    }
+
+    async fn fill_source_meta(&self, task_id: uuid::Uuid, meta: &SourceMeta) -> Result<()> {
+        let res = ::sqlx::query("UPDATE reviews SET source_meta = ?, project = ?, repository = ? WHERE task_id = ?")
+            .bind(rows::encode_source_meta(meta)?)
+            .bind(&meta.project)
+            .bind(&meta.repository)
+            .bind(task_id.to_string())
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("fill source_meta for review {task_id}"))?;
+        warn_missing_row("fill_source_meta", &task_id, res.rows_affected());
+        Ok(())
+    }
+
+    async fn complete(&self, entry: &TaskEntry) -> Result<()> {
+        let row = rows::task_entry_to_row(entry)?;
+        let report_created_at = row.completed_at.clone().unwrap_or_else(|| encode_ts(&Utc::now()));
+        let mut tx = self.pool().begin().await.context("begin complete review")?;
+        let res = ::sqlx::query(
+            "UPDATE reviews SET state = ?, result = ?, error = ?, completed_at = ?, progress = ? \
+             WHERE task_id = ?",
+        )
+        .bind(&row.state)
+        .bind(&row.result)
+        .bind(&row.error)
+        .bind(&row.completed_at)
+        .bind(row.progress)
+        .bind(&row.task_id)
+        .execute(&mut *tx)
+        .await
+        .with_context(|| format!("complete review {}", row.task_id))?;
+        warn_missing_row("complete", &entry.task_id, res.rows_affected());
+        // Replace (not upsert) so a retried-then-completed task cannot hit
+        // the (task_id, expert_name) PK with stale rows.
+        ::sqlx::query("DELETE FROM expert_reports WHERE task_id = ?")
+            .bind(&row.task_id)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("clear expert_reports for {}", row.task_id))?;
+        if let Some(result) = &entry.result {
+            match rows::expert_report_rows(&entry.task_id, result, report_created_at) {
+                Ok(report_rows) => {
+                    for report in &report_rows {
+                        ::sqlx::query(
+                            "INSERT INTO expert_reports (task_id, expert_name, report, duration_ms, created_at) \
+                             VALUES (?, ?, ?, ?, ?)",
+                        )
+                        .bind(&report.task_id)
+                        .bind(&report.expert_name)
+                        .bind(&report.report)
+                        .bind(report.duration_ms)
+                        .bind(&report.created_at)
+                        .execute(&mut *tx)
+                        .await
+                        .with_context(|| {
+                            format!("insert expert_report {:?} for {}", report.expert_name, report.task_id)
+                        })?;
+                    }
+                }
+                // A result that is not a serialized ReviewOutput is not a
+                // transient failure — keep the terminal review row, drop the
+                // per-expert split.
+                Err(e) => tracing::warn!(
+                    "could not split expert reports for task {}: {e:#}; storing the review row only",
+                    entry.task_id
+                ),
+            }
+        }
+        tx.commit()
+            .await
+            .with_context(|| format!("commit complete review {}", row.task_id))?;
+        Ok(())
+    }
+
+    async fn mark_cancelled(&self, task_id: uuid::Uuid, completed_at: DateTime<Utc>) -> Result<()> {
+        let res = ::sqlx::query("UPDATE reviews SET state = 'cancelled', completed_at = ? WHERE task_id = ?")
+            .bind(encode_ts(&completed_at))
+            .bind(task_id.to_string())
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("mark review {task_id} cancelled"))?;
+        warn_missing_row("mark_cancelled", &task_id, res.rows_affected());
+        Ok(())
+    }
+
+    async fn mark_retry(&self, task_id: uuid::Uuid) -> Result<()> {
+        let res =
+            ::sqlx::query("UPDATE reviews SET state = 'pending', error = NULL, completed_at = NULL WHERE task_id = ?")
+                .bind(task_id.to_string())
+                .execute(self.pool())
+                .await
+                .with_context(|| format!("mark review {task_id} retried"))?;
+        warn_missing_row("mark_retry", &task_id, res.rows_affected());
+        Ok(())
+    }
+
+    async fn mark_interrupted(&self, now: DateTime<Utc>) -> Result<u64> {
+        let res = ::sqlx::query(
+            "UPDATE reviews SET state = 'failed', error = 'interrupted: server restarted', completed_at = ? \
+             WHERE state IN ('pending', 'running')",
+        )
+        .bind(encode_ts(&now))
+        .execute(self.pool())
+        .await
+        .context("interrupted-task sweep failed")?;
+        Ok(res.rows_affected())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,5 +649,144 @@ mod tests {
         assert!(store.config_tables_empty().await.unwrap());
         store.save_setting("ui", &serde_json::json!({})).await.unwrap();
         assert!(!store.config_tables_empty().await.unwrap());
+    }
+
+    // ─── ReviewStore (step 4) ───
+
+    use crate::server::task_queue::{TaskEntry, TaskState};
+
+    /// (d) the startup sweep flips ONLY pending/running rows to
+    /// failed/interrupted; terminal rows are untouched.
+    #[tokio::test]
+    async fn mark_interrupted_sweeps_only_pending_and_running() {
+        let store = fresh_store().await;
+        let now = Utc::now();
+        for (id, state) in [
+            ("t-pending", "pending"),
+            ("t-running", "running"),
+            ("t-completed", "completed"),
+            ("t-failed", "failed"),
+            ("t-cancelled", "cancelled"),
+        ] {
+            ::sqlx::query("INSERT INTO reviews (task_id, state, created_at) VALUES (?, ?, ?)")
+                .bind(id)
+                .bind(state)
+                .bind(encode_ts(&now))
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+
+        let swept = ReviewStore::mark_interrupted(&store, now).await.unwrap();
+        assert_eq!(swept, 2, "only pending + running are swept");
+
+        let rows: Vec<(String, String, Option<String>, Option<String>)> =
+            ::sqlx::query_as("SELECT task_id, state, error, completed_at FROM reviews ORDER BY task_id")
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        for (id, state, error, completed_at) in &rows {
+            match id.as_str() {
+                "t-pending" | "t-running" => {
+                    assert_eq!(state, "failed");
+                    assert_eq!(error.as_deref(), Some("interrupted: server restarted"));
+                    assert!(completed_at.is_some(), "sweep stamps completed_at");
+                }
+                other => {
+                    assert_eq!(state, &other[2..], "terminal row {other} must be untouched");
+                    assert!(error.is_none() && completed_at.is_none());
+                }
+            }
+        }
+    }
+
+    /// (task_id, state, source_meta, project, repository, request, result,
+    /// error, progress, created_at, started_at, completed_at)
+    type RawReviewRow = (
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        String,
+        Option<String>,
+        Option<String>,
+    );
+
+    /// reviews row codec: create → read raw columns → decode back to a
+    /// TaskEntry that matches the original.
+    #[tokio::test]
+    async fn review_row_codec_round_trip() {
+        let store = fresh_store().await;
+        let entry = TaskEntry {
+            task_id: uuid::Uuid::new_v4(),
+            state: TaskState::Pending,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            error: None,
+            request: Some(serde_json::json!({"mr_url": "https://gitlab.example/g/p/-/merge_requests/7"})),
+            source_meta: crate::server::task_queue::SourceMeta {
+                mr_title: Some("Add login".into()),
+                project: Some("g/p".into()),
+                repository: Some("p".into()),
+                ..Default::default()
+            },
+            progress: None,
+            expert_name: None,
+        };
+        ReviewStore::create(&store, &entry).await.unwrap();
+
+        let (
+            task_id,
+            state,
+            source_meta,
+            project,
+            repository,
+            request,
+            result,
+            error,
+            progress,
+            created_at,
+            started_at,
+            completed_at,
+        ): RawReviewRow = ::sqlx::query_as(
+            "SELECT task_id, state, source_meta, project, repository, request, result, error, \
+             progress, created_at, started_at, completed_at FROM reviews WHERE task_id = ?",
+        )
+        .bind(entry.task_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        // Materialized filter columns are in sync with source_meta.
+        assert_eq!(project.as_deref(), Some("g/p"));
+        assert_eq!(repository.as_deref(), Some("p"));
+        let decoded = rows::review_from_row(rows::ReviewRow {
+            task_id,
+            state,
+            source_meta,
+            project,
+            repository,
+            request,
+            result,
+            error,
+            progress,
+            created_at,
+            started_at,
+            completed_at,
+        })
+        .unwrap();
+        assert_eq!(decoded.task_id, entry.task_id);
+        assert_eq!(decoded.state, entry.state);
+        assert_eq!(decoded.request, entry.request);
+        assert_eq!(decoded.source_meta.mr_title.as_deref(), Some("Add login"));
+        assert_eq!(decoded.source_meta.project.as_deref(), Some("g/p"));
+        assert_eq!(decoded.created_at, entry.created_at);
+        assert!(decoded.expert_name.is_none(), "live-only field is not persisted");
     }
 }

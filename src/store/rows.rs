@@ -175,3 +175,149 @@ pub(crate) fn legacy_gitlab_from_value(value: &Value, key: &[u8; 32]) -> Result<
         webhook_signing_secret: field("webhook_signing_secret")?,
     })
 }
+
+// ─── Review domain (step 4): reviews / expert_reports ⇄ TaskEntry ───
+
+use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
+use crate::store::{decode_ts, encode_ts};
+use uuid::Uuid;
+
+/// At-rest form of one `reviews` row (design/persistence.md §3.2). JSON
+/// columns (`source_meta`, `request`, `result`) are serialized TEXT;
+/// timestamps are RFC 3339 UTC strings via `encode_ts` / `decode_ts`.
+#[derive(Debug)]
+pub(crate) struct ReviewRow {
+    pub task_id: String,
+    pub state: String,
+    pub source_meta: String,
+    /// Materialized filter columns kept in sync with `source_meta` (§3.2).
+    pub project: Option<String>,
+    pub repository: Option<String>,
+    pub request: Option<String>,
+    pub result: Option<String>,
+    pub error: Option<String>,
+    pub progress: Option<i64>,
+    pub created_at: String,
+    pub started_at: Option<String>,
+    pub completed_at: Option<String>,
+}
+
+fn opt_json(value: &Option<Value>, what: &str) -> Result<Option<String>> {
+    value
+        .as_ref()
+        .map(|v| serde_json::to_string(v).with_context(|| format!("serialize {what}")))
+        .transpose()
+}
+
+/// `TaskState` → the `reviews.state` string. Single source of truth is the
+/// API projection mapping (`task_status_str`); the store reuses it so the
+/// DB vocabulary can never drift from the SSE / API vocabulary (§5.3).
+pub(crate) fn task_state_str(state: &TaskState) -> &'static str {
+    crate::server::api::review::task_status_str(state)
+}
+
+pub(crate) fn task_state_from_str(s: &str) -> Result<TaskState> {
+    match s {
+        "pending" => Ok(TaskState::Pending),
+        "running" => Ok(TaskState::Running),
+        "completed" => Ok(TaskState::Completed),
+        "failed" => Ok(TaskState::Failed),
+        "cancelled" => Ok(TaskState::Cancelled),
+        other => anyhow::bail!("unknown reviews.state value: {other:?}"),
+    }
+}
+
+pub(crate) fn encode_source_meta(meta: &SourceMeta) -> Result<String> {
+    serde_json::to_string(meta).context("serialize source_meta")
+}
+
+pub(crate) fn decode_source_meta(raw: &str) -> Result<SourceMeta> {
+    serde_json::from_str(raw).with_context(|| format!("reviews.source_meta holds invalid JSON: {raw:?}"))
+}
+
+pub(crate) fn task_entry_to_row(entry: &TaskEntry) -> Result<ReviewRow> {
+    Ok(ReviewRow {
+        task_id: entry.task_id.to_string(),
+        state: task_state_str(&entry.state).to_string(),
+        source_meta: encode_source_meta(&entry.source_meta)?,
+        project: entry.source_meta.project.clone(),
+        repository: entry.source_meta.repository.clone(),
+        request: opt_json(&entry.request, "reviews.request")?,
+        result: opt_json(&entry.result, "reviews.result")?,
+        error: entry.error.clone(),
+        progress: entry.progress.map(i64::from),
+        created_at: encode_ts(&entry.created_at),
+        started_at: entry.started_at.as_ref().map(encode_ts),
+        completed_at: entry.completed_at.as_ref().map(encode_ts),
+    })
+}
+
+/// Decode a `reviews` row back into a [`TaskEntry`]. Used by tests now and
+/// by the history read path in the next step (§8.1).
+#[allow(dead_code)]
+pub(crate) fn review_from_row(row: ReviewRow) -> Result<TaskEntry> {
+    fn opt_ts(raw: Option<String>, what: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
+        raw.as_deref()
+            .map(|s| decode_ts(s).with_context(|| format!("reviews.{what}")))
+            .transpose()
+    }
+    let state = task_state_from_str(&row.state)?;
+    Ok(TaskEntry {
+        task_id: Uuid::parse_str(&row.task_id)
+            .with_context(|| format!("reviews.task_id is not a UUID: {:?}", row.task_id))?,
+        state,
+        created_at: decode_ts(&row.created_at).context("reviews.created_at")?,
+        started_at: opt_ts(row.started_at, "started_at")?,
+        completed_at: opt_ts(row.completed_at, "completed_at")?,
+        result: row
+            .result
+            .map(|s| serde_json::from_str(&s).context("reviews.result holds invalid JSON"))
+            .transpose()?,
+        error: row.error,
+        request: row
+            .request
+            .map(|s| serde_json::from_str(&s).context("reviews.request holds invalid JSON"))
+            .transpose()?,
+        source_meta: decode_source_meta(&row.source_meta)?,
+        progress: row
+            .progress
+            .map(|p| u8::try_from(p).with_context(|| format!("reviews.progress out of range: {p}")))
+            .transpose()?,
+        // Live-only fields: the DB is the history source, the in-memory
+        // `expert_name` (current active expert) is not persisted.
+        expert_name: None,
+    })
+}
+
+/// At-rest form of one `expert_reports` row.
+#[derive(Debug)]
+pub(crate) struct ExpertReportRow {
+    pub task_id: String,
+    pub expert_name: String,
+    pub report: String,
+    /// Per-expert duration: always NULL for now — `TaskEntry` does not track
+    /// it yet (design/persistence.md §5.4 note).
+    pub duration_ms: Option<i64>,
+    pub created_at: String,
+}
+
+/// Split a serialized `ReviewOutput` (`reviews.result`) into one
+/// `expert_reports` row per `reports[]` entry.
+pub(crate) fn expert_report_rows(task_id: &Uuid, result: &Value, created_at: String) -> Result<Vec<ExpertReportRow>> {
+    let output: crate::models::ReviewOutput =
+        serde_json::from_value(result.clone()).context("reviews.result is not a serialized ReviewOutput")?;
+    output
+        .reports
+        .iter()
+        .map(|report| {
+            Ok(ExpertReportRow {
+                task_id: task_id.to_string(),
+                expert_name: report.expert_name.clone(),
+                report: serde_json::to_string(report)
+                    .with_context(|| format!("serialize expert report {:?}", report.expert_name))?,
+                duration_ms: None,
+                created_at: created_at.clone(),
+            })
+        })
+        .collect()
+}

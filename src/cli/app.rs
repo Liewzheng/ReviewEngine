@@ -282,16 +282,34 @@ pub async fn run() -> Result<()> {
             // 0.10.0 persistence (design/persistence.md §6.1, strict order):
             // 1) resolve DB URL → pool → migrate (failure aborts startup;
             //    REVIEW_DISABLE_DB=1 bypasses to 0.9 behaviour);
-            // 2) TODO(梁序, step 4): §5.3 interrupted sweep — UPDATE reviews
-            //    SET state='failed', error='interrupted: server restarted',
-            //    completed_at=? WHERE state IN ('pending','running') goes
-            //    here, after migrate and before the config replay;
+            // 2) §5.3 interrupted sweep + TaskStore write-through injection
+            //    (below, right after migrate);
             // 3) one-shot ui-state.toml import (single transaction; failure
             //    keeps the file and falls back to the file replay below);
             // 4) replay the DB state through the same apply_ui_config path.
             app_state.db = review_engine::server::api::config::persist::bootstrap_database()
                 .await?
                 .map(Arc::new);
+            if let Some(store) = app_state.db.clone() {
+                // §5.3: tasks still pending/running when the previous process
+                // died are marked failed with an 'interrupted' error. They are
+                // NOT re-queued automatically (LLM quota / duplicate MR
+                // comments); the user retries from the history page.
+                use review_engine::store::traits::ReviewStore;
+                match store.mark_interrupted(chrono::Utc::now()).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::warn!(
+                        "marked {n} interrupted review task(s) as failed (server restarted); \
+                         they can be retried manually from the history page"
+                    ),
+                    Err(e) => tracing::error!("interrupted-task sweep failed: {e:#}"),
+                }
+                // Write-through injection: rebuild the (still untouched) task
+                // store with the DB attached (§5.2).
+                let mut task_store = review_engine::server::task_queue::TaskStore::new();
+                task_store.set_db(store);
+                app_state.task_store = Some(Arc::new(task_store));
+            }
             let state = Arc::new(app_state);
             let mut config_replayed = false;
             if let Some(store) = state.db.clone() {

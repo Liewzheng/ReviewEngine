@@ -157,9 +157,8 @@ pub(crate) fn encode_ts(ts: &DateTime<Utc>) -> String {
     ts.to_rfc3339_opts(SecondsFormat::Micros, true)
 }
 
-/// Decode a timestamp produced by [`encode_ts`]. Used by tests and by the
-/// review-domain codecs (later steps).
-#[allow(dead_code)]
+/// Decode a timestamp produced by [`encode_ts`]. Used by the review-domain
+/// codecs ([`rows`]) and by tests.
 pub(crate) fn decode_ts(s: &str) -> Result<DateTime<Utc>> {
     Ok(DateTime::parse_from_rfc3339(s)
         .with_context(|| format!("invalid RFC 3339 timestamp in database: {s:?}"))?

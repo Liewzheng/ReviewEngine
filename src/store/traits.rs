@@ -2,8 +2,8 @@
 //! `ConfigStore` (git_platforms / llm_providers / app_settings),
 //! `DiscussionStore` (mr_discussions).
 //!
-//! Only `ConfigStore` is defined so far (step 2 of the 0.10.0 persistence
-//! rollout); the other two land with their implementations.
+//! `ConfigStore` landed in step 2, `ReviewStore` in step 4 of the 0.10.0
+//! persistence rollout; `DiscussionStore` lands with its implementation.
 //!
 //! Semantics follow `UiStateFile` (design/persistence.md §4.2, §6.2): each
 //! domain is read and replaced AS A WHOLE — `PUT /config` resolves the full
@@ -12,9 +12,12 @@
 
 use anyhow::Result;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use uuid::Uuid;
 
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
+use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 /// Persistence boundary for UI-managed configuration.
 ///
@@ -71,4 +74,44 @@ pub trait ConfigStore: Send + Sync {
     /// — the trigger condition for the one-shot `ui-state.toml` import
     /// (design/persistence.md §6.1 step 3).
     async fn config_tables_empty(&self) -> Result<bool>;
+}
+
+/// Persistence boundary for review tasks (`reviews` + `expert_reports`).
+///
+/// Write-through contract (design/persistence.md §5): the in-memory
+/// `TaskStore` stays the hot path / SSE source; every lifecycle transition
+/// is mirrored here synchronously so the DB is the source of truth for
+/// history across restarts. Callers treat failures as non-fatal (log and
+/// continue) — a missing history row must never block a review.
+#[async_trait]
+pub trait ReviewStore: Send + Sync {
+    /// INSERT a new `reviews` row from the freshly created entry
+    /// (`state = 'pending'`, `request` / `source_meta` serialized).
+    async fn create(&self, entry: &TaskEntry) -> Result<()>;
+
+    /// `UPDATE state='running', started_at=?` for a task claimed by a worker.
+    async fn mark_started(&self, task_id: Uuid, started_at: DateTime<Utc>) -> Result<()>;
+
+    /// `UPDATE source_meta=?` plus the materialized `project` / `repository`
+    /// filter columns (§3.2: read path must never touch JSON extraction).
+    async fn fill_source_meta(&self, task_id: Uuid, meta: &SourceMeta) -> Result<()>;
+
+    /// Terminal write, in ONE transaction: `UPDATE reviews` with
+    /// state/result/error/completed_at/progress, then replace the task's
+    /// `expert_reports` rows (delete + re-INSERT per `result.reports` entry,
+    /// so a retried-then-completed task cannot hit the PK).
+    async fn complete(&self, entry: &TaskEntry) -> Result<()>;
+
+    /// `UPDATE state='cancelled', completed_at=?` (cancel semantics of
+    /// `TaskStore::delete`).
+    async fn mark_cancelled(&self, task_id: Uuid, completed_at: DateTime<Utc>) -> Result<()>;
+
+    /// `UPDATE state='pending', error=NULL, completed_at=NULL` (retry:
+    /// `Failed → Pending`).
+    async fn mark_retry(&self, task_id: Uuid) -> Result<()>;
+
+    /// Startup sweep (§5.3): every row still `pending` / `running` when the
+    /// previous process died becomes `failed` with
+    /// `error='interrupted: server restarted'`. Returns affected rows.
+    async fn mark_interrupted(&self, now: DateTime<Utc>) -> Result<u64>;
 }

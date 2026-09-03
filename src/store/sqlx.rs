@@ -3,6 +3,9 @@
 //!
 //! Dialect discipline (§3.1): `?` placeholders only, no `RETURNING`, JSON as
 //! bound `String`, timestamps via `encode_ts` / `decode_ts` (RFC 3339 TEXT).
+//! Every statement passes through [`crate::store::adapt_sql`] exactly once
+//! before construction: PostgreSQL gets `?` rewritten to `$1..$n` (the Any
+//! driver passes SQL through verbatim), SQLite borrows the text unchanged.
 //! NOTE: this file is itself named `sqlx.rs` — the sibling module shadows
 //! the extern crate lexically, so every reference to the real sqlx crate
 //! must use the absolute `::sqlx::` path.
@@ -17,7 +20,7 @@ use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 use super::rows;
 use super::traits::{ConfigStore, DiscussionNote, DiscussionStore, ReviewListQuery, ReviewStore};
-use super::{encode_ts, SqlxStore};
+use super::{adapt_sql, encode_ts, BackendKind, SqlxStore};
 
 const LEGACY_GITLAB_KEY: &str = "gitlab";
 const UI_KEY: &str = "ui";
@@ -25,84 +28,103 @@ const UI_KEY: &str = "ui";
 type AnyTx<'a> = ::sqlx::Transaction<'a, ::sqlx::Any>;
 
 /// DELETE + re-INSERT the whole git_platforms set inside `tx`.
-async fn replace_git_platforms_in(tx: &mut AnyTx<'_>, platforms: &[GitPlatformConfig], key: &[u8; 32]) -> Result<()> {
+async fn replace_git_platforms_in(
+    tx: &mut AnyTx<'_>,
+    kind: BackendKind,
+    platforms: &[GitPlatformConfig],
+    key: &[u8; 32],
+) -> Result<()> {
     let now = encode_ts(&Utc::now());
-    ::sqlx::query("DELETE FROM git_platforms")
+    let delete = adapt_sql(kind, "DELETE FROM git_platforms");
+    ::sqlx::query(&delete)
         .execute(&mut **tx)
         .await
         .context("clear git_platforms")?;
+    let insert = adapt_sql(
+        kind,
+        "INSERT INTO git_platforms (id, name, type, base_url, internal_base_url, token, \
+         webhook_secret, webhook_signing_secret, enabled, raw, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
     for platform in platforms {
         let row = rows::git_platform_to_row(platform, uuid::Uuid::new_v4().to_string(), now.clone(), key)?;
-        ::sqlx::query(
-            "INSERT INTO git_platforms (id, name, type, base_url, internal_base_url, token, \
-             webhook_secret, webhook_signing_secret, enabled, raw, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.name)
-        .bind(&row.platform_type)
-        .bind(&row.base_url)
-        .bind(&row.internal_base_url)
-        .bind(&row.token)
-        .bind(&row.webhook_secret)
-        .bind(&row.webhook_signing_secret)
-        .bind(i64::from(row.enabled))
-        .bind(&row.raw)
-        .bind(&row.updated_at)
-        .execute(&mut **tx)
-        .await
-        .with_context(|| format!("insert git_platform {:?}", platform.name))?;
+        ::sqlx::query(&insert)
+            .bind(&row.id)
+            .bind(&row.name)
+            .bind(&row.platform_type)
+            .bind(&row.base_url)
+            .bind(&row.internal_base_url)
+            .bind(&row.token)
+            .bind(&row.webhook_secret)
+            .bind(&row.webhook_signing_secret)
+            .bind(i64::from(row.enabled))
+            .bind(&row.raw)
+            .bind(&row.updated_at)
+            .execute(&mut **tx)
+            .await
+            .with_context(|| format!("insert git_platform {:?}", platform.name))?;
     }
     Ok(())
 }
 
 /// DELETE + re-INSERT the whole llm_providers set inside `tx`.
-async fn replace_llm_providers_in(tx: &mut AnyTx<'_>, providers: &[LLMConfig], key: &[u8; 32]) -> Result<()> {
+async fn replace_llm_providers_in(
+    tx: &mut AnyTx<'_>,
+    kind: BackendKind,
+    providers: &[LLMConfig],
+    key: &[u8; 32],
+) -> Result<()> {
     let now = encode_ts(&Utc::now());
-    ::sqlx::query("DELETE FROM llm_providers")
+    let delete = adapt_sql(kind, "DELETE FROM llm_providers");
+    ::sqlx::query(&delete)
         .execute(&mut **tx)
         .await
         .context("clear llm_providers")?;
+    let insert = adapt_sql(
+        kind,
+        "INSERT INTO llm_providers (id, provider, model, api_base, api_key, max_tokens, \
+         temperature, raw, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    );
     for (position, config) in providers.iter().enumerate() {
         let row = rows::llm_to_row(config, position, uuid::Uuid::new_v4().to_string(), now.clone(), key)?;
-        ::sqlx::query(
-            "INSERT INTO llm_providers (id, provider, model, api_base, api_key, max_tokens, \
-             temperature, raw, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.id)
-        .bind(&row.provider)
-        .bind(&row.model)
-        .bind(&row.api_base)
-        .bind(&row.api_key)
-        .bind(row.max_tokens)
-        .bind(row.temperature)
-        .bind(&row.raw)
-        .bind(&row.updated_at)
-        .execute(&mut **tx)
-        .await
-        .with_context(|| format!("insert llm_provider {:?}", config.provider))?;
+        ::sqlx::query(&insert)
+            .bind(&row.id)
+            .bind(&row.provider)
+            .bind(&row.model)
+            .bind(&row.api_base)
+            .bind(&row.api_key)
+            .bind(row.max_tokens)
+            .bind(row.temperature)
+            .bind(&row.raw)
+            .bind(&row.updated_at)
+            .execute(&mut **tx)
+            .await
+            .with_context(|| format!("insert llm_provider {:?}", config.provider))?;
     }
     Ok(())
 }
 
 /// Upsert one app_settings row inside `tx`. Syntax is shared by PG and
 /// SQLite (≥3.24); no RETURNING.
-async fn upsert_setting_in(tx: &mut AnyTx<'_>, key: &str, value: &serde_json::Value) -> Result<()> {
-    ::sqlx::query(
+async fn upsert_setting_in(tx: &mut AnyTx<'_>, kind: BackendKind, key: &str, value: &serde_json::Value) -> Result<()> {
+    let upsert = adapt_sql(
+        kind,
         "INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?) \
          ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-    )
-    .bind(key)
-    .bind(value.to_string())
-    .bind(encode_ts(&Utc::now()))
-    .execute(&mut **tx)
-    .await
-    .with_context(|| format!("failed to save app_setting {key:?}"))?;
+    );
+    ::sqlx::query(&upsert)
+        .bind(key)
+        .bind(value.to_string())
+        .bind(encode_ts(&Utc::now()))
+        .execute(&mut **tx)
+        .await
+        .with_context(|| format!("failed to save app_setting {key:?}"))?;
     Ok(())
 }
 
-async fn delete_setting_in(tx: &mut AnyTx<'_>, key: &str) -> Result<()> {
-    ::sqlx::query("DELETE FROM app_settings WHERE key = ?")
+async fn delete_setting_in(tx: &mut AnyTx<'_>, kind: BackendKind, key: &str) -> Result<()> {
+    let delete = adapt_sql(kind, "DELETE FROM app_settings WHERE key = ?");
+    ::sqlx::query(&delete)
         .bind(key)
         .execute(&mut **tx)
         .await
@@ -113,6 +135,10 @@ async fn delete_setting_in(tx: &mut AnyTx<'_>, key: &str) -> Result<()> {
 #[async_trait]
 impl ConfigStore for SqlxStore {
     async fn load_git_platforms(&self) -> Result<Vec<GitPlatformConfig>> {
+        let sql = self.sql(
+            "SELECT id, name, type, base_url, internal_base_url, token, webhook_secret, \
+             webhook_signing_secret, enabled, raw, updated_at FROM git_platforms ORDER BY name",
+        );
         let rows = ::sqlx::query_as::<
             _,
             (
@@ -128,10 +154,7 @@ impl ConfigStore for SqlxStore {
                 String,
                 String,
             ),
-        >(
-            "SELECT id, name, type, base_url, internal_base_url, token, webhook_secret, \
-             webhook_signing_secret, enabled, raw, updated_at FROM git_platforms ORDER BY name",
-        )
+        >(&sql)
         .fetch_all(self.pool())
         .await
         .context("failed to load git_platforms")?;
@@ -175,19 +198,20 @@ impl ConfigStore for SqlxStore {
 
     async fn replace_git_platforms(&self, platforms: &[GitPlatformConfig]) -> Result<()> {
         let mut tx = self.pool().begin().await.context("begin replace_git_platforms")?;
-        replace_git_platforms_in(&mut tx, platforms, &self.key).await?;
+        replace_git_platforms_in(&mut tx, self.kind, platforms, &self.key).await?;
         tx.commit().await.context("commit replace_git_platforms")?;
         Ok(())
     }
 
     async fn load_llm_providers(&self) -> Result<Vec<LLMConfig>> {
-        let rows = ::sqlx::query_as::<_, (String, String, String, String, String, i64, f64, String, String)>(
+        let sql = self.sql(
             "SELECT id, provider, model, api_base, api_key, max_tokens, temperature, raw, \
              updated_at FROM llm_providers ORDER BY provider",
-        )
-        .fetch_all(self.pool())
-        .await
-        .context("failed to load llm_providers")?;
+        );
+        let rows = ::sqlx::query_as::<_, (String, String, String, String, String, i64, f64, String, String)>(&sql)
+            .fetch_all(self.pool())
+            .await
+            .context("failed to load llm_providers")?;
         let mut rows: Vec<rows::LlmProviderRow> = rows
             .into_iter()
             .map(
@@ -214,7 +238,7 @@ impl ConfigStore for SqlxStore {
 
     async fn replace_llm_providers(&self, providers: &[LLMConfig]) -> Result<()> {
         let mut tx = self.pool().begin().await.context("begin replace_llm_providers")?;
-        replace_llm_providers_in(&mut tx, providers, &self.key).await?;
+        replace_llm_providers_in(&mut tx, self.kind, providers, &self.key).await?;
         tx.commit().await.context("commit replace_llm_providers")?;
         Ok(())
     }
@@ -232,7 +256,8 @@ impl ConfigStore for SqlxStore {
     }
 
     async fn load_setting(&self, key: &str) -> Result<Option<serde_json::Value>> {
-        let raw: Option<String> = ::sqlx::query_scalar("SELECT value FROM app_settings WHERE key = ?")
+        let sql = self.sql("SELECT value FROM app_settings WHERE key = ?");
+        let raw: Option<String> = ::sqlx::query_scalar(&sql)
             .bind(key)
             .fetch_optional(self.pool())
             .await
@@ -243,41 +268,42 @@ impl ConfigStore for SqlxStore {
 
     async fn save_setting(&self, key: &str, value: &serde_json::Value) -> Result<()> {
         let mut tx = self.pool().begin().await.context("begin save_setting")?;
-        upsert_setting_in(&mut tx, key, value).await?;
+        upsert_setting_in(&mut tx, self.kind, key, value).await?;
         tx.commit().await.context("commit save_setting")?;
         Ok(())
     }
 
     async fn save_ui_state(&self, state: &UiStateFile) -> Result<()> {
         let mut tx = self.pool().begin().await.context("begin save_ui_state")?;
-        replace_git_platforms_in(&mut tx, &state.git_platforms, &self.key).await?;
-        replace_llm_providers_in(&mut tx, &state.llm, &self.key).await?;
+        replace_git_platforms_in(&mut tx, self.kind, &state.git_platforms, &self.key).await?;
+        replace_llm_providers_in(&mut tx, self.kind, &state.llm, &self.key).await?;
         let gitlab = &state.gitlab;
         if gitlab.token.is_empty() && gitlab.webhook_secret.is_empty() && gitlab.webhook_signing_secret.is_empty() {
             // Unset is unset: an all-empty legacy gitlab value removes the row
             // instead of storing an empty JSON shell.
-            delete_setting_in(&mut tx, LEGACY_GITLAB_KEY).await?;
+            delete_setting_in(&mut tx, self.kind, LEGACY_GITLAB_KEY).await?;
         } else {
             let value = rows::legacy_gitlab_to_value(gitlab, &self.key)?;
-            upsert_setting_in(&mut tx, LEGACY_GITLAB_KEY, &value).await?;
+            upsert_setting_in(&mut tx, self.kind, LEGACY_GITLAB_KEY, &value).await?;
         }
         if let Some(ui) = &state.ui {
             let value = serde_json::to_value(ui).context("serialize ui projection")?;
-            upsert_setting_in(&mut tx, UI_KEY, &value).await?;
+            upsert_setting_in(&mut tx, self.kind, UI_KEY, &value).await?;
         }
         tx.commit().await.context("commit save_ui_state")?;
         Ok(())
     }
 
     async fn config_tables_empty(&self) -> Result<bool> {
-        let (gp, lp, st): (i64, i64, i64) = ::sqlx::query_as(
+        let sql = self.sql(
             "SELECT (SELECT COUNT(*) FROM git_platforms), \
              (SELECT COUNT(*) FROM llm_providers), \
              (SELECT COUNT(*) FROM app_settings)",
-        )
-        .fetch_one(self.pool())
-        .await
-        .context("failed to count config tables")?;
+        );
+        let (gp, lp, st): (i64, i64, i64) = ::sqlx::query_as(&sql)
+            .fetch_one(self.pool())
+            .await
+            .context("failed to count config tables")?;
         Ok(gp == 0 && lp == 0 && st == 0)
     }
 }
@@ -297,31 +323,33 @@ fn warn_missing_row(op: &str, task_id: &uuid::Uuid, rows_affected: u64) {
 impl ReviewStore for SqlxStore {
     async fn create(&self, entry: &TaskEntry) -> Result<()> {
         let row = rows::task_entry_to_row(entry)?;
-        ::sqlx::query(
+        let sql = self.sql(
             "INSERT INTO reviews (task_id, state, source_meta, project, repository, request, \
              result, error, progress, created_at, started_at, completed_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        )
-        .bind(&row.task_id)
-        .bind(&row.state)
-        .bind(&row.source_meta)
-        .bind(&row.project)
-        .bind(&row.repository)
-        .bind(&row.request)
-        .bind(&row.result)
-        .bind(&row.error)
-        .bind(row.progress)
-        .bind(&row.created_at)
-        .bind(&row.started_at)
-        .bind(&row.completed_at)
-        .execute(self.pool())
-        .await
-        .with_context(|| format!("insert review {}", row.task_id))?;
+        );
+        ::sqlx::query(&sql)
+            .bind(&row.task_id)
+            .bind(&row.state)
+            .bind(&row.source_meta)
+            .bind(&row.project)
+            .bind(&row.repository)
+            .bind(&row.request)
+            .bind(&row.result)
+            .bind(&row.error)
+            .bind(row.progress)
+            .bind(&row.created_at)
+            .bind(&row.started_at)
+            .bind(&row.completed_at)
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("insert review {}", row.task_id))?;
         Ok(())
     }
 
     async fn mark_started(&self, task_id: uuid::Uuid, started_at: DateTime<Utc>) -> Result<()> {
-        let res = ::sqlx::query("UPDATE reviews SET state = 'running', started_at = ? WHERE task_id = ?")
+        let sql = self.sql("UPDATE reviews SET state = 'running', started_at = ? WHERE task_id = ?");
+        let res = ::sqlx::query(&sql)
             .bind(encode_ts(&started_at))
             .bind(task_id.to_string())
             .execute(self.pool())
@@ -332,7 +360,8 @@ impl ReviewStore for SqlxStore {
     }
 
     async fn fill_source_meta(&self, task_id: uuid::Uuid, meta: &SourceMeta) -> Result<()> {
-        let res = ::sqlx::query("UPDATE reviews SET source_meta = ?, project = ?, repository = ? WHERE task_id = ?")
+        let sql = self.sql("UPDATE reviews SET source_meta = ?, project = ?, repository = ? WHERE task_id = ?");
+        let res = ::sqlx::query(&sql)
             .bind(rows::encode_source_meta(meta)?)
             .bind(&meta.project)
             .bind(&meta.repository)
@@ -348,23 +377,25 @@ impl ReviewStore for SqlxStore {
         let row = rows::task_entry_to_row(entry)?;
         let report_created_at = row.completed_at.clone().unwrap_or_else(|| encode_ts(&Utc::now()));
         let mut tx = self.pool().begin().await.context("begin complete review")?;
-        let res = ::sqlx::query(
+        let update = self.sql(
             "UPDATE reviews SET state = ?, result = ?, error = ?, completed_at = ?, progress = ? \
              WHERE task_id = ?",
-        )
-        .bind(&row.state)
-        .bind(&row.result)
-        .bind(&row.error)
-        .bind(&row.completed_at)
-        .bind(row.progress)
-        .bind(&row.task_id)
-        .execute(&mut *tx)
-        .await
-        .with_context(|| format!("complete review {}", row.task_id))?;
+        );
+        let res = ::sqlx::query(&update)
+            .bind(&row.state)
+            .bind(&row.result)
+            .bind(&row.error)
+            .bind(&row.completed_at)
+            .bind(row.progress)
+            .bind(&row.task_id)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("complete review {}", row.task_id))?;
         warn_missing_row("complete", &entry.task_id, res.rows_affected());
         // Replace (not upsert) so a retried-then-completed task cannot hit
         // the (task_id, expert_name) PK with stale rows.
-        ::sqlx::query("DELETE FROM expert_reports WHERE task_id = ?")
+        let delete = self.sql("DELETE FROM expert_reports WHERE task_id = ?");
+        ::sqlx::query(&delete)
             .bind(&row.task_id)
             .execute(&mut *tx)
             .await
@@ -372,21 +403,22 @@ impl ReviewStore for SqlxStore {
         if let Some(result) = &entry.result {
             match rows::expert_report_rows(&entry.task_id, result, report_created_at) {
                 Ok(report_rows) => {
+                    let insert = self.sql(
+                        "INSERT INTO expert_reports (task_id, expert_name, report, duration_ms, created_at) \
+                         VALUES (?, ?, ?, ?, ?)",
+                    );
                     for report in &report_rows {
-                        ::sqlx::query(
-                            "INSERT INTO expert_reports (task_id, expert_name, report, duration_ms, created_at) \
-                             VALUES (?, ?, ?, ?, ?)",
-                        )
-                        .bind(&report.task_id)
-                        .bind(&report.expert_name)
-                        .bind(&report.report)
-                        .bind(report.duration_ms)
-                        .bind(&report.created_at)
-                        .execute(&mut *tx)
-                        .await
-                        .with_context(|| {
-                            format!("insert expert_report {:?} for {}", report.expert_name, report.task_id)
-                        })?;
+                        ::sqlx::query(&insert)
+                            .bind(&report.task_id)
+                            .bind(&report.expert_name)
+                            .bind(&report.report)
+                            .bind(report.duration_ms)
+                            .bind(&report.created_at)
+                            .execute(&mut *tx)
+                            .await
+                            .with_context(|| {
+                                format!("insert expert_report {:?} for {}", report.expert_name, report.task_id)
+                            })?;
                     }
                 }
                 // A result that is not a serialized ReviewOutput is not a
@@ -405,7 +437,8 @@ impl ReviewStore for SqlxStore {
     }
 
     async fn mark_cancelled(&self, task_id: uuid::Uuid, completed_at: DateTime<Utc>) -> Result<()> {
-        let res = ::sqlx::query("UPDATE reviews SET state = 'cancelled', completed_at = ? WHERE task_id = ?")
+        let sql = self.sql("UPDATE reviews SET state = 'cancelled', completed_at = ? WHERE task_id = ?");
+        let res = ::sqlx::query(&sql)
             .bind(encode_ts(&completed_at))
             .bind(task_id.to_string())
             .execute(self.pool())
@@ -416,32 +449,34 @@ impl ReviewStore for SqlxStore {
     }
 
     async fn mark_retry(&self, task_id: uuid::Uuid) -> Result<()> {
-        let res =
-            ::sqlx::query("UPDATE reviews SET state = 'pending', error = NULL, completed_at = NULL WHERE task_id = ?")
-                .bind(task_id.to_string())
-                .execute(self.pool())
-                .await
-                .with_context(|| format!("mark review {task_id} retried"))?;
+        let sql = self.sql("UPDATE reviews SET state = 'pending', error = NULL, completed_at = NULL WHERE task_id = ?");
+        let res = ::sqlx::query(&sql)
+            .bind(task_id.to_string())
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("mark review {task_id} retried"))?;
         warn_missing_row("mark_retry", &task_id, res.rows_affected());
         Ok(())
     }
 
     async fn mark_interrupted(&self, now: DateTime<Utc>) -> Result<u64> {
-        let res = ::sqlx::query(
+        let sql = self.sql(
             "UPDATE reviews SET state = 'failed', error = 'interrupted: server restarted', completed_at = ? \
              WHERE state IN ('pending', 'running')",
-        )
-        .bind(encode_ts(&now))
-        .execute(self.pool())
-        .await
-        .context("interrupted-task sweep failed")?;
+        );
+        let res = ::sqlx::query(&sql)
+            .bind(encode_ts(&now))
+            .execute(self.pool())
+            .await
+            .context("interrupted-task sweep failed")?;
         Ok(res.rows_affected())
     }
 
     async fn list_reviews(&self, query: &ReviewListQuery) -> Result<(Vec<TaskEntry>, u64)> {
         let (where_sql, binds) = review_where(query);
 
-        let count_sql = format!("SELECT COUNT(*) FROM reviews {where_sql}");
+        let count_raw = format!("SELECT COUNT(*) FROM reviews {where_sql}");
+        let count_sql = self.sql(&count_raw);
         let mut count_q = ::sqlx::query_scalar::<_, i64>(&count_sql);
         for value in &binds {
             count_q = count_q.bind(value);
@@ -452,10 +487,11 @@ impl ReviewStore for SqlxStore {
         // and both timestamps), so the COUNT and the page SELECT share the
         // same positional parameter list; LIMIT/OFFSET trail as two more.
         let offset = query.page.saturating_sub(1).saturating_mul(query.per_page);
-        let list_sql = format!(
+        let list_raw = format!(
             "SELECT {} FROM reviews {where_sql} ORDER BY created_at DESC, task_id DESC LIMIT ? OFFSET ?",
             rows::REVIEW_COLUMNS
         );
+        let list_sql = self.sql(&list_raw);
         let mut list_q = ::sqlx::query_as::<_, rows::ReviewRowTuple>(&list_sql);
         for value in &binds {
             list_q = list_q.bind(value);
@@ -475,14 +511,13 @@ impl ReviewStore for SqlxStore {
     }
 
     async fn get_review(&self, task_id: uuid::Uuid) -> Result<Option<TaskEntry>> {
-        let row = ::sqlx::query_as::<_, rows::ReviewRowTuple>(&format!(
-            "SELECT {} FROM reviews WHERE task_id = ?",
-            rows::REVIEW_COLUMNS
-        ))
-        .bind(task_id.to_string())
-        .fetch_optional(self.pool())
-        .await
-        .with_context(|| format!("load review {task_id}"))?;
+        let raw = format!("SELECT {} FROM reviews WHERE task_id = ?", rows::REVIEW_COLUMNS);
+        let sql = self.sql(&raw);
+        let row = ::sqlx::query_as::<_, rows::ReviewRowTuple>(&sql)
+            .bind(task_id.to_string())
+            .fetch_optional(self.pool())
+            .await
+            .with_context(|| format!("load review {task_id}"))?;
         row.map(|tuple| rows::review_from_row(tuple.into()))
             .transpose()
             .with_context(|| format!("decode review row {task_id}"))
@@ -496,22 +531,23 @@ impl ReviewStore for SqlxStore {
         content_hash: &str,
         token_estimate: i64,
     ) -> Result<()> {
-        ::sqlx::query(
+        let sql = self.sql(
             "INSERT INTO review_contexts (task_id, kind, content, content_hash, token_estimate, created_at) \
              VALUES (?, ?, ?, ?, ?, ?) \
              ON CONFLICT (task_id, kind) DO UPDATE SET \
              content = excluded.content, content_hash = excluded.content_hash, \
              token_estimate = excluded.token_estimate",
-        )
-        .bind(task_id.to_string())
-        .bind(kind)
-        .bind(content)
-        .bind(content_hash)
-        .bind(token_estimate)
-        .bind(encode_ts(&Utc::now()))
-        .execute(self.pool())
-        .await
-        .with_context(|| format!("upsert review_context {kind} for {task_id}"))?;
+        );
+        ::sqlx::query(&sql)
+            .bind(task_id.to_string())
+            .bind(kind)
+            .bind(content)
+            .bind(content_hash)
+            .bind(token_estimate)
+            .bind(encode_ts(&Utc::now()))
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("upsert review_context {kind} for {task_id}"))?;
         Ok(())
     }
 }
@@ -522,43 +558,45 @@ impl ReviewStore for SqlxStore {
 impl DiscussionStore for SqlxStore {
     async fn upsert_note(&self, note: &DiscussionNote) -> Result<()> {
         let (mr_iid, note_id) = rows::discussion_ids(note)?;
-        ::sqlx::query(
+        let sql = self.sql(
             "INSERT INTO mr_discussions (platform, project, mr_iid, note_id, author, body, created_at, ingested_at) \
              VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (platform, project, mr_iid, note_id) DO UPDATE SET \
              body = excluded.body, author = excluded.author",
-        )
-        .bind(&note.platform)
-        .bind(&note.project)
-        .bind(mr_iid)
-        .bind(note_id)
-        .bind(&note.author)
-        .bind(&note.body)
-        .bind(encode_ts(&note.created_at))
-        .bind(encode_ts(&Utc::now()))
-        .execute(self.pool())
-        .await
-        .with_context(|| {
-            format!(
-                "upsert mr_discussion note {} for {} !{}",
-                note.note_id, note.project, note.mr_iid
-            )
-        })?;
+        );
+        ::sqlx::query(&sql)
+            .bind(&note.platform)
+            .bind(&note.project)
+            .bind(mr_iid)
+            .bind(note_id)
+            .bind(&note.author)
+            .bind(&note.body)
+            .bind(encode_ts(&note.created_at))
+            .bind(encode_ts(&Utc::now()))
+            .execute(self.pool())
+            .await
+            .with_context(|| {
+                format!(
+                    "upsert mr_discussion note {} for {} !{}",
+                    note.note_id, note.project, note.mr_iid
+                )
+            })?;
         Ok(())
     }
 
     async fn list_notes(&self, platform: &str, project: &str, mr_iid: u64) -> Result<Vec<DiscussionNote>> {
         let mr_iid = i64::try_from(mr_iid).with_context(|| format!("mr_iid out of range: {mr_iid}"))?;
-        let rows = ::sqlx::query_as::<_, rows::DiscussionRowTuple>(
+        let sql = self.sql(
             "SELECT platform, project, mr_iid, note_id, author, body, created_at FROM mr_discussions \
              WHERE platform = ? AND project = ? AND mr_iid = ? ORDER BY created_at, note_id",
-        )
-        .bind(platform)
-        .bind(project)
-        .bind(mr_iid)
-        .fetch_all(self.pool())
-        .await
-        .with_context(|| format!("list mr_discussions for {project} !{mr_iid}"))?;
+        );
+        let rows = ::sqlx::query_as::<_, rows::DiscussionRowTuple>(&sql)
+            .bind(platform)
+            .bind(project)
+            .bind(mr_iid)
+            .fetch_all(self.pool())
+            .await
+            .with_context(|| format!("list mr_discussions for {project} !{mr_iid}"))?;
         rows.into_iter()
             .map(rows::discussion_from_row)
             .collect::<Result<Vec<_>>>()

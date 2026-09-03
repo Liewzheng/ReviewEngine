@@ -66,7 +66,7 @@
 
 | 主题 | PG | SQLite | 本文的取舍 |
 |---|---|---|---|
-| 占位符 | 原生 `$1..$n` | `?` | **统一写 `?`**。Any 驱动内部为 PG 做翻译；写 `$1` 在 SQLite 端直接报错。（落地验证点 A，见 §11） |
+| 占位符 | 原生 `$1..$n` | `?` | **统一写 `?`**，执行前由 store 层改写。**更正（0.10.0 E2E 实证）**：「Any 驱动内部为 PG 做翻译」的假设被证伪——sqlx 0.8.6 的 Any 驱动把 SQL 原样透传给 PG 解析器，`?` 直接 `42601 syntax error`（`sqlx-core-0.8.6/src/any/` 无任何 placeholder/rewrite 逻辑；`migrate` 走底层真实驱动的 ledger，不受影响）。因此 store 层自带重写器 `src/store/placeholders.rs`：PG 把顶层 `?` 依次改写为 `$1..$n`（正确跳过 `'...'` 字符串字面量含 `''` 转义、`"..."` 标识符、`--` / `/* */` 注释内的 `?`），SQLite 原样透传；所有语句经 `SqlxStore::sql` / `adapt_sql` 收口一次，不逐条手改 |
 | upsert | `ON CONFLICT ... DO UPDATE/NOTHING` | 同语法（≥3.24） | 两端一致，直接用；sqlx 内置 libsqlite3 版本远高于此 |
 | `RETURNING` | 支持 | ≥3.35 支持 | **一律不用**。主键全部由 Rust 侧生成（UUID v4），写后无需回读；避免 Any 下两端 decode 行为差异 |
 | JSON 列 | 原生 JSONB | TEXT | **DDL 用 TEXT，绑定用 `String`**：store 层 `serde_json::to_string` 后按 TEXT 绑定，读出再 `from_str`。若声明 PG JSONB 列而 SQLite 是 TEXT，`serde_json::Value` 在 PG 端会按 JSONB 编码、绑到 TEXT 列报类型错——应用层序列化是唯一两头都稳的做法 |
@@ -347,7 +347,7 @@ output.aggregated.map(|a| a.markdown)
 
 ## 10. 实施清单（依赖序，可逐项验收）
 
-1. **[祁远]** `Cargo.toml` 加 sqlx 0.8（指定 features）；`src/store/` 骨架 + `migrations/0001_init.sql`；`SqlxStore::connect/new_in_memory` + migrate 接线。**验收**：验证点 A（Any 占位符翻译 + AnyPool migrate smoke test）通过，SQLite 内存库建表成功。
+1. **[祁远]** `Cargo.toml` 加 sqlx 0.8（指定 features）；`src/store/` 骨架 + `migrations/0001_init.sql`；`SqlxStore::connect/new_in_memory` + migrate 接线。**验收**：验证点 A（占位符改写 + AnyPool migrate smoke test）通过，SQLite 内存库建表成功。
 2. **[祁远]** `rows.rs` 加密边界 + `ConfigStore` 实现（§3.2 三张配置表 + §6.2 保存路径）。**验收**：配置 PUT→库→重启回放 round-trip 单测绿；LLM key 在库里是 `enc:`。
 3. **[祁远]** 一次性导入（§6.1 第 3 步，单事务 + rename 备份 + 失败回退）。**验收**：老 `ui-state.toml`（含明文 LLM key）启动一次后：库里有数据、文件改名、GET /config 行为不变、env 覆盖矩阵（§6.3）逐行单测。
 4. **[梁序]** `ReviewStore` + TaskStore 写穿（§5.2）+ 重启恢复（§5.3）。**验收**：跑一个评审 → kill -9 → 重启 → 该任务在库里是 failed/interrupted 文案；完成的评审重启后历史可查。
@@ -361,7 +361,7 @@ output.aggregated.map(|a| a.markdown)
 
 ## 11. 待验证点（实现前确认，不确定处不猜）
 
-- **验证点 A**（✅ 已验证，sqlx 0.8.6 smoke test）：`?` 占位符 PG 翻译、`Migrator` 在 `AnyPool` 上的行为均正常；SQLite 侧通过，PG 侧留 `#[ignore]` 入口待有实例时跑。附带结论：Any 驱动无 chrono/uuid 的 `Type<Any>` 实现，SQLite 拒绝对 `TIMESTAMP` 声明列做 String 解码——时间戳/uuid 一律 TEXT 绑定（§3.1 已按此定稿）。
+- **验证点 A**（✅ 已验证，sqlx 0.8.6；⚠️ 占位符结论已由 0.10.0 E2E 更正）：`Migrator` 在 `AnyPool` 上的行为正常（Any 端委托底层真实驱动，PG ledger 不受影响）；但「Any 驱动为 PG 翻译 `?` 占位符」的假设在真实 PG E2E 上被证伪（带绑定参数的 DML 全部 `42601`），落地方案改为 store 层自行重写（`placeholders::rewrite`，见 §3.1 占位符行）。附带结论仍然有效：Any 驱动无 chrono/uuid 的 `Type<Any>` 实现，SQLite 拒绝对 `TIMESTAMP` 声明列做 String 解码——时间戳/uuid 一律 TEXT 绑定（§3.1 已按此定稿）。
 - **验证点 B**：`config/resolver/` 是否从 config.toml 承载 `git_platforms`（§6.3 表中标注待核实）。方法：`Grep "git_platforms" src/config/`。
 - **验证点 C**：评审报告的固定前缀常量位置（§7.1 自噬防护条件 a）。方法：`Grep` publisher/output 模块的报告头部模板。
 - **验证点 D**（✅ 已验证）：通过。固定宽度 RFC 3339 UTC 串按 TEXT 存储，字典序 == 时间序，`ORDER BY created_at` 排序正确（分页前提成立）。

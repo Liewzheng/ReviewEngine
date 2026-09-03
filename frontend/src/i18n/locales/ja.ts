@@ -465,6 +465,12 @@ export default {
       requestTimeout: 'リクエストタイムアウト（秒）',
       enableMetrics: 'メトリクスを有効化',
       debugMode: 'デバッグモード',
+      storageBackend: 'ストレージバックエンド',
+      storageBackendKind: {
+        postgresql: 'PostgreSQL',
+        sqlite: 'SQLite',
+        disabled: '無効',
+      },
     },
   },
   llm: {

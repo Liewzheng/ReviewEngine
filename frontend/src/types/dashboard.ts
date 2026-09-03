@@ -24,6 +24,12 @@ export interface HealthStatus {
   message?: string;
 }
 
+/**
+ * Persistence backend in use, reported by `/system/health` (0.10.0).
+ * Absent when the server predates the field.
+ */
+export type StorageBackendKind = 'postgresql' | 'sqlite' | 'disabled';
+
 export interface SystemHealth {
   integrations: HealthStatus[];
   llmProviders: HealthStatus[];
@@ -31,6 +37,8 @@ export interface SystemHealth {
   lastChecked: string;
   /** False when the server has no usable LLM configured (reviews cannot run). */
   llmConfigured: boolean;
+  /** Persistence backend kind; normalized from the raw `storage_backend` key. */
+  storageBackend?: StorageBackendKind;
 }
 
 // Display-facing status for recent reviews. The backend reports the real task

@@ -470,6 +470,12 @@ export default {
       requestTimeout: "Délai d'expiration de la requête (secondes)",
       enableMetrics: 'Activer les métriques',
       debugMode: 'Mode débogage',
+      storageBackend: 'Backend de stockage',
+      storageBackendKind: {
+        postgresql: 'PostgreSQL',
+        sqlite: 'SQLite',
+        disabled: 'Désactivé',
+      },
     },
   },
   llm: {

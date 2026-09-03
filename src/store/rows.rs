@@ -308,8 +308,26 @@ impl From<ReviewRowTuple> for ReviewRow {
     }
 }
 
+/// `TaskStore::fill_source_meta`'s blank definition: `None` or
+/// whitespace-only. A blank projection field may take the materialized
+/// column's value; a non-blank `source_meta` value always wins.
+fn backfill_from_column(field: &mut Option<String>, column: Option<String>) {
+    let blank = field.as_deref().map(str::trim).unwrap_or_default().is_empty();
+    if blank {
+        *field = column.filter(|v| !v.trim().is_empty());
+    }
+}
+
 /// Decode a `reviews` row back into a [`TaskEntry`]. Used by the history
 /// read path (`ReviewStore::list_reviews` / `get_review`, §8.1) and by tests.
+///
+/// Projection reads `source_meta` (the full metadata JSON); the materialized
+/// `project`/`repository` columns exist for indexed filtering (§5.2 keeps
+/// them in sync on every write). If a row has nevertheless drifted — a
+/// failed `fill_source_meta` UPDATE is only logged, never retried, and
+/// hand-seeded/legacy rows bypass the codec — the column is the last copy
+/// of the value, so blank JSON fields are back-filled from it: a row that
+/// matches `?project=X` must never display a blank project.
 pub(crate) fn review_from_row(row: ReviewRow) -> Result<TaskEntry> {
     fn opt_ts(raw: Option<String>, what: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>> {
         raw.as_deref()
@@ -317,6 +335,9 @@ pub(crate) fn review_from_row(row: ReviewRow) -> Result<TaskEntry> {
             .transpose()
     }
     let state = task_state_from_str(&row.state)?;
+    let mut source_meta = decode_source_meta(&row.source_meta)?;
+    backfill_from_column(&mut source_meta.project, row.project);
+    backfill_from_column(&mut source_meta.repository, row.repository);
     Ok(TaskEntry {
         task_id: Uuid::parse_str(&row.task_id)
             .with_context(|| format!("reviews.task_id is not a UUID: {:?}", row.task_id))?,
@@ -333,7 +354,7 @@ pub(crate) fn review_from_row(row: ReviewRow) -> Result<TaskEntry> {
             .request
             .map(|s| serde_json::from_str(&s).context("reviews.request holds invalid JSON"))
             .transpose()?,
-        source_meta: decode_source_meta(&row.source_meta)?,
+        source_meta,
         progress: row
             .progress
             .map(|p| u8::try_from(p).with_context(|| format!("reviews.progress out of range: {p}")))
@@ -409,4 +430,68 @@ pub(crate) fn discussion_from_row(
         body,
         created_at: decode_ts(&created_at).context("mr_discussions.created_at")?,
     })
+}
+
+// ─── tests ───
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Minimal decodable completed row; individual fields are overridden per
+    /// test.
+    fn review_row(source_meta: &str, project: Option<&str>, repository: Option<&str>) -> ReviewRow {
+        ReviewRow {
+            task_id: Uuid::new_v4().to_string(),
+            state: "completed".to_string(),
+            source_meta: source_meta.to_string(),
+            project: project.map(str::to_string),
+            repository: repository.map(str::to_string),
+            request: None,
+            result: None,
+            error: None,
+            progress: Some(100),
+            created_at: "2026-09-03T01:00:00.000000Z".to_string(),
+            started_at: Some("2026-09-03T01:00:01.000000Z".to_string()),
+            completed_at: Some("2026-09-03T01:00:42.000000Z".to_string()),
+        }
+    }
+
+    /// §8.1 projection semantics (E2E-A 观察点 4): the materialized
+    /// project/repository columns exist for filtering, `source_meta` is the
+    /// projection source — but a drifted row (column set, JSON blank) must
+    /// not lose the value the filter matched on.
+    #[test]
+    fn review_from_row_backfills_blank_meta_from_materialized_columns() {
+        let entry = review_from_row(review_row("{}", Some("grp/proj"), Some("grp/proj"))).unwrap();
+        assert_eq!(entry.source_meta.project.as_deref(), Some("grp/proj"));
+        assert_eq!(entry.source_meta.repository.as_deref(), Some("grp/proj"));
+    }
+
+    /// A non-blank `source_meta` value is authoritative; the column is only
+    /// a fallback and never clobbers it.
+    #[test]
+    fn review_from_row_source_meta_wins_over_materialized_columns() {
+        let meta = r#"{"project":"json/wins","repository":"json-repo"}"#;
+        let entry = review_from_row(review_row(meta, Some("grp/proj"), Some("grp/proj"))).unwrap();
+        assert_eq!(entry.source_meta.project.as_deref(), Some("json/wins"));
+        assert_eq!(entry.source_meta.repository.as_deref(), Some("json-repo"));
+    }
+
+    /// Both sides blank stays absent (no empty-string fabrication), and a
+    /// whitespace-only JSON value counts as blank.
+    #[test]
+    fn review_from_row_backfill_never_fabricates_values() {
+        let entry = review_from_row(review_row("{}", None, None)).unwrap();
+        assert!(entry.source_meta.project.is_none());
+        assert!(entry.source_meta.repository.is_none());
+
+        let meta = r#"{"project":"   "}"#;
+        let entry = review_from_row(review_row(meta, Some("grp/proj"), Some(""))).unwrap();
+        assert_eq!(entry.source_meta.project.as_deref(), Some("grp/proj"));
+        assert!(
+            entry.source_meta.repository.is_none(),
+            "blank column must not back-fill"
+        );
+    }
 }

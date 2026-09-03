@@ -1715,3 +1715,152 @@ async fn list_reviews_db_empty_and_out_of_range_pages() {
     );
     assert_eq!(json["page"], 99);
 }
+
+/// A consolidated report carrying an overall assessment, so the list item's
+/// embedded `result` exercises the score column (`consolidated.assessment`).
+fn consolidated_with_score(score: u8) -> crate::team::lead_consolidator::ConsolidatedReport {
+    crate::team::lead_consolidator::ConsolidatedReport {
+        findings: Vec::new(),
+        low_confidence_removed: 0,
+        duplicates_merged: 0,
+        conflicts: Vec::new(),
+        assessment: crate::models::OverallAssessment {
+            score,
+            risk_level: crate::models::RiskLevel::Low,
+            lead_override: None,
+            tl_dr: "looks fine".to_string(),
+            unverified: false,
+            coverage_insufficient: false,
+        },
+        consensus_reached: true,
+        total_files: 0,
+        reviewed_files: 0,
+        unreviewed_files: Vec::new(),
+        coverage: None,
+        adjudicated_removed: Vec::new(),
+    }
+}
+
+/// (e) E2E-A 观察点 4 pin: with the DB as the data source, a row written by
+/// the real write-through flow (record_task_started → record_task_outcome,
+/// the exact helpers the GitLab webhook path uses) projects EVERY list field
+/// at full value — status / project / repository / branch / author /
+/// duration / embedded assessment — identically to the 0.9 in-memory path.
+/// Test (a) only compared key SETS; a `project: null` drift passes a key-set
+/// assertion, so this one compares values.
+#[tokio::test]
+async fn list_reviews_db_projection_values_complete() {
+    let (state, _db) = state_with_db().await;
+    let store = state.task_store.clone().unwrap();
+
+    let id = crate::server::task_queue::record_task_started(&store, source_meta_with_commit()).await;
+    let mut output = crate::models::ReviewOutput::new(vec![make_report(
+        "security",
+        vec![make_finding(crate::models::Severity::High)],
+    )]);
+    output.consolidated = Some(consolidated_with_score(87));
+    let outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(output);
+    crate::server::task_queue::record_task_outcome(&store, id, &outcome).await;
+
+    let json = list_json(state.clone(), empty_params()).await;
+    assert_eq!(json["total"], 1);
+    let item = &json["items"][0];
+
+    // status decodes from the reviews.state column — a non-Option string in
+    // both projections, so it can never go missing from a served item.
+    assert_eq!(item["status"], "completed");
+    assert_eq!(item["task_id"], id.to_string());
+    assert_eq!(item["id"], id.to_string());
+
+    // Metadata projected from source_meta (both naming schemes).
+    assert_eq!(item["project"], "group/repo");
+    assert_eq!(item["repository"], "group/repo");
+    assert_eq!(item["branch"], "feature/x");
+    assert_eq!(item["target_branch"], "main");
+    assert_eq!(item["targetBranch"], "main");
+    assert_eq!(item["mr_title"], "Fix login bug");
+    assert_eq!(item["mrTitle"], "Fix login bug");
+    assert_eq!(item["author_name"], "alice");
+    assert_eq!(item["author"]["name"], "alice");
+    assert_eq!(item["author"]["avatarUrl"], "http://avatar");
+    assert_eq!(item["gitlab_mr_url"], "http://gitlab/mr/1");
+    assert_eq!(item["gitlabMrUrl"], "http://gitlab/mr/1");
+    assert_eq!(item["commit_sha"], "abc123");
+
+    // Wall-clock duration: present, non-negative, identical in both namings.
+    assert!(
+        item["duration_ms"].as_u64().is_some(),
+        "completed row must carry duration_ms"
+    );
+    assert_eq!(item["durationMs"], item["duration_ms"]);
+    assert!(item["created_at"].as_str().is_some() && item["createdAt"].as_str().is_some());
+
+    // The score column's data source: the embedded ReviewOutput keeps its
+    // consolidated assessment through the DB round-trip.
+    assert_eq!(item["result"]["consolidated"]["assessment"]["score"], 87);
+    assert_eq!(item["result"]["reports"][0]["expert_name"], "security");
+
+    // Value parity with the 0.9 in-memory path for the same logical task.
+    let mem_state = state_with_store();
+    let mem_store = mem_state.task_store.clone().unwrap();
+    let mid = crate::server::task_queue::record_task_started(&mem_store, source_meta_with_commit()).await;
+    let mut mem_output = crate::models::ReviewOutput::new(vec![make_report(
+        "security",
+        vec![make_finding(crate::models::Severity::High)],
+    )]);
+    mem_output.consolidated = Some(consolidated_with_score(87));
+    let mem_outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(mem_output);
+    crate::server::task_queue::record_task_outcome(&mem_store, mid, &mem_outcome).await;
+    let mem_json = list_json(mem_state, empty_params()).await;
+    let mem_item = &mem_json["items"][0];
+    for key in [
+        "status",
+        "project",
+        "repository",
+        "branch",
+        "mr_title",
+        "mrTitle",
+        "author_name",
+    ] {
+        assert_eq!(item[key], mem_item[key], "DB vs memory mismatch on {key}");
+    }
+    assert_eq!(
+        item["result"]["consolidated"]["assessment"]["score"],
+        mem_item["result"]["consolidated"]["assessment"]["score"],
+    );
+}
+
+/// (f) Drifted row — materialized filter column set but the source_meta JSON
+/// blank (a failed `fill_source_meta` UPDATE is only logged, never retried;
+/// hand-seeded/legacy rows bypass the codec): the row matches `?project=X`
+/// via the column, and the projection must show the same X instead of null.
+/// source_meta stays the primary source — the column only back-fills blanks
+/// (codec-level pinning lives in store::rows::tests).
+#[tokio::test]
+async fn list_reviews_db_drifted_row_projects_materialized_column() {
+    let (state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO reviews (task_id, state, source_meta, project, repository, created_at, completed_at) \
+         VALUES (?, 'completed', '{}', 'grp/proj', 'grp/proj', \
+         '2026-09-03T10:00:00.000000Z', '2026-09-03T10:05:00.000000Z')",
+    )
+    .bind(id.to_string())
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let mut params = empty_params();
+    params.project = Some("grp/proj".to_string());
+    let json = list_json(state, params).await;
+    assert_eq!(json["total"], 1, "the materialized column drives the filter");
+    let item = &json["items"][0];
+    assert_eq!(item["task_id"], id.to_string());
+    assert_eq!(item["status"], "completed");
+    assert_eq!(
+        item["project"], "grp/proj",
+        "a row that matches ?project=X must not display a blank project"
+    );
+    assert_eq!(item["repository"], "grp/proj");
+    assert_eq!(item["duration_ms"], 5 * 60 * 1000);
+}

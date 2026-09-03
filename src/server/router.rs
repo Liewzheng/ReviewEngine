@@ -8,7 +8,7 @@ use axum::{
     extract::Request,
     http::{header::CACHE_CONTROL, HeaderMap, HeaderValue, StatusCode},
     middleware::{self, Next},
-    response::{Html, Response},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -66,13 +66,44 @@ async fn static_cache_control(request: Request, next: Next) -> Response {
 }
 
 /// Detect the frontend static assets directory (Docker or local dev).
+///
+/// `./frontend/dist` is resolved against the process working directory, so
+/// starting the binary outside the repository root silently degrades to the
+/// placeholder page — log the CWD to make that diagnosable.
 fn static_dir() -> Option<String> {
     for path in ["/app/frontend/dist", "./frontend/dist"] {
         if std::path::Path::new(path).is_dir() {
             return Some(path.to_string());
         }
     }
+    tracing::warn!(
+        "frontend dist not found (checked /app/frontend/dist, ./frontend/dist; cwd = {}); \
+         serving the placeholder page until a build is available",
+        std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string())
+    );
     None
+}
+
+/// Decide whether a missing static path is an SPA deep link that should fall
+/// back to `index.html` (history-mode routing), as opposed to a genuinely
+/// absent resource that must keep its 404.
+///
+/// - `/api/…` — never: an unmatched API route must stay a 404 JSON problem,
+///   not an HTML page.
+/// - paths whose last segment contains a `.` (e.g. `/assets/app-XXXX.js`,
+///   `/favicon.svg`) — never: these are file requests; serving HTML with 200
+///   for a missing asset would mask deploy breakage (and an immutable-cached
+///   200 keeps it broken in browsers).
+/// - everything else (`/history`, `/config`, `/reviews/42`, …) — the SPA
+///   router owns it client-side, so serve the entry point.
+fn is_spa_deep_link(path: &str) -> bool {
+    if path.starts_with("/api/") {
+        return false;
+    }
+    let last_segment = path.rsplit('/').next().unwrap_or(path);
+    !last_segment.contains('.')
 }
 
 /// Build the complete Axum application router.
@@ -90,8 +121,33 @@ pub fn build(state: Arc<AppState>, auth: Arc<AuthConfig>, webhook_handlers: Vec<
     // what is registered at that point (fallback included), so API/health and
     // webhook routes below are unaffected.
     if let Some(dir) = static_dir() {
+        // SPA history-mode fallback: a hard refresh or direct entry on a
+        // client-side route (`/history`, `/config`, …) must serve the entry
+        // point, not ServeDir's bare 404. Missing files (has extension) and
+        // `/api/` paths keep their 404. The file is re-read per request (never
+        // held in memory): an in-place upgrade replaces dist while the server
+        // runs, and a stale copy would reference vanished hashed chunks. The
+        // response carries the same `no-cache, must-revalidate` policy as `/`
+        // — it IS index.html.
+        let index = std::path::PathBuf::from(&dir).join("index.html");
+        let spa_fallback = get(move |req: Request| {
+            let index = index.clone();
+            async move {
+                if !is_spa_deep_link(req.uri().path()) {
+                    return StatusCode::NOT_FOUND.into_response();
+                }
+                match tokio::fs::read(&index).await {
+                    Ok(html) => ([(CACHE_CONTROL, "no-cache, must-revalidate")], Html(html)).into_response(),
+                    Err(_) => StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        });
         app = app
-            .fallback_service(ServeDir::new(dir))
+            // `fallback`, not `not_found_service`: the latter force-overrides
+            // the fallback's status to 404 (SetStatus wrapper). The handler
+            // decides per request — 200 index.html for deep links, explicit
+            // 404 for `/api/` and file-like paths.
+            .fallback_service(ServeDir::new(dir).fallback(spa_fallback))
             .layer(middleware::from_fn(static_cache_control));
     } else {
         app = app.route("/", get(serve_frontend));
@@ -388,6 +444,36 @@ mod tests {
                     cache_control_for_path(path).is_none(),
                     "{path} must keep the default (absent) cache policy"
                 );
+            }
+        }
+    }
+
+    /// Decision function for the SPA history-mode fallback, exercised
+    /// end-to-end by `spa_deep_links_fall_back_to_index_html` in
+    /// tests/server/frontend.rs.
+    mod spa_deep_link {
+        use super::*;
+
+        #[test]
+        fn client_side_routes_fall_back() {
+            for path in ["/history", "/config", "/reviews/42", "/settings/git-platforms"] {
+                assert!(is_spa_deep_link(path), "{path} must fall back to index.html");
+            }
+        }
+
+        #[test]
+        fn api_paths_stay_404() {
+            for path in ["/api/v1/definitely-not-a-route", "/api/v1/reviews/999"] {
+                assert!(!is_spa_deep_link(path), "{path} must keep its API 404");
+            }
+        }
+
+        #[test]
+        fn file_requests_stay_404() {
+            // A missing hashed asset must not be masked by an HTML 200 — that
+            // would hide deploy breakage behind a white screen.
+            for path in ["/assets/missing-00000000.js", "/favicon.svg", "/icons.svg"] {
+                assert!(!is_spa_deep_link(path), "{path} must keep its 404");
             }
         }
     }

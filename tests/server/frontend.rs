@@ -166,3 +166,79 @@ async fn static_frontend_cache_control_headers() {
         "304 must carry the same Cache-Control as the 200, got {cc:?}"
     );
 }
+
+// ─── SPA history-mode fallback (deep-link 404 defect) ────────────
+
+/// Defect regression: the SPA uses history-mode routing, so directly opening
+/// or refreshing a client-side route (`/history`, `/config`, …) must serve
+/// `index.html` — ServeDir's bare 404 left deep links dead. Unmatched `/api/`
+/// routes and missing files (extension in the last segment) must keep their
+/// 404: serving HTML for a missing hashed asset would mask deploy breakage.
+#[tokio::test]
+async fn spa_deep_links_fall_back_to_index_html() {
+    let www = tempfile::tempdir().expect("failed to create www temp dir");
+    write_fake_frontend_dist(www.path());
+
+    let port = find_free_port();
+    let _guard = spawn_server_full(&bin_path(), port, None, &[], Some(www.path()));
+    wait_for_server(port).await;
+
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{port}");
+
+    // Deep links — single segment and nested — serve the entry point with the
+    // same revalidation policy as `/`.
+    for path in ["/history", "/config", "/reviews/42"] {
+        let resp = client
+            .get(format!("{base}{path}"))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("GET {path}: {e}"));
+        assert_eq!(
+            resp.status(),
+            reqwest::StatusCode::OK,
+            "GET {path} must serve index.html, got {}",
+            resp.status()
+        );
+        let cc = resp
+            .headers()
+            .get("cache-control")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .unwrap_or_default();
+        assert!(cc.contains("no-cache"), "GET {path} must be no-cache, got {cc:?}");
+        let body = resp.text().await.expect("body");
+        assert!(
+            body.contains("fixture"),
+            "GET {path} must serve the fixture index.html, got {body:?}"
+        );
+    }
+
+    // An unmatched API route stays a 404 — it must never be answered with the
+    // SPA entry point.
+    let resp = client
+        .get(format!("{base}/api/v1/definitely-not-a-route"))
+        .send()
+        .await
+        .expect("GET unknown api route");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "unknown /api/ route must stay 404, got {}",
+        resp.status()
+    );
+
+    // A missing file (hashed asset) stays a 404 — an HTML 200 here would hide
+    // a broken deploy behind a white screen.
+    let resp = client
+        .get(format!("{base}/assets/missing-00000000.js"))
+        .send()
+        .await
+        .expect("GET missing asset");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::NOT_FOUND,
+        "missing asset must stay 404, got {}",
+        resp.status()
+    );
+}

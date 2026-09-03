@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -263,9 +264,7 @@ impl TaskStore {
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
             entry.progress = Some(progress.min(100));
             entry.expert_name = expert_name.clone();
-            let elapsed = entry
-                .started_at
-                .map(|s| (chrono::Utc::now() - s).num_milliseconds() as u64);
+            let elapsed = entry.started_at.map(|s| millis_between(s, chrono::Utc::now()));
             let _ = self.tx.send(TaskEvent {
                 task_id,
                 status: "running",
@@ -315,9 +314,7 @@ impl TaskStore {
                 TaskState::Failed => "failed",
                 TaskState::Cancelled => "cancelled",
             };
-            let elapsed = entry
-                .started_at
-                .map(|s| (chrono::Utc::now() - s).num_milliseconds() as u64);
+            let elapsed = entry.started_at.map(|s| millis_between(s, chrono::Utc::now()));
             let _ = self.tx.send(TaskEvent {
                 task_id,
                 status,
@@ -704,17 +701,23 @@ pub async fn record_task_outcome(
     }
 }
 
+/// Milliseconds between two timestamps, clamped at 0. Projection-only
+/// helper: hand-seeded rows (created_at later than completed_at) or clock
+/// skew must not let a negative `i64` wrap to ~2^64 in the u64 projection.
+fn millis_between(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
+    end.timestamp_millis().saturating_sub(start.timestamp_millis()).max(0) as u64
+}
+
 impl TaskEntry {
     pub fn duration_ms(&self) -> Option<u64> {
         match (self.created_at, self.completed_at) {
-            (start, Some(end)) => Some((end - start).num_milliseconds() as u64),
+            (start, Some(end)) => Some(millis_between(start, end)),
             _ => None,
         }
     }
 
     pub fn elapsed_ms(&self) -> Option<u64> {
-        self.started_at
-            .map(|s| (chrono::Utc::now() - s).num_milliseconds() as u64)
+        self.started_at.map(|s| millis_between(s, chrono::Utc::now()))
     }
 }
 
@@ -748,6 +751,40 @@ mod tests {
             gitlab_mr_url: None,
             commit_sha: Some("deadbeef".to_string()),
         }
+    }
+
+    /// F2 guard: hand-seeded rows with created_at later than completed_at
+    /// must clamp the u64 duration projection to 0 instead of wrapping to
+    /// ~2^64; elapsed_ms is clamped by the same helper.
+    #[test]
+    fn duration_ms_clamps_inverted_timestamps_to_zero() {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-09-03T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let entry = TaskEntry {
+            task_id: Uuid::new_v4(),
+            state: TaskState::Completed,
+            created_at: base,
+            started_at: Some(base),
+            completed_at: Some(base - chrono::Duration::minutes(5)),
+            result: None,
+            error: None,
+            request: None,
+            source_meta: SourceMeta::default(),
+            progress: None,
+            expert_name: None,
+        };
+        assert_eq!(entry.duration_ms(), Some(0), "inverted span must clamp, not wrap");
+
+        // started_at in the future (clock skew) must clamp, not wrap.
+        let mut skewed = entry.clone();
+        skewed.started_at = Some(chrono::Utc::now() + chrono::Duration::minutes(5));
+        assert_eq!(skewed.elapsed_ms(), Some(0));
+
+        // Sanity: a normal forward span still reports real milliseconds.
+        let mut ok = entry.clone();
+        ok.completed_at = Some(base + chrono::Duration::milliseconds(1500));
+        assert_eq!(ok.duration_ms(), Some(1500));
     }
 
     #[tokio::test]

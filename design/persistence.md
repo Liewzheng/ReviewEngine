@@ -162,7 +162,7 @@ CREATE TABLE llm_providers (
     api_base     TEXT NOT NULL DEFAULT '',
     api_key      TEXT NOT NULL DEFAULT '',     -- enc: 加密（新增：0.9 明文落盘）
     max_tokens   INTEGER NOT NULL DEFAULT 4096,
-    temperature  REAL NOT NULL DEFAULT 0.7,
+    temperature  DOUBLE PRECISION NOT NULL DEFAULT 0.7,  -- 必须 float8：PG 的 REAL 是 float4，store 层按 f64 解码会 mismatched types（PG E2E 实测）；SQLite 的 REAL affinity 同为 8 字节，两端兼容
     raw          TEXT NOT NULL DEFAULT '{}',   -- 扩展兜底：disable_thinking 等
     updated_at   TEXT NOT NULL
 );

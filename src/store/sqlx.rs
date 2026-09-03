@@ -791,6 +791,54 @@ mod tests {
         assert_eq!(loaded[0].api_key, "plain-legacy-key");
     }
 
+    /// F1 regression gate on real PG: `temperature` is DOUBLE PRECISION
+    /// (float8) and the store binds/decodes f64 — a float4 (REAL) column
+    /// fails the read-back with `mismatched types`, which silently emptied
+    /// GET /config after a restart. Requires `DATABASE_URL`:
+    /// `DATABASE_URL=postgres://... cargo test store -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires DATABASE_URL pointing at a scratch PostgreSQL"]
+    async fn llm_providers_temperature_round_trip_on_postgres() {
+        let url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let store = SqlxStore::connect(&url).await.unwrap();
+        store.migrate().await.unwrap();
+
+        let providers = vec![
+            LLMConfig {
+                provider: "pg-f1-openai".into(),
+                model: "gpt-5".into(),
+                api_key: "sk-f1".into(),
+                api_base: "https://api.openai.com/v1".into(),
+                max_tokens: 8192,
+                temperature: 0.3,
+                disable_thinking: None,
+            },
+            LLMConfig {
+                provider: "pg-f1-deepseek".into(),
+                model: "deepseek-v4-flash".into(),
+                api_key: "ds-f1".into(),
+                api_base: "https://api.deepseek.com".into(),
+                max_tokens: 4096,
+                temperature: 0.7,
+                disable_thinking: Some(true),
+            },
+        ];
+        store.replace_llm_providers(&providers).await.unwrap();
+
+        // The exact read path that failed on float4: f64 decode of the
+        // temperature column.
+        let loaded = store.load_llm_providers().await.unwrap();
+        assert_eq!(loaded.len(), 2);
+        assert!(llm_eq(&loaded[0], &providers[0]), "entry 0 mismatch: {loaded:?}");
+        assert!(llm_eq(&loaded[1], &providers[1]), "entry 1 mismatch: {loaded:?}");
+
+        // Clean up: the enc: rows are keyed by the runner's local
+        // ~/.config secrets key and are undecryptable garbage for anyone
+        // else sharing this scratch database.
+        let cleanup = store.sql("DELETE FROM llm_providers WHERE provider IN ('pg-f1-openai', 'pg-f1-deepseek')");
+        ::sqlx::query(&cleanup).execute(store.pool()).await.unwrap();
+    }
+
     #[tokio::test]
     async fn legacy_gitlab_round_trip_with_encrypted_fields() {
         let store = fresh_store().await;

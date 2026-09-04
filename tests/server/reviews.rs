@@ -325,3 +325,52 @@ async fn webhook_loopback_http_is_accepted_and_delivered() {
     assert_eq!(callback["task_id"], task_id);
     assert_eq!(callback["status"], "failed");
 }
+
+/// RENG-29 regression: there is no `/reviews/history` route — the paginated
+/// history list is `GET /api/v1/reviews` (docs/rest-api.md). A request to the
+/// non-existent sub-path is captured by `/{task_id}` and rejected at
+/// path-parameter validation with 400, which is the documented contract: the
+/// error names `task_id`, so a mistyped path surfaces as a parameter error,
+/// never as a routed "history" handler.
+#[tokio::test]
+async fn reviews_history_subpath_is_not_a_route() {
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("GITLAB_TOKEN", "")]);
+    wait_for_server(port).await;
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{}", port);
+
+    // The real history list endpoint answers 200 with the paginated envelope.
+    let resp = client
+        .get(format!("{}/api/v1/reviews", base))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/reviews");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "the history list endpoint is GET /api/v1/reviews"
+    );
+    let json: serde_json::Value = resp.json().await.expect("list body is JSON");
+    for key in ["items", "total", "page", "per_page"] {
+        assert!(json.get(key).is_some(), "list envelope must carry {key}: {json}");
+    }
+
+    // The mistaken path hits `/{task_id}`: `history` is not a UUID, so path
+    // validation fails with 400 before any handler runs.
+    let resp = client
+        .get(format!("{}/api/v1/reviews/history", base))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/reviews/history");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::BAD_REQUEST,
+        "a non-UUID task_id must fail path validation with 400"
+    );
+    let body = resp.text().await.expect("400 body");
+    assert!(
+        body.contains("task_id"),
+        "the 400 must name the failing path parameter: {body}"
+    );
+}

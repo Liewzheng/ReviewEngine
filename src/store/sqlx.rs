@@ -772,7 +772,10 @@ mod tests {
                 .fetch_one(store.pool())
                 .await
                 .unwrap();
-        assert!(api_key.starts_with("enc:"), "api_key not encrypted: {api_key}");
+        assert!(
+            api_key.starts_with("enc:"),
+            "api_key not encrypted at rest (missing enc: prefix)"
+        );
         assert!(!api_key.contains("sk-live-key"));
         assert_eq!(serde_json::from_str::<serde_json::Value>(&raw).unwrap()["position"], 0);
 

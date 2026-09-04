@@ -695,7 +695,7 @@ pub(crate) async fn run_experts_inner(
         )
         .await;
         info!(
-            "Adjudication pass: examined {} finding(s) at or above {:?}, dropped {}",
+            "Adjudication pass: {} candidate(s) at or above {:?}, dropped {}",
             candidates,
             min_severity,
             removed.len()

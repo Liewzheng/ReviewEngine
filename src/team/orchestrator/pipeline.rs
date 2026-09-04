@@ -26,6 +26,36 @@ use crate::team::verifier::{self, DroppedFinding};
 use super::validation::{apply_feedback_filter, build_consolidated_report, build_coverage_ledger};
 use crate::team::ExpertMetrics;
 
+/// Gather project context for the lead overview.
+///
+/// `mr_info.project_path` is a local filesystem path only for CLI local
+/// reviews; for webhook/API-triggered reviews it is the provider slug
+/// (`group/project`) and the server never clones the repository, so a
+/// missing path is the expected case there — not a failure worth a
+/// warning. When no local checkout exists (or gathering from it fails),
+/// fall back to the reviewed diff's file list so first-time reviews of
+/// repositories with no local cache still get a real (partial) context
+/// instead of an empty default.
+fn gather_lead_project_context(
+    mr_info: &MRInfo,
+    files: &[DiffFile],
+    base_ref: Option<&str>,
+    head_ref: Option<&str>,
+) -> crate::context::ProjectContext {
+    let diff_fallback = || crate::context::ProjectContext::from_diff_paths(files.iter().map(|f| f.path.as_str()));
+    let repo_path = std::path::Path::new(&mr_info.project_path);
+    if !repo_path.is_dir() {
+        return diff_fallback();
+    }
+    match crate::context::gather_project_context(repo_path, base_ref, head_ref) {
+        Ok(ctx) => ctx,
+        Err(err) => {
+            tracing::warn!("failed to gather project context: {}", err);
+            diff_fallback()
+        }
+    }
+}
+
 /// Parse the raw unified diff and filter out ignored files.
 fn parse_and_filter_diff(diff_raw: &str) -> Vec<DiffFile> {
     let mut files = diff_parser::parse_unified_diff(diff_raw);
@@ -346,14 +376,7 @@ pub(crate) async fn run_experts_inner(
         .cloned();
 
     // Gather lightweight project context for the lead overview
-    let project_context =
-        match crate::context::gather_project_context(std::path::Path::new(&mr_info.project_path), base_ref, head_ref) {
-            Ok(ctx) => ctx,
-            Err(err) => {
-                tracing::warn!("failed to gather project context: {}", err);
-                crate::context::ProjectContext::default()
-            }
-        };
+    let project_context = gather_lead_project_context(mr_info, &files, base_ref, head_ref);
 
     // Pass 1: Lead Overview (now runs for all PR sizes)
     let global_context: Option<GlobalReviewContext> = build_lead_overview(
@@ -645,4 +668,84 @@ pub(crate) async fn run_experts_inner(
         dropped_findings,
         consolidated,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn diff_file(path: &str) -> DiffFile {
+        DiffFile {
+            path: path.to_string(),
+            old_path: path.to_string(),
+            new_path: path.to_string(),
+            status: "modified".to_string(),
+            additions: 1,
+            deletions: 0,
+            hunks: Vec::new(),
+        }
+    }
+
+    /// Regression (RENG-25): a webhook-triggered review of a freshly created
+    /// repository carries the provider slug (`group/project`) in
+    /// `mr_info.project_path`, and the server never clones the repo, so no
+    /// local path exists. Context gathering must not fail/warn in that case;
+    /// it must fall back to the diff's file list.
+    #[test]
+    fn test_gather_lead_project_context_slug_path_falls_back_to_diff() {
+        let mr_info = MRInfo::new(
+            "review-lab/review-engine-reng25-nonexistent".to_string(),
+            "test".to_string(),
+            "feat/x".to_string(),
+            "main".to_string(),
+        );
+        assert!(
+            !std::path::Path::new(&mr_info.project_path).is_dir(),
+            "test prerequisite: slug path must not exist locally"
+        );
+        let files = vec![diff_file("src/lib.rs"), diff_file("README.md")];
+
+        let ctx = gather_lead_project_context(&mr_info, &files, Some("main"), Some("feat/x"));
+
+        assert_eq!(ctx.file_tree, vec!["README.md", "src/lib.rs"]);
+        assert!(ctx.readme_excerpt.is_empty());
+        assert!(ctx.recent_commits.is_empty());
+        assert!(ctx.branch_commits.is_empty());
+    }
+
+    /// A real local checkout (CLI local review) must still gather the full
+    /// git-backed context, unchanged from the pre-fix behaviour.
+    #[test]
+    fn test_gather_lead_project_context_local_checkout_uses_git() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .current_dir(dir.path())
+                .args(args)
+                .status()
+                .expect("git command failed to run");
+            assert!(status.success(), "git command {:?} failed", args);
+        };
+        run(&["init"]);
+        run(&["checkout", "-b", "main"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test User"]);
+        std::fs::write(dir.path().join("README.md"), "# Local Project\n").unwrap();
+        run(&["add", "README.md"]);
+        run(&["commit", "-m", "add readme"]);
+
+        let mr_info = MRInfo::new(
+            dir.path().to_string_lossy().to_string(),
+            "test".to_string(),
+            "main".to_string(),
+            "main".to_string(),
+        );
+        let files = vec![diff_file("src/lib.rs")];
+
+        let ctx = gather_lead_project_context(&mr_info, &files, Some("main"), Some("main"));
+
+        assert!(ctx.readme_excerpt.contains("# Local Project"));
+        assert!(ctx.file_tree.iter().any(|f| f == "README.md"));
+        assert!(ctx.recent_commits.iter().any(|c| c.contains("add readme")));
+    }
 }

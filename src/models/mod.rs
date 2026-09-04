@@ -219,6 +219,16 @@ pub struct MRInfo {
     pub merge_commit_sha: Option<String>,
     /// Author's username or login (GitHub login / GitLab username).
     pub pr_author: Option<String>,
+    /// Author of the MR's head commit (`author_name` from the commit API).
+    ///
+    /// RENG-27: the History "author" column prefers this over `pr_author` —
+    /// the commit author is who actually wrote the code under review, while
+    /// `pr_author` is whoever opened the MR (often an admin/bot account).
+    /// Best-effort: `None` when the provider cannot resolve it, in which case
+    /// callers fall back to `pr_author`. `#[serde(default)]` keeps previously
+    /// serialized `MRInfo` JSON (without this field) deserializable.
+    #[serde(default)]
+    pub commit_author: Option<String>,
     /// Author's platform-specific unique ID (GitHub user.id / GitLab user.id).
     pub pr_author_id: Option<u64>,
     /// Rendered MR discussion-history section injected into review prompts
@@ -245,6 +255,7 @@ impl MRInfo {
             merge_commit_sha: None,
             pr_author: None,
             pr_author_id: None,
+            commit_author: None,
             discussion_context: None,
         }
     }

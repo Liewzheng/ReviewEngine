@@ -1606,7 +1606,7 @@ webhook_secret = "legacy-wh-plain"
             .unwrap();
         assert!(
             api_key.starts_with("enc:"),
-            "api_key must be encrypted at rest: {api_key}"
+            "api_key must be encrypted at rest (enc:-prefixed)"
         );
         assert!(!api_key.contains("sk-live"));
         let token: String = sqlx::query_scalar("SELECT token FROM git_platforms")

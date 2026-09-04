@@ -458,10 +458,17 @@ onUnmounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column :label="$t('history.columns.status')" width="100">
+              <el-table-column :label="$t('history.columns.status')" width="108">
                 <template #default="{ row }">
-                  <StatusBadge :status="statusToBadgeStatus(row.status)" :show-text="false" size="small" />
-                  <span style="margin-left: 6px; font-size: 12px; color: var(--text-primary);">{{ statusLabel(row.status) }}</span>
+                  <!-- Cell padding stacks: 16px from cellStyle on the td plus
+                       Element Plus' default 12px on .cell, leaving only ~44px
+                       of content width in a 100px column — "已完成" wrapped
+                       as "已完/成". Nowrap the cell and widen the column to
+                       match the history table (see commit 8aa1740). -->
+                  <div class="status-cell">
+                    <StatusBadge :status="statusToBadgeStatus(row.status)" :show-text="false" size="small" />
+                    <span class="status-label">{{ statusLabel(row.status) }}</span>
+                  </div>
                 </template>
               </el-table-column>
 
@@ -687,6 +694,28 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
+}
+
+/* Status cell: badge dot + label must stay on one line; Element Plus'
+   default .cell has word-break: break-all, which split "已完成" into
+   "已完/成" once the stacked cell padding squeezed the content width. */
+.status-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+}
+
+.status-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  /* Same truncation recipe as the history table (8aa1740): labels that
+     still don't fit (e.g. ja "キャンセル済み") ellipsize instead of
+     wrapping or being hard-clipped. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .author-cell {

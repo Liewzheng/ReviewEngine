@@ -987,10 +987,8 @@ mod tests {
         // Deterministic timestamp with sub-microsecond digits: `Utc::now()`
         // returns nanoseconds on Linux (clock_gettime) but only microseconds
         // on macOS (gettimeofday), which made this test platform-flaky.
-        let created_at = Utc
-            .with_ymd_and_hms(2026, 9, 4, 9, 34, 12)
-            .unwrap()
-            + chrono::Duration::nanoseconds(524_657_367);
+        let created_at =
+            Utc.with_ymd_and_hms(2026, 9, 4, 9, 34, 12).unwrap() + chrono::Duration::nanoseconds(524_657_367);
         let entry = TaskEntry {
             task_id: uuid::Uuid::new_v4(),
             state: TaskState::Pending,

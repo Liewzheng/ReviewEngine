@@ -459,6 +459,12 @@ export default {
       requestTimeout: '請求逾時（秒）',
       enableMetrics: '啟用指標',
       debugMode: '偵錯模式',
+      storageBackend: '儲存後端',
+      storageBackendKind: {
+        postgresql: 'PostgreSQL',
+        sqlite: 'SQLite',
+        disabled: '已停用',
+      },
     },
   },
   llm: {

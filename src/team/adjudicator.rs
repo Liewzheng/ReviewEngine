@@ -18,6 +18,17 @@
 //! finding's quoted `evidence` actually appears in the real file; the result
 //! is attached to the prompt as a PRE-FILTER NOTE (never an auto-drop — the
 //! LLM decides with the hint).
+//!
+//! When there is NO local checkout (server-side webhook/API reviews, where
+//! `project_path` is a provider slug like `group/project` and the diff
+//! arrives via the provider API), full-file ground truth cannot be obtained
+//! from the diff alone: a unified diff carries only the changed regions ±3
+//! context lines, so the "defensive code far from the hunk" check the pass
+//! exists for is unsatisfiable, and adjudicating against patch-only content
+//! would risk fail-closed drops on missing data. The pass therefore skips
+//! explicitly — one WARN naming the reason and the number of findings that
+//! pass through unadjudicated — instead of per-file INFO noise followed by a
+//! summary that claims findings were examined.
 
 use crate::llm::client::LLMClient;
 use crate::models::{Finding, LLMConfig, Severity};
@@ -159,6 +170,27 @@ where
     let mut drop_marks: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
     let mut downgrades: Vec<(usize, Severity)> = Vec::new();
 
+    // No local checkout at all (server-side webhook/API reviews pass the
+    // provider slug as `project_path` and never clone): every per-file load
+    // below would fail, so skip once, loudly, instead of emitting one INFO
+    // per file and a summary that miscounts these findings as examined.
+    // Fail-open: all candidates are kept unchanged. The diff patch alone is
+    // NOT a substitute ground truth — it covers only changed regions ±3
+    // lines, and adjudicating against it would risk fail-closed drops on
+    // code the patch simply doesn't show.
+    let candidate_count: usize = groups.iter().map(|(_, g)| g.len()).sum();
+    if candidate_count > 0 && !std::path::Path::new(project_path).is_dir() {
+        tracing::warn!(
+            "Adjudication: no local checkout at '{}' (server-side reviews fetch the diff via the \
+             provider API and never clone), so full-file ground truth is unavailable — \
+             {} candidate finding(s) pass through UNADJUDICATED and are kept unchanged (fail-open). \
+             To enable adjudication, run the review against a local checkout of the repository.",
+            project_path,
+            candidate_count
+        );
+        return Vec::new();
+    }
+
     for (file, group) in &groups {
         let cited_line = group.iter().find_map(|&i| findings[i].line);
         let content = match load_full_file(project_path, file, cited_line) {
@@ -167,7 +199,15 @@ where
                 // Fail-open: without the ground-truth file the adjudicator
                 // has nothing to judge against — keep every finding in the
                 // group untouched rather than inviting speculative drops.
-                tracing::info!("Adjudication: skipping '{}': {}", file, note);
+                // WARN, not INFO: inside a real checkout a missing file
+                // (e.g. deleted by the MR) means these candidates are not
+                // adjudicated, and that must be visible in the logs.
+                tracing::warn!(
+                    "Adjudication: skipping '{}': {} — {} finding(s) kept unchanged (fail-open)",
+                    file,
+                    note,
+                    group.len()
+                );
                 continue;
             }
         };
@@ -780,6 +820,81 @@ mod tests {
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 0, "no LLM call without ground truth");
+    }
+
+    /// RENG-25 regression: server-side webhook reviews pass the provider
+    /// slug (`group/project`) as `project_path` and never clone the repo.
+    /// The pass must skip explicitly — no LLM calls, every candidate kept
+    /// unchanged — instead of per-file "not readable" noise followed by a
+    /// summary claiming the findings were examined.
+    #[tokio::test]
+    async fn test_adjudicate_no_local_checkout_slug_skips_all_candidates() {
+        // Hermetic stand-in for a provider slug: a path that is not a
+        // directory, as `group/project` is not on the server's filesystem.
+        let dir = tempfile::tempdir().unwrap();
+        let slug = dir.path().join("group/project");
+        let slug = slug.to_str().unwrap();
+        assert!(!std::path::Path::new(slug).is_dir());
+
+        let mut findings = vec![
+            make_finding("README.md", Some(1), Severity::Critical, "doc claim"),
+            make_finding("src/a.rs", Some(10), Severity::High, "bug A"),
+            make_finding("src/b.rs", Some(20), Severity::High, "bug B"),
+            make_finding("src/c.rs", Some(30), Severity::Medium, "below threshold"),
+        ];
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let llm = move |_u: String| {
+            calls2.fetch_add(1, Ordering::SeqCst);
+            async { Ok("verdicts: []".to_string()) }
+        };
+
+        let dropped = adjudicate_with_llm(&mut findings, slug, &Severity::High, llm).await;
+
+        assert!(dropped.is_empty(), "fail-open: nothing dropped without ground truth");
+        assert_eq!(findings.len(), 4, "all findings kept unchanged");
+        assert_eq!(findings[0].severity, Severity::Critical);
+        assert_eq!(findings[1].severity, Severity::High);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no LLM call when no local checkout exists"
+        );
+    }
+
+    /// A real checkout where one cited file is missing (e.g. deleted by the
+    /// MR): that file's group is skipped fail-open, but files that DO exist
+    /// on disk are still adjudicated normally.
+    #[tokio::test]
+    async fn test_adjudicate_real_checkout_missing_file_skips_only_that_group() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("present.rs"), "fn f() {}").unwrap();
+        let mut findings = vec![
+            make_finding("deleted.rs", Some(1), Severity::Critical, "on deleted file"),
+            make_finding("present.rs", Some(1), Severity::High, "on present file"),
+        ];
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let llm = move |_u: String| {
+            calls2.fetch_add(1, Ordering::SeqCst);
+            async {
+                Ok("verdicts:\n  - index: 0\n    verdict: downgrade\n    new_severity: low\n    reason: \"minor\"\n    cited_lines: \"1\"\n".to_string())
+            }
+        };
+
+        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+
+        assert!(dropped.is_empty());
+        assert_eq!(findings.len(), 2);
+        // Missing file: kept untouched.
+        assert_eq!(findings[0].severity, Severity::Critical);
+        // Present file: adjudicated normally (downgrade applied).
+        assert_eq!(findings[1].severity, Severity::Low);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "only the readable file's batch calls the LLM"
+        );
     }
 
     #[tokio::test]

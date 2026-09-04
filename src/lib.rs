@@ -37,6 +37,9 @@ pub mod publisher;
 pub mod repo;
 pub mod scoring;
 pub mod server;
+/// Persistence layer (0.10.0): sqlx `Any` pool serving PostgreSQL and SQLite
+/// from one code path. See `design/persistence.md`.
+pub mod store;
 pub mod team;
 pub mod tokenizer;
 
@@ -172,7 +175,7 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
                 .context("Failed to create GitLabProvider")?
         };
 
-    let mut md = String::from("# CodeReview Board\n\n");
+    let mut md = String::from(crate::publisher::REVIEW_REPORT_PREFIX);
     for report in &output.reports {
         // render_expert_section appends the parse-failure / raw-response
         // annotations that the pre-rendered `markdown` does not carry, so a

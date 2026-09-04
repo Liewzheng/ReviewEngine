@@ -6,6 +6,7 @@ use base64::Engine;
 use std::sync::Arc;
 
 use crate::server::AppState;
+use crate::store::traits::ConfigStore;
 
 use super::is_blank_or_masked;
 use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK};
@@ -482,16 +483,32 @@ pub async fn put_config(
     };
 
     // Write-through persistence: everything the UI manages (llm, gitlab
-    // legacy fields, gitPlatforms, rules, advanced…) lands in
-    // `ui-state.toml` so a restart keeps it. The in-memory update above has
+    // legacy fields, gitPlatforms, rules, advanced…) is persisted so a
+    // restart keeps it — to the database when `state.db` is set (0.10.0,
+    // §6.2), otherwise to `ui-state.toml` (0.9 behaviour, also the
+    // REVIEW_DISABLE_DB escape hatch). The in-memory update above has
     // already been applied either way; a persist failure is surfaced as a
     // 500 so a silently-non-persistent deployment cannot go unnoticed.
     //
-    // The file is built from the REQUEST-RESOLVED sets (`applied`), never
+    // The snapshot is built from the REQUEST-RESOLVED sets (`applied`), never
     // from the effective runtime state: the runtime may additionally carry
     // env-derived entries (env wins at runtime), and persisting those would
     // leak env secrets to disk and resurrect them on a clean-env restart.
-    if let Some(path) = &state.ui_state_path {
+    // The env filter (`UiStateFile::from_applied`) is identical for both
+    // sinks: env/CLI values are never persisted anywhere.
+    if let Some(db) = &state.db {
+        let snapshot = super::persist::UiStateFile::from_applied(&applied, state.ui_state_env.as_ref());
+        if let Err(e) = db.save_ui_state(&snapshot).await {
+            tracing::error!(error = %e, "failed to persist config to the database");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("config applied in memory but failed to persist to the database: {e}")
+                })),
+            )
+                .into_response();
+        }
+    } else if let Some(path) = &state.ui_state_path {
         let snapshot = super::persist::UiStateFile::from_applied(&applied, state.ui_state_env.as_ref());
         if let Err(e) = super::persist::save_ui_state(path, &snapshot) {
             tracing::error!(path = %path.display(), error = %e, "failed to persist ui-state.toml");

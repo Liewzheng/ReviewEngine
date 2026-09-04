@@ -1,0 +1,87 @@
+# Companion to Dockerfile.dev: root .dockerignore minus the frontend/dist
+# exclusion (the dev preview image COPYs the locally built frontend).
+# migrations/ is not excluded here, satisfying the builder-stage
+# `COPY migrations ./migrations` (sqlx::migrate! compile-time embed).
+# Git ignore patterns for Docker build context
+# This prevents unnecessary files from being copied into the Docker build
+
+# Rust build artifacts
+target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Git
+.git/
+.gitignore
+.github/
+
+# IDE and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Documentation (not needed at runtime)
+docs/*.md
+!docs/code-audit-default.toml
+
+# Review reports and runtime data
+reports/
+*.log
+review-engine*.log
+
+# Docker files themselves (avoid recursion issues)
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+.env
+.env.*
+!.env.example
+
+# CI/CD
+.github/workflows/
+
+# Test data and artifacts
+test_data/
+tmp/
+temp/
+
+# Python bindings (not included in SaaS build)
+python/
+*.py
+*.pyc
+__pycache__/
+
+# Node.js (if any frontend exists)
+# A bare `node_modules/` only matches the context root (BuildKit verified) and
+# would not exclude the nested frontend/node_modules: after a local npm install
+# it would be copied into the image by `COPY frontend/ ./`, clobbering the
+# in-container linux-musl dependencies (@rolldown/binding-* platform mismatch
+# breaks the build). `**/node_modules` covers both root and any depth;
+# node_modules is a pure build artifact and must never enter the image.
+**/node_modules
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Local development configs
+.code-audit-config.toml
+.pr-agent.toml
+
+# Misc
+*.md
+!README.md
+CHANGELOG.md
+LICENSE
+
+# Plan and review artifacts
+plan.md
+review-feedback-*.md

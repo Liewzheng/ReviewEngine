@@ -25,6 +25,27 @@ pub struct ProjectContext {
     pub branch_commits: Vec<String>,
 }
 
+impl ProjectContext {
+    /// Build a partial context from the file paths of the reviewed diff.
+    ///
+    /// Fallback for reviews whose repository has no local checkout (e.g.
+    /// server-side webhook reviews, where `MRInfo::project_path` is a
+    /// provider slug like `group/project` and the diff arrives via the
+    /// provider API): the lead overview still gets a real file tree
+    /// instead of an empty default. Paths are sorted, deduplicated, and
+    /// capped at 200 entries, matching `gather_project_context`.
+    pub fn from_diff_paths<'a>(paths: impl Iterator<Item = &'a str>) -> Self {
+        let mut file_tree: Vec<String> = paths.map(String::from).collect();
+        file_tree.sort();
+        file_tree.dedup();
+        file_tree.truncate(200);
+        ProjectContext {
+            file_tree,
+            ..ProjectContext::default()
+        }
+    }
+}
+
 /// Common manifest files used to identify project type and dependencies.
 const MANIFEST_FILES: &[&str] = &["Cargo.toml", "package.json", "pyproject.toml", "go.mod", "build.gradle"];
 
@@ -678,5 +699,22 @@ mod tests {
         assert!(ctx.file_tree.iter().any(|f| f == "README.md"));
         assert!(ctx.readme_excerpt.is_empty()); // plain dir, no git show
         assert!(ctx.manifest_excerpt.is_empty());
+    }
+
+    #[test]
+    fn test_from_diff_paths_sorts_and_dedups() {
+        let ctx = ProjectContext::from_diff_paths(["src/b.rs", "src/a.rs", "src/b.rs"].into_iter());
+        assert_eq!(ctx.file_tree, vec!["src/a.rs", "src/b.rs"]);
+        assert!(ctx.readme_excerpt.is_empty());
+        assert!(ctx.manifest_excerpt.is_empty());
+        assert!(ctx.recent_commits.is_empty());
+        assert!(ctx.branch_commits.is_empty());
+    }
+
+    #[test]
+    fn test_from_diff_paths_caps_at_200() {
+        let paths: Vec<String> = (0..500).map(|i| format!("src/file_{i:03}.rs")).collect();
+        let ctx = ProjectContext::from_diff_paths(paths.iter().map(String::as_str));
+        assert_eq!(ctx.file_tree.len(), 200);
     }
 }

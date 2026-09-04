@@ -464,6 +464,12 @@ export default {
       requestTimeout: '요청 시간 초과（초）',
       enableMetrics: '메트릭 활성화',
       debugMode: '디버그 모드',
+      storageBackend: '스토리지 백엔드',
+      storageBackendKind: {
+        postgresql: 'PostgreSQL',
+        sqlite: 'SQLite',
+        disabled: '비활성화됨',
+      },
     },
   },
   llm: {

@@ -3,7 +3,10 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::super::dispatcher::MrDispatcher;
+use crate::server::api::review::discussion::DiscussionTap;
 use crate::server::task_queue::{record_task_outcome, record_task_started, SourceMeta, TaskStore};
+use crate::store::traits::{DiscussionNote, DiscussionStore};
+use crate::store::SqlxStore;
 
 /// Parsed payload from a GitLab Merge Request webhook event.
 pub struct MrHookPayload {
@@ -60,11 +63,14 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
         .unwrap_or("")
         .to_string();
 
-    // Author: prefer the MR author block when present, otherwise fall back to
-    // the webhook trigger user. MRInfo will back-fill the authoritative author
-    // once the review pipeline resolves the MR metadata.
-    let author_name = parsed["object_attributes"]["author"]["name"]
+    // Author (RENG-27): prefer the head commit's author — the person who
+    // actually wrote the code under review. Fall back to the MR author block
+    // (whoever opened the MR, e.g. an admin account), then the webhook
+    // trigger user. MRInfo will back-fill the authoritative author once the
+    // review pipeline resolves the MR metadata.
+    let author_name = parsed["object_attributes"]["last_commit"]["author"]["name"]
         .as_str()
+        .or_else(|| parsed["object_attributes"]["author"]["name"].as_str())
         .or_else(|| parsed["user"]["name"].as_str())
         .unwrap_or("")
         .to_string();
@@ -105,6 +111,7 @@ async fn run_webhook_review(
     gitlab_token: String,
     mr_iid: u64,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     let task_id = if let Some(store) = task_store.as_ref() {
         Some(record_task_started(store, source_meta).await)
@@ -113,11 +120,22 @@ async fn run_webhook_review(
     };
 
     let outcome = async {
-        let (info, diff) = super::super::resolve_review_source(&mr_url, &gitlab_token).await?;
+        let (mut info, diff) = super::super::resolve_review_source(&mr_url, &gitlab_token).await?;
         if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
             store
                 .fill_source_meta(id, crate::server::task_queue::source_meta_from_mr_info(&info))
                 .await;
+            // §7.2 discussion-context injection: best-effort, `None`
+            // degrades to the 0.9 prompt. Requires the live task row
+            // (`review_contexts.task_id` FK), hence tied to the task store.
+            if let Some(tap) = tap.as_ref() {
+                if let Some(section) = tap
+                    .inject(id, &info.project_path, u64::from(info.mr_iid), &gitlab_token, &mr_url)
+                    .await
+                {
+                    info.discussion_context = Some(section);
+                }
+            }
         }
         super::super::run_review_common(
             &mr_url,
@@ -152,10 +170,11 @@ pub fn spawn_mr_review_task(
     mr_iid: u64,
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     let d = dispatcher.clone();
     tokio::spawn(async move {
-        run_webhook_review(task_store, &d, mr_url, sha, gitlab_token, mr_iid, source_meta).await;
+        run_webhook_review(task_store, &d, mr_url, sha, gitlab_token, mr_iid, source_meta, tap).await;
     });
 }
 
@@ -168,6 +187,7 @@ pub async fn handle_mr_in_progress(
     mr_iid: u64,
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     tracing::info!("MR !{} review in progress, waiting...", mr_iid);
     dispatcher.wait(mr_url).await;
@@ -182,6 +202,7 @@ pub async fn handle_mr_in_progress(
                 mr_iid,
                 task_store,
                 source_meta,
+                tap,
             );
         }
         _ => {
@@ -200,6 +221,7 @@ pub async fn dispatch_mr_event(
     mr_iid: u64,
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
+    tap: Option<DiscussionTap>,
 ) {
     match dispatcher.try_start(mr_url, sha).await {
         super::super::dispatcher::ShouldStart::Go => {
@@ -211,13 +233,24 @@ pub async fn dispatch_mr_event(
                 mr_iid,
                 task_store,
                 source_meta,
+                tap,
             );
         }
         super::super::dispatcher::ShouldStart::AlreadyReviewed => {
             tracing::info!("Skipping MR !{}: already reviewed at SHA {}", mr_iid, sha);
         }
         super::super::dispatcher::ShouldStart::InProgress => {
-            handle_mr_in_progress(dispatcher, mr_url, sha, gitlab_token, mr_iid, task_store, source_meta).await;
+            handle_mr_in_progress(
+                dispatcher,
+                mr_url,
+                sha,
+                gitlab_token,
+                mr_iid,
+                task_store,
+                source_meta,
+                tap,
+            )
+            .await;
         }
     }
 }
@@ -289,7 +322,7 @@ pub(crate) fn rewrite_url_to_platform(url: &str, base_url: &str) -> String {
 /// while the payload carries the external :8443), else `base_url`. The
 /// fail-safe in [`rewrite_url_to_platform`] keeps the payload URL verbatim
 /// when the chosen target does not parse.
-fn review_base_url(platform: &crate::models::GitPlatformConfig) -> &str {
+pub(crate) fn review_base_url(platform: &crate::models::GitPlatformConfig) -> &str {
     if platform.internal_base_url.is_empty() {
         &platform.base_url
     } else {
@@ -303,6 +336,7 @@ pub async fn handle_mr_hook(
     gitlab_token: &str,
     platform: Option<crate::models::GitPlatformConfig>,
     task_store: Option<Arc<TaskStore>>,
+    db: Option<Arc<SqlxStore>>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_mr_hook_payload(body, gitlab_token)?;
 
@@ -356,6 +390,12 @@ pub async fn handle_mr_hook(
 
         let source_meta = source_meta_from_payload(&payload);
 
+        // §7.2 discussion tap: the DB handle plus platform identity, built
+        // against the (rewritten) review URL so the API fallback and the
+        // self-echo guard target the reachable instance. `None` without a
+        // DB → 0.9 behaviour.
+        let tap = db.map(|db| DiscussionTap::new(db, platform.as_ref(), &review_url));
+
         dispatch_mr_event(
             dispatcher,
             &review_url,
@@ -364,6 +404,7 @@ pub async fn handle_mr_hook(
             payload.mr_iid,
             task_store,
             source_meta,
+            tap,
         )
         .await;
     }
@@ -376,7 +417,7 @@ pub async fn handle_mr_hook(
 
 /// True when `note` (already lowercased) begins with a slash command whose
 /// first path segment is exactly `cmd` — i.e. `/review` and `/review/123`
-/// match, but `/reviewer` / `/reviewxyz` do not. The command must be followed
+/// match, but `/reviewer` / `reviewxyz` do not. The command must be followed
 /// by a path separator (`/`) or the end of the note, so prefix lookalikes
 /// never trigger a review (`^/review(/|$)` semantics).
 pub fn note_starts_with_command(note: &str, cmd: &str) -> bool {
@@ -384,6 +425,19 @@ pub fn note_starts_with_command(note: &str, cmd: &str) -> bool {
         return false;
     };
     rest.is_empty() || rest.starts_with('/')
+}
+
+/// True when a note body (already lowercased) is a `/review` or `/describe`
+/// command. Command notes are user intent: they always ingest (§7.1) and
+/// survive the self-echo filter of the discussion-context tap (§7.2).
+pub(crate) fn is_command_note(body_lower: &str) -> bool {
+    note_starts_with_command(body_lower, "/review") || note_starts_with_command(body_lower, "/describe")
+}
+
+/// True when `body` is one of our own published review reports (self-echo
+/// guard (a) of §7.1).
+pub(crate) fn is_self_report(body: &str) -> bool {
+    body.starts_with(crate::publisher::REVIEW_REPORT_PREFIX)
 }
 
 /// Extract the merge request iid from the tail of a system-hook note/MR URL
@@ -405,17 +459,195 @@ pub(crate) fn mr_iid_from_url(url: &str) -> Option<u64> {
     }
 }
 
+// ─── 0.10.0 Note ingestion (design/persistence.md §7.1) ───
+
+/// `object_attributes.created_at` from a note webhook. GitLab sends either
+/// RFC 3339 or its legacy `"2026-09-03 10:00:00 UTC"` format; both decode to
+/// UTC. `None` when absent/unparseable (the caller falls back to now()).
+pub(crate) fn parse_note_created_at(raw: Option<&str>) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = raw?;
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&chrono::Utc));
+    }
+    chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S UTC")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// `scheme://host[:port]` of a URL — the instance root for instance-level
+/// API calls derived from a payload URL.
+pub(crate) fn url_origin(url: &str) -> Option<String> {
+    let (scheme, rest) = url.split_once("://")?;
+    let host = rest.split('/').next().unwrap_or("");
+    if host.is_empty() {
+        None
+    } else {
+        Some(format!("{scheme}://{host}"))
+    }
+}
+
+/// Self-echo guard (b) of §7.1: the GitLab user id this service's token
+/// posts as, per platform key ("default" for the unmatched/runtime-token
+/// path). Resolved LAZILY (GET /user) and cached for the process lifetime;
+/// only successes are cached, so a transient API failure retries on the
+/// next call instead of permanently disabling the guard. The platform set
+/// is runtime-mutable (PUT /config), which is why this is not resolved once
+/// at startup. Shared with the §7.2 discussion-context tap (same guard
+/// applies to API-fallback notes). `None` when the token or instance base
+/// is empty, or the lookup fails — the guard is inactive, never an error.
+static SELF_USER_IDS: std::sync::OnceLock<tokio::sync::Mutex<std::collections::HashMap<String, u64>>> =
+    std::sync::OnceLock::new();
+
+pub(crate) async fn self_user_id_cached(platform_name: &str, gitlab_token: &str, instance_base: &str) -> Option<u64> {
+    if gitlab_token.is_empty() || instance_base.is_empty() {
+        return None;
+    }
+    let cache = SELF_USER_IDS.get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(id) = cache.lock().await.get(platform_name) {
+        return Some(*id);
+    }
+    let client = crate::git_provider::gitlab::client::Client::for_instance(gitlab_token, instance_base);
+    match client.get_current_user_id().await {
+        Ok(id) => {
+            cache.lock().await.insert(platform_name.to_string(), id);
+            Some(id)
+        }
+        Err(e) => {
+            tracing::warn!(
+                "could not resolve the service's own GitLab user id ({platform_name}): {e:#}; \
+                 self-echo guard (b) inactive for this call"
+            );
+            None
+        }
+    }
+}
+
+/// Resolve the instance base + platform key for a note webhook payload, then
+/// delegate to [`self_user_id_cached`]. The instance to ask: the matched
+/// platform's reachable base (internal when configured, mirroring the review
+/// URL rewrite), else the origin of the payload's own URLs.
+async fn resolve_self_user_id(
+    platform: Option<&crate::models::GitPlatformConfig>,
+    gitlab_token: &str,
+    parsed: &Value,
+) -> Option<u64> {
+    if gitlab_token.is_empty() {
+        return None;
+    }
+    let key = platform
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| "default".to_string());
+    let instance_base = match platform {
+        Some(p) => review_base_url(p).to_string(),
+        None => {
+            let url = parsed["project"]["web_url"]
+                .as_str()
+                .or_else(|| parsed["project"]["homepage"].as_str())
+                .or_else(|| parsed["object_attributes"]["url"].as_str())?;
+            url_origin(url)?
+        }
+    };
+    self_user_id_cached(&key, gitlab_token, &instance_base).await
+}
+
+/// Persist one note-webhook payload into `mr_discussions` (§7.1).
+/// Best-effort: every failure is logged and swallowed — note ingestion is an
+/// enhancement, never a reason to fail the hook. Skips: non-note payloads,
+/// non-MR notes (Commit/Issue/Snippet), system notes, and our own output
+/// (self-echo guard) — except `/review` / `/describe` command notes, which
+/// are user intent and always ingest.
+async fn ingest_note(
+    db: &SqlxStore,
+    parsed: &Value,
+    platform: Option<&crate::models::GitPlatformConfig>,
+    gitlab_token: &str,
+) {
+    if parsed["object_kind"].as_str() != Some("note") {
+        return;
+    }
+    let attrs = &parsed["object_attributes"];
+    if attrs["noteable_type"].as_str() != Some("MergeRequest") {
+        return;
+    }
+    // System notes ("added 1 commit") are noise, not discussion (§7.1).
+    if attrs["system"].as_bool() == Some(true) {
+        return;
+    }
+    let Some(note_id) = attrs["id"].as_u64() else {
+        return;
+    };
+    let project = parsed["project"]["path_with_namespace"].as_str().unwrap_or("");
+    // `merge_request.iid`, falling back to the `object_attributes.url` tail
+    // (system-hook notes may omit the merge_request block).
+    let mr_iid = parsed["merge_request"]["iid"]
+        .as_u64()
+        .or_else(|| attrs["url"].as_str().and_then(mr_iid_from_url));
+    let Some(mr_iid) = mr_iid.filter(|_| !project.is_empty()) else {
+        tracing::debug!("note hook ingestion skipped: no MR iid or project path");
+        return;
+    };
+
+    let body = attrs["note"].as_str().unwrap_or("");
+    let is_command = is_command_note(&body.to_lowercase());
+    if !is_command {
+        // (a) our own published review report.
+        if is_self_report(body) {
+            tracing::debug!("note hook ingestion skipped: self-published review report");
+            return;
+        }
+        // (b) a note authored by the service's own GitLab account.
+        if let Some(self_id) = resolve_self_user_id(platform, gitlab_token, parsed).await {
+            if parsed["user"]["id"].as_u64() == Some(self_id) {
+                tracing::debug!("note hook ingestion skipped: note authored by the service itself");
+                return;
+            }
+        }
+    }
+
+    let author = parsed["user"]["username"]
+        .as_str()
+        .or_else(|| parsed["user"]["name"].as_str())
+        .unwrap_or("");
+    let created_at = parse_note_created_at(attrs["created_at"].as_str()).unwrap_or_else(|| {
+        tracing::warn!("note {note_id}: unparseable created_at, using ingestion time");
+        chrono::Utc::now()
+    });
+    let note = DiscussionNote {
+        platform: platform
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| "default".to_string()),
+        project: project.to_string(),
+        mr_iid,
+        note_id,
+        author: author.to_string(),
+        body: body.to_string(),
+        created_at,
+    };
+    if let Err(e) = db.upsert_note(&note).await {
+        tracing::error!("failed to persist MR discussion note {note_id} for {project} !{mr_iid}: {e:#}");
+    }
+}
+
 pub async fn handle_note_hook(
     body: &str,
     dispatcher: &MrDispatcher,
     gitlab_token: &str,
     platform: Option<crate::models::GitPlatformConfig>,
     task_store: Option<Arc<TaskStore>>,
+    db: Option<Arc<SqlxStore>>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse Note hook: {}", e);
         StatusCode::BAD_REQUEST
     })?;
+
+    // 0.10.0 (design/persistence.md §7.1): persist the note into
+    // mr_discussions BEFORE the command check below — command notes are
+    // discussion history too. Ingestion is best-effort: a failure is logged,
+    // never fails the hook, and db=None keeps the 0.9 behaviour exactly.
+    if let Some(db) = &db {
+        ingest_note(db, &parsed, platform.as_ref(), gitlab_token).await;
+    }
 
     let note = parsed["object_attributes"]["note"].as_str().unwrap_or("");
     let note_lower = note.to_lowercase();
@@ -488,8 +720,10 @@ pub async fn handle_note_hook(
                     let u = url;
                     let s = sha;
                     let note_iid = mr_iid;
+                    // §7.2 discussion tap (same wiring as the MR hook).
+                    let tap = db.clone().map(|db| DiscussionTap::new(db, platform.as_ref(), &u));
                     tokio::spawn(async move {
-                        run_webhook_review(task_store, &d, u, s, token, note_iid, source_meta).await;
+                        run_webhook_review(task_store, &d, u, s, token, note_iid, source_meta, tap).await;
                     });
                 }
                 _ => {
@@ -658,6 +892,43 @@ mod tests {
         assert_eq!(payload.author_avatar_url, "http://author-avatar");
     }
 
+    /// RENG-27: the head commit's author (who wrote the code) wins over the
+    /// MR author block (who opened the MR).
+    #[test]
+    fn parse_mr_hook_payload_prefers_last_commit_author() {
+        let body = r#"{
+            "object_attributes": {
+                "action": "open",
+                "iid": 7,
+                "title": "Fix login bug",
+                "source_branch": "feature/login",
+                "target_branch": "main",
+                "url": "http://gitlab.internal:8929/group/proj/-/merge_requests/7",
+                "last_commit": {"id": "abc123", "author": {"name": "commit-author", "email": "c@example.com"}},
+                "author": {"name": "mr-author", "avatar_url": "http://author-avatar"}
+            },
+            "project": {
+                "path_with_namespace": "group/proj",
+                "web_url": "http://gitlab.internal:8929/group/proj"
+            },
+            "user": {"name": "trigger-user", "avatar_url": "http://trigger-avatar"}
+        }"#;
+        let payload = parse_mr_hook_payload(body, "glpat-test").expect("payload must parse");
+
+        assert_eq!(payload.author_name, "commit-author");
+        let meta = source_meta_from_payload(&payload);
+        assert_eq!(meta.author_name.as_deref(), Some("commit-author"));
+    }
+
+    /// RENG-27 regression guard: when `last_commit.author` is absent, the MR
+    /// author block remains the fallback (pre-fix behavior).
+    #[test]
+    fn parse_mr_hook_payload_falls_back_to_mr_author_without_commit_author() {
+        let payload = parse_mr_hook_payload(sample_mr_payload(), "glpat-test").expect("payload must parse");
+
+        assert_eq!(payload.author_name, "real-author");
+    }
+
     #[test]
     fn parse_mr_hook_payload_falls_back_to_trigger_user_for_author() {
         let body = r#"{
@@ -696,5 +967,245 @@ mod tests {
         assert_eq!(meta.author_avatar_url.as_deref(), Some("http://author-avatar"));
         assert_eq!(meta.gitlab_mr_url.as_deref(), Some(MR_URL));
         assert_eq!(meta.commit_sha.as_deref(), Some(SHA));
+    }
+
+    // ─── 0.10.0 note ingestion (design/persistence.md §7.1) ───
+
+    async fn fresh_db() -> Arc<SqlxStore> {
+        let db = Arc::new(SqlxStore::new_in_memory().await.unwrap());
+        db.migrate().await.unwrap();
+        db
+    }
+
+    fn note_payload(note_id: u64, body: &str, user_id: u64, username: &str) -> String {
+        serde_json::json!({
+            "object_kind": "note",
+            "object_attributes": {
+                "id": note_id,
+                "note": body,
+                "noteable_type": "MergeRequest",
+                "created_at": "2026-09-03 10:00:00 UTC",
+                "url": format!("http://gitlab.internal/group/proj/-/merge_requests/7#note_{note_id}"),
+                "system": false
+            },
+            "merge_request": {"iid": 7},
+            "project": {"path_with_namespace": "group/proj", "web_url": "http://gitlab.internal/group/proj"},
+            "user": {"id": user_id, "username": username, "name": username}
+        })
+        .to_string()
+    }
+
+    async fn note_count(db: &SqlxStore) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM mr_discussions")
+            .fetch_one(db.pool())
+            .await
+            .unwrap()
+    }
+
+    /// Fire a note hook whose response is discarded (Json is #[must_use]).
+    async fn fire_note(
+        payload: &str,
+        dispatcher: &MrDispatcher,
+        token: &str,
+        platform: Option<crate::models::GitPlatformConfig>,
+        db: &Arc<SqlxStore>,
+    ) {
+        let _ = handle_note_hook(payload, dispatcher, token, platform, None, Some(db.clone()))
+            .await
+            .unwrap();
+    }
+
+    /// (a) a plain MR note is persisted with all fields, project from
+    /// `path_with_namespace`, author from `user.username`, platform
+    /// "default" when no platform matched.
+    #[tokio::test]
+    async fn note_ingestion_persists_fields() {
+        let db = fresh_db().await;
+        let dispatcher = MrDispatcher::new();
+        let resp = handle_note_hook(
+            &note_payload(1234, "LGTM, ship it", 42, "alice"),
+            &dispatcher,
+            "",
+            None,
+            None,
+            Some(db.clone()),
+        )
+        .await
+        .expect("hook must succeed");
+        assert_eq!(resp["status"], "received");
+
+        let notes = db.list_notes("default", "group/proj", 7).await.unwrap();
+        assert_eq!(notes.len(), 1);
+        let note = &notes[0];
+        assert_eq!(note.note_id, 1234);
+        assert_eq!(note.body, "LGTM, ship it");
+        assert_eq!(note.author, "alice");
+        assert_eq!(note.platform, "default");
+        assert_eq!(note.project, "group/proj");
+        assert_eq!(note.mr_iid, 7);
+        assert_eq!(
+            note.created_at,
+            chrono::DateTime::parse_from_rfc3339("2026-09-03T10:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+            "GitLab legacy timestamp format decodes to UTC"
+        );
+        // ingested_at is stamped on insert.
+        let ingested: String = sqlx::query_scalar("SELECT ingested_at FROM mr_discussions WHERE note_id = 1234")
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        crate::store::decode_ts(&ingested).unwrap();
+    }
+
+    /// Matched platform supplies the `platform` column; the MR iid falls
+    /// back to the `object_attributes.url` tail when merge_request is absent.
+    #[tokio::test]
+    async fn note_ingestion_platform_name_and_iid_fallback() {
+        let db = fresh_db().await;
+        let dispatcher = MrDispatcher::new();
+        let platform = crate::models::GitPlatformConfig {
+            name: "internal".to_string(),
+            base_url: "http://gitlab.internal".to_string(),
+            ..Default::default()
+        };
+        let mut payload: Value = serde_json::from_str(&note_payload(55, "looks fine", 42, "bob")).unwrap();
+        payload.as_object_mut().unwrap().remove("merge_request");
+        fire_note(&payload.to_string(), &dispatcher, "", Some(platform), &db).await;
+        let notes = db.list_notes("internal", "group/proj", 7).await.unwrap();
+        assert_eq!(notes.len(), 1, "iid recovered from the note URL tail");
+        assert_eq!(notes[0].platform, "internal");
+    }
+
+    /// (b) webhook redelivery dedups on the primary key; (c) an edited note
+    /// (same note_id) updates the body in place.
+    #[tokio::test]
+    async fn note_ingestion_idempotent_redelivery_and_edit() {
+        let db = fresh_db().await;
+        let dispatcher = MrDispatcher::new();
+
+        let body = note_payload(1234, "first version", 42, "alice");
+        fire_note(&body, &dispatcher, "", None, &db).await;
+        fire_note(&body, &dispatcher, "", None, &db).await;
+        assert_eq!(note_count(&db).await, 1, "redelivery must dedup");
+
+        let edited = note_payload(1234, "edited body", 42, "alice");
+        fire_note(&edited, &dispatcher, "", None, &db).await;
+        assert_eq!(note_count(&db).await, 1, "edit must update in place");
+        let notes = db.list_notes("default", "group/proj", 7).await.unwrap();
+        assert_eq!(notes[0].body, "edited body");
+    }
+
+    /// (d) non-MR notes (Commit/Issue/Snippet) are ignored.
+    #[tokio::test]
+    async fn note_ingestion_ignores_non_mr_notes() {
+        let db = fresh_db().await;
+        let dispatcher = MrDispatcher::new();
+        for noteable in ["Commit", "Issue", "Snippet"] {
+            let mut payload: Value = serde_json::from_str(&note_payload(9, "note", 42, "alice")).unwrap();
+            payload["object_attributes"]["noteable_type"] = serde_json::json!(noteable);
+            fire_note(&payload.to_string(), &dispatcher, "", None, &db).await;
+        }
+        assert_eq!(note_count(&db).await, 0);
+    }
+
+    /// (e) system notes ("added 1 commit") are noise and skipped.
+    #[tokio::test]
+    async fn note_ingestion_skips_system_notes() {
+        let db = fresh_db().await;
+        let dispatcher = MrDispatcher::new();
+        let mut payload: Value = serde_json::from_str(&note_payload(9, "added 1 commit", 42, "alice")).unwrap();
+        payload["object_attributes"]["system"] = serde_json::json!(true);
+        fire_note(&payload.to_string(), &dispatcher, "", None, &db).await;
+        assert_eq!(note_count(&db).await, 0);
+    }
+
+    /// (f) self-echo guard: our published report prefix and our own author
+    /// id are skipped; a /review command note is user intent and ingests
+    /// even when it hits both guards.
+    #[tokio::test]
+    async fn note_ingestion_self_echo_guard_and_command_exception() {
+        let db = fresh_db().await;
+        let dispatcher = MrDispatcher::new();
+
+        // (a) report prefix.
+        let report = format!("{}\nreview body", crate::publisher::REVIEW_REPORT_PREFIX);
+        fire_note(&note_payload(1, &report, 42, "review-bot"), &dispatcher, "", None, &db).await;
+        assert_eq!(note_count(&db).await, 0, "our own report must not be ingested");
+
+        // (b) self-author. Seed the per-platform cache directly (unique
+        // platform name — no network, no cross-test interference).
+        let platform = crate::models::GitPlatformConfig {
+            name: "self-echo-test".to_string(),
+            base_url: "http://127.0.0.1:9".to_string(),
+            ..Default::default()
+        };
+        SELF_USER_IDS
+            .get_or_init(|| tokio::sync::Mutex::new(std::collections::HashMap::new()))
+            .lock()
+            .await
+            .insert("self-echo-test".to_string(), 4242);
+
+        fire_note(
+            &note_payload(2, "inline comment by the bot", 4242, "review-bot"),
+            &dispatcher,
+            "glpat-self-echo-test",
+            Some(platform.clone()),
+            &db,
+        )
+        .await;
+        assert_eq!(note_count(&db).await, 0, "note by our own user id must be skipped");
+
+        // A DIFFERENT user on the same platform ingests fine (cache hit, no
+        // network).
+        fire_note(
+            &note_payload(3, "human comment", 777, "carol"),
+            &dispatcher,
+            "glpat-self-echo-test",
+            Some(platform.clone()),
+            &db,
+        )
+        .await;
+        assert_eq!(note_count(&db).await, 1);
+
+        // Command exception: a /review note from our own account is still
+        // user intent → ingested. Empty token keeps the command branch from
+        // dispatching (the guard exception bypasses self-id resolution
+        // entirely, so the token value is irrelevant to this assertion).
+        fire_note(
+            &note_payload(4, "/review", 4242, "review-bot"),
+            &dispatcher,
+            "",
+            Some(platform),
+            &db,
+        )
+        .await;
+        let notes = db.list_notes("self-echo-test", "group/proj", 7).await.unwrap();
+        assert_eq!(notes.len(), 2, "human comment + command note");
+        assert!(
+            notes.iter().any(|n| n.body == "/review"),
+            "command note must be ingested"
+        );
+    }
+
+    /// (g) db=None: the hook behaves exactly like 0.9 — no ingestion, no
+    /// error.
+    #[tokio::test]
+    async fn note_hook_without_db_is_0_9_behaviour() {
+        let dispatcher = MrDispatcher::new();
+        let resp = handle_note_hook(&note_payload(1, "LGTM", 42, "alice"), &dispatcher, "", None, None, None)
+            .await
+            .expect("hook must succeed without a DB");
+        assert_eq!(resp["status"], "received");
+    }
+
+    #[test]
+    fn parse_note_created_at_accepts_gitlab_formats() {
+        let legacy = parse_note_created_at(Some("2026-09-03 10:00:00 UTC")).unwrap();
+        assert_eq!(legacy.to_rfc3339(), "2026-09-03T10:00:00+00:00");
+        let rfc = parse_note_created_at(Some("2026-09-03T10:00:00Z")).unwrap();
+        assert_eq!(legacy, rfc);
+        assert!(parse_note_created_at(Some("not a date")).is_none());
+        assert!(parse_note_created_at(None).is_none());
     }
 }

@@ -1362,3 +1362,505 @@ async fn rerun_with_stored_request_llm_configs_passes_gate() {
     assert_ne!(new_id, original_id, "rerun must create a fresh task id");
     assert!(store.get(new_id).await.is_some(), "a new task must be enqueued");
 }
+
+// ─── 0.10.0 history API reads the DB (design/persistence.md §8.1) ───
+
+use crate::store::SqlxStore;
+use std::collections::BTreeSet;
+
+/// State whose task store writes through to an in-memory SQLite DB — the
+/// wiring app.rs does at startup (`set_db` + `AppState::db`).
+async fn state_with_db() -> (Arc<AppState>, Arc<SqlxStore>) {
+    let db = Arc::new(SqlxStore::new_in_memory().await.unwrap());
+    db.migrate().await.unwrap();
+    let mut store = TaskStore::new();
+    store.set_db(db.clone());
+    let mut state = AppState::new(vec![usable_llm_config()]);
+    state.task_store = Some(Arc::new(store));
+    state.db = Some(db.clone());
+    (Arc::new(state), db)
+}
+
+fn empty_params() -> ListParams {
+    ListParams {
+        status: None,
+        page: None,
+        per_page: None,
+        q: None,
+        project: None,
+        repository: None,
+        date_from: None,
+        date_to: None,
+    }
+}
+
+async fn list_json(state: Arc<AppState>, params: ListParams) -> serde_json::Value {
+    let resp = list_reviews(State(state), Query(params)).await.into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "list_reviews must succeed, got {json}");
+    json
+}
+
+/// Seed one `reviews` row directly with a fixed `created_at`, so list order
+/// is deterministic (no wall-clock ties).
+async fn seed_review_row(
+    db: &SqlxStore,
+    id: Uuid,
+    state_str: &str,
+    created_at: &str,
+    completed_at: Option<&str>,
+    meta: &SourceMeta,
+    result: Option<serde_json::Value>,
+) {
+    sqlx::query(
+        "INSERT INTO reviews (task_id, state, source_meta, project, repository, result, created_at, completed_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind(state_str)
+    .bind(serde_json::to_string(meta).unwrap())
+    .bind(&meta.project)
+    .bind(&meta.repository)
+    .bind(result.map(|v| v.to_string()))
+    .bind(created_at)
+    .bind(completed_at)
+    .execute(db.pool())
+    .await
+    .unwrap();
+}
+
+fn meta_titled(title: &str, project: &str, repository: &str) -> SourceMeta {
+    SourceMeta {
+        mr_title: Some(title.to_string()),
+        project: Some(project.to_string()),
+        repository: Some(repository.to_string()),
+        ..SourceMeta::default()
+    }
+}
+
+fn item_ids(json: &serde_json::Value) -> Vec<String> {
+    json["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["task_id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+/// (a) pagination / filter / q / project / date parameters keep their 0.9
+/// semantics with the DB as the data source; the response shape is asserted
+/// key-for-key against the 0.9 in-memory path.
+#[tokio::test]
+async fn list_reviews_db_pagination_and_filters_match_0_9() {
+    let (state, db) = state_with_db().await;
+
+    let t1 = Uuid::new_v4();
+    let t2 = Uuid::new_v4();
+    let t3 = Uuid::new_v4();
+    let t4 = Uuid::new_v4();
+    let t5 = Uuid::new_v4();
+    seed_review_row(
+        &db,
+        t1,
+        "completed",
+        "2026-09-01T10:00:00.000000Z",
+        Some("2026-09-01T10:05:00.000000Z"),
+        &meta_titled("Fix login bug", "group/a", "a"),
+        None,
+    )
+    .await;
+    seed_review_row(
+        &db,
+        t2,
+        "failed",
+        "2026-09-02T10:00:00.000000Z",
+        Some("2026-09-02T10:01:00.000000Z"),
+        &meta_titled("Add metrics endpoint", "group/b", "b"),
+        None,
+    )
+    .await;
+    seed_review_row(
+        &db,
+        t3,
+        "completed",
+        "2026-09-03T10:00:00.000000Z",
+        Some("2026-09-03T10:05:00.000000Z"),
+        &meta_titled("Refactor auth flow", "group/a", "a"),
+        None,
+    )
+    .await;
+    seed_review_row(
+        &db,
+        t4,
+        "running",
+        "2026-09-03T12:00:00.000000Z",
+        None,
+        &meta_titled("Login page tweaks", "group/c", "c"),
+        None,
+    )
+    .await;
+    seed_review_row(
+        &db,
+        t5,
+        "pending",
+        "2026-09-03T13:00:00.000000Z",
+        None,
+        &SourceMeta::default(),
+        None,
+    )
+    .await;
+
+    // Default page: newest first, all five.
+    let json = list_json(state.clone(), empty_params()).await;
+    assert_eq!(json["total"], 5);
+    assert_eq!(json["page"], 1);
+    assert_eq!(json["per_page"], 20);
+    assert_eq!(
+        item_ids(&json),
+        vec![
+            t5.to_string(),
+            t4.to_string(),
+            t3.to_string(),
+            t2.to_string(),
+            t1.to_string()
+        ]
+    );
+
+    // Second page of two.
+    let mut params = empty_params();
+    params.per_page = Some(2);
+    params.page = Some(2);
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(json["total"], 5);
+    assert_eq!(json["page"], 2);
+    assert_eq!(json["per_page"], 2);
+    assert_eq!(item_ids(&json), vec![t3.to_string(), t2.to_string()]);
+
+    // per_page is clamped to 100 (0.9 behaviour).
+    let mut params = empty_params();
+    params.per_page = Some(500);
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(json["per_page"], 100);
+    assert_eq!(json["total"], 5);
+
+    // Status filter.
+    let mut params = empty_params();
+    params.status = Some("completed".to_string());
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(json["total"], 2);
+    assert_eq!(item_ids(&json), vec![t3.to_string(), t1.to_string()]);
+
+    // q: case-insensitive substring over source_meta ("login" hits t1 + t4).
+    let mut params = empty_params();
+    params.q = Some("LOGIN".to_string());
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(json["total"], 2);
+    assert_eq!(item_ids(&json), vec![t4.to_string(), t1.to_string()]);
+    // LIKE wildcards in the needle stay literal (0.9 used `contains`).
+    let mut params = empty_params();
+    params.q = Some("100%".to_string());
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(json["total"], 0);
+
+    // project / repository hit the materialized columns.
+    let mut params = empty_params();
+    params.project = Some("group/a".to_string());
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(item_ids(&json), vec![t3.to_string(), t1.to_string()]);
+    let mut params = empty_params();
+    params.repository = Some("b".to_string());
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(item_ids(&json), vec![t2.to_string()]);
+
+    // created_at range.
+    let mut params = empty_params();
+    params.date_from = Some("2026-09-03T00:00:00Z".to_string());
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(item_ids(&json), vec![t5.to_string(), t4.to_string(), t3.to_string()]);
+    let mut params = empty_params();
+    params.date_to = Some("2026-09-02T23:59:59Z".to_string());
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(item_ids(&json), vec![t2.to_string(), t1.to_string()]);
+
+    // Response shape: the DB-path item/top-level key sets are identical to
+    // the 0.9 in-memory path's.
+    let mem_state = state_with_store();
+    let mem_store = mem_state.task_store.clone().unwrap();
+    let mid = mem_store.create(Some(source_meta_with_commit())).await;
+    mem_store
+        .update(
+            mid,
+            TaskState::Completed,
+            Some(serde_json::json!({"reports": []})),
+            None,
+        )
+        .await;
+    let mem_json = list_json(mem_state, empty_params()).await;
+
+    let key_set = |v: &serde_json::Value| -> BTreeSet<String> { v.as_object().unwrap().keys().cloned().collect() };
+    assert_eq!(
+        key_set(&json["items"][0]),
+        key_set(&mem_json["items"][0]),
+        "list item shape changed"
+    );
+    assert_eq!(key_set(&json), key_set(&mem_json), "top-level shape changed");
+}
+
+/// (b) get_review: in-flight tasks overlay live progress/expert_name from
+/// memory onto the DB row; a task that exists only in the DB (e.g. after a
+/// restart / reaper pass) is served purely from history.
+#[tokio::test]
+async fn get_review_db_read_with_live_overlay() {
+    let (state, db) = state_with_db().await;
+    let store = state.task_store.clone().unwrap();
+
+    // In-flight: write-through persists the row, progress stays memory-only.
+    let id = crate::server::task_queue::record_task_started(&store, source_meta_with_commit()).await;
+    store.set_progress(id, 42, Some("security".to_string())).await;
+
+    let resp = get_review(State(state.clone()), Path(id)).await.into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "in-flight task must resolve, got {json}");
+    assert_eq!(json["status"], "running");
+    assert_eq!(json["progress"], 42, "live progress overlays the DB row");
+    assert_eq!(json["expert_name"], "security");
+    assert_eq!(json["mrTitle"], "Fix login bug");
+
+    // Pure history: DB row only, nothing in memory.
+    let hid = Uuid::new_v4();
+    let output = crate::models::ReviewOutput::new(vec![make_report(
+        "security",
+        vec![make_finding(crate::models::Severity::High)],
+    )]);
+    seed_review_row(
+        &db,
+        hid,
+        "completed",
+        "2026-09-01T10:00:00.000000Z",
+        Some("2026-09-01T10:05:00.000000Z"),
+        &source_meta_with_commit(),
+        Some(serde_json::to_value(&output).unwrap()),
+    )
+    .await;
+    assert!(store.get(hid).await.is_none(), "history row must not be in memory");
+
+    let resp = get_review(State(state.clone()), Path(hid)).await.into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "history-only task must resolve from the DB, got {json}"
+    );
+    assert_eq!(json["status"], "completed");
+    assert_eq!(json["task_id"], hid.to_string());
+    assert!(json["progress"].is_null(), "no live overlay for history rows");
+    assert_eq!(json["experts"][0]["expertName"], "security");
+    assert_eq!(json["duration_ms"], 5 * 60 * 1000);
+    assert!(json["rawApiResponse"].is_object());
+
+    // Unknown task → 404.
+    let resp = get_review(State(state), Path(Uuid::new_v4())).await.into_response();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// (c) db=None (REVIEW_DISABLE_DB=1 / tests) keeps the 0.9 in-memory
+/// behaviour for both list and get.
+#[tokio::test]
+async fn db_none_falls_back_to_in_memory_list_and_get() {
+    let state = state_with_store();
+    assert!(state.db.is_none(), "this state must exercise the fallback path");
+    let store = state.task_store.clone().unwrap();
+
+    let id = store.create(Some(source_meta_with_commit())).await;
+    store
+        .update(id, TaskState::Completed, Some(serde_json::json!({"reports": []})), None)
+        .await;
+
+    let json = list_json(state.clone(), empty_params()).await;
+    assert_eq!(json["total"], 1);
+    assert_eq!(json["items"][0]["task_id"], id.to_string());
+    assert_eq!(json["items"][0]["status"], "completed");
+
+    let resp = get_review(State(state.clone()), Path(id)).await.into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "completed");
+
+    let resp = get_review(State(state), Path(Uuid::new_v4())).await.into_response();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// (d) empty-DB pagination boundaries: empty result set, and a page beyond
+/// the last row returns an empty list with the correct total.
+#[tokio::test]
+async fn list_reviews_db_empty_and_out_of_range_pages() {
+    let (state, _db) = state_with_db().await;
+
+    let json = list_json(state.clone(), empty_params()).await;
+    assert_eq!(json["total"], 0);
+    assert!(json["items"].as_array().unwrap().is_empty());
+
+    // One task (via write-through), then ask for a page past the end.
+    let store = state.task_store.clone().unwrap();
+    store.create(Some(source_meta_with_commit())).await;
+
+    let mut params = empty_params();
+    params.page = Some(99);
+    params.per_page = Some(1);
+    let json = list_json(state.clone(), params).await;
+    assert_eq!(json["total"], 1, "total reflects the filters, not the page");
+    assert!(
+        json["items"].as_array().unwrap().is_empty(),
+        "out-of-range page is an empty list"
+    );
+    assert_eq!(json["page"], 99);
+}
+
+/// A consolidated report carrying an overall assessment, so the list item's
+/// embedded `result` exercises the score column (`consolidated.assessment`).
+fn consolidated_with_score(score: u8) -> crate::team::lead_consolidator::ConsolidatedReport {
+    crate::team::lead_consolidator::ConsolidatedReport {
+        findings: Vec::new(),
+        low_confidence_removed: 0,
+        duplicates_merged: 0,
+        conflicts: Vec::new(),
+        assessment: crate::models::OverallAssessment {
+            score,
+            risk_level: crate::models::RiskLevel::Low,
+            lead_override: None,
+            tl_dr: "looks fine".to_string(),
+            unverified: false,
+            coverage_insufficient: false,
+        },
+        consensus_reached: true,
+        total_files: 0,
+        reviewed_files: 0,
+        unreviewed_files: Vec::new(),
+        coverage: None,
+        adjudicated_removed: Vec::new(),
+    }
+}
+
+/// (e) E2E-A 观察点 4 pin: with the DB as the data source, a row written by
+/// the real write-through flow (record_task_started → record_task_outcome,
+/// the exact helpers the GitLab webhook path uses) projects EVERY list field
+/// at full value — status / project / repository / branch / author /
+/// duration / embedded assessment — identically to the 0.9 in-memory path.
+/// Test (a) only compared key SETS; a `project: null` drift passes a key-set
+/// assertion, so this one compares values.
+#[tokio::test]
+async fn list_reviews_db_projection_values_complete() {
+    let (state, _db) = state_with_db().await;
+    let store = state.task_store.clone().unwrap();
+
+    let id = crate::server::task_queue::record_task_started(&store, source_meta_with_commit()).await;
+    let mut output = crate::models::ReviewOutput::new(vec![make_report(
+        "security",
+        vec![make_finding(crate::models::Severity::High)],
+    )]);
+    output.consolidated = Some(consolidated_with_score(87));
+    let outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(output);
+    crate::server::task_queue::record_task_outcome(&store, id, &outcome).await;
+
+    let json = list_json(state.clone(), empty_params()).await;
+    assert_eq!(json["total"], 1);
+    let item = &json["items"][0];
+
+    // status decodes from the reviews.state column — a non-Option string in
+    // both projections, so it can never go missing from a served item.
+    assert_eq!(item["status"], "completed");
+    assert_eq!(item["task_id"], id.to_string());
+    assert_eq!(item["id"], id.to_string());
+
+    // Metadata projected from source_meta (both naming schemes).
+    assert_eq!(item["project"], "group/repo");
+    assert_eq!(item["repository"], "group/repo");
+    assert_eq!(item["branch"], "feature/x");
+    assert_eq!(item["target_branch"], "main");
+    assert_eq!(item["targetBranch"], "main");
+    assert_eq!(item["mr_title"], "Fix login bug");
+    assert_eq!(item["mrTitle"], "Fix login bug");
+    assert_eq!(item["author_name"], "alice");
+    assert_eq!(item["author"]["name"], "alice");
+    assert_eq!(item["author"]["avatarUrl"], "http://avatar");
+    assert_eq!(item["gitlab_mr_url"], "http://gitlab/mr/1");
+    assert_eq!(item["gitlabMrUrl"], "http://gitlab/mr/1");
+    assert_eq!(item["commit_sha"], "abc123");
+
+    // Wall-clock duration: present, non-negative, identical in both namings.
+    assert!(
+        item["duration_ms"].as_u64().is_some(),
+        "completed row must carry duration_ms"
+    );
+    assert_eq!(item["durationMs"], item["duration_ms"]);
+    assert!(item["created_at"].as_str().is_some() && item["createdAt"].as_str().is_some());
+
+    // The score column's data source: the embedded ReviewOutput keeps its
+    // consolidated assessment through the DB round-trip.
+    assert_eq!(item["result"]["consolidated"]["assessment"]["score"], 87);
+    assert_eq!(item["result"]["reports"][0]["expert_name"], "security");
+
+    // Value parity with the 0.9 in-memory path for the same logical task.
+    let mem_state = state_with_store();
+    let mem_store = mem_state.task_store.clone().unwrap();
+    let mid = crate::server::task_queue::record_task_started(&mem_store, source_meta_with_commit()).await;
+    let mut mem_output = crate::models::ReviewOutput::new(vec![make_report(
+        "security",
+        vec![make_finding(crate::models::Severity::High)],
+    )]);
+    mem_output.consolidated = Some(consolidated_with_score(87));
+    let mem_outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(mem_output);
+    crate::server::task_queue::record_task_outcome(&mem_store, mid, &mem_outcome).await;
+    let mem_json = list_json(mem_state, empty_params()).await;
+    let mem_item = &mem_json["items"][0];
+    for key in [
+        "status",
+        "project",
+        "repository",
+        "branch",
+        "mr_title",
+        "mrTitle",
+        "author_name",
+    ] {
+        assert_eq!(item[key], mem_item[key], "DB vs memory mismatch on {key}");
+    }
+    assert_eq!(
+        item["result"]["consolidated"]["assessment"]["score"],
+        mem_item["result"]["consolidated"]["assessment"]["score"],
+    );
+}
+
+/// (f) Drifted row — materialized filter column set but the source_meta JSON
+/// blank (a failed `fill_source_meta` UPDATE is only logged, never retried;
+/// hand-seeded/legacy rows bypass the codec): the row matches `?project=X`
+/// via the column, and the projection must show the same X instead of null.
+/// source_meta stays the primary source — the column only back-fills blanks
+/// (codec-level pinning lives in store::rows::tests).
+#[tokio::test]
+async fn list_reviews_db_drifted_row_projects_materialized_column() {
+    let (state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO reviews (task_id, state, source_meta, project, repository, created_at, completed_at) \
+         VALUES (?, 'completed', '{}', 'grp/proj', 'grp/proj', \
+         '2026-09-03T10:00:00.000000Z', '2026-09-03T10:05:00.000000Z')",
+    )
+    .bind(id.to_string())
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let mut params = empty_params();
+    params.project = Some("grp/proj".to_string());
+    let json = list_json(state, params).await;
+    assert_eq!(json["total"], 1, "the materialized column drives the filter");
+    let item = &json["items"][0];
+    assert_eq!(item["task_id"], id.to_string());
+    assert_eq!(item["status"], "completed");
+    assert_eq!(
+        item["project"], "grp/proj",
+        "a row that matches ?project=X must not display a blank project"
+    );
+    assert_eq!(item["repository"], "grp/proj");
+    assert_eq!(item["duration_ms"], 5 * 60 * 1000);
+}

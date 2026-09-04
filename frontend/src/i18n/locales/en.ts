@@ -474,6 +474,12 @@ export default {
       requestTimeout: 'Request timeout (seconds)',
       enableMetrics: 'Enable metrics',
       debugMode: 'Debug mode',
+      storageBackend: 'Storage backend',
+      storageBackendKind: {
+        postgresql: 'PostgreSQL',
+        sqlite: 'SQLite',
+        disabled: 'Disabled',
+      },
     },
   },
   llm: {

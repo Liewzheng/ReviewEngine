@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -22,7 +23,7 @@ pub enum TaskState {
 }
 
 /// Metadata about the source merge request or pull request.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SourceMeta {
     pub mr_title: Option<String>,
     pub project: Option<String>,
@@ -40,6 +41,10 @@ pub struct SourceMeta {
 /// Empty strings map to `None` — a missing value must stay absent rather
 /// than be persisted as `""`. Paired with [`TaskStore::fill_source_meta`]'s
 /// fill-only-blank semantics so enqueue-time values are never clobbered.
+///
+/// Author precedence (RENG-27): the head commit's author wins over the MR
+/// creator — the commit author is who wrote the code, the MR creator is
+/// only the fallback.
 pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMeta {
     fn non_empty(s: &str) -> Option<String> {
         let trimmed = s.trim();
@@ -53,7 +58,11 @@ pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMe
         mr_title: non_empty(&info.title),
         branch: non_empty(&info.source_branch),
         target_branch: non_empty(&info.target_branch),
-        author_name: info.pr_author.clone(),
+        author_name: info
+            .commit_author
+            .as_deref()
+            .and_then(non_empty)
+            .or_else(|| info.pr_author.clone()),
         commit_sha: non_empty(&info.git_hash),
         ..SourceMeta::default()
     }
@@ -112,6 +121,14 @@ pub struct TaskEvent {
 /// Provides concurrency-safe task lifecycle management with automatic
 /// expiry cleanup, broadcast SSE events, pause/resume control, and
 /// configurable concurrency limits.
+///
+/// Persistence (0.10.0, design/persistence.md §5): when `db` is injected via
+/// [`set_db`](Self::set_db), every lifecycle transition is ALSO written
+/// through to the database, synchronously awaited (restart-recovery
+/// semantics rely on the DB being current). Write failures never block the
+/// review path — they are logged; terminal writes are retried once. `None`
+/// (the default) is exactly the 0.9 pure in-memory behaviour, which the
+/// runtime-free sync unit tests depend on.
 #[derive(Clone)]
 pub struct TaskStore {
     inner: Arc<RwLock<HashMap<Uuid, TaskEntry>>>,
@@ -119,6 +136,7 @@ pub struct TaskStore {
     is_paused: Arc<RwLock<bool>>,
     max_concurrent: Arc<RwLock<usize>>,
     queue_capacity: Arc<RwLock<usize>>,
+    db: Option<Arc<dyn crate::store::traits::ReviewStore>>,
 }
 
 impl TaskStore {
@@ -154,7 +172,15 @@ impl TaskStore {
             is_paused: Arc::new(RwLock::new(false)),
             max_concurrent: Arc::new(RwLock::new(8)),
             queue_capacity: Arc::new(RwLock::new(16)),
+            db: None,
         }
+    }
+
+    /// Inject the write-through persistence target (0.10.0 §5.2). Call before
+    /// the store is shared with workers; leaving it unset keeps the 0.9 pure
+    /// in-memory behaviour.
+    pub fn set_db(&mut self, db: Arc<dyn crate::store::traits::ReviewStore>) {
+        self.db = Some(db);
     }
 
     pub async fn cleanup_expired(&self) {
@@ -195,7 +221,7 @@ impl TaskStore {
             progress: None,
             expert_name: None,
         };
-        self.inner.write().await.insert(id, entry);
+        self.inner.write().await.insert(id, entry.clone());
         let _ = self.tx.send(TaskEvent {
             task_id: id,
             status: "pending",
@@ -206,13 +232,22 @@ impl TaskStore {
             expert_name: None,
             elapsed_ms: None,
         });
+        // Write-through (§5.2): INSERT reviews (state=pending).
+        if let Some(db) = &self.db {
+            if let Err(e) = db.create(&entry).await {
+                tracing::error!("failed to persist new review task {id} to the database: {e:#}");
+            }
+        }
         id
     }
 
     pub async fn start(&self, task_id: Uuid) {
+        let mut started_at = None;
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
+            let now = chrono::Utc::now();
             entry.state = TaskState::Running;
-            entry.started_at = Some(chrono::Utc::now());
+            entry.started_at = Some(now);
+            started_at = Some(now);
             let _ = self.tx.send(TaskEvent {
                 task_id,
                 status: "running",
@@ -224,15 +259,20 @@ impl TaskStore {
                 elapsed_ms: None,
             });
         }
+        // Write-through (§5.2): UPDATE state=running, started_at. Awaited
+        // AFTER the in-memory write lock is released.
+        if let (Some(db), Some(at)) = (&self.db, started_at) {
+            if let Err(e) = db.mark_started(task_id, at).await {
+                tracing::error!("failed to persist review start for task {task_id}: {e:#}");
+            }
+        }
     }
 
     pub async fn set_progress(&self, task_id: Uuid, progress: u8, expert_name: Option<String>) {
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
             entry.progress = Some(progress.min(100));
             entry.expert_name = expert_name.clone();
-            let elapsed = entry
-                .started_at
-                .map(|s| (chrono::Utc::now() - s).num_milliseconds() as u64);
+            let elapsed = entry.started_at.map(|s| millis_between(s, chrono::Utc::now()));
             let _ = self.tx.send(TaskEvent {
                 task_id,
                 status: "running",
@@ -253,6 +293,7 @@ impl TaskStore {
         result: Option<serde_json::Value>,
         error: Option<String>,
     ) {
+        let mut terminal_snapshot = None;
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
             // Cancelled is terminal: a background task racing past a DELETE
             // must not flip the record back to running/completed.
@@ -265,6 +306,7 @@ impl TaskStore {
             if new_state == TaskState::Completed || new_state == TaskState::Failed || new_state == TaskState::Cancelled
             {
                 entry.completed_at = Some(chrono::Utc::now());
+                terminal_snapshot = Some(entry.clone());
             }
             let event = match new_state {
                 TaskState::Pending => "review.created",
@@ -280,9 +322,7 @@ impl TaskStore {
                 TaskState::Failed => "failed",
                 TaskState::Cancelled => "cancelled",
             };
-            let elapsed = entry
-                .started_at
-                .map(|s| (chrono::Utc::now() - s).num_milliseconds() as u64);
+            let elapsed = entry.started_at.map(|s| millis_between(s, chrono::Utc::now()));
             let _ = self.tx.send(TaskEvent {
                 task_id,
                 status,
@@ -293,6 +333,21 @@ impl TaskStore {
                 expert_name: entry.expert_name.clone(),
                 elapsed_ms: elapsed,
             });
+        }
+        // Write-through (§5.2): terminal transitions persist state/result/
+        // error/completed_at/progress + the expert_reports split. Terminal
+        // writes get ONE immediate retry on failure (§5.2), then are given
+        // up — history may lose a row, the review itself must never die.
+        if let (Some(db), Some(entry)) = (&self.db, terminal_snapshot) {
+            if let Err(e) = db.complete(&entry).await {
+                tracing::error!("failed to persist terminal state for task {task_id}: {e:#}; retrying once");
+                if let Err(e) = db.complete(&entry).await {
+                    tracing::error!(
+                        "terminal write for task {task_id} failed again: {e:#}; \
+                         giving up — history will miss this row"
+                    );
+                }
+            }
         }
     }
 
@@ -311,6 +366,7 @@ impl TaskStore {
         fn is_blank(value: &Option<String>) -> bool {
             value.as_deref().map(str::trim).unwrap_or_default().is_empty()
         }
+        let mut filled = None;
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
             if entry.state == TaskState::Cancelled {
                 return;
@@ -342,6 +398,14 @@ impl TaskStore {
             }
             if is_blank(&meta.commit_sha) {
                 meta.commit_sha = candidate.commit_sha;
+            }
+            filled = Some(entry.source_meta.clone());
+        }
+        // Write-through (§5.2): UPDATE source_meta + the materialized
+        // project/repository filter columns. At most once per task.
+        if let (Some(db), Some(meta)) = (&self.db, filled) {
+            if let Err(e) = db.fill_source_meta(task_id, &meta).await {
+                tracing::error!("failed to persist source_meta for task {task_id}: {e:#}");
             }
         }
     }
@@ -426,52 +490,84 @@ impl TaskStore {
     /// as `cancelled`. Tasks that are already in a terminal state (`Completed`,
     /// `Failed`, `Cancelled`) are left untouched and return `false`.
     pub async fn delete(&self, task_id: Uuid) -> bool {
-        let mut map = self.inner.write().await;
-        if let Some(entry) = map.get_mut(&task_id) {
-            if entry.state == TaskState::Pending || entry.state == TaskState::Running {
-                entry.state = TaskState::Cancelled;
-                entry.completed_at = Some(chrono::Utc::now());
-                let meta = entry.source_meta.clone();
-                let _ = self.tx.send(TaskEvent {
-                    task_id,
-                    status: "cancelled",
-                    event: "review.cancelled",
-                    mr_title: meta.mr_title,
-                    project: meta.project,
-                    progress: None,
-                    expert_name: None,
-                    elapsed_ms: None,
-                });
-                return true;
+        let mut cancelled_at = None;
+        let transitioned = {
+            let mut map = self.inner.write().await;
+            if let Some(entry) = map.get_mut(&task_id) {
+                if entry.state == TaskState::Pending || entry.state == TaskState::Running {
+                    entry.state = TaskState::Cancelled;
+                    let now = chrono::Utc::now();
+                    entry.completed_at = Some(now);
+                    cancelled_at = Some(now);
+                    let meta = entry.source_meta.clone();
+                    let _ = self.tx.send(TaskEvent {
+                        task_id,
+                        status: "cancelled",
+                        event: "review.cancelled",
+                        mr_title: meta.mr_title,
+                        project: meta.project,
+                        progress: None,
+                        expert_name: None,
+                        elapsed_ms: None,
+                    });
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        // Write-through (§5.2): UPDATE state=cancelled, completed_at.
+        if transitioned {
+            if let (Some(db), Some(at)) = (&self.db, cancelled_at) {
+                if let Err(e) = db.mark_cancelled(task_id, at).await {
+                    tracing::error!("failed to persist cancellation for task {task_id}: {e:#}");
+                }
             }
         }
-        false
+        transitioned
     }
 
     pub async fn retry(&self, task_id: Uuid) -> bool {
-        let mut map = self.inner.write().await;
-        if let Some(entry) = map.get_mut(&task_id) {
-            if entry.state == TaskState::Failed {
-                entry.state = TaskState::Pending;
-                entry.error = None;
-                entry.progress = None;
-                entry.completed_at = None;
-                entry.started_at = None;
-                let meta = entry.source_meta.clone();
-                let _ = self.tx.send(TaskEvent {
-                    task_id,
-                    status: "pending",
-                    event: "review.retry",
-                    mr_title: meta.mr_title,
-                    project: meta.project,
-                    progress: None,
-                    expert_name: None,
-                    elapsed_ms: None,
-                });
-                return true;
+        let transitioned = {
+            let mut map = self.inner.write().await;
+            if let Some(entry) = map.get_mut(&task_id) {
+                if entry.state == TaskState::Failed {
+                    entry.state = TaskState::Pending;
+                    entry.error = None;
+                    entry.progress = None;
+                    entry.completed_at = None;
+                    entry.started_at = None;
+                    let meta = entry.source_meta.clone();
+                    let _ = self.tx.send(TaskEvent {
+                        task_id,
+                        status: "pending",
+                        event: "review.retry",
+                        mr_title: meta.mr_title,
+                        project: meta.project,
+                        progress: None,
+                        expert_name: None,
+                        elapsed_ms: None,
+                    });
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        };
+        // Write-through (§5.2): UPDATE state=pending, error=NULL,
+        // completed_at=NULL (Failed → Pending).
+        if transitioned {
+            if let Some(db) = &self.db {
+                if let Err(e) = db.mark_retry(task_id).await {
+                    tracing::error!("failed to persist retry for task {task_id}: {e:#}");
+                }
             }
         }
-        false
+        transitioned
     }
 
     /// Aggregate queue statistics from the current task store.
@@ -613,17 +709,23 @@ pub async fn record_task_outcome(
     }
 }
 
+/// Milliseconds between two timestamps, clamped at 0. Projection-only
+/// helper: hand-seeded rows (created_at later than completed_at) or clock
+/// skew must not let a negative `i64` wrap to ~2^64 in the u64 projection.
+fn millis_between(start: DateTime<Utc>, end: DateTime<Utc>) -> u64 {
+    end.timestamp_millis().saturating_sub(start.timestamp_millis()).max(0) as u64
+}
+
 impl TaskEntry {
     pub fn duration_ms(&self) -> Option<u64> {
         match (self.created_at, self.completed_at) {
-            (start, Some(end)) => Some((end - start).num_milliseconds() as u64),
+            (start, Some(end)) => Some(millis_between(start, end)),
             _ => None,
         }
     }
 
     pub fn elapsed_ms(&self) -> Option<u64> {
-        self.started_at
-            .map(|s| (chrono::Utc::now() - s).num_milliseconds() as u64)
+        self.started_at.map(|s| millis_between(s, chrono::Utc::now()))
     }
 }
 
@@ -657,6 +759,79 @@ mod tests {
             gitlab_mr_url: None,
             commit_sha: Some("deadbeef".to_string()),
         }
+    }
+
+    /// RENG-27: the head commit's author (who wrote the code) wins over the
+    /// MR creator for the History author column.
+    #[test]
+    fn source_meta_from_mr_info_prefers_commit_author() {
+        let mut info = crate::models::MRInfo::new(
+            "group/proj".to_string(),
+            "t".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        );
+        info.pr_author = Some("mr-creator".to_string());
+        info.commit_author = Some("commit-author".to_string());
+
+        let meta = source_meta_from_mr_info(&info);
+        assert_eq!(meta.author_name.as_deref(), Some("commit-author"));
+    }
+
+    /// RENG-27 fallback: no usable commit author (absent, or blank/whitespace)
+    /// degrades to the MR creator, exactly the pre-fix behavior.
+    #[test]
+    fn source_meta_from_mr_info_falls_back_to_mr_author() {
+        let mut info = crate::models::MRInfo::new(
+            "group/proj".to_string(),
+            "t".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        );
+        info.pr_author = Some("mr-creator".to_string());
+
+        // Absent commit author → MR creator.
+        let meta = source_meta_from_mr_info(&info);
+        assert_eq!(meta.author_name.as_deref(), Some("mr-creator"));
+
+        // Blank commit author must not be persisted as "" — still the MR creator.
+        info.commit_author = Some("   ".to_string());
+        let meta = source_meta_from_mr_info(&info);
+        assert_eq!(meta.author_name.as_deref(), Some("mr-creator"));
+    }
+
+    /// F2 guard: hand-seeded rows with created_at later than completed_at
+    /// must clamp the u64 duration projection to 0 instead of wrapping to
+    /// ~2^64; elapsed_ms is clamped by the same helper.
+    #[test]
+    fn duration_ms_clamps_inverted_timestamps_to_zero() {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-09-03T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let entry = TaskEntry {
+            task_id: Uuid::new_v4(),
+            state: TaskState::Completed,
+            created_at: base,
+            started_at: Some(base),
+            completed_at: Some(base - chrono::Duration::minutes(5)),
+            result: None,
+            error: None,
+            request: None,
+            source_meta: SourceMeta::default(),
+            progress: None,
+            expert_name: None,
+        };
+        assert_eq!(entry.duration_ms(), Some(0), "inverted span must clamp, not wrap");
+
+        // started_at in the future (clock skew) must clamp, not wrap.
+        let mut skewed = entry.clone();
+        skewed.started_at = Some(chrono::Utc::now() + chrono::Duration::minutes(5));
+        assert_eq!(skewed.elapsed_ms(), Some(0));
+
+        // Sanity: a normal forward span still reports real milliseconds.
+        let mut ok = entry.clone();
+        ok.completed_at = Some(base + chrono::Duration::milliseconds(1500));
+        assert_eq!(ok.duration_ms(), Some(1500));
     }
 
     #[tokio::test]
@@ -731,5 +906,301 @@ mod tests {
             meta.mr_title.is_none() && meta.branch.is_none() && meta.commit_sha.is_none(),
             "a cancelled task must not be mutated, got {meta:?}"
         );
+    }
+
+    // ─── 0.10.0 write-through (design/persistence.md §5.2) ───
+
+    use crate::store::traits::ReviewStore;
+    use crate::store::SqlxStore;
+
+    async fn db_backed_store() -> (TaskStore, Arc<SqlxStore>) {
+        let db = Arc::new(SqlxStore::new_in_memory().await.unwrap());
+        db.migrate().await.unwrap();
+        let mut store = TaskStore::new();
+        store.set_db(db.clone());
+        (store, db)
+    }
+
+    /// (state, project, repository, result, error, progress, started_at, completed_at)
+    type ReviewRowTuple = (
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+
+    async fn review_row(db: &SqlxStore, task_id: Uuid) -> Option<ReviewRowTuple> {
+        sqlx::query_as(
+            "SELECT state, project, repository, result, error, progress, started_at, completed_at \
+             FROM reviews WHERE task_id = ?",
+        )
+        .bind(task_id.to_string())
+        .fetch_optional(db.pool())
+        .await
+        .unwrap()
+    }
+
+    fn sample_output() -> crate::models::ReviewOutput {
+        let report = |name: &str| crate::models::ExpertReport {
+            expert_name: name.to_string(),
+            findings: vec![],
+            markdown: format!("# {name} report"),
+            raw_llm_response: "raw".to_string(),
+            parse_error: None,
+            raw_dump_path: None,
+        };
+        crate::models::ReviewOutput {
+            reports: vec![report("security"), report("performance")],
+            aggregated: None,
+            dropped_findings: vec![],
+            consolidated: None,
+        }
+    }
+
+    /// (a) full lifecycle: create → start → fill_meta → complete, asserting
+    /// the DB row at every step.
+    #[tokio::test]
+    async fn write_through_full_lifecycle() {
+        let (store, db) = db_backed_store().await;
+        let request = serde_json::json!({"mr_url": "https://gitlab.example/group/proj/-/merge_requests/1"});
+        let id = store
+            .create_with_request(
+                Some(SourceMeta {
+                    project: Some("group/proj".to_string()),
+                    repository: Some("proj".to_string()),
+                    ..SourceMeta::default()
+                }),
+                Some(request.clone()),
+            )
+            .await;
+
+        // create → INSERT (pending), request + materialized columns persisted.
+        let row = review_row(&db, id).await.expect("row exists after create");
+        assert_eq!(row.0, "pending");
+        assert_eq!(row.1.as_deref(), Some("group/proj"));
+        assert_eq!(row.2.as_deref(), Some("proj"));
+        assert!(row.3.is_none() && row.4.is_none());
+        assert!(row.6.is_none() && row.7.is_none());
+        let req: String = sqlx::query_scalar("SELECT request FROM reviews WHERE task_id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&req).unwrap(), request);
+        let created_at: String = sqlx::query_scalar("SELECT created_at FROM reviews WHERE task_id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        crate::store::decode_ts(&created_at).unwrap();
+
+        // start → state=running + started_at.
+        store.start(id).await;
+        let row = review_row(&db, id).await.unwrap();
+        assert_eq!(row.0, "running");
+        assert!(row.6.is_some(), "started_at persisted");
+
+        // fill_source_meta → source_meta updated; enqueue-time project wins.
+        store.fill_source_meta(id, candidate_meta()).await;
+        let meta_raw: String = sqlx::query_scalar("SELECT source_meta FROM reviews WHERE task_id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let meta: SourceMeta = serde_json::from_str(&meta_raw).unwrap();
+        assert_eq!(meta.mr_title.as_deref(), Some("Add login endpoint"));
+        assert_eq!(meta.branch.as_deref(), Some("feature/login"));
+        assert_eq!(
+            meta.project.as_deref(),
+            Some("group/proj"),
+            "enqueue-time value must win"
+        );
+        let row = review_row(&db, id).await.unwrap();
+        assert_eq!(row.1.as_deref(), Some("group/proj"), "materialized column in sync");
+
+        // set_progress must NOT write: progress stays NULL mid-flight.
+        store.set_progress(id, 42, Some("security".to_string())).await;
+        let row = review_row(&db, id).await.unwrap();
+        assert!(row.5.is_none(), "progress is not persisted mid-flight");
+
+        // complete → terminal row: state/result/completed_at + progress snapshot.
+        let result = serde_json::to_value(sample_output()).unwrap();
+        store.update(id, TaskState::Completed, Some(result.clone()), None).await;
+        let row = review_row(&db, id).await.unwrap();
+        assert_eq!(row.0, "completed");
+        assert!(row.7.is_some(), "completed_at persisted");
+        assert_eq!(row.5, Some(42), "terminal write snapshots progress");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&row.3.unwrap()).unwrap(),
+            result
+        );
+    }
+
+    /// (b) complete splits result.reports into one expert_reports row each.
+    #[tokio::test]
+    async fn write_through_complete_splits_expert_reports() {
+        let (store, db) = db_backed_store().await;
+        let id = record_task_started(&store, SourceMeta::default()).await;
+        let output = sample_output();
+        store
+            .update(
+                id,
+                TaskState::Completed,
+                Some(serde_json::to_value(&output).unwrap()),
+                None,
+            )
+            .await;
+
+        let reports: Vec<(String, String, Option<i64>, String)> = sqlx::query_as(
+            "SELECT expert_name, report, duration_ms, created_at FROM expert_reports \
+             WHERE task_id = ? ORDER BY expert_name",
+        )
+        .bind(id.to_string())
+        .fetch_all(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(reports.len(), 2);
+        assert_eq!(reports[0].0, "performance");
+        assert_eq!(reports[1].0, "security");
+        for (_, report_json, duration_ms, created_at) in &reports {
+            let decoded: crate::models::ExpertReport = serde_json::from_str(report_json).unwrap();
+            assert!(decoded.markdown.starts_with("# "));
+            assert!(duration_ms.is_none(), "per-expert duration is NULL for now (§5.4)");
+            crate::store::decode_ts(created_at).unwrap();
+        }
+        assert_eq!(reports[1].0, output.reports[0].expert_name);
+
+        // A failed terminal write stores error, no result, no reports.
+        let id2 = record_task_started(&store, SourceMeta::default()).await;
+        store
+            .update(id2, TaskState::Failed, None, Some("boom".to_string()))
+            .await;
+        let row = review_row(&db, id2).await.unwrap();
+        assert_eq!(row.0, "failed");
+        assert_eq!(row.4.as_deref(), Some("boom"));
+        assert!(row.3.is_none());
+        let report_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM expert_reports WHERE task_id = ?")
+            .bind(id2.to_string())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert_eq!(report_count, 0);
+    }
+
+    /// delete (cancel) and retry write-through.
+    #[tokio::test]
+    async fn write_through_cancel_and_retry() {
+        let (store, db) = db_backed_store().await;
+
+        let id = store.create(None).await;
+        assert!(store.delete(id).await);
+        let row = review_row(&db, id).await.unwrap();
+        assert_eq!(row.0, "cancelled");
+        assert!(row.7.is_some(), "cancel stamps completed_at");
+
+        // Cancelling a terminal task touches nothing, in memory or in DB.
+        assert!(!store.delete(id).await);
+
+        let id2 = record_task_started(&store, SourceMeta::default()).await;
+        store
+            .update(id2, TaskState::Failed, None, Some("boom".to_string()))
+            .await;
+        assert!(store.retry(id2).await);
+        let row = review_row(&db, id2).await.unwrap();
+        assert_eq!(row.0, "pending");
+        assert!(row.4.is_none(), "retry clears error");
+        assert!(row.7.is_none(), "retry clears completed_at");
+    }
+
+    /// (c) a failing ReviewStore never blocks the review path; the terminal
+    /// write is retried exactly once and then given up.
+    #[tokio::test]
+    async fn write_through_failure_never_blocks_review_path() {
+        #[derive(Default)]
+        struct FailingStore {
+            complete_attempts: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait::async_trait]
+        impl ReviewStore for FailingStore {
+            async fn create(&self, _: &TaskEntry) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+            async fn mark_started(&self, _: Uuid, _: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+            async fn fill_source_meta(&self, _: Uuid, _: &SourceMeta) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+            async fn complete(&self, _: &TaskEntry) -> anyhow::Result<()> {
+                self.complete_attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                anyhow::bail!("db down")
+            }
+            async fn mark_cancelled(&self, _: Uuid, _: chrono::DateTime<chrono::Utc>) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+            async fn mark_retry(&self, _: Uuid) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+            async fn mark_interrupted(&self, _: chrono::DateTime<chrono::Utc>) -> anyhow::Result<u64> {
+                anyhow::bail!("db down")
+            }
+            async fn list_reviews(
+                &self,
+                _: &crate::store::traits::ReviewListQuery,
+            ) -> anyhow::Result<(Vec<TaskEntry>, u64)> {
+                anyhow::bail!("db down")
+            }
+            async fn get_review(&self, _: Uuid) -> anyhow::Result<Option<TaskEntry>> {
+                anyhow::bail!("db down")
+            }
+            async fn upsert_review_context(&self, _: Uuid, _: &str, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+        }
+
+        let failing = Arc::new(FailingStore::default());
+        let mut store = TaskStore::new();
+        store.set_db(failing.clone());
+
+        let id = record_task_started(&store, SourceMeta::default()).await;
+        store
+            .update(
+                id,
+                TaskState::Completed,
+                Some(serde_json::to_value(sample_output()).unwrap()),
+                None,
+            )
+            .await;
+
+        // The review path is unaffected: the in-memory entry is Completed.
+        let entry = store.get(id).await.expect("entry exists");
+        assert_eq!(entry.state, TaskState::Completed);
+        assert!(entry.result.is_some());
+        assert_eq!(
+            failing.complete_attempts.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "terminal write is retried exactly once, then given up"
+        );
+    }
+
+    /// (e) with no DB injected the store is exactly the 0.9 in-memory store.
+    #[tokio::test]
+    async fn no_db_behaves_like_0_9() {
+        let store = TaskStore::new();
+        let id = record_task_started(&store, SourceMeta::default()).await;
+        store
+            .update(id, TaskState::Completed, Some(serde_json::json!({"ok": true})), None)
+            .await;
+        let entry = store.get(id).await.unwrap();
+        assert_eq!(entry.state, TaskState::Completed);
+        assert!(!store.retry(id).await, "retry only from Failed");
+        store.update(id, TaskState::Failed, None, Some("x".to_string())).await;
+        assert!(store.retry(id).await);
+        assert_eq!(store.get(id).await.unwrap().state, TaskState::Pending);
     }
 }

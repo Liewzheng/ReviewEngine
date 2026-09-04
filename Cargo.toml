@@ -1,6 +1,6 @@
 [package]
 name = "review-engine"
-version = "0.9.50"
+version = "0.10.0"
 license = "Apache-2.0"
 edition = "2021"
 
@@ -101,6 +101,15 @@ futures = "0.3"
 
 # Async trait support
 async-trait = "0.1"
+
+# Database access: sqlx 0.8 with the Any pool so one code path serves both
+# PostgreSQL (primary, via DATABASE_URL) and embedded SQLite (fallback).
+# Placeholders are written as `?` everywhere; the Any driver translates them
+# for Postgres. See design/persistence.md §3.1 for the dialect rules.
+# Two additions on top of the design-doc list, both because of
+# `default-features = false`: `any` (the Any driver is otherwise not compiled
+# in) and `macros` (`sqlx::migrate!` is gated on it).
+sqlx = { version = "0.8", default-features = false, features = ["any", "runtime-tokio", "postgres", "sqlite", "migrate", "macros", "chrono", "uuid", "json"] }
 
 # Token counting for LLM context window management
 tiktoken-rs = "0.7"

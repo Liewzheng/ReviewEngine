@@ -135,10 +135,20 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     // POST /api/v1/reviews.
     let llm_configured = llm_configs.iter().any(|c| !c.api_base.trim().is_empty());
 
+    // Persistence backend actually in use (0.10.0): "postgresql" / "sqlite"
+    // from the store's connect-time URL discrimination; "disabled" when no
+    // DB is attached (`REVIEW_DISABLE_DB=1`, tests, embedded use).
+    let storage_backend = state
+        .db
+        .as_ref()
+        .map(|db| db.backend_kind().as_str())
+        .unwrap_or("disabled");
+
     Json(serde_json::json!({
         "integrations": integrations,
         "llmProviders": llm_providers,
         "llmConfigured": llm_configured,
+        "storage_backend": storage_backend,
         "overall": overall,
         "lastChecked": chrono::Utc::now().to_rfc3339(),
     }))
@@ -610,5 +620,25 @@ mod tests {
             body["llmConfigured"], true,
             "an entry with api_base must report true: {body}"
         );
+    }
+
+    /// `/system/health` exposes `storage_backend`: "disabled" when no DB is
+    /// attached (`REVIEW_DISABLE_DB=1`, tests, embedded use).
+    #[tokio::test]
+    async fn system_health_reports_storage_backend_disabled_without_db() {
+        let body = health_json(AppState::new(vec![])).await;
+        assert_eq!(body["storage_backend"], "disabled", "no db attached: {body}");
+    }
+
+    /// With an in-memory SQLite store attached, `storage_backend` reports
+    /// "sqlite". The "postgresql" value is covered function-level in
+    /// `store::tests::backend_kind_discriminates_by_url_scheme` (no live PG
+    /// in unit tests).
+    #[tokio::test]
+    async fn system_health_reports_storage_backend_sqlite_with_db() {
+        let mut state = AppState::new(vec![]);
+        state.db = Some(Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap()));
+        let body = health_json(state).await;
+        assert_eq!(body["storage_backend"], "sqlite", "sqlite store attached: {body}");
     }
 }

@@ -235,6 +235,14 @@
                 <el-switch v-model="config.advanced.debugMode" :disabled="!isEditing" />
               </el-form-item>
             </el-col>
+            <!-- Runtime info, not config: no `prop`, stays disabled in edit
+                 mode, and the whole row is hidden until /system/health
+                 answers (fail-silent on error). -->
+            <el-col v-if="storageBackend" :xs="24" :sm="12">
+              <el-form-item :label="$t('config.advanced.storageBackend')">
+                <el-input :model-value="storageBackendLabel" disabled readonly />
+              </el-form-item>
+            </el-col>
           </el-row>
         </div>
       </el-card>
@@ -274,7 +282,9 @@ import { ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
 import { useConfigForm } from '../composables/useConfigForm'
+import { getSystemHealth } from '../services/health'
 import type { AppConfig, GitPlatformConfig } from '../types/config'
+import type { StorageBackendKind } from '../types/dashboard'
 import GitPlatformsSection from '../components/Config/GitPlatformsSection.vue'
 
 // --- Composables ---
@@ -305,6 +315,23 @@ const loading = cfg.loading
 const loadError = computed(() => !!cfg.error.value)
 const saving = cfg.saving
 const showAdvanced = ref(false)
+
+/* Read-only runtime info: the persistence backend in use, from
+ * GET /system/health (`storage_backend`, 0.10.0). Fail-silent — a health
+ * check error or an older server simply leaves the row hidden. */
+const storageBackend = ref<StorageBackendKind | null>(null)
+
+const storageBackendLabel = computed(() =>
+  storageBackend.value ? t(`config.advanced.storageBackendKind.${storageBackend.value}`) : ''
+)
+
+function loadStorageBackend() {
+  getSystemHealth()
+    .then((health) => {
+      storageBackend.value = health.storageBackend ?? null
+    })
+    .catch(() => {})
+}
 
 // Card refs for flash animation
 const gitPlatformsCardRef = ref<HTMLElement>()
@@ -400,7 +427,7 @@ async function saveChanges() {
         setTimeout(() => el.classList.remove('flash-success'), 600)
       }
     })
-  } catch (e) {
+  } catch {
     ElNotification({
       title: t('common.error'),
       message: t('config.saveFailed'),
@@ -450,6 +477,7 @@ onMounted(() => {
   window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('resize', handleResize)
   loadConfig()
+  loadStorageBackend()
 })
 
 // --- Error handling ---

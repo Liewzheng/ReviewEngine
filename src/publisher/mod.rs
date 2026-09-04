@@ -8,6 +8,13 @@
 
 use anyhow::Result;
 
+/// Fixed header of the review report this service posts to the MR
+/// (`publish_review`, lib.rs). The Note-hook ingestion path skips notes
+/// starting with this prefix — self-echo guard (a) of
+/// design/persistence.md §7.1, so our own report never re-enters the
+/// discussion history it was published into.
+pub const REVIEW_REPORT_PREFIX: &str = "# CodeReview Board\n\n";
+
 /// A note to be posted on a specific line of a file in a merge request.
 #[derive(Debug, Clone)]
 pub struct InlineNote {

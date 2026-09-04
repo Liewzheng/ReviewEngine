@@ -117,7 +117,9 @@ Response 202:
 
 #### `GET /api/v1/reviews/:task_id`
 
-返回单个任务详情。snake_case `TaskStatus` 字段全部保留，之上合并 camelCase 结构化字段（`ReviewDetail`）：`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `status` / `durationMs` / `createdAt` / `completedAt` / `commitSha` / `experts[{expertId, expertName, status, score, summary, details}]` / `rawComment` / `rawApiResponse` / `gitlabMrUrl`。
+返回单个任务详情。`task_id` 必须是合法 UUID：非 UUID 值在路径参数解析阶段即失败，返回 `400`（如误请求 `/api/v1/reviews/history`——历史列表端点是下方单独的 `GET /api/v1/reviews`，不存在 `history` 子路径）；任务不存在返回 `404 { "error": "task not found" }`。
+
+snake_case `TaskStatus` 字段全部保留，之上合并 camelCase 结构化字段（`ReviewDetail`）：`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `status` / `durationMs` / `createdAt` / `completedAt` / `commitSha` / `experts[{expertId, expertName, status, score, summary, details}]` / `rawComment` / `rawApiResponse` / `gitlabMrUrl`。
 
 ```
 Response 200:
@@ -185,7 +187,7 @@ Response 200:
 
 #### `GET /api/v1/reviews`
 
-分页列出历史 reviews。
+分页列出历史 reviews。这是唯一的 review 历史列表端点（前端 History 页的数据源）；不存在 `/api/v1/reviews/history` 子路径——该请求会命中 `/:task_id` 路由并因 `history` 不是 UUID 而返回 400。
 
 ```
 Query:

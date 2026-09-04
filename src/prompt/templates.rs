@@ -179,6 +179,10 @@ Description: {{ description }}
 {% endif %}
 {% endif %}
 
+{% if discussion_context %}
+{{ discussion_context }}
+{% endif %}
+
 Note: In the diff below:
 - Lines starting with '+' are NEW code added by this PR — focus on these.
 - Lines starting with '-' are DELETED code.

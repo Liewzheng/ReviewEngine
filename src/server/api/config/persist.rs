@@ -31,11 +31,14 @@
 
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use crate::config::secrets::{self, ENC_PREFIX};
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::AppState;
+use crate::store::traits::ConfigStore;
+use crate::store::SqlxStore;
 
 use super::put::AppliedConfig;
 use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, UiLlmProviderConfig, API_KEY_MASK};
@@ -367,10 +370,139 @@ pub fn load_and_apply_ui_state(state: &AppState, path: &Path, overrides: &UiStat
     let Some(file) = load_ui_state(path)? else {
         return Ok(false);
     };
-    let payload = replay_payload(&file, overrides);
+    apply_replay(state, &file, overrides, &path.display().to_string())?;
+    Ok(true)
+}
+
+/// Shared tail of both replay paths: build the PUT-equivalent payload and
+/// push it through `apply_ui_config`. `source_desc` only feeds error text.
+fn apply_replay(
+    state: &AppState,
+    file: &UiStateFile,
+    overrides: &UiStateEnvOverrides,
+    source_desc: &str,
+) -> anyhow::Result<()> {
+    let payload = replay_payload(file, overrides);
     super::put::apply_ui_config(state, &payload).map_err(|(status, axum::Json(body))| {
-        anyhow::anyhow!("failed to apply {} (HTTP {}): {}", path.display(), status, body)
+        anyhow::anyhow!("failed to apply {source_desc} (HTTP {status}): {body}")
     })?;
+    Ok(())
+}
+
+// ── 0.10.0 database-backed persistence (design/persistence.md §6) ──
+
+/// Suffix of the post-import backup: `ui-state.toml` →
+/// `ui-state.toml.migrated` (kept, never deleted — §6.1).
+pub const MIGRATED_SUFFIX: &str = ".migrated";
+
+/// `ui-state.toml` → `ui-state.toml.migrated`.
+pub fn migrated_path(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(MIGRATED_SUFFIX);
+    PathBuf::from(os)
+}
+
+/// True when `REVIEW_DISABLE_DB` requests the 0.9 escape hatch (§9).
+/// Pure function over the env value for testability.
+pub fn db_disabled_flag(value: Option<&str>) -> bool {
+    matches!(
+        value.map(|v| v.trim().to_ascii_lowercase()),
+        Some(v) if v == "1" || v == "true" || v == "yes"
+    )
+}
+
+/// Startup step 1 (§6.1): resolve the DB URL, build the pool, run
+/// migrations. `Ok(None)` = persistence disabled (escape hatch, or no
+/// config dir resolvable — the 0.9 "persistence off" case); an unreachable
+/// database is a hard startup error, NEVER a silent SQLite fallback (§9).
+pub async fn bootstrap_database() -> anyhow::Result<Option<SqlxStore>> {
+    if db_disabled_flag(std::env::var("REVIEW_DISABLE_DB").ok().as_deref()) {
+        tracing::warn!("persistence disabled via REVIEW_DISABLE_DB — running with 0.9 in-memory + file behaviour");
+        return Ok(None);
+    }
+    let store = match std::env::var("DATABASE_URL") {
+        Ok(url) if !url.is_empty() => SqlxStore::connect(&url).await.with_context(|| {
+            "DATABASE_URL is set but the database is unreachable; \
+             refusing to silently fall back to embedded SQLite (fix the connection, \
+             unset DATABASE_URL, or set REVIEW_DISABLE_DB=1 to bypass persistence)"
+                .to_string()
+        })?,
+        _ => {
+            let Some(state_path) = resolve_ui_state_path() else {
+                tracing::warn!("no config dir resolvable — persistence disabled (0.9 behaviour)");
+                return Ok(None);
+            };
+            let dir = state_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."));
+            SqlxStore::connect_default(&dir).await?
+        }
+    };
+    store.migrate().await?;
+    Ok(Some(store))
+}
+
+/// Startup step 3 (§6.1): one-shot import of `ui-state.toml` into the DB.
+///
+/// Triggers only when the three config tables are completely empty AND the
+/// file exists. The whole import is ONE transaction (`save_ui_state`), so a
+/// mid-import failure rolls back cleanly; the file is renamed to
+/// `.migrated` only after every table has been written. Any error leaves
+/// the file untouched so the caller falls back to the file replay path and
+/// the next startup retries the import.
+pub async fn import_ui_state_into_db(store: &SqlxStore, path: &Path) -> anyhow::Result<bool> {
+    if !store.config_tables_empty().await? {
+        return Ok(false);
+    }
+    let Some(file) = load_ui_state(path)? else {
+        return Ok(false);
+    };
+    store.save_ui_state(&file).await?;
+    match std::fs::rename(path, migrated_path(path)) {
+        Ok(()) => tracing::info!(
+            "imported ui-state.toml into the database; backup at {}",
+            migrated_path(path).display()
+        ),
+        // The data is safely in the DB and DB replay wins from here on; a
+        // failed rename only means the backup was not created.
+        Err(e) => tracing::warn!("import succeeded but renaming {} failed: {e}", path.display()),
+    }
+    Ok(true)
+}
+
+/// Startup step 4 (§6.1): replay the UI state from the DB through the SAME
+/// `apply_ui_config` path as `PUT /config`. The DB rows are reassembled into
+/// a [`UiStateFile`] so the replay payload builder (env precedence, masked
+/// projections) is literally shared with the file path. `Ok(false)` = DB
+/// holds no configuration at all (caller falls back to the file replay).
+pub async fn load_and_apply_ui_state_from_db(
+    state: &AppState,
+    store: &SqlxStore,
+    overrides: &UiStateEnvOverrides,
+) -> anyhow::Result<bool> {
+    let ui: Option<UiConfig> = store
+        .load_setting("ui")
+        .await?
+        .map(|v| serde_json::from_value(v).context("app_settings row 'ui' is not a valid UiConfig"))
+        .transpose()?;
+    let file = UiStateFile {
+        ui,
+        llm: store.load_llm_providers().await?,
+        git_platforms: store.load_git_platforms().await?,
+        gitlab: store.load_legacy_gitlab().await?,
+    };
+    let gitlab = &file.gitlab;
+    let empty = file.ui.is_none()
+        && file.llm.is_empty()
+        && file.git_platforms.is_empty()
+        && gitlab.token.is_empty()
+        && gitlab.webhook_secret.is_empty()
+        && gitlab.webhook_signing_secret.is_empty();
+    if empty {
+        return Ok(false);
+    }
+    apply_replay(state, &file, overrides, "the database UI state")?;
     Ok(true)
 }
 
@@ -1429,5 +1561,290 @@ webhook_secret = "legacy-wh-plain"
         assert_eq!(llm[0].provider, "xiaomi-mimo");
         assert_eq!(llm[0].api_key, "tp-REALKEY");
         assert_eq!(llm[0].api_base, "https://token-plan-cn.xiaomimimo.com/v1");
+    }
+
+    // ── 0.10.0: DB-backed persistence (import / DB replay / escape hatch) ──
+
+    async fn fresh_db() -> SqlxStore {
+        let store = SqlxStore::new_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+        store
+    }
+
+    /// (a) One-shot import: an old ui-state.toml (plaintext LLM key on disk,
+    /// encrypted git token) imports into empty config tables; the file is
+    /// renamed to .migrated; every secret column at rest is `enc:`; and the
+    /// DB replay produces the same effective configuration as the 0.9 file
+    /// replay.
+    #[tokio::test]
+    async fn import_then_db_replay_matches_file_replay() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        // save_ui_state writes the legacy on-disk shape: git secrets enc:,
+        // the LLM api_key PLAINTEXT (0.9 threat model, persist.rs:27-29).
+        save_ui_state(&path, &sample_state_file()).unwrap();
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            on_disk.contains("sk-live"),
+            "precondition: 0.9 stores the LLM key in plaintext"
+        );
+
+        let store = fresh_db().await;
+        assert!(import_ui_state_into_db(&store, &path).await.unwrap());
+
+        assert!(!path.exists(), "original file must be renamed away");
+        assert!(migrated_path(&path).exists(), "backup must be kept");
+        assert!(!store.config_tables_empty().await.unwrap());
+
+        // At rest: all four secret columns are enc:-prefixed — the LLM key
+        // included (newly inside the encryption boundary).
+        let api_key: String = sqlx::query_scalar("SELECT api_key FROM llm_providers")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            api_key.starts_with("enc:"),
+            "api_key must be encrypted at rest (enc:-prefixed)"
+        );
+        assert!(!api_key.contains("sk-live"));
+        let token: String = sqlx::query_scalar("SELECT token FROM git_platforms")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(token.starts_with("enc:"), "platform token must stay encrypted");
+        let gitlab_raw: String = sqlx::query_scalar("SELECT value FROM app_settings WHERE key = 'gitlab'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let gitlab_json: serde_json::Value = serde_json::from_str(&gitlab_raw).unwrap();
+        assert!(gitlab_json["token"].as_str().unwrap().starts_with("enc:"));
+        assert!(gitlab_json["webhook_secret"].as_str().unwrap().starts_with("enc:"));
+        assert_eq!(gitlab_json["webhook_signing_secret"], "");
+
+        // Replay equivalence: DB replay vs 0.9 file replay (from the backup)
+        // must land the same effective configuration.
+        let state_db = Arc::new(fresh_state(vec![]));
+        assert!(
+            load_and_apply_ui_state_from_db(&state_db, &store, &UiStateEnvOverrides::default())
+                .await
+                .unwrap()
+        );
+        let state_file = Arc::new(fresh_state(vec![]));
+        assert!(load_and_apply_ui_state(&state_file, &migrated_path(&path), &UiStateEnvOverrides::default()).unwrap());
+        let db_llm = state_db.llm_configs.read().unwrap().clone();
+        let file_llm = state_file.llm_configs.read().unwrap().clone();
+        assert_eq!(db_llm.len(), 1);
+        assert_eq!(db_llm[0].api_key, "sk-live");
+        assert_eq!(db_llm[0].api_key, file_llm[0].api_key);
+        assert_eq!(
+            state_db.git_platforms.read().unwrap().clone(),
+            state_file.git_platforms.read().unwrap().clone()
+        );
+        assert_eq!(
+            serde_json::to_value(&*state_db.ui_config.read().unwrap()).unwrap(),
+            serde_json::to_value(&*state_file.ui_config.read().unwrap()).unwrap(),
+            "GET /config projection must be identical for DB and file replay"
+        );
+    }
+
+    /// (b) env precedence matrix against the DB source: env-seeded LLM list
+    /// wins wholesale (DB llm section NOT replayed); legacy gitlab env/CLI
+    /// values are fallback-only (used only when the DB value is empty).
+    #[tokio::test]
+    async fn db_replay_env_precedence_matrix() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let env_llm = LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-env".to_string(),
+            api_key: "sk-env".to_string(),
+            api_base: "https://api.openai.com/v1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+        };
+
+        // Row 1: llm_from_env — DB llm entries must not touch the runtime.
+        let store = fresh_db().await;
+        store
+            .replace_llm_providers(&[LLMConfig {
+                provider: "openai".to_string(),
+                model: "gpt-db".to_string(),
+                api_key: "sk-db".to_string(),
+                api_base: String::new(),
+                max_tokens: 4096,
+                temperature: 0.7,
+                disable_thinking: None,
+            }])
+            .await
+            .unwrap();
+        let state = Arc::new(fresh_state(vec![env_llm.clone()]));
+        let overrides = UiStateEnvOverrides {
+            llm_from_env: true,
+            llm_entries: vec![env_llm.clone()],
+            ..Default::default()
+        };
+        assert!(load_and_apply_ui_state_from_db(&state, &store, &overrides)
+            .await
+            .unwrap());
+        let llm = state.llm_configs.read().unwrap().clone();
+        assert_eq!(llm.len(), 1);
+        assert_eq!(llm[0].api_key, "sk-env", "env provider list wins wholesale over the DB");
+        assert_eq!(llm[0].model, "gpt-env");
+
+        // Row 2: DB gitlab empty → env/CLI fills in (fallback-only).
+        *crate::server::gitlab::gitlab_runtime().write().unwrap() = crate::server::gitlab::GitLabRuntimeConfig {
+            webhook_secret: String::new(),
+            signing_secret: None,
+            signing_key: None,
+            token: String::new(),
+        };
+        let state2 = Arc::new(fresh_state(vec![]));
+        let overrides2 = UiStateEnvOverrides {
+            gitlab_token: Some("glpat-env".to_string()),
+            gitlab_webhook_secret: Some("wh-env".to_string()),
+            ..Default::default()
+        };
+        assert!(load_and_apply_ui_state_from_db(&state2, &store, &overrides2)
+            .await
+            .unwrap());
+        let rt = crate::server::gitlab::gitlab_runtime().read().unwrap().clone();
+        assert_eq!(rt.token, "glpat-env", "env fallback fills an empty DB token");
+        assert_eq!(rt.webhook_secret, "wh-env");
+
+        // Row 3: DB gitlab set → DB is authoritative, env is ignored.
+        store
+            .save_legacy_gitlab(&PersistedGitlabConfig {
+                token: "glpat-db".to_string(),
+                webhook_secret: "wh-db".to_string(),
+                webhook_signing_secret: String::new(),
+            })
+            .await
+            .unwrap();
+        *crate::server::gitlab::gitlab_runtime().write().unwrap() = crate::server::gitlab::GitLabRuntimeConfig {
+            webhook_secret: String::new(),
+            signing_secret: None,
+            signing_key: None,
+            token: String::new(),
+        };
+        let state3 = Arc::new(fresh_state(vec![]));
+        assert!(load_and_apply_ui_state_from_db(&state3, &store, &overrides2)
+            .await
+            .unwrap());
+        let rt = crate::server::gitlab::gitlab_runtime().read().unwrap().clone();
+        assert_eq!(rt.token, "glpat-db", "DB token must beat the env override");
+        assert_eq!(rt.webhook_secret, "wh-db");
+    }
+
+    /// (c) A mid-import failure rolls back the whole transaction: no partial
+    /// rows, the file is NOT renamed, and the file replay fallback still
+    /// works. Injected fault: two git platforms with the same `name` violate
+    /// the UNIQUE constraint on the second insert.
+    #[tokio::test]
+    async fn failed_import_rolls_back_and_keeps_file() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let mut file = sample_state_file();
+        file.git_platforms.push(GitPlatformConfig {
+            name: "testbed".to_string(), // duplicate of the first entry
+            base_url: "https://dup.example.com".to_string(),
+            ..Default::default()
+        });
+        save_ui_state(&path, &file).unwrap();
+
+        let store = fresh_db().await;
+        let err = import_ui_state_into_db(&store, &path).await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("testbed"),
+            "error must name the failing row: {err:#}"
+        );
+        assert!(path.exists(), "failed import must NOT rename the file");
+        assert!(!migrated_path(&path).exists());
+        assert!(
+            store.config_tables_empty().await.unwrap(),
+            "the transaction must roll back completely (no partial import)"
+        );
+
+        // Fallback: the file replay path still applies the (valid parts of
+        // the) configuration — same as a corrupt-DB 0.9 startup.
+        let state = Arc::new(fresh_state(vec![]));
+        assert!(load_and_apply_ui_state(&state, &path, &UiStateEnvOverrides::default()).unwrap());
+        assert_eq!(state.llm_configs.read().unwrap()[0].api_key, "sk-live");
+    }
+
+    /// PUT /config with a DB attached persists to the DB (not to the file)
+    /// and stores the resolved live key encrypted.
+    #[tokio::test]
+    async fn put_config_persists_to_db_instead_of_file() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let store = fresh_db().await;
+
+        let mut state = fresh_state(vec![]);
+        state.ui_state_path = Some(path.clone());
+        state.db = Some(Arc::new(store.clone()));
+        let state = Arc::new(state);
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state.clone()),
+            axum::Json(serde_json::json!({
+                "llm": {
+                    "openaiApiKey": "sk-live-db",
+                    "apiBaseUrl": "https://api.openai.com/v1",
+                    "defaultModel": "gpt-4o"
+                },
+                "gitlab": { "apiToken": "glpat-db", "webhookSecret": "wh-db" }
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        assert!(!path.exists(), "no ui-state.toml may be written when the DB is active");
+        let llm = store.load_llm_providers().await.unwrap();
+        assert_eq!(llm.len(), 1);
+        assert_eq!(
+            llm[0].api_key, "sk-live-db",
+            "masked/resolved live key must land in the DB"
+        );
+        let at_rest: String = sqlx::query_scalar("SELECT api_key FROM llm_providers")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(at_rest.starts_with("enc:"));
+        let gitlab = store.load_legacy_gitlab().await.unwrap();
+        assert_eq!(gitlab.token, "glpat-db");
+        assert_eq!(gitlab.webhook_secret, "wh-db");
+
+        // And a fresh state replays it back from the DB.
+        let state2 = Arc::new(fresh_state(vec![]));
+        assert!(
+            load_and_apply_ui_state_from_db(&state2, &store, &UiStateEnvOverrides::default())
+                .await
+                .unwrap()
+        );
+        assert_eq!(state2.llm_configs.read().unwrap()[0].api_key, "sk-live-db");
+    }
+
+    /// (d) The escape hatch: REVIEW_DISABLE_DB parsing. Behavioural 0.9
+    /// equivalence is structural — `db = None` routes everything through the
+    /// file path, which the tests above (and every pre-existing persist test)
+    /// exercise.
+    #[test]
+    fn db_disabled_flag_parsing() {
+        assert!(db_disabled_flag(Some("1")));
+        assert!(db_disabled_flag(Some("true")));
+        assert!(db_disabled_flag(Some(" TRUE ")));
+        assert!(db_disabled_flag(Some("yes")));
+        assert!(!db_disabled_flag(None));
+        assert!(!db_disabled_flag(Some("")));
+        assert!(!db_disabled_flag(Some("0")));
+        assert!(!db_disabled_flag(Some("no")));
+        assert!(!db_disabled_flag(Some("random")));
     }
 }

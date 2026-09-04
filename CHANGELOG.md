@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.10.0] - 2026-09-03
+## [0.10.0] - 2026-09-04
 
 > **0.10.x is a major upgrade.** The upgrade itself is fully automatic — the first 0.10.x boot creates the database, applies the embedded schema migrations, and imports `ui-state.toml` into the database in one transaction — but it is a **one-way move: downgrading back to 0.9.x is not supported** (configuration's authoritative source becomes the database and `ui-state.toml` is renamed to `ui-state.toml.migrated`, which a 0.9.x binary cannot read). **Back up your config directory** (`~/.config/review-engine/`, including `ui-state.toml` and `secrets.key`; Docker: the `./config` and `./auth` bind mounts) **before upgrading.** Step-by-step instructions, expected logs, verification, and troubleshooting: [`docs/migration-0.10.md`](docs/migration-0.10.md).
 

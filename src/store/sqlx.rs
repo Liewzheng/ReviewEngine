@@ -653,6 +653,7 @@ fn review_where(query: &ReviewListQuery) -> (String, Vec<String>) {
 mod tests {
     use super::*;
     use crate::store::decode_ts;
+    use chrono::{SubsecRound, TimeZone};
 
     async fn fresh_store() -> SqlxStore {
         let store = SqlxStore::new_in_memory().await.unwrap();
@@ -980,10 +981,17 @@ mod tests {
     #[tokio::test]
     async fn review_row_codec_round_trip() {
         let store = fresh_store().await;
+        // Deterministic timestamp with sub-microsecond digits: `Utc::now()`
+        // returns nanoseconds on Linux (clock_gettime) but only microseconds
+        // on macOS (gettimeofday), which made this test platform-flaky.
+        let created_at = Utc
+            .with_ymd_and_hms(2026, 9, 4, 9, 34, 12)
+            .unwrap()
+            + chrono::Duration::nanoseconds(524_657_367);
         let entry = TaskEntry {
             task_id: uuid::Uuid::new_v4(),
             state: TaskState::Pending,
-            created_at: Utc::now(),
+            created_at,
             started_at: None,
             completed_at: None,
             result: None,
@@ -1044,7 +1052,14 @@ mod tests {
         assert_eq!(decoded.request, entry.request);
         assert_eq!(decoded.source_meta.mr_title.as_deref(), Some("Add login"));
         assert_eq!(decoded.source_meta.project.as_deref(), Some("g/p"));
-        assert_eq!(decoded.created_at, entry.created_at);
+        // Codec contract (encode_ts): timestamps are stored at microsecond
+        // precision; sub-micro digits are truncated, not rounded.
+        assert_ne!(
+            entry.created_at.timestamp_subsec_nanos() % 1_000,
+            0,
+            "test input must carry sub-microsecond digits"
+        );
+        assert_eq!(decoded.created_at, entry.created_at.trunc_subsecs(6));
         assert!(decoded.expert_name.is_none(), "live-only field is not persisted");
     }
 

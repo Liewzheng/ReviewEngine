@@ -1,0 +1,120 @@
+# ═══════════════════════════════════════════════════════════════════════
+# Dockerfile.dev — local/dev preview image built from source
+# For contributors (e.g. on macOS arm64) who want to build a Linux image
+# from the current checkout and preview branch changes locally.
+#
+# Differences from the root Dockerfile (zero-build, downloads GitHub
+# Release assets):
+#   - adds a builder stage: compiles this checkout inside the container
+#     with rust:1.96-bookworm (macOS arm64 has no cross toolchain, so the
+#     Linux binary must be produced by the in-container builder)
+#   - binary: COPY --from=builder (replaces the release-download RUN block)
+#   - frontend dist: COPY the locally built frontend/dist (contains the
+#     latest changes of this branch)
+# The runtime stage is aligned section-by-section with the root Dockerfile
+# to keep deployment semantics identical.
+# Note: requires the companion Dockerfile.dev.dockerignore (the root
+# .dockerignore excludes frontend/dist; without the override the COPY of
+# the frontend artifacts would fail).
+# ═══════════════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════════════
+# Stage 0: Builder (compile the Linux binary in-container)
+# bookworm glibc 2.36, forward-compatible with the ubuntu 24.04 runtime
+# (glibc 2.39).
+# ═══════════════════════════════════════════════════════════════════════
+FROM rust:1.96-bookworm AS builder
+
+WORKDIR /build
+
+# Single crate, no build.rs, no workspace members: manifest + src/ suffice
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+# Referenced by src/config/defaults.rs via include_str! — must exist at
+# compile time (the root .dockerignore already exempts this file)
+COPY docs/code-audit-default.toml ./docs/code-audit-default.toml
+# Since v0.10.0, src/store/mod.rs uses sqlx::migrate!("./migrations") —
+# must exist at compile time
+COPY migrations ./migrations
+
+RUN cargo build --release --locked
+
+# ═══════════════════════════════════════════════════════════════════════
+# Stage 1: Runtime (aligned section-by-section with the root Dockerfile)
+# ═══════════════════════════════════════════════════════════════════════
+FROM ubuntu:24.04
+
+# Optional apt mirror for contributors with poor connectivity to the
+# official Ubuntu archives (e.g. --build-arg APT_MIRROR=mirrors.aliyun.com).
+# Empty (default) = official sources. When set, the archive/security hosts
+# (x86_64) and the ports host (aarch64, ubuntu-ports) are rewritten in both
+# the legacy sources.list and the deb822 ubuntu.sources — Ubuntu 24.04
+# keeps the real entries in the latter.
+ARG APT_MIRROR=""
+RUN if [ -n "${APT_MIRROR}" ]; then \
+      echo ">> APT_MIRROR set: rewriting apt sources to ${APT_MIRROR}"; \
+      for f in /etc/apt/sources.list /etc/apt/sources.list.d/ubuntu.sources; do \
+        [ -f "$f" ] || continue; \
+        sed -i -e "s|archive.ubuntu.com|${APT_MIRROR}|g" \
+               -e "s|security.ubuntu.com|${APT_MIRROR}|g" \
+               -e "s|ports.ubuntu.com|${APT_MIRROR}|g" "$f"; \
+      done; \
+    fi
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    git \
+    openssh-client \
+    curl \
+    tar \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Create non-root user (fixed UID/GID 9001, same as the root Dockerfile)
+RUN groupadd -r -g 9001 review-engine && useradd -r -u 9001 -g review-engine -d /app -s /sbin/nologin review-engine
+
+WORKDIR /app
+
+# ── Local build artifact: binary (replaces the release-download RUN block) ──
+COPY --from=builder /build/target/release/review-engine /usr/local/bin/review-engine
+RUN /usr/local/bin/review-engine --version
+
+# ── Local build artifact: frontend dist (replaces the frontend-dist.tar.gz
+#    download RUN block) ──
+# IMAGE_DIST=/app/frontend-dist-image in entrypoint.sh: on first start the
+# contents are synced from here into the /app/frontend/dist volume; the
+# image keeps a copy as the sync source.
+COPY frontend/dist /app/frontend-dist-image
+RUN ls -la /app/frontend-dist-image
+
+# reng alias (dynamic command name via argv[0]; a symlink is enough)
+RUN ln -s /usr/local/bin/review-engine /usr/local/bin/reng
+
+# Copy the entrypoint script; kept as the container entrypoint for future
+# extension
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+# Create config and report directories
+RUN mkdir -p /app/config /app/reports /app/.ssh /app/bin /app/frontend/dist && \
+    chown -R review-engine:review-engine /app
+
+# Switch to non-root user
+USER review-engine
+
+# Expose ports
+EXPOSE 443 8080
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD curl -f http://localhost:8080/health || exit 1
+
+# Default environment variables
+ENV REVIEW_ENGINE_CONFIG_DIR=/app/config
+ENV REVIEW_ENGINE_REPORT_DIR=/app/reports
+ENV RUST_LOG=info
+
+# Entry: start the service
+ENTRYPOINT ["/app/entrypoint.sh"]
+CMD ["serve", "--bind", "0.0.0.0", "--port", "8080"]

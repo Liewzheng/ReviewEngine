@@ -162,18 +162,72 @@ async fn build_lead_overview(
         .complete_with_fallback(&overview_config, &system, &user)
         .await
     {
-        Ok(result) => match serde_yaml_ng::from_str::<GlobalReviewContext>(&result.content) {
-            Ok(ctx) => Some(ctx),
-            Err(e) => {
-                tracing::warn!("Failed to parse GlobalReviewContext: {:?}", e);
-                None
-            }
-        },
+        Ok(result) => parse_global_review_context(&result.content),
         Err(e) => {
             tracing::warn!("Pass 1 Overview failed: {:?}", e);
             None
         }
     }
+}
+
+/// Parse the lead overview's YAML response into a [`GlobalReviewContext`],
+/// tolerating the formatting quirks LLMs commonly emit.
+///
+/// LLMs routinely wrap the document in a ```` ```yaml ```` fence, surround it
+/// with prose, or indent with tabs. A backtick at line start is a reserved
+/// YAML indicator and tabs are illegal indentation, so the strict scanner
+/// aborts with "found character that cannot start any token" (RENG-26).
+///
+/// Attempts, in order, first success wins:
+/// 1. strict parse of the raw response;
+/// 2. parse after stripping code fences and normalizing tab indentation;
+/// 3. parse of the first fenced YAML block only (drops surrounding prose and
+///    any additional fenced blocks).
+///
+/// Returns `None` when every attempt fails; the caller then runs the expert
+/// pass without a global context — the degradation path is unchanged.
+fn parse_global_review_context(raw: &str) -> Option<GlobalReviewContext> {
+    let strict_err = match serde_yaml_ng::from_str::<GlobalReviewContext>(raw) {
+        Ok(ctx) => return Some(ctx),
+        Err(e) => e,
+    };
+
+    let sanitized = sanitize_overview_yaml(raw);
+    if let Ok(ctx) = serde_yaml_ng::from_str::<GlobalReviewContext>(&sanitized) {
+        return Some(ctx);
+    }
+
+    if let Some(fenced) = crate::output::parser::extract_first_fenced_yaml(raw) {
+        if let Ok(ctx) = serde_yaml_ng::from_str::<GlobalReviewContext>(&fenced) {
+            return Some(ctx);
+        }
+    }
+
+    tracing::warn!(
+        "Failed to parse GlobalReviewContext: {:?} (fence/tab sanitization and fenced-block fallback also failed)",
+        strict_err
+    );
+    None
+}
+
+/// Normalize LLM YAML quirks that trip the strict scanner: strip markdown
+/// code fences (reusing the shared output-parser helper) and replace leading
+/// tab indentation — illegal in YAML — with two spaces per tab. Tabs inside
+/// scalar content are left untouched.
+fn sanitize_overview_yaml(text: &str) -> String {
+    let stripped = crate::output::parser::clean_yaml(text);
+    stripped
+        .lines()
+        .map(|line| {
+            let tabs = line.bytes().take_while(|&b| b == b'\t').count();
+            if tabs == 0 {
+                line.to_string()
+            } else {
+                format!("{}{}", "  ".repeat(tabs), &line[tabs..])
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Set up concurrency-control infrastructure: semaphore, rate limiter, and
@@ -747,5 +801,92 @@ mod tests {
         assert!(ctx.readme_excerpt.contains("# Local Project"));
         assert!(ctx.file_tree.iter().any(|f| f == "README.md"));
         assert!(ctx.recent_commits.iter().any(|c| c.contains("add readme")));
+    }
+}
+
+#[cfg(test)]
+mod global_context_parse_tests {
+    use super::*;
+
+    const PLAIN_YAML: &str = "summary: \"Add auth\"\n\
+                              risk_areas:\n  - \"Security: token handling\"\n\
+                              focus_files:\n  - \"src/auth.rs\"\n\
+                              guidance: \"Check token expiry\"\n";
+
+    #[test]
+    fn parse_global_context_plain_yaml() {
+        let ctx = parse_global_review_context(PLAIN_YAML).expect("plain YAML should parse");
+        assert_eq!(ctx.summary, "Add auth");
+        assert_eq!(ctx.risk_areas, vec!["Security: token handling".to_string()]);
+        assert_eq!(ctx.focus_files, vec!["src/auth.rs".to_string()]);
+        assert_eq!(ctx.guidance, "Check token expiry");
+    }
+
+    /// Regression for RENG-26: a ```yaml fence alone used to abort the strict
+    /// scanner ("found character that cannot start any token") and silently
+    /// drop the global context.
+    #[test]
+    fn parse_global_context_fenced_yaml_with_prose() {
+        let raw = "Here is the overview:\n\
+                   ```yaml\n\
+                   summary: \"Add auth\"\nrisk_areas: []\nfocus_files: []\nguidance: \"g\"\n\
+                   ```\n\
+                   Hope this helps.";
+        let ctx = parse_global_review_context(raw).expect("fenced YAML should parse after sanitization");
+        assert_eq!(ctx.summary, "Add auth");
+    }
+
+    #[test]
+    fn parse_global_context_unclosed_fence() {
+        let raw = "```yaml\nsummary: \"Add auth\"\nrisk_areas: []\nfocus_files: []\nguidance: \"g\"\n";
+        let ctx = parse_global_review_context(raw).expect("unclosed fence should still parse");
+        assert_eq!(ctx.summary, "Add auth");
+    }
+
+    /// Tab indentation is illegal in YAML and triggers the same scanner error
+    /// family as fences; it must be normalized to spaces before parsing.
+    #[test]
+    fn parse_global_context_tab_indentation() {
+        let raw = "summary: \"Add auth\"\nrisk_areas:\n\t- \"Security\"\nfocus_files:\n\t- \"src/auth.rs\"\nguidance: \"g\"\n";
+        let ctx = parse_global_review_context(raw).expect("tab indentation should be normalized");
+        assert_eq!(ctx.risk_areas, vec!["Security".to_string()]);
+        assert_eq!(ctx.focus_files, vec!["src/auth.rs".to_string()]);
+    }
+
+    /// Special characters (colons, emoji) inside properly quoted scalars must
+    /// survive the sanitize path unchanged.
+    #[test]
+    fn parse_global_context_quoted_special_characters() {
+        let raw = "```yaml\n\
+                   summary: \"Refactor auth: split middleware 🔒\"\n\
+                   risk_areas:\n  - \"Security: auth middleware changes\"\n  - \"Perf: N+1 query ⚠️\"\n\
+                   focus_files: []\n\
+                   guidance: \"Note: check token expiry\"\n\
+                   ```";
+        let ctx = parse_global_review_context(raw).expect("quoted colons/emoji should parse");
+        assert_eq!(ctx.summary, "Refactor auth: split middleware 🔒");
+        assert_eq!(ctx.risk_areas.len(), 2);
+        assert_eq!(ctx.guidance, "Note: check token expiry");
+    }
+
+    /// When sanitization still yields invalid YAML (e.g. multiple fenced
+    /// blocks concatenated), fall back to parsing the first fenced block only.
+    #[test]
+    fn parse_global_context_first_fenced_block_fallback() {
+        let raw = "```yaml\n\
+                   summary: \"Add auth\"\nrisk_areas: []\nfocus_files: []\nguidance: \"g\"\n\
+                   ```\n\
+                   trailing prose\n\
+                   ```yaml\n\
+                   not: valid: yaml\n\
+                   ```";
+        let ctx = parse_global_review_context(raw).expect("first fenced block should be recovered");
+        assert_eq!(ctx.summary, "Add auth");
+    }
+
+    /// Total garbage must still degrade to `None` — never panic, never guess.
+    #[test]
+    fn parse_global_context_garbage_returns_none() {
+        assert!(parse_global_review_context("not yaml at all: [unclosed").is_none());
     }
 }

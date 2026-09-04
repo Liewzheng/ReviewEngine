@@ -7,6 +7,7 @@ This directory contains the user-facing documentation for review-engine.
 | Document | What you'll learn |
 |---|---|
 | [Getting Started](getting-started.md) | Install review-engine, configure an LLM provider, and run your first local or remote review. |
+| [Migrating to 0.10](migration-0.10.md) | Upgrade to 0.10.x: backup, the automatic database migration, verification, and troubleshooting. |
 | [FAQ / Troubleshooting](faq.md) | API token setup, 401 errors, forgotten-token recovery, and container bind-volume pitfalls. |
 | [Configuration](configuration.md) | How config files are merged, command enablement, expert teams, validation, and the web Configuration UI. |
 

@@ -160,6 +160,9 @@ binary; pulling a newer image also works, the entrypoint syncs it to the
 volumes on next start), and plain binary installs are replaced atomically
 (backup + smoke test + rollback on failure).
 
+> **Upgrading to 0.10.x?** It is a one-way, automatic migration — back up your
+> config directory first: [`docs/migration-0.10.md`](docs/migration-0.10.md).
+
 For a detailed walkthrough, see [`docs/getting-started.md`](docs/getting-started.md).  
 For full CLI options, environment variables, LLM providers, and config reference, see [`docs/configuration.md`](docs/configuration.md), [`docs/integrations/`](docs/integrations/), and [`docs/rest-api.md`](docs/rest-api.md).
 

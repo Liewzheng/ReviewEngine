@@ -145,6 +145,9 @@ impl Client {
             merge_commit_sha: pr.merge_commit_sha,
             pr_author: Some(pr.user.login),
             pr_author_id: Some(pr.user.id),
+            // RENG-27: commit-author resolution is GitLab-only for now; the
+            // GitHub path keeps the PR-author fallback unchanged.
+            commit_author: None,
             discussion_context: None,
         })
     }

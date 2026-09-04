@@ -63,11 +63,14 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
         .unwrap_or("")
         .to_string();
 
-    // Author: prefer the MR author block when present, otherwise fall back to
-    // the webhook trigger user. MRInfo will back-fill the authoritative author
-    // once the review pipeline resolves the MR metadata.
-    let author_name = parsed["object_attributes"]["author"]["name"]
+    // Author (RENG-27): prefer the head commit's author — the person who
+    // actually wrote the code under review. Fall back to the MR author block
+    // (whoever opened the MR, e.g. an admin account), then the webhook
+    // trigger user. MRInfo will back-fill the authoritative author once the
+    // review pipeline resolves the MR metadata.
+    let author_name = parsed["object_attributes"]["last_commit"]["author"]["name"]
         .as_str()
+        .or_else(|| parsed["object_attributes"]["author"]["name"].as_str())
         .or_else(|| parsed["user"]["name"].as_str())
         .unwrap_or("")
         .to_string();
@@ -887,6 +890,43 @@ mod tests {
         // MR author block is preferred over the trigger user.
         assert_eq!(payload.author_name, "real-author");
         assert_eq!(payload.author_avatar_url, "http://author-avatar");
+    }
+
+    /// RENG-27: the head commit's author (who wrote the code) wins over the
+    /// MR author block (who opened the MR).
+    #[test]
+    fn parse_mr_hook_payload_prefers_last_commit_author() {
+        let body = r#"{
+            "object_attributes": {
+                "action": "open",
+                "iid": 7,
+                "title": "Fix login bug",
+                "source_branch": "feature/login",
+                "target_branch": "main",
+                "url": "http://gitlab.internal:8929/group/proj/-/merge_requests/7",
+                "last_commit": {"id": "abc123", "author": {"name": "commit-author", "email": "c@example.com"}},
+                "author": {"name": "mr-author", "avatar_url": "http://author-avatar"}
+            },
+            "project": {
+                "path_with_namespace": "group/proj",
+                "web_url": "http://gitlab.internal:8929/group/proj"
+            },
+            "user": {"name": "trigger-user", "avatar_url": "http://trigger-avatar"}
+        }"#;
+        let payload = parse_mr_hook_payload(body, "glpat-test").expect("payload must parse");
+
+        assert_eq!(payload.author_name, "commit-author");
+        let meta = source_meta_from_payload(&payload);
+        assert_eq!(meta.author_name.as_deref(), Some("commit-author"));
+    }
+
+    /// RENG-27 regression guard: when `last_commit.author` is absent, the MR
+    /// author block remains the fallback (pre-fix behavior).
+    #[test]
+    fn parse_mr_hook_payload_falls_back_to_mr_author_without_commit_author() {
+        let payload = parse_mr_hook_payload(sample_mr_payload(), "glpat-test").expect("payload must parse");
+
+        assert_eq!(payload.author_name, "real-author");
     }
 
     #[test]

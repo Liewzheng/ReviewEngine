@@ -41,6 +41,10 @@ pub struct SourceMeta {
 /// Empty strings map to `None` — a missing value must stay absent rather
 /// than be persisted as `""`. Paired with [`TaskStore::fill_source_meta`]'s
 /// fill-only-blank semantics so enqueue-time values are never clobbered.
+///
+/// Author precedence (RENG-27): the head commit's author wins over the MR
+/// creator — the commit author is who wrote the code, the MR creator is
+/// only the fallback.
 pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMeta {
     fn non_empty(s: &str) -> Option<String> {
         let trimmed = s.trim();
@@ -54,7 +58,11 @@ pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMe
         mr_title: non_empty(&info.title),
         branch: non_empty(&info.source_branch),
         target_branch: non_empty(&info.target_branch),
-        author_name: info.pr_author.clone(),
+        author_name: info
+            .commit_author
+            .as_deref()
+            .and_then(non_empty)
+            .or_else(|| info.pr_author.clone()),
         commit_sha: non_empty(&info.git_hash),
         ..SourceMeta::default()
     }
@@ -753,12 +761,50 @@ mod tests {
         }
     }
 
+    /// RENG-27: the head commit's author (who wrote the code) wins over the
+    /// MR creator for the History author column.
+    #[test]
+    fn source_meta_from_mr_info_prefers_commit_author() {
+        let mut info = crate::models::MRInfo::new(
+            "group/proj".to_string(),
+            "t".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        );
+        info.pr_author = Some("mr-creator".to_string());
+        info.commit_author = Some("commit-author".to_string());
+
+        let meta = source_meta_from_mr_info(&info);
+        assert_eq!(meta.author_name.as_deref(), Some("commit-author"));
+    }
+
+    /// RENG-27 fallback: no usable commit author (absent, or blank/whitespace)
+    /// degrades to the MR creator, exactly the pre-fix behavior.
+    #[test]
+    fn source_meta_from_mr_info_falls_back_to_mr_author() {
+        let mut info = crate::models::MRInfo::new(
+            "group/proj".to_string(),
+            "t".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        );
+        info.pr_author = Some("mr-creator".to_string());
+
+        // Absent commit author → MR creator.
+        let meta = source_meta_from_mr_info(&info);
+        assert_eq!(meta.author_name.as_deref(), Some("mr-creator"));
+
+        // Blank commit author must not be persisted as "" — still the MR creator.
+        info.commit_author = Some("   ".to_string());
+        let meta = source_meta_from_mr_info(&info);
+        assert_eq!(meta.author_name.as_deref(), Some("mr-creator"));
+    }
+
     /// F2 guard: hand-seeded rows with created_at later than completed_at
     /// must clamp the u64 duration projection to 0 instead of wrapping to
     /// ~2^64; elapsed_ms is clamped by the same helper.
     #[test]
-    fn duration_ms_clamps_inverted_timestamps_to_zero() {
-        let base = chrono::DateTime::parse_from_rfc3339("2026-09-03T10:00:00Z")
+    fn duration_ms_clamps_inverted_timestamps_to_zero() {        let base = chrono::DateTime::parse_from_rfc3339("2026-09-03T10:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
         let entry = TaskEntry {

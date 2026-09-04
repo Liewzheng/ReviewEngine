@@ -296,6 +296,16 @@ impl Client {
             .and_then(|a| a.username.clone().or_else(|| a.name.clone()));
         let pr_author_id = gl.author.as_ref().and_then(|a| a.id);
 
+        // RENG-27: resolve the head commit's author so the History "author"
+        // column can show who wrote the code rather than who opened the MR.
+        // Best-effort: any failure degrades to None and callers fall back to
+        // the MR author — it must never fail the review.
+        let commit_author = if git_hash.is_empty() {
+            None
+        } else {
+            self.fetch_commit_author(&git_hash).await
+        };
+
         Ok(MRInfo {
             project_path: self.project_path.clone(),
             mr_iid: self.mr_iid,
@@ -309,8 +319,26 @@ impl Client {
             merge_commit_sha: None,
             pr_author,
             pr_author_id,
+            commit_author,
             discussion_context: None,
         })
+    }
+
+    /// Best-effort lookup of a commit's `author_name` via
+    /// `GET /projects/:id/repository/commits/:sha`.
+    ///
+    /// Returns `None` on any failure (network error, non-2xx, missing/blank
+    /// field) — the commit author is display metadata, not review input, so
+    /// this never propagates an error.
+    async fn fetch_commit_author(&self, sha: &str) -> Option<String> {
+        let path = format!("repository/commits/{sha}");
+        let value: serde_json::Value = self.get_json(&path).await.ok()?;
+        let name = value["author_name"].as_str()?.trim();
+        if name.is_empty() {
+            None
+        } else {
+            Some(name.to_string())
+        }
     }
 
     pub async fn fetch_diff(&self) -> Result<String> {
@@ -1189,6 +1217,69 @@ mod tests {
         assert_eq!(info.pr_author_id, Some(9));
         // Missing diff_refs must not fail the fetch; git_hash degrades to "".
         assert_eq!(info.git_hash, "");
+        // No head SHA → no commit-author lookup is even attempted.
+        assert!(info.commit_author.is_none());
+    }
+
+    /// RENG-27: the head commit's `author_name` is resolved best-effort so
+    /// the History author column can prefer it over the MR creator.
+    #[tokio::test]
+    async fn test_fetch_mr_info_resolves_head_commit_author() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "Add login endpoint",
+                "source_branch": "feature/login",
+                "target_branch": "main",
+                "author": {"id": 7, "username": "alice", "name": "Alice A"},
+                "diff_refs": {"head_sha": "deadbeef"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/repository/commits/deadbeef"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "deadbeef",
+                "author_name": "isletspace",
+                "author_email": "dev@example.com"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let info = client.fetch_mr_info().await.unwrap();
+        assert_eq!(info.commit_author.as_deref(), Some("isletspace"));
+        // MR author is still populated as the fallback source.
+        assert_eq!(info.pr_author.as_deref(), Some("alice"));
+    }
+
+    /// RENG-27: a failing commit lookup must degrade to `None` (callers fall
+    /// back to the MR author) and must never fail the whole MR fetch.
+    #[tokio::test]
+    async fn test_fetch_mr_info_commit_author_best_effort_on_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 7, "username": "alice"},
+                "diff_refs": {"head_sha": "deadbeef"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/repository/commits/deadbeef"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let info = client.fetch_mr_info().await.unwrap();
+        assert!(info.commit_author.is_none());
+        assert_eq!(info.pr_author.as_deref(), Some("alice"));
     }
 
     // ─── fetch_file_raw ───────────────────────────

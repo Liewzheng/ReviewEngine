@@ -563,7 +563,7 @@ watch(() => route.query, () => {
           :border="false"
           :highlight-current-row="false"
         >
-          <el-table-column :label="$t('history.columns.mrTitle')" min-width="240" sortable :sort-by="['mrTitle']">
+          <el-table-column :label="$t('history.columns.mrTitle')" min-width="200" sortable :sort-by="['mrTitle']">
             <template #default="{ row }">
               <div class="title-cell">
                 <div class="title-text">
@@ -577,9 +577,15 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column prop="project" :label="$t('history.columns.project')" width="140" sortable class-name="col-project">
+          <el-table-column prop="project" :label="$t('history.columns.project')" width="160" sortable class-name="col-project">
             <template #default="{ row }">
-              <el-tag size="small" type="info">{{ row.project }}</el-tag>
+              <!-- Long "group/sub/project" slugs used to be hard-clipped by the
+                   cell's overflow:hidden — no ellipsis, no way to read the full
+                   name. The tag now ellipsizes (see .col-project CSS below) and
+                   the tooltip reveals the full slug on hover. -->
+              <el-tooltip :content="row.project" placement="top" :disabled="!row.project">
+                <el-tag size="small" type="info" class="project-tag">{{ row.project }}</el-tag>
+              </el-tooltip>
             </template>
           </el-table-column>
 
@@ -595,13 +601,13 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.status')" width="100" sortable :sort-by="['status']">
+          <el-table-column :label="$t('history.columns.status')" width="108" sortable :sort-by="['status']">
             <template #default="{ row }">
               <StatusBadge :status="row.status" size="small" />
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.score')" width="72" align="center" sortable :sort-by="['assessment.score']">
+          <el-table-column :label="$t('history.columns.score')" width="76" align="center" sortable :sort-by="['assessment.score']">
             <template #default="{ row }">
               <el-tooltip
                 v-if="row.status === 'completed' && row.assessment"
@@ -904,6 +910,22 @@ watch(() => route.query, () => {
 
 .history-table :deep(.el-table__row:hover) {
   background: var(--bg-hover) !important;
+}
+
+/* Project column: cap the tag at the cell width so an over-long slug
+   ellipsizes instead of being hard-clipped by the cell's overflow:hidden
+   (the full name is still available via the hover tooltip in the template).
+   Same truncation recipe Element Plus itself uses for tags inside
+   el-select / el-input-tag. */
+.history-table :deep(.col-project .project-tag) {
+  max-width: 100%;
+}
+
+.history-table :deep(.col-project .project-tag .el-tag__content) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .title-cell {

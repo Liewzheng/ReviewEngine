@@ -288,3 +288,166 @@ async fn config_validate_missing_body_returns_json_error() {
         body
     );
 }
+
+// ─── 0.10.1: webhook path falls back to state.llm_configs ─────────
+
+/// Defect regression (0.10.1): the webhook review path
+/// (`run_review_common` via `POST /webhook/gitlab`) resolved LLM providers
+/// from only the config file `[[llm]]` and the `LLM_CONFIG` env — never the
+/// hot-applied `state.llm_configs`. A provider added through the WebUI
+/// (`POST /api/v1/llm/providers`, the exact flow reproduced below) therefore
+/// had no effect on webhook-triggered reviews, which failed with
+/// "LLM config 'default' has no api_base set".
+///
+/// Setup: a mock GitLab instance serves the MR metadata/diff, a mock
+/// OpenAI-compatible endpoint serves the LLM calls, and the server is spawned
+/// with NEITHER `LLM_CONFIG` nor a config file (fresh HOME). The provider
+/// exists only in `state.llm_configs`. The webhook-dispatched review must
+/// complete and actually call that provider.
+#[tokio::test]
+async fn webhook_review_uses_hot_applied_server_llm_configs() {
+    let gitlab = MockServer::start().await;
+    let llm = MockServer::start().await;
+    mount_mock_llm(&llm).await;
+
+    // Minimal GitLab API surface for resolve_review_source + publish:
+    // MR metadata, the raw diff, and the discussion/notes publish calls.
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "title": "Fix login bug",
+            "description": "",
+            "source_branch": "feature/login",
+            "target_branch": "main",
+            "author": {"id": 1, "username": "alice", "name": "Alice"},
+            "diff_refs": {"base_sha": "base1", "head_sha": "abc123", "start_sha": "base1"}
+        })))
+        .mount(&gitlab)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/raw_diffs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-f()\n+g()\n"))
+        .mount(&gitlab)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/discussions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&gitlab)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/notes"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+        .mount(&gitlab)
+        .await;
+
+    let mr_url = format!("{}/group/proj/-/merge_requests/7", gitlab.uri());
+
+    // No LLM_CONFIG env, no config file (fresh HOME in the spawned server):
+    // the ONLY LLM provider source is the hot-applied server state below.
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(
+        port,
+        None,
+        &[("GITLAB_WEBHOOK_SECRET", "hook-secret"), ("GITLAB_TOKEN", "glpat-test")],
+    );
+    wait_for_server(port).await;
+
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{}", port);
+
+    // The WebUI "add provider" flow: hot-applies into `state.llm_configs`
+    // without touching the config file or env.
+    let resp = client
+        .post(format!("{}/api/v1/llm/providers", base))
+        .json(&serde_json::json!({
+            "provider": "openai",
+            "model": "gpt-4o",
+            "apiKey": "sk-test",
+            "apiBaseUrl": llm.uri(),
+            "maxTokens": 2048,
+            "temperature": 0.3,
+        }))
+        .send()
+        .await
+        .expect("failed to POST /api/v1/llm/providers");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::CREATED,
+        "POST /api/v1/llm/providers returned {}",
+        resp.status()
+    );
+
+    // Fire the GitLab MR webhook (verified via the legacy secret token).
+    let hook_body = serde_json::json!({
+        "object_attributes": {
+            "action": "open",
+            "iid": 7,
+            "title": "Fix login bug",
+            "source_branch": "feature/login",
+            "target_branch": "main",
+            "url": mr_url,
+            "last_commit": {"id": "abc123", "author": {"name": "alice"}},
+        },
+        "project": {
+            "path_with_namespace": "group/proj",
+            "web_url": format!("{}/group/proj", gitlab.uri()),
+        },
+        "user": {"name": "alice"},
+    });
+    let resp = reqwest::Client::new()
+        .post(format!("{}/webhook/gitlab", base))
+        .header("X-Gitlab-Event", "Merge Request Hook")
+        .header("X-Gitlab-Token", "hook-secret")
+        .json(&hook_body)
+        .send()
+        .await
+        .expect("failed to POST /webhook/gitlab");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "webhook must be accepted, got {}",
+        resp.status()
+    );
+
+    // The review runs on a detached task: poll the history list until the
+    // webhook task settles. A fresh server has exactly this one task.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let final_item = loop {
+        let list: serde_json::Value = client
+            .get(format!("{}/api/v1/reviews?per_page=100", base))
+            .send()
+            .await
+            .expect("failed to GET /api/v1/reviews")
+            .json()
+            .await
+            .expect("reviews list body is not JSON");
+        let items = list["items"].as_array().expect("reviews.items is an array");
+        let item = items.iter().find(|i| {
+            i["gitlabMrUrl"].as_str() == Some(mr_url.as_str()) || i["gitlab_mr_url"].as_str() == Some(mr_url.as_str())
+        });
+        match item.map(|i| i["status"].as_str().unwrap_or("")) {
+            Some("completed") | Some("failed") => break item.unwrap().clone(),
+            _ if Instant::now() > deadline => {
+                panic!("webhook review did not settle within 60s: {:?}", list)
+            }
+            _ => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    };
+
+    assert_eq!(
+        final_item["status"].as_str(),
+        Some("completed"),
+        "webhook-triggered review must complete via the hot-applied provider, got {:?}",
+        final_item
+    );
+
+    let requests = llm.received_requests().await.expect("received requests");
+    let llm_hits = requests
+        .iter()
+        .filter(|r| r.url.path().ends_with("/chat/completions"))
+        .count();
+    assert!(
+        llm_hits >= 1,
+        "the WebUI-configured LLM provider must actually have been called by the webhook review"
+    );
+}

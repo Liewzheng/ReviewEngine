@@ -85,6 +85,31 @@ pub(crate) async fn resolve_review_source(url: &str, token: &str) -> anyhow::Res
     Ok((mr_info, diff))
 }
 
+/// Resolve the LLM provider set for a webhook-dispatched review.
+///
+/// Precedence (highest first):
+/// 1. **Config file `[[llm]]`** — the static, explicit configuration.
+/// 2. **`server_llm_configs`** — the server's hot-applied providers
+///    (`AppState::llm_configs`, populated from the DB `llm_providers` table at
+///    startup and updated live by the WebUI / `PUT /api/v1/config`). An empty
+///    vec counts as "not provided" (mirrors the 0.9.1 API-path semantics).
+/// 3. **`LLM_CONFIG` env** — the Docker compose standard form.
+///
+/// `None` (CLI/legacy paths without an `AppState`) skips straight to the env
+/// fallback, keeping pre-fix behavior exactly.
+pub(crate) fn resolve_webhook_llm_configs(
+    file_llm: &[crate::models::LLMConfig],
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+) -> Vec<crate::models::LLMConfig> {
+    if !file_llm.is_empty() {
+        return file_llm.to_vec();
+    }
+    match server_llm_configs {
+        Some(server) if !server.is_empty() => server,
+        _ => crate::config::llm_configs_from_env(),
+    }
+}
+
 /// Shared review execution logic used by both GitLab and GitHub webhook handlers.
 ///
 /// Runs the expert team against the already-resolved `mr_info` and `diff`, then:
@@ -99,6 +124,12 @@ pub(crate) async fn resolve_review_source(url: &str, token: &str) -> anyhow::Res
 /// Finally, notifies the dispatcher of completion and returns the constructed
 /// [`ReviewOutput`] (so the task store can persist expert reports for the
 /// History detail panel).
+///
+/// `server_llm_configs` carries the server's hot-applied LLM providers
+/// (`AppState::llm_configs`, snapshotted by the webhook handler at dispatch
+/// time); see [`resolve_webhook_llm_configs`] for the precedence. `None` is
+/// the CLI/legacy path (no server state) and keeps the pre-0.10.1
+/// config-file → env behavior.
 pub(crate) async fn run_review_common(
     url: &str,
     token: &str,
@@ -107,6 +138,7 @@ pub(crate) async fn run_review_common(
     sha: Option<&str>,
     mr_info: crate::models::MRInfo,
     diff: String,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) -> anyhow::Result<crate::models::ReviewOutput> {
     use crate::config;
     use crate::team::orchestrator;
@@ -121,12 +153,19 @@ pub(crate) async fn run_review_common(
         return Ok(crate::models::ReviewOutput::new(vec![]));
     }
 
-    // Set up LLM configs
-    let llm_configs: Vec<crate::models::LLMConfig> = if !config.llm.is_empty() {
-        config.llm.clone()
-    } else {
-        crate::config::llm_configs_from_env()
-    };
+    // Set up LLM configs: config file [[llm]] > server (WebUI/DB hot-applied)
+    // > LLM_CONFIG env. Without the server fallback, providers configured in
+    // the WebUI never reached webhook-triggered reviews (0.10.0 bug: the task
+    // failed with "LLM config 'default' has no api_base set").
+    let llm_configs = resolve_webhook_llm_configs(&config.llm, server_llm_configs);
+    if llm_configs.is_empty() {
+        tracing::error!(
+            url = %url,
+            "no LLM provider available for webhook-triggered review: the config file has no [[llm]] section, \
+             no provider is configured in the WebUI, and LLM_CONFIG is unset — add a provider via the WebUI \
+             (Configuration → LLM), the config file, or the LLM_CONFIG env var; the review will fail"
+        );
+    }
 
     // Select experts for the review command
     let experts = config.build_expert_defs();
@@ -208,6 +247,67 @@ pub(crate) async fn run_review_common(
 mod tests {
     use super::*;
     use crate::models::{AggregatedReport, ExpertDef, ExpertReport, ExpertTomlDef, Finding, Severity};
+
+    // ─── resolve_webhook_llm_configs ──────────
+
+    fn llm(provider: &str) -> crate::models::LLMConfig {
+        crate::models::LLMConfig {
+            provider: provider.to_string(),
+            model: "m".to_string(),
+            api_key: "k".to_string(),
+            api_base: format!("http://{provider}.example"),
+            max_tokens: 1024,
+            temperature: 0.3,
+            disable_thinking: None,
+        }
+    }
+
+    #[test]
+    fn file_llm_wins_over_server_and_env() {
+        let resolved = resolve_webhook_llm_configs(&[llm("file")], Some(vec![llm("server")]));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].provider, "file",
+            "config file [[llm]] must win over server providers"
+        );
+    }
+
+    #[test]
+    fn server_llm_used_when_file_empty() {
+        let resolved = resolve_webhook_llm_configs(&[], Some(vec![llm("server")]));
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].provider, "server",
+            "empty config file must fall back to server providers"
+        );
+    }
+
+    #[test]
+    fn empty_server_vec_counts_as_not_provided() {
+        // An explicit empty array is "not provided" (0.9.1 semantics): the
+        // result must equal the env fallback, whatever the env holds.
+        // (LLMConfig has no PartialEq — compare the provider sequence.)
+        let resolved = resolve_webhook_llm_configs(&[], Some(vec![]));
+        let env = crate::config::llm_configs_from_env();
+        let providers: Vec<&str> = resolved.iter().map(|c| c.provider.as_str()).collect();
+        let env_providers: Vec<&str> = env.iter().map(|c| c.provider.as_str()).collect();
+        assert_eq!(
+            providers, env_providers,
+            "Some(vec![]) must fall through to the LLM_CONFIG env fallback"
+        );
+    }
+
+    #[test]
+    fn none_server_falls_back_to_env() {
+        let resolved = resolve_webhook_llm_configs(&[], None);
+        let env = crate::config::llm_configs_from_env();
+        let providers: Vec<&str> = resolved.iter().map(|c| c.provider.as_str()).collect();
+        let env_providers: Vec<&str> = env.iter().map(|c| c.provider.as_str()).collect();
+        assert_eq!(
+            providers, env_providers,
+            "None (CLI/legacy path) must keep the pre-fix config-file → env behavior"
+        );
+    }
 
     // ─── select_aggregator_expert ─────────────
 

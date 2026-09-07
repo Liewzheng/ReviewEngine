@@ -24,6 +24,11 @@ pub struct GitHubWebhookHandler {
     /// Populated via [`Self::with_app_state`] in server startup; tests and
     /// legacy paths leave it `None` and fall back to the legacy run-only behavior.
     task_store: Option<Arc<TaskStore>>,
+    /// Weak handle to the server's `AppState` for the hot-applied LLM
+    /// providers (`state.llm_configs`, WebUI/DB-managed). `None` in tests and
+    /// legacy startup paths — reviews then resolve LLM configs from the
+    /// config file / `LLM_CONFIG` env only.
+    app_state: Option<std::sync::Weak<crate::server::AppState>>,
 }
 
 impl GitHubWebhookHandler {
@@ -34,12 +39,15 @@ impl GitHubWebhookHandler {
             dispatcher,
             token,
             task_store: None,
+            app_state: None,
         }
     }
 
-    /// Attach the server's shared state so the handler can record review tasks.
+    /// Attach the server's shared state so the handler can record review tasks
+    /// and hand the hot-applied LLM providers to webhook-dispatched reviews.
     pub fn with_app_state(mut self, state: &Arc<crate::server::AppState>) -> Self {
         self.task_store = state.task_store.clone();
+        self.app_state = Some(Arc::downgrade(state));
         self
     }
 }
@@ -102,17 +110,39 @@ impl WebhookHandler for GitHubWebhookHandler {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
+        // Snapshot the server's hot-applied LLM providers (WebUI / DB
+        // `llm_providers`) so webhook-triggered reviews can use them — the
+        // review path itself only reads the config file and `LLM_CONFIG`
+        // (0.10.1 fix). `None` without an AppState → config-file/env only.
+        let server_llm_configs = self
+            .app_state
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .map(|s| s.llm_configs.read().unwrap().clone());
+
         let result = match event {
             "ping" => {
                 tracing::info!("GitHub ping event received");
                 Ok(Json(serde_json::json!({ "status": "ok" })))
             }
-            "pull_request" => handle_pull_request(&body, &self.dispatcher, &self.token, self.task_store.clone())
-                .await
-                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
-            "issue_comment" => handle_issue_comment(&body, &self.dispatcher, &self.token, self.task_store.clone())
-                .await
-                .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "pull_request" => handle_pull_request(
+                &body,
+                &self.dispatcher,
+                &self.token,
+                self.task_store.clone(),
+                server_llm_configs,
+            )
+            .await
+            .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
+            "issue_comment" => handle_issue_comment(
+                &body,
+                &self.dispatcher,
+                &self.token,
+                self.task_store.clone(),
+                server_llm_configs,
+            )
+            .await
+            .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
             "push" => {
                 tracing::info!("GitHub push event received");
                 Ok(Json(serde_json::json!({ "status": "received" })))
@@ -224,6 +254,10 @@ pub(crate) fn source_meta_from_pr_payload(payload: &PrHookPayload) -> SourceMeta
 
 /// Execute a webhook-dispatched PR review on a detached task, recording its
 /// lifecycle in the task store when one is available.
+///
+/// `server_llm_configs` is the handler's snapshot of the server's hot-applied
+/// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]).
+#[allow(clippy::too_many_arguments)]
 async fn run_webhook_pr_review(
     task_store: Option<Arc<TaskStore>>,
     dispatcher: &MrDispatcher,
@@ -232,6 +266,7 @@ async fn run_webhook_pr_review(
     github_token: String,
     pr_number: u64,
     source_meta: SourceMeta,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) {
     let task_id = if let Some(store) = task_store.as_ref() {
         Some(record_task_started(store, source_meta).await)
@@ -254,6 +289,7 @@ async fn run_webhook_pr_review(
             Some(&sha),
             info,
             diff,
+            server_llm_configs,
         )
         .await
     }
@@ -274,6 +310,7 @@ async fn handle_pull_request(
     dispatcher: &MrDispatcher,
     github_token: &str,
     task_store: Option<Arc<TaskStore>>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_pr_hook_payload(body)?;
 
@@ -298,7 +335,7 @@ async fn handle_pull_request(
                 let ts = task_store.clone();
                 let note_iid = payload.pr_number;
                 tokio::spawn(async move {
-                    run_webhook_pr_review(ts, &d, u, s, token, note_iid, source_meta).await;
+                    run_webhook_pr_review(ts, &d, u, s, token, note_iid, source_meta, server_llm_configs).await;
                 });
             }
             super::dispatcher::ShouldStart::AlreadyReviewed => {
@@ -320,7 +357,7 @@ async fn handle_pull_request(
                         let ts = task_store.clone();
                         let note_iid = payload.pr_number;
                         tokio::spawn(async move {
-                            run_webhook_pr_review(ts, &d, u, s, token, note_iid, source_meta).await;
+                            run_webhook_pr_review(ts, &d, u, s, token, note_iid, source_meta, server_llm_configs).await;
                         });
                     }
                     _ => {
@@ -353,6 +390,7 @@ async fn handle_issue_comment(
     dispatcher: &MrDispatcher,
     github_token: &str,
     task_store: Option<Arc<TaskStore>>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse issue_comment webhook: {}", e);
@@ -393,7 +431,7 @@ async fn handle_issue_comment(
                     let token = github_token;
                     let ts = task_store.clone();
                     tokio::spawn(async move {
-                        run_webhook_pr_review(ts, &d, u, s, token, pr_number, source_meta).await;
+                        run_webhook_pr_review(ts, &d, u, s, token, pr_number, source_meta, server_llm_configs).await;
                     });
                 }
                 _ => {

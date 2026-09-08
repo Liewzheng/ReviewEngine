@@ -110,15 +110,18 @@ impl WebhookHandler for GitHubWebhookHandler {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
 
-        // Snapshot the server's hot-applied LLM providers (WebUI / DB
-        // `llm_providers`) so webhook-triggered reviews can use them — the
-        // review path itself only reads the config file and `LLM_CONFIG`
-        // (0.10.1 fix). `None` without an AppState → config-file/env only.
-        let server_llm_configs = self
-            .app_state
-            .as_ref()
-            .and_then(|w| w.upgrade())
-            .map(|s| s.llm_configs.read().unwrap().clone());
+        // The server's hot-applied LLM providers (WebUI / DB `llm_providers`)
+        // are snapshotted LAZILY inside the review-dispatching arms below —
+        // the review path itself only reads the config file and `LLM_CONFIG`
+        // (0.10.1 fix), and ping/push/unknown events must not pay for the
+        // RwLock read + Vec clone. `None` without an AppState →
+        // config-file/env only.
+        let server_llm_configs = || {
+            self.app_state
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .map(|s| s.llm_configs.read().unwrap().clone())
+        };
 
         let result = match event {
             "ping" => {
@@ -130,7 +133,7 @@ impl WebhookHandler for GitHubWebhookHandler {
                 &self.dispatcher,
                 &self.token,
                 self.task_store.clone(),
-                server_llm_configs,
+                server_llm_configs(),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -139,7 +142,7 @@ impl WebhookHandler for GitHubWebhookHandler {
                 &self.dispatcher,
                 &self.token,
                 self.task_store.clone(),
-                server_llm_configs,
+                server_llm_configs(),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),

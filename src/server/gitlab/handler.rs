@@ -481,12 +481,13 @@ impl WebhookHandler for GitLabWebhookHandler {
         let app_state = self.app_state.as_ref().and_then(|w| w.upgrade());
         let task_store = app_state.as_ref().and_then(|s| s.task_store.clone());
         let db = app_state.as_ref().and_then(|s| s.db.clone());
-        // Snapshot the server's hot-applied LLM providers (WebUI / DB
-        // `llm_providers`) so webhook-triggered reviews can use them — the
-        // review path itself only reads the config file and `LLM_CONFIG`
-        // (0.10.1 fix). `None` without an AppState → config-file/env only.
-        let server_llm_configs = app_state.as_ref().map(|s| s.llm_configs.read().unwrap().clone());
 
+        // The server's hot-applied LLM providers (WebUI / DB `llm_providers`)
+        // are snapshotted LAZILY inside each review-dispatching arm below —
+        // the review path itself only reads the config file and `LLM_CONFIG`
+        // (0.10.1 fix), and ping/push/unknown events must not pay for the
+        // RwLock read + Vec clone. `None` without an AppState →
+        // config-file/env only.
         match event {
             "Merge Request Hook" => super::handle_mr_hook(
                 body,
@@ -495,7 +496,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 platform,
                 task_store.clone(),
                 db.clone(),
-                server_llm_configs,
+                app_state.as_ref().map(|s| s.llm_configs.read().unwrap().clone()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -506,7 +507,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 platform,
                 task_store.clone(),
                 db.clone(),
-                server_llm_configs,
+                app_state.as_ref().map(|s| s.llm_configs.read().unwrap().clone()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -514,6 +515,9 @@ impl WebhookHandler for GitLabWebhookHandler {
                 .await
                 .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
             "System Hook" => {
+                // Snapshot lazily here (not at handler entry): system hooks
+                // route to review dispatch only for merge_request/note events.
+                let server_llm_configs = app_state.as_ref().map(|s| s.llm_configs.read().unwrap().clone());
                 self.handle_system_hook(body, &token, platform, task_store, db, server_llm_configs)
                     .await
             }

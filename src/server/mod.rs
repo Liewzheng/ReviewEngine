@@ -157,14 +157,29 @@ pub(crate) async fn run_review_common(
     // > LLM_CONFIG env. Without the server fallback, providers configured in
     // the WebUI never reached webhook-triggered reviews (0.10.0 bug: the task
     // failed with "LLM config 'default' has no api_base set").
+    let has_server_state = server_llm_configs.is_some();
     let llm_configs = resolve_webhook_llm_configs(&config.llm, server_llm_configs);
     if llm_configs.is_empty() {
-        tracing::error!(
-            url = %url,
-            "no LLM provider available for webhook-triggered review: the config file has no [[llm]] section, \
-             no provider is configured in the WebUI, and LLM_CONFIG is unset — add a provider via the WebUI \
-             (Configuration → LLM), the config file, or the LLM_CONFIG env var; the review will fail"
-        );
+        // Log-only; the failure itself keeps the pre-existing semantics. The
+        // guidance matches the caller: with server state (real webhook
+        // handlers) point at the WebUI; without it (legacy/test startup —
+        // no WebUI exists) naming the WebUI would be misleading, so point at
+        // the config file / env only.
+        if has_server_state {
+            tracing::error!(
+                url = %url,
+                "no LLM provider available for webhook-triggered review: the config file has no [[llm]] section, \
+                 no provider is configured in the WebUI, and LLM_CONFIG is unset — add a provider via the WebUI \
+                 (Configuration → LLM), the config file, or the LLM_CONFIG env var; the review will fail"
+            );
+        } else {
+            tracing::error!(
+                url = %url,
+                "no LLM provider available for webhook-triggered review: the config file has no [[llm]] section \
+                 and LLM_CONFIG is unset — add a provider via the config file or the LLM_CONFIG env var; \
+                 the review will fail"
+            );
+        }
     }
 
     // Select experts for the review command

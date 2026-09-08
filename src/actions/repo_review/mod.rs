@@ -462,6 +462,8 @@ pub async fn run_repo_review(
                     raw_llm_response: String::new(),
                     parse_error: None,
                     raw_dump_path: None,
+                    llm_provider: None,
+                    llm_model: None,
                 }];
                 let dropped =
                     crate::team::verifier::verify_findings(&mut reports, &[], local_path, llm_configs, max_file_bytes)

@@ -150,6 +150,11 @@ pub struct ExpertResultDetail {
     pub score: Option<u8>,
     pub summary: String,
     pub details: Option<String>,
+    /// RENG-38: name snapshot of the LLM provider that actually produced this
+    /// expert's report (the fallback-chain hit). `null` for pre-0.10.2 records.
+    pub llm_provider: Option<String>,
+    /// Model identifier snapshot paired with `llm_provider`.
+    pub llm_model: Option<String>,
 }
 
 /// Author of the reviewed MR/PR, matching `ReviewDetail.author`.
@@ -212,4 +217,8 @@ pub struct ReviewListItem {
     pub duration_ms: Option<u64>,
     pub created_at: String,
     pub gitlab_mr_url: Option<String>,
+    /// RENG-38: deduplicated LLM `(provider, model)` pairs used by this
+    /// review, decoded from the `reviews.llm_summary` snapshot column.
+    /// `null` for pre-0.10.2 records and non-completed tasks.
+    pub llm_summary: Option<Vec<crate::models::LlmUsage>>,
 }

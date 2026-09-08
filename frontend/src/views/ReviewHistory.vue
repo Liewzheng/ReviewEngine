@@ -20,7 +20,7 @@ import {
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import type { ApiError } from '../services/api'
-import type { ReviewListItem, HistoryFilters, RiskLevel } from '../types/history'
+import type { ReviewListItem, ExpertResult, HistoryFilters, RiskLevel } from '../types/history'
 import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
@@ -424,6 +424,21 @@ function riskLabelKey(level: RiskLevel): string {
   return 'history.riskLevel.' + riskLevelKeys[level]
 }
 
+/* ─────────────── LLM usage snapshot (RENG-38) ─────────────── */
+
+/** Compact `provider/model` form for one expert's LLM tag; null when the
+    record predates the 0.10.2 snapshot (rendered as "未知"/"Unknown"). */
+function expertLlmLabel(exp: ExpertResult): string | null {
+  if (!exp.llmProvider && !exp.llmModel) return null
+  return `${exp.llmProvider ?? t('history.llm.unknown')}/${exp.llmModel ?? t('history.llm.unknown')}`
+}
+
+/** Compact list-cell form of the deduplicated `llmSummary` snapshot. */
+function formatLlmSummary(usages: ReviewListItem['llmSummary']): string {
+  if (!usages || usages.length === 0) return '-'
+  return usages.map((u) => `${u.provider}/${u.model}`).join(', ')
+}
+
 const hasRawComment = computed(
   () => !!selectedReview.value?.rawComment?.trim()
 )
@@ -622,6 +637,14 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
+          <!-- RENG-38: LLM snapshot column — compact `provider/model` pairs,
+               '-' for records predating the 0.10.2 snapshot. -->
+          <el-table-column :label="$t('history.columns.llm')" min-width="150" class-name="col-llm">
+            <template #default="{ row }">
+              <span class="llm-cell">{{ formatLlmSummary(row.llmSummary) }}</span>
+            </template>
+          </el-table-column>
+
           <el-table-column :label="$t('history.columns.duration')" width="100" sortable :sort-by="['durationMs']">
             <template #default="{ row }">
               <span class="duration-text">{{ formatDuration(row.durationMs) }}</span>
@@ -780,6 +803,11 @@ watch(() => route.query, () => {
                   <el-tag v-if="exp.score" size="small" :type="exp.score >= 80 ? 'success' : exp.score >= 60 ? 'warning' : 'danger'">
                     {{ exp.score }}
                   </el-tag>
+                  <!-- RENG-38: which LLM actually produced this report;
+                       absent for pre-0.10.2 records (no tag rendered). -->
+                  <el-tooltip v-if="expertLlmLabel(exp)" :content="$t('history.llm.expertTooltip')" placement="bottom">
+                    <el-tag size="small" effect="plain" class="llm-tag">{{ expertLlmLabel(exp) }}</el-tag>
+                  </el-tooltip>
                 </div>
               </div>
             </template>
@@ -1165,6 +1193,27 @@ watch(() => route.query, () => {
    that do have a score by reserving the score column (42px) + the gap (8px). */
 .expert-meta > .el-tag:only-child {
   margin-right: 50px;
+}
+
+/* RENG-38: per-expert LLM snapshot tag (provider/model). Mono so model IDs
+   stay scannable; ellipsized when a provider ships a very long model name. */
+.llm-tag {
+  font-family: var(--font-mono, monospace);
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* RENG-38: history list LLM column cell. */
+.llm-cell {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: inline-block;
+  max-width: 100%;
 }
 
 .expert-content {

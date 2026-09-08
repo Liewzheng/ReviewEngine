@@ -334,7 +334,29 @@ mod tests {
             .fetch_one(store.pool())
             .await
             .unwrap();
-        assert_eq!(applied, 1, "only 0001_init should be recorded");
+        assert_eq!(applied, 2, "0001_init + 0002_llm_snapshot should be recorded");
+
+        // 0002 (RENG-38): the snapshot columns exist on both history tables.
+        let er_cols: Vec<String> = ::sqlx::query_scalar("SELECT name FROM pragma_table_info('expert_reports')")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            er_cols.iter().any(|c| c == "llm_provider"),
+            "expert_reports missing llm_provider"
+        );
+        assert!(
+            er_cols.iter().any(|c| c == "llm_model"),
+            "expert_reports missing llm_model"
+        );
+        let rv_cols: Vec<String> = ::sqlx::query_scalar("SELECT name FROM pragma_table_info('reviews')")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            rv_cols.iter().any(|c| c == "llm_summary"),
+            "reviews missing llm_summary"
+        );
     }
 
     /// 验证点 A(b): `?` placeholder INSERT + SELECT round trip on SQLite

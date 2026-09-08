@@ -201,6 +201,7 @@ pub(crate) async fn submit_review(
         source_meta: SourceMeta::default(),
         progress: None,
         expert_name: None,
+        llm_summary: None,
     });
 
     (StatusCode::ACCEPTED, Json(status)).into_response()

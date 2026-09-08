@@ -26,6 +26,15 @@ export interface ReviewAuthor {
   email?: string
 }
 
+/**
+ * One LLM `provider/model` pair observed during a review (RENG-38), from the
+ * backend's `reviews.llm_summary` snapshot (`ReviewOutput::llm_usages`).
+ */
+export interface LlmUsage {
+  provider: string
+  model: string
+}
+
 export interface ExpertResult {
   expertId: string
   expertName: string
@@ -36,6 +45,10 @@ export interface ExpertResult {
   summary: string
   // Raw LLM response (`report.raw_llm_response`); debugging aid only.
   details?: string
+  // RENG-38: name snapshot of the LLM that actually produced this report
+  // (the fallback-chain hit). Absent for records predating 0.10.2.
+  llmProvider?: string | null
+  llmModel?: string | null
 }
 
 export interface ReviewListItem {
@@ -51,6 +64,9 @@ export interface ReviewListItem {
   createdAt: string
   gitlabMrUrl?: string
   assessment?: ReviewAssessment
+  // RENG-38: deduplicated LLM pairs used by this review (`reviews.llm_summary`).
+  // Absent for records predating 0.10.2 and non-completed tasks.
+  llmSummary?: LlmUsage[] | null
 }
 
 export interface ReviewDetail {

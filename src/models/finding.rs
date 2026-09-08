@@ -26,6 +26,26 @@ pub struct ExpertReport {
     /// raw exchange was not persisted to disk.
     #[serde(default)]
     pub raw_dump_path: Option<String>,
+    /// Name snapshot of the LLM provider that actually produced this report
+    /// (the fallback-chain entry that succeeded — RENG-38). `None` for
+    /// reports produced before 0.10.2 or by non-LLM paths.
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+    /// Model identifier snapshot paired with [`Self::llm_provider`].
+    #[serde(default)]
+    pub llm_model: Option<String>,
+}
+
+/// One LLM `(provider, model)` pair observed during a review (RENG-38).
+///
+/// Serialized into `reviews.llm_summary` (TEXT JSON) so the history list can
+/// render the compact `provider/model` form without parsing `reviews.result`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LlmUsage {
+    /// Provider name snapshot (e.g. `"xiaomi"`).
+    pub provider: String,
+    /// Model identifier snapshot (e.g. `"mimo-v2.5-pro"`).
+    pub model: String,
 }
 
 /// A single finding / issue identified during a code review.
@@ -174,6 +194,13 @@ pub struct AggregatedReport {
     /// Path of the dumped raw LLM prompt + response with `--verbose`.
     #[serde(default)]
     pub raw_dump_path: Option<String>,
+    /// Name snapshot of the LLM provider that produced this aggregated report
+    /// (RENG-38). `None` for pre-0.10.2 records.
+    #[serde(default)]
+    pub llm_provider: Option<String>,
+    /// Model identifier snapshot paired with [`Self::llm_provider`].
+    #[serde(default)]
+    pub llm_model: Option<String>,
 }
 
 impl ReviewOutput {
@@ -207,6 +234,36 @@ impl ReviewOutput {
     pub fn with_consolidated(mut self, consolidated: crate::team::lead_consolidator::ConsolidatedReport) -> Self {
         self.consolidated = Some(consolidated);
         self
+    }
+
+    /// De-duplicated `(provider, model)` pairs that actually produced this
+    /// review's reports (RENG-38), in first-seen order: per-expert reports
+    /// first, then the aggregator. Entries missing either side of the pair
+    /// (pre-0.10.2 records, non-LLM paths) are skipped. Persisted as
+    /// `reviews.llm_summary` by the store layer.
+    pub fn llm_usages(&self) -> Vec<LlmUsage> {
+        let mut usages: Vec<LlmUsage> = Vec::new();
+        let mut push = |provider: &Option<String>, model: &Option<String>| {
+            if let (Some(p), Some(m)) = (provider, model) {
+                if p.is_empty() || m.is_empty() {
+                    return;
+                }
+                let usage = LlmUsage {
+                    provider: p.clone(),
+                    model: m.clone(),
+                };
+                if !usages.contains(&usage) {
+                    usages.push(usage);
+                }
+            }
+        };
+        for report in &self.reports {
+            push(&report.llm_provider, &report.llm_model);
+        }
+        if let Some(agg) = &self.aggregated {
+            push(&agg.llm_provider, &agg.llm_model);
+        }
+        usages
     }
 }
 
@@ -344,5 +401,74 @@ mod tests {
         assert_eq!(back.title, f.title);
         assert_eq!(back.category, f.category);
         assert_eq!(back.fingerprint(), f.fingerprint());
+    }
+
+    fn bare_report(expert: &str, provider: Option<&str>, model: Option<&str>) -> ExpertReport {
+        ExpertReport {
+            expert_name: expert.to_string(),
+            findings: Vec::new(),
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: provider.map(str::to_string),
+            llm_model: model.map(str::to_string),
+        }
+    }
+
+    /// RENG-38: `llm_usages` dedups (provider, model) pairs in first-seen
+    /// order across expert reports + the aggregator, skipping entries that
+    /// lack either side (pre-0.10.2 records, empty strings).
+    #[test]
+    fn llm_usages_dedups_in_first_seen_order() {
+        let mut output = ReviewOutput::new(vec![
+            bare_report("a", Some("xiaomi"), Some("mimo-v2.5-pro")),
+            bare_report("b", Some("xiaomi"), Some("mimo-v2.5-pro")),
+            bare_report("c", Some("deepseek"), Some("deepseek-v4")),
+            bare_report("d", None, None),              // no snapshot: skipped
+            bare_report("e", Some(""), Some("model")), // blank provider: skipped
+            bare_report("f", Some("xiaomi"), Some("mimo-v2-pro")),
+        ]);
+        output.aggregated = Some(AggregatedReport {
+            findings: Vec::new(),
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: Some("deepseek".to_string()),
+            llm_model: Some("deepseek-v4".to_string()),
+        });
+
+        let usages = output.llm_usages();
+        assert_eq!(
+            usages,
+            vec![
+                LlmUsage {
+                    provider: "xiaomi".into(),
+                    model: "mimo-v2.5-pro".into()
+                },
+                LlmUsage {
+                    provider: "deepseek".into(),
+                    model: "deepseek-v4".into()
+                },
+                LlmUsage {
+                    provider: "xiaomi".into(),
+                    model: "mimo-v2-pro".into()
+                },
+            ]
+        );
+
+        // No snapshots anywhere → empty list (→ NULL column upstream).
+        let bare = ReviewOutput::new(vec![bare_report("a", None, None)]);
+        assert!(bare.llm_usages().is_empty());
+    }
+
+    /// Pre-0.10.2 report JSON (no llm_* keys) must still deserialize.
+    #[test]
+    fn expert_report_without_llm_fields_deserializes() {
+        let json = r#"{"expert_name":"a","findings":[],"markdown":"","raw_llm_response":""}"#;
+        let report: ExpertReport = serde_json::from_str(json).unwrap();
+        assert!(report.llm_provider.is_none());
+        assert!(report.llm_model.is_none());
     }
 }

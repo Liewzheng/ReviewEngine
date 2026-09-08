@@ -153,6 +153,7 @@ async fn submit_repo_scan(State(state): State<Arc<AppState>>, Json(body): Json<R
         source_meta: meta,
         progress: None,
         expert_name: None,
+        llm_summary: None,
     });
 
     (StatusCode::ACCEPTED, Json(status)).into_response()

@@ -85,6 +85,18 @@ impl LLMClient {
         std::time::Duration::from_millis(base_ms.min(30_000) + jitter_ms.min(1000))
     }
 
+    /// Attribute a successful completion to the hitting config's `provider`
+    /// (RENG-38): the provider instance name usually equals it (registry is
+    /// keyed by config.provider), but the config entry is the source of truth
+    /// for history snapshots — e.g. an empty `config.provider` falls back to
+    /// the registry name instead of recording an empty string.
+    fn attribute_provider(mut result: CompletionResult, config: &LLMConfig) -> CompletionResult {
+        if !config.provider.is_empty() {
+            result.provider = config.provider.clone();
+        }
+        result
+    }
+
     /// Complete using a specific LLM config (backward-compatible API).
     pub async fn complete(
         &self,
@@ -105,14 +117,14 @@ impl LLMClient {
                 };
                 let result = provider.complete(&params).await;
                 Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
-                return result;
+                return result.map(|r| Self::attribute_provider(r, config));
             }
         }
 
         // Fallback: use the direct OpenAI-compatible HTTP approach (original behavior)
         let result = self.complete_direct(config, system_prompt, user_prompt).await;
         Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
-        result
+        result.map(|r| Self::attribute_provider(r, config))
     }
 
     /// Direct HTTP-based completion (backward compat, OpenAI-compatible only).
@@ -209,6 +221,7 @@ impl LLMClient {
             content,
             total_tokens,
             model,
+            provider: config.provider.clone(),
         })
     }
 
@@ -249,7 +262,10 @@ impl LLMClient {
                             attempt_dur,
                             _cf_start.elapsed()
                         );
-                        return Ok(r);
+                        // RENG-38: attribute the hit to THIS config's provider
+                        // — the fallback chain may have succeeded on a later
+                        // entry than the caller's primary.
+                        return Ok(Self::attribute_provider(r, config));
                     }
                     Err(e) => {
                         let err_str = e.to_string();

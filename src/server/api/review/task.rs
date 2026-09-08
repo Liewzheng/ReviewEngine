@@ -70,6 +70,8 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
                         } else {
                             Some(report.raw_llm_response.clone())
                         },
+                        llm_provider: report.llm_provider.clone(),
+                        llm_model: report.llm_model.clone(),
                     })
                     .collect();
                 let raw_comment = output
@@ -128,6 +130,12 @@ pub(crate) fn build_review_list_item(entry: &TaskEntry) -> ReviewListItem {
         duration_ms: entry.duration_ms(),
         created_at: entry.created_at.to_rfc3339(),
         gitlab_mr_url: meta.gitlab_mr_url.clone(),
+        // RENG-38: the snapshot column is TEXT JSON; a corrupt value degrades
+        // to None (the list shows "unknown") instead of failing the page.
+        llm_summary: entry
+            .llm_summary
+            .as_deref()
+            .and_then(|s| serde_json::from_str::<Vec<crate::models::LlmUsage>>(s).ok()),
     }
 }
 
@@ -384,6 +392,7 @@ mod tests {
             source_meta: SourceMeta::default(),
             progress: None,
             expert_name: None,
+            llm_summary: None,
         }
     }
 
@@ -417,6 +426,8 @@ mod tests {
             raw_llm_response: String::new(),
             parse_error: None,
             raw_dump_path: None,
+            llm_provider: None,
+            llm_model: None,
         }
     }
 

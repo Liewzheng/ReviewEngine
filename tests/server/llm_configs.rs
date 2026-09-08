@@ -558,3 +558,90 @@ async fn webhook_review_uses_hot_applied_server_llm_configs() {
         "the WebUI-configured LLM provider must actually have been called by the webhook review"
     );
 }
+
+// ─── RENG-38: LLM usage snapshot in review history ───────────────
+
+/// RENG-38: a completed review records which LLM actually produced each
+/// expert report. The mock poses as provider `xiaomi` answering with model
+/// `mimo-v2.5-pro`; afterwards the detail endpoint must carry
+/// `experts[].llmProvider/llmModel` and the history list must carry the
+/// deduplicated `llmSummary` (read from the `reviews.llm_summary` column,
+/// not re-parsed from `result`).
+#[tokio::test]
+async fn completed_review_history_carries_llm_snapshot() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": "findings: []"}}],
+            "usage": {"total_tokens": 8},
+            "model": "mimo-v2.5-pro"
+        })))
+        .mount(&mock)
+        .await;
+    let llm_config_env = serde_json::json!([{
+        "provider": "xiaomi",
+        "model": "mimo-v2.5-pro",
+        "api_key": "sk-test",
+        "api_base": mock.uri(),
+        "max_tokens": 2048,
+        "temperature": 0.3
+    }])
+    .to_string();
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
+    wait_for_server(port).await;
+
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{}", port);
+    let final_body = post_review_and_poll(&base, &client, None).await;
+    assert_eq!(
+        final_body["status"].as_str(),
+        Some("completed"),
+        "review must complete against the mock LLM, got {:?}",
+        final_body
+    );
+    let task_id = final_body["task_id"].as_str().expect("task_id");
+
+    // Detail: every expert report names the LLM that produced it.
+    let experts = final_body["experts"].as_array().expect("experts is an array");
+    assert!(!experts.is_empty(), "a completed review must have expert results");
+    for expert in experts {
+        assert_eq!(
+            expert["llmProvider"].as_str(),
+            Some("xiaomi"),
+            "expert {} missing llmProvider: {:?}",
+            expert["expertName"],
+            expert
+        );
+        assert_eq!(
+            expert["llmModel"].as_str(),
+            Some("mimo-v2.5-pro"),
+            "expert {} missing llmModel: {:?}",
+            expert["expertName"],
+            expert
+        );
+    }
+
+    // List: the review-level summary is the deduplicated pair list.
+    let list: serde_json::Value = client
+        .get(format!("{}/api/v1/reviews?per_page=100", base))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/reviews")
+        .json()
+        .await
+        .expect("reviews list body is not JSON");
+    let items = list["items"].as_array().expect("reviews.items is an array");
+    let item = items
+        .iter()
+        .find(|i| i["id"].as_str() == Some(task_id) || i["task_id"].as_str() == Some(task_id))
+        .expect("completed review must appear in the history list");
+    assert_eq!(
+        item["llmSummary"],
+        serde_json::json!([{ "provider": "xiaomi", "model": "mimo-v2.5-pro" }]),
+        "list item must carry the deduplicated llmSummary: {:?}",
+        item
+    );
+}

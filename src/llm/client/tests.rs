@@ -292,6 +292,7 @@ impl super::super::provider::LLMProvider for MockProvider {
                 content: "success".to_string(),
                 total_tokens: 10,
                 model: "mock".to_string(),
+                provider: self.name.clone(),
             })
         }
     }
@@ -420,8 +421,45 @@ async fn test_complete_with_fallback_fallback_to_next_provider() {
             disable_thinking: None,
         },
     ];
-
     let result = client.complete_with_fallback(&configs, "system", "user").await;
     assert!(result.is_ok());
     assert_eq!(result.unwrap().content, "success");
+}
+
+/// RENG-38: the completion carries the hitting config's provider — when the
+/// fallback chain succeeds on the SECOND entry, the result is attributed to
+/// that entry, not the primary. This is the attribution the history snapshot
+/// (`expert_reports.llm_provider`) is built from.
+#[tokio::test]
+async fn test_fallback_result_is_attributed_to_the_hitting_provider() {
+    let client = LLMClient::new();
+    let mut registry = ProviderRegistry::new();
+    registry.register(Box::new(MockProvider::new("first", 999, "500")));
+    registry.register(Box::new(MockProvider::new("second", 0, "unused")));
+    let client = client.with_registry(Arc::new(registry));
+
+    let config = |provider: &str| LLMConfig {
+        provider: provider.to_string(),
+        model: format!("{provider}-model"),
+        api_key: "test".to_string(),
+        api_base: format!("https://api.{provider}.com/v1"),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: None,
+    };
+
+    // Fallback hit: second config wins.
+    let result = client
+        .complete_with_fallback(&[config("first"), config("second")], "system", "user")
+        .await
+        .unwrap();
+    assert_eq!(
+        result.provider, "second",
+        "the hitting config's provider must be recorded"
+    );
+
+    // Direct hit: attributed to the (only) config.
+    let result = client.complete(&config("second"), "system", "user").await.unwrap();
+    assert_eq!(result.provider, "second");
+    assert_eq!(result.model, "mock", "mock provider's reported model is preserved");
 }

@@ -22,6 +22,11 @@ pub struct CompletionResult {
     pub total_tokens: u64,
     /// Actual model identifier used (may differ from request if provider remapped).
     pub model: String,
+    /// Provider name that produced this completion. Filled by the provider
+    /// itself (`LLMProvider::name`); [`LLMClient`](super::client::LLMClient)
+    /// overwrites it with the hitting config's `provider` so fallback-chain
+    /// hits are attributed to the configured entry (RENG-38).
+    pub provider: String,
 }
 
 /// Parameters for LLM completion requests.
@@ -154,6 +159,7 @@ impl LLMProvider for OpenAIProvider {
             content,
             total_tokens,
             model,
+            provider: self.name().to_string(),
         })
     }
 }
@@ -300,6 +306,7 @@ impl LLMProvider for AnthropicProvider {
             content,
             total_tokens,
             model,
+            provider: self.name().to_string(),
         })
     }
 }

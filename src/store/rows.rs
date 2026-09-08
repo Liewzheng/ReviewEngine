@@ -197,6 +197,10 @@ pub(crate) struct ReviewRow {
     pub result: Option<String>,
     pub error: Option<String>,
     pub progress: Option<i64>,
+    /// RENG-38: deduplicated `[{provider, model}]` JSON snapshot of the LLMs
+    /// that produced this review (`ReviewOutput::llm_usages`), materialized
+    /// at write time so the history list never parses `result` (§8.1).
+    pub llm_summary: Option<String>,
     pub created_at: String,
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
@@ -207,6 +211,22 @@ fn opt_json(value: &Option<Value>, what: &str) -> Result<Option<String>> {
         .as_ref()
         .map(|v| serde_json::to_string(v).with_context(|| format!("serialize {what}")))
         .transpose()
+}
+
+/// RENG-38: compute the `reviews.llm_summary` TEXT (JSON array of
+/// [`crate::models::LlmUsage`]) from a serialized `ReviewOutput` result.
+/// `None` when the result is absent, not a `ReviewOutput`, or carries no
+/// llm snapshots (pre-0.10.2 records, all-experts-failed runs) — a
+/// non-ReviewOutput result is a legitimate shape (`complete` only warns and
+/// skips the expert_reports split), never a store error.
+pub(crate) fn llm_summary_json(result: &Value) -> Option<String> {
+    let output: crate::models::ReviewOutput = serde_json::from_value(result.clone()).ok()?;
+    let usages = output.llm_usages();
+    if usages.is_empty() {
+        None
+    } else {
+        serde_json::to_string(&usages).ok()
+    }
 }
 
 /// `TaskState` → the `reviews.state` string. Single source of truth is the
@@ -246,6 +266,12 @@ pub(crate) fn task_entry_to_row(entry: &TaskEntry) -> Result<ReviewRow> {
         result: opt_json(&entry.result, "reviews.result")?,
         error: entry.error.clone(),
         progress: entry.progress.map(i64::from),
+        // The entry's live field wins (filled on terminal update); when it is
+        // absent (e.g. the create-time write-through) compute from `result`.
+        llm_summary: entry
+            .llm_summary
+            .clone()
+            .or_else(|| entry.result.as_ref().and_then(llm_summary_json)),
         created_at: encode_ts(&entry.created_at),
         started_at: entry.started_at.as_ref().map(encode_ts),
         completed_at: entry.completed_at.as_ref().map(encode_ts),
@@ -255,7 +281,7 @@ pub(crate) fn task_entry_to_row(entry: &TaskEntry) -> Result<ReviewRow> {
 /// Column list of the shared `reviews` SELECT used by the read path
 /// (`sqlx.rs`); the order matches [`ReviewRowTuple`].
 pub(crate) const REVIEW_COLUMNS: &str = "task_id, state, source_meta, project, repository, request, \
-     result, error, progress, created_at, started_at, completed_at";
+     result, error, progress, llm_summary, created_at, started_at, completed_at";
 
 /// Raw decode target for a `SELECT {REVIEW_COLUMNS}` query, in column order.
 #[allow(clippy::type_complexity)]
@@ -269,6 +295,7 @@ pub(crate) type ReviewRowTuple = (
     Option<String>,
     Option<String>,
     Option<i64>,
+    Option<String>,
     String,
     Option<String>,
     Option<String>,
@@ -286,6 +313,7 @@ impl From<ReviewRowTuple> for ReviewRow {
             result,
             error,
             progress,
+            llm_summary,
             created_at,
             started_at,
             completed_at,
@@ -301,6 +329,7 @@ impl From<ReviewRowTuple> for ReviewRow {
             result,
             error,
             progress,
+            llm_summary,
             created_at,
             started_at,
             completed_at,
@@ -359,6 +388,7 @@ pub(crate) fn review_from_row(row: ReviewRow) -> Result<TaskEntry> {
             .progress
             .map(|p| u8::try_from(p).with_context(|| format!("reviews.progress out of range: {p}")))
             .transpose()?,
+        llm_summary: row.llm_summary,
         // Live-only fields: the DB is the history source, the in-memory
         // `expert_name` (current active expert) is not persisted.
         expert_name: None,
@@ -374,6 +404,11 @@ pub(crate) struct ExpertReportRow {
     /// Per-expert duration: always NULL for now — `TaskEntry` does not track
     /// it yet (design/persistence.md §5.4 note).
     pub duration_ms: Option<i64>,
+    /// RENG-38: LLM name snapshots denormalized from the report JSON so the
+    /// per-expert provider/model is queryable without parsing `report`.
+    /// NULL for pre-0.10.2 rows and non-LLM reports.
+    pub llm_provider: Option<String>,
+    pub llm_model: Option<String>,
     pub created_at: String,
 }
 
@@ -392,6 +427,8 @@ pub(crate) fn expert_report_rows(task_id: &Uuid, result: &Value, created_at: Str
                 report: serde_json::to_string(report)
                     .with_context(|| format!("serialize expert report {:?}", report.expert_name))?,
                 duration_ms: None,
+                llm_provider: report.llm_provider.clone(),
+                llm_model: report.llm_model.clone(),
                 created_at: created_at.clone(),
             })
         })
@@ -451,6 +488,7 @@ mod tests {
             result: None,
             error: None,
             progress: Some(100),
+            llm_summary: None,
             created_at: "2026-09-03T01:00:00.000000Z".to_string(),
             started_at: Some("2026-09-03T01:00:01.000000Z".to_string()),
             completed_at: Some("2026-09-03T01:00:42.000000Z".to_string()),

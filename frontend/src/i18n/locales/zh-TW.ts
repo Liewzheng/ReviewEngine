@@ -171,10 +171,15 @@ export default {
       author: '作者',
       status: '狀態',
       score: '得分',
+      llm: 'LLM',
       duration: '耗時',
       created: '建立時間',
       time: '時間',
       actions: '操作',
+    },
+    llm: {
+      unknown: '未知',
+      expertTooltip: '實際產生該報告的 LLM（provider/model）',
     },
     actions: {
       rerun: '重新審查',

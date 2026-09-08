@@ -863,6 +863,8 @@ mod tests {
             raw_llm_response: "raw".to_string(),
             parse_error: None,
             raw_dump_path: None,
+            llm_provider: None,
+            llm_model: None,
         };
         let output = crate::models::ReviewOutput::new(vec![report]);
         let outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(output);

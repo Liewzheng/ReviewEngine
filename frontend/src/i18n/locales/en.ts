@@ -183,10 +183,15 @@ export default {
       author: 'Author',
       status: 'Status',
       score: 'Score',
+      llm: 'LLM',
       duration: 'Duration',
       created: 'Created',
       time: 'Time',
       actions: 'Actions',
+    },
+    llm: {
+      unknown: 'unknown',
+      expertTooltip: 'LLM that actually produced this report (provider/model)',
     },
     actions: {
       rerun: 'Re-run review',

@@ -1,6 +1,6 @@
 import { request } from './api';
 import { normalizeStatus } from './status';
-import type { ReviewListItem, ReviewDetail, HistoryFilters, RiskLevel, ReviewAssessment } from '../types/history';
+import type { ReviewListItem, ReviewDetail, HistoryFilters, RiskLevel, ReviewAssessment, LlmUsage } from '../types/history';
 
 export interface ReviewsListResponse {
   items: ReviewListItem[];
@@ -40,6 +40,8 @@ interface RawReviewItem {
   createdAt?: string;
   gitlab_mr_url?: string | null;
   gitlabMrUrl?: string;
+  /** RENG-38: deduplicated LLM pairs (`reviews.llm_summary` snapshot). */
+  llmSummary?: LlmUsage[] | null;
   /** Embedded full `ReviewOutput` JSON (carries `consolidated.assessment`). */
   result?: unknown;
 }
@@ -115,6 +117,9 @@ function normalizeReviewListItem(raw: RawReviewItem): ReviewListItem {
     createdAt: raw.createdAt ?? raw.created_at ?? '',
     gitlabMrUrl: raw.gitlabMrUrl ?? raw.gitlab_mr_url ?? undefined,
     assessment: extractAssessment(raw.result),
+    // Pass the snapshot through only when it is a non-empty array — anything
+    // else (null, missing, malformed) degrades to "unknown" at render time.
+    llmSummary: Array.isArray(raw.llmSummary) && raw.llmSummary.length > 0 ? raw.llmSummary : undefined,
   };
 }
 

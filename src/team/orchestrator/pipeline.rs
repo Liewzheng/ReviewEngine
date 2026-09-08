@@ -297,8 +297,11 @@ fn create_expert_task(
         )?;
         let llm_config = select_llm_config(&expert, &llm_configs);
         let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
-        let report = crate::output::parser::parse_llm_response(&expert.name, &result.content);
-        let mut report = report;
+        let mut report = crate::output::parser::parse_llm_response(&expert.name, &result.content);
+        // RENG-38: snapshot the LLM that actually produced this report (the
+        // fallback-chain hit), so history can show provider/model per expert.
+        report.llm_provider = Some(result.provider.clone());
+        report.llm_model = Some(result.model.clone());
         // `--verbose`: persist the raw LLM prompt + response to the dump dir so
         // a zero-finding or mis-parsed run can be debugged from the actual LLM
         // exchange, and reference the file path on the report (the renderer

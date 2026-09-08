@@ -103,6 +103,10 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
 /// Completed (with the full [`ReviewOutput`] result) or Failed (with the error
 /// message). Without a store this is exactly the legacy behavior — run, log,
 /// and release the dispatcher's dedup on failure.
+///
+/// `server_llm_configs` is the handler's snapshot of the server's hot-applied
+/// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]).
+#[allow(clippy::too_many_arguments)]
 async fn run_webhook_review(
     task_store: Option<Arc<TaskStore>>,
     dispatcher: &MrDispatcher,
@@ -112,6 +116,7 @@ async fn run_webhook_review(
     mr_iid: u64,
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) {
     let task_id = if let Some(store) = task_store.as_ref() {
         Some(record_task_started(store, source_meta).await)
@@ -145,6 +150,7 @@ async fn run_webhook_review(
             Some(&sha),
             info,
             diff,
+            server_llm_configs,
         )
         .await
     }
@@ -162,6 +168,7 @@ async fn run_webhook_review(
 
 /// Spawn a background task that runs the full review for an MR, recording its
 /// lifecycle in the task store when one is available.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_mr_review_task(
     dispatcher: &MrDispatcher,
     mr_url: String,
@@ -171,14 +178,27 @@ pub fn spawn_mr_review_task(
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) {
     let d = dispatcher.clone();
     tokio::spawn(async move {
-        run_webhook_review(task_store, &d, mr_url, sha, gitlab_token, mr_iid, source_meta, tap).await;
+        run_webhook_review(
+            task_store,
+            &d,
+            mr_url,
+            sha,
+            gitlab_token,
+            mr_iid,
+            source_meta,
+            tap,
+            server_llm_configs,
+        )
+        .await;
     });
 }
 
 /// Handle the `InProgress` dispatcher state: wait and then retry.
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_mr_in_progress(
     dispatcher: &MrDispatcher,
     mr_url: &str,
@@ -188,6 +208,7 @@ pub async fn handle_mr_in_progress(
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) {
     tracing::info!("MR !{} review in progress, waiting...", mr_iid);
     dispatcher.wait(mr_url).await;
@@ -203,6 +224,7 @@ pub async fn handle_mr_in_progress(
                 task_store,
                 source_meta,
                 tap,
+                server_llm_configs,
             );
         }
         _ => {
@@ -213,6 +235,7 @@ pub async fn handle_mr_in_progress(
 
 /// Dispatch an MR webhook event to start or defer a review based on the
 /// dispatcher state.
+#[allow(clippy::too_many_arguments)]
 pub async fn dispatch_mr_event(
     dispatcher: &MrDispatcher,
     mr_url: &str,
@@ -222,6 +245,7 @@ pub async fn dispatch_mr_event(
     task_store: Option<Arc<TaskStore>>,
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) {
     match dispatcher.try_start(mr_url, sha).await {
         super::super::dispatcher::ShouldStart::Go => {
@@ -234,6 +258,7 @@ pub async fn dispatch_mr_event(
                 task_store,
                 source_meta,
                 tap,
+                server_llm_configs,
             );
         }
         super::super::dispatcher::ShouldStart::AlreadyReviewed => {
@@ -249,6 +274,7 @@ pub async fn dispatch_mr_event(
                 task_store,
                 source_meta,
                 tap,
+                server_llm_configs,
             )
             .await;
         }
@@ -337,6 +363,7 @@ pub async fn handle_mr_hook(
     platform: Option<crate::models::GitPlatformConfig>,
     task_store: Option<Arc<TaskStore>>,
     db: Option<Arc<SqlxStore>>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_mr_hook_payload(body, gitlab_token)?;
 
@@ -405,6 +432,7 @@ pub async fn handle_mr_hook(
             task_store,
             source_meta,
             tap,
+            server_llm_configs,
         )
         .await;
     }
@@ -635,6 +663,7 @@ pub async fn handle_note_hook(
     platform: Option<crate::models::GitPlatformConfig>,
     task_store: Option<Arc<TaskStore>>,
     db: Option<Arc<SqlxStore>>,
+    server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse Note hook: {}", e);
@@ -723,7 +752,18 @@ pub async fn handle_note_hook(
                     // §7.2 discussion tap (same wiring as the MR hook).
                     let tap = db.clone().map(|db| DiscussionTap::new(db, platform.as_ref(), &u));
                     tokio::spawn(async move {
-                        run_webhook_review(task_store, &d, u, s, token, note_iid, source_meta, tap).await;
+                        run_webhook_review(
+                            task_store,
+                            &d,
+                            u,
+                            s,
+                            token,
+                            note_iid,
+                            source_meta,
+                            tap,
+                            server_llm_configs,
+                        )
+                        .await;
                     });
                 }
                 _ => {
@@ -1010,7 +1050,7 @@ mod tests {
         platform: Option<crate::models::GitPlatformConfig>,
         db: &Arc<SqlxStore>,
     ) {
-        let _ = handle_note_hook(payload, dispatcher, token, platform, None, Some(db.clone()))
+        let _ = handle_note_hook(payload, dispatcher, token, platform, None, Some(db.clone()), None)
             .await
             .unwrap();
     }
@@ -1029,6 +1069,7 @@ mod tests {
             None,
             None,
             Some(db.clone()),
+            None,
         )
         .await
         .expect("hook must succeed");
@@ -1193,9 +1234,17 @@ mod tests {
     #[tokio::test]
     async fn note_hook_without_db_is_0_9_behaviour() {
         let dispatcher = MrDispatcher::new();
-        let resp = handle_note_hook(&note_payload(1, "LGTM", 42, "alice"), &dispatcher, "", None, None, None)
-            .await
-            .expect("hook must succeed without a DB");
+        let resp = handle_note_hook(
+            &note_payload(1, "LGTM", 42, "alice"),
+            &dispatcher,
+            "",
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("hook must succeed without a DB");
         assert_eq!(resp["status"], "received");
     }
 

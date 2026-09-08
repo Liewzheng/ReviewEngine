@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.2] - 2026-09-08
+
+### Fixed
+- **`reviews.request` no longer persists caller-supplied LLM API keys in plaintext (RENG-39)**: when a review request carries explicit `llm_configs`, `LLMConfig.api_key` was serialized verbatim into the `reviews.request` column — unlike the GitLab token (never part of the `ReviewRequest` struct) and unlike the server-side `llm_providers.api_key` column (`enc:`-encrypted at rest since 0.10.0), this key landed in the database as cleartext. Masking now happens at the single persistence choke point (`enqueue_review`, through which every `reviews.request` write — submit AND rerun — passes): each `llm_configs[i].api_key` is replaced with the same `***` sentinel the rest of the API/UI surface uses (`GET /config`, `mask_api_key`); an empty key (local providers) stays empty. Masking touches only the persisted JSON — the in-memory config driving the review keeps the live key. Because a rerun replays the persisted (masked) request, a masked key is resolved for execution exactly like the `POST /config/models` probe: it falls back to the server-side config with the same `api_base`; a masked key with no server-side match is kept as-is and fails explicitly at the provider, never silently swapped. A rerun of a legacy plaintext row re-persists the new task's request masked instead of copying the leak forward. **Existing rows are not rewritten** (no migration): to clean up pre-0.10.2 history, either null the column out (`UPDATE reviews SET request = NULL;` — rerun of those rows then returns `409 original request parameters are not available`) or rewrite per row by replacing every `llm_configs[i].api_key` value with `"***"` in the JSON text. (`src/server/api/review/task.rs`, `src/server/api/review/handlers.rs`, `src/server/api/review/tests.rs`, `tests/server/llm_configs.rs`)
+
 ## [0.10.1] - 2026-09-07
 
 ### Fixed

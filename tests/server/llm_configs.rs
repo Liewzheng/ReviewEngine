@@ -197,6 +197,113 @@ async fn review_request_llm_configs_take_priority_over_server_state() {
     );
 }
 
+/// RENG-39: persistence-time masking must not bleed into execution. A review
+/// submitted with explicit `llm_configs` runs with the caller's LIVE key
+/// (the mock provider sees it in the Authorization header), while the
+/// persisted request is masked — so a rerun replays the masked request and
+/// resolves the key from the server-side config with the same `api_base`
+/// (the `POST /config/models` probe rule), never sending the `***` sentinel
+/// to the provider.
+#[tokio::test]
+async fn masked_persistence_keeps_live_key_in_execution_and_rerun_falls_back_to_server_key() {
+    let mock = MockServer::start().await;
+    mount_mock_llm(&mock).await;
+
+    // Server-side provider: same api_base, different key. The rerun's masked
+    // replay must resolve to this key.
+    let mut server_provider = mock_llm_provider(&mock.uri());
+    server_provider["api_key"] = serde_json::json!("sk-reng39-server-key");
+    let llm_config_env = serde_json::json!([server_provider]).to_string();
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
+    wait_for_server(port).await;
+
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{}", port);
+
+    // Submit with an explicit request-level config carrying the live key.
+    let mut request_provider = mock_llm_provider(&mock.uri());
+    request_provider["api_key"] = serde_json::json!("sk-reng39-request-key");
+    let final_body = post_review_and_poll(&base, &client, Some(serde_json::json!([request_provider]))).await;
+    assert_eq!(
+        final_body["status"].as_str(),
+        Some("completed"),
+        "review with explicit llm_configs must complete, got {:?}",
+        final_body
+    );
+    let task_id = final_body["task_id"].as_str().expect("task_id").to_string();
+
+    let auth_of = |r: &wiremock::Request| {
+        r.headers
+            .get("authorization")
+            .expect("LLM calls must carry an authorization header")
+            .to_str()
+            .expect("authorization header is ASCII")
+            .to_string()
+    };
+    let first_round: Vec<String> = mock
+        .received_requests()
+        .await
+        .expect("received requests")
+        .iter()
+        .filter(|r| r.url.path().ends_with("/chat/completions"))
+        .map(&auth_of)
+        .collect();
+    assert!(!first_round.is_empty(), "the mock provider must have been called");
+    assert!(
+        first_round.iter().all(|h| h == "Bearer sk-reng39-request-key"),
+        "execution must use the caller's live key, never the mask sentinel"
+    );
+
+    // Rerun replays the persisted (masked) request: the key must resolve from
+    // the server-side config with the same api_base.
+    let resp = client
+        .post(format!("{}/api/v1/reviews/{}/rerun", base, task_id))
+        .send()
+        .await
+        .expect("POST rerun");
+    assert_eq!(resp.status(), reqwest::StatusCode::ACCEPTED, "rerun must be accepted");
+    let rerun_body: serde_json::Value = resp.json().await.expect("rerun body is JSON");
+    let rerun_task_id = rerun_body["task_id"].as_str().expect("rerun task_id").to_string();
+
+    // Poll the rerun task to completion.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let resp = client
+            .get(format!("{}/api/v1/reviews/{}", base, rerun_task_id))
+            .send()
+            .await
+            .expect("GET rerun task");
+        let body: serde_json::Value = resp.json().await.expect("GET body is JSON");
+        match body["status"].as_str().unwrap_or("") {
+            "completed" => break,
+            "failed" => panic!("rerun review failed: {:?}", body),
+            _ if Instant::now() > deadline => panic!("rerun did not settle within 60s: {:?}", body),
+            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+
+    let rerun_auths: Vec<String> = mock
+        .received_requests()
+        .await
+        .expect("received requests")
+        .iter()
+        .filter(|r| r.url.path().ends_with("/chat/completions"))
+        .map(&auth_of)
+        .skip(first_round.len())
+        .collect();
+    assert!(!rerun_auths.is_empty(), "the rerun must have called the mock provider");
+    assert!(
+        rerun_auths.iter().all(|h| h == "Bearer sk-reng39-server-key"),
+        "rerun must resolve the masked key from the server-side config (same api_base)"
+    );
+    assert!(
+        rerun_auths.iter().all(|h| !h.contains("***")),
+        "the mask sentinel must never be sent to a provider"
+    );
+}
+
 /// Unit 1 (integration): a completed review emits structured lifecycle log
 /// entries carrying `metadata.reviewId`/`requestId`/`durationMs`, so the
 /// log-page badges are no longer dead fields.

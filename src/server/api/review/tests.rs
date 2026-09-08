@@ -1053,6 +1053,156 @@ async fn gitlab_token_is_never_persisted_in_task_store() {
     assert!(matches!(replayed.source, ReviewSource::GitLabMr { .. }));
 }
 
+// ─── RENG-39: llm_configs api_key masking at persistence ────────
+
+/// State with a DB-backed task store (write-through to an in-memory SQLite
+/// `SqlxStore`), so tests can assert on the actual `reviews.request` column.
+async fn state_with_db_backed_store() -> (Arc<AppState>, Arc<crate::store::SqlxStore>) {
+    let db = Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap());
+    db.migrate().await.unwrap();
+    let mut task_store = TaskStore::new();
+    task_store.set_db(db.clone());
+    let mut state = AppState::new(vec![usable_llm_config()]);
+    state.task_store = Some(Arc::new(task_store));
+    (Arc::new(state), db)
+}
+
+/// RENG-39: a caller-supplied `llm_configs[i].api_key` is a live secret and
+/// must never reach the `reviews.request` column (or the in-memory
+/// projection) as plaintext — it is masked to the same `***` sentinel the
+/// rest of the API/UI surface uses. The masked request must still round-trip
+/// into `ReviewRequest` so rerun stays replayable.
+#[tokio::test]
+async fn llm_api_key_is_masked_in_persisted_request() {
+    let (state, db) = state_with_db_backed_store().await;
+    let store = state.task_store.clone().unwrap();
+
+    let mut body = static_diff_body();
+    body["llm_configs"] = serde_json::json!([{
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_base": "http://127.0.0.1:9/v1",
+        "api_key": "sk-reng39-live-key"
+    }]);
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(body)))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    assert!(
+        !json.to_string().contains("reng39"),
+        "the API key must never be echoed in the response"
+    );
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    // In-memory projection (what rerun reads back) is masked.
+    let entry = store.get(task_id).await.expect("task must be stored");
+    let persisted = serde_json::to_string(&entry.request).unwrap();
+    assert!(
+        persisted.contains("\"api_key\":\"***\""),
+        "the persisted request must mask the API key: {persisted}"
+    );
+    assert!(
+        !persisted.contains("reng39"),
+        "the API key must not be persisted in the task store"
+    );
+
+    // The DB column (write-through INSERT) is masked too.
+    let (db_request,): (String,) = ::sqlx::query_as("SELECT request FROM reviews WHERE task_id = ?")
+        .bind(task_id.to_string())
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+    assert!(
+        db_request.contains("\"api_key\":\"***\""),
+        "reviews.request must mask the API key: {db_request}"
+    );
+    assert!(
+        !db_request.contains("reng39"),
+        "reviews.request must not contain the plaintext API key"
+    );
+
+    // The masked request still replays: it round-trips into ReviewRequest,
+    // and every non-secret field is preserved.
+    let replayed: crate::server::api::types::ReviewRequest = serde_json::from_str(&db_request).unwrap();
+    let configs = replayed.llm_configs.expect("llm_configs preserved");
+    assert_eq!(configs[0].api_key, crate::models::API_KEY_MASK);
+    assert_eq!(configs[0].api_base, "http://127.0.0.1:9/v1");
+    assert_eq!(configs[0].model, "gpt-4o");
+}
+
+/// RENG-39: an empty api_key (local providers legitimately carry none) stays
+/// empty rather than becoming the mask sentinel, so masked storage keeps the
+/// "no key configured" distinction.
+#[tokio::test]
+async fn empty_llm_api_key_stays_empty_in_persisted_request() {
+    let state = state_with_store();
+    let store = state.task_store.clone().unwrap();
+
+    let mut body = static_diff_body();
+    body["llm_configs"] = serde_json::json!([{
+        "provider": "ollama",
+        "model": "qwen3",
+        "api_base": "http://127.0.0.1:9/v1",
+        "api_key": ""
+    }]);
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(body)))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    let entry = store.get(task_id).await.expect("task must be stored");
+    let persisted = serde_json::to_string(&entry.request).unwrap();
+    assert!(
+        persisted.contains("\"api_key\":\"\""),
+        "an empty API key must stay empty, not become the mask: {persisted}"
+    );
+}
+
+/// RENG-39: masking lives at the single persistence choke point
+/// (`enqueue_review`), so a rerun of a legacy row written before 0.10.2 —
+/// whose stored request still carries a plaintext key — re-persists the new
+/// task's request masked instead of copying the leak forward.
+#[tokio::test]
+async fn rerun_remasks_legacy_plaintext_llm_api_key() {
+    let state = state_with_store();
+    let store = state.task_store.clone().unwrap();
+
+    let mut legacy_request = static_diff_body();
+    legacy_request["llm_configs"] = serde_json::json!([{
+        "provider": "openai",
+        "model": "gpt-4o",
+        "api_base": "http://127.0.0.1:9/v1",
+        "api_key": "sk-reng39-legacy-key"
+    }]);
+    let original_id = store
+        .create_with_request(Some(SourceMeta::default()), Some(legacy_request))
+        .await;
+    store
+        .update(original_id, TaskState::Failed, None, Some("boom".to_string()))
+        .await;
+
+    let resp = rerun_review(State(state), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "rerun must pass, got {json}");
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    let new_entry = store.get(new_id).await.expect("rerun task must be stored");
+    let persisted = serde_json::to_string(&new_entry.request).unwrap();
+    assert!(
+        persisted.contains("\"api_key\":\"***\""),
+        "the rerun task must persist the masked API key: {persisted}"
+    );
+    assert!(
+        !persisted.contains("reng39"),
+        "the legacy plaintext API key must not be copied into the rerun task"
+    );
+}
+
 // ─── rerun credential re-resolution ─────────────────────────────
 
 /// Store a completed gitlab_mr task whose persisted request carries no

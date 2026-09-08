@@ -172,24 +172,88 @@ pub struct ListParams {
     pub date_to: Option<String>,
 }
 
+/// Mask every `llm_configs[i].api_key` in the serialized request before it is
+/// persisted into `reviews.request` (RENG-39): a caller-supplied LLM API key
+/// is a live secret and must never land in the database as plaintext. The
+/// `reviews.request` column contract is therefore: the GitLab token never
+/// enters the `ReviewRequest` struct at all, and `llm_configs[i].api_key` is
+/// stored masked from 0.10.2 on. Uses the same projection as the rest of the
+/// API/UI surface ([`crate::models::mask_api_key`]): `***` for a set key, `""`
+/// for an empty one (local providers legitimately carry no key). Applied to
+/// the persisted JSON only — the in-memory `ReviewRequest` driving the actual
+/// review keeps the real key.
+pub(crate) fn mask_request_llm_api_keys(request_json: &mut serde_json::Value) {
+    let Some(configs) = request_json
+        .get_mut("llm_configs")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return;
+    };
+    for config in configs {
+        let Some(key) = config.get("api_key").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        let masked = crate::models::mask_api_key(key);
+        config["api_key"] = serde_json::Value::String(masked);
+    }
+}
+
+/// Resolve masked `api_key`s in request-level LLM configs for execution.
+///
+/// A rerun replays the persisted request, whose keys are masked by
+/// [`mask_request_llm_api_keys`]. The mask sentinel means "the caller's key
+/// was never persisted", so it is resolved by falling back to the server-side
+/// config matching BOTH `provider` and `api_base`. The composite match is
+/// required: several providers may share one `api_base` (e.g. a self-hosted
+/// gateway fronting multiple providers), and a single-key `api_base` lookup
+/// would then return whichever config happens to sort first — silently
+/// swapping in an unrelated provider's key. There is deliberately no
+/// `api_base`-only fallback: a masked key with no composite match is kept
+/// as-is, so the provider call fails authentication explicitly. Real keys and
+/// empty keys (local providers) pass through untouched.
+fn resolve_masked_api_keys(
+    mut configs: Vec<crate::models::LLMConfig>,
+    server_configs: &[crate::models::LLMConfig],
+) -> Vec<crate::models::LLMConfig> {
+    for config in &mut configs {
+        if config.api_key == crate::models::API_KEY_MASK {
+            if let Some(matched) = server_configs
+                .iter()
+                .find(|c| c.provider == config.provider && c.api_base == config.api_base)
+            {
+                config.api_key = matched.api_key.clone();
+            }
+        }
+    }
+    configs
+}
+
 pub(crate) async fn enqueue_review(
     state: &Arc<AppState>,
     store: &TaskStore,
     request: crate::server::api::types::ReviewRequest,
-    request_json: serde_json::Value,
+    mut request_json: serde_json::Value,
     gitlab_token: Option<String>,
 ) -> uuid::Uuid {
     let source_meta = source_meta_from_request(&request.source);
-    // `request_json` is serialized from the credential-free `ReviewRequest`
-    // struct: the GitLab token travels only in the `gitlab_token` parameter
-    // (resolved from the X-Gitlab-Token header / server config) and is never
-    // persisted into the task store, so rerun re-resolves it at rerun time.
+    // `request_json` is serialized from the `ReviewRequest` struct, which
+    // never carries the GitLab token: it travels only in the `gitlab_token`
+    // parameter (resolved from the X-Gitlab-Token header / server config) and
+    // is never persisted into the task store, so rerun re-resolves it at
+    // rerun time. Caller-supplied LLM API keys, however, ARE part of the
+    // struct — mask them before the JSON is persisted (RENG-39). Masking is
+    // done here, the single choke point every `reviews.request` write passes
+    // through (submit AND rerun), so a rerun of a legacy plaintext row also
+    // re-persists it masked.
+    mask_request_llm_api_keys(&mut request_json);
     let task_id = store.create_with_request(Some(source_meta), Some(request_json)).await;
     let store_clone = store.clone();
     let source = request.source;
     let config_toml = request.config;
     let llm_configs = match request.llm_configs {
-        Some(configs) if !configs.is_empty() => configs,
+        // A rerun replays the persisted (masked) request: resolve the mask
+        // sentinel against the server-side configs before execution.
+        Some(configs) if !configs.is_empty() => resolve_masked_api_keys(configs, &state.llm_configs.read().unwrap()),
         _ => state.llm_configs.read().unwrap().clone(),
     };
     let webhook = request.webhook;
@@ -399,5 +463,136 @@ mod tests {
         // No parseable result at all.
         let entry = entry_with_result(None);
         assert!(build_review_detail(&entry).raw_comment.is_none());
+    }
+
+    // ─── RENG-39: persistence-time api_key masking ──────────────────
+
+    #[test]
+    fn mask_request_llm_api_keys_masks_set_keys_and_keeps_empty() {
+        let mut json = serde_json::json!({
+            "source": {"type": "static_diff", "diff": "d"},
+            "llm_configs": [
+                {"provider": "openai", "model": "gpt-4o", "api_key": "sk-live", "api_base": "https://api.openai.com/v1"},
+                {"provider": "ollama", "model": "qwen3", "api_key": "", "api_base": "http://localhost:11434/v1"}
+            ]
+        });
+        mask_request_llm_api_keys(&mut json);
+        assert_eq!(json["llm_configs"][0]["api_key"], crate::models::API_KEY_MASK);
+        // Other fields are untouched.
+        assert_eq!(json["llm_configs"][0]["api_base"], "https://api.openai.com/v1");
+        // An empty key stays empty (local providers carry no key; the mask
+        // sentinel must not invent one).
+        assert_eq!(json["llm_configs"][1]["api_key"], "");
+    }
+
+    #[test]
+    fn mask_request_llm_api_keys_tolerates_absent_or_malformed_fields() {
+        // No llm_configs at all.
+        let mut json = serde_json::json!({"source": {"type": "static_diff", "diff": "d"}});
+        mask_request_llm_api_keys(&mut json);
+        assert_eq!(
+            json,
+            serde_json::json!({"source": {"type": "static_diff", "diff": "d"}})
+        );
+
+        // llm_configs present but not an array of well-formed objects.
+        let mut json = serde_json::json!({"llm_configs": "not-an-array"});
+        mask_request_llm_api_keys(&mut json);
+        assert_eq!(json["llm_configs"], "not-an-array");
+
+        let mut json = serde_json::json!({"llm_configs": [{"model": "gpt-4o"}, 42]});
+        mask_request_llm_api_keys(&mut json);
+        assert_eq!(json["llm_configs"][0]["model"], "gpt-4o");
+        assert_eq!(json["llm_configs"][1], 42);
+    }
+
+    fn llm_config(api_key: &str, api_base: &str) -> crate::models::LLMConfig {
+        llm_config_for("openai", api_key, api_base)
+    }
+
+    fn llm_config_for(provider: &str, api_key: &str, api_base: &str) -> crate::models::LLMConfig {
+        crate::models::LLMConfig {
+            provider: provider.to_string(),
+            model: "gpt-4o".to_string(),
+            api_key: api_key.to_string(),
+            api_base: api_base.to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+        }
+    }
+
+    /// A masked key (rerun replaying a persisted request) resolves to the
+    /// server-side key for the same (provider, api_base) pair.
+    #[test]
+    fn resolve_masked_api_keys_falls_back_to_server_config_by_api_base() {
+        let request_configs = vec![llm_config(crate::models::API_KEY_MASK, "https://api.openai.com/v1")];
+        let server_configs = vec![llm_config("sk-server-side", "https://api.openai.com/v1")];
+        let resolved = resolve_masked_api_keys(request_configs, &server_configs);
+        assert_eq!(resolved[0].api_key, "sk-server-side");
+    }
+
+    /// RENG-39 follow-up: several server configs may share one `api_base`
+    /// (e.g. a self-hosted gateway). The composite (provider, api_base) match
+    /// must pick the key of the SAME provider, not the first config that
+    /// happens to share the endpoint.
+    #[test]
+    fn resolve_masked_api_keys_composite_match_picks_same_provider_key() {
+        let request_configs = vec![llm_config_for(
+            "anthropic",
+            crate::models::API_KEY_MASK,
+            "https://gateway.internal/v1",
+        )];
+        let server_configs = vec![
+            llm_config_for("openai", "sk-openai", "https://gateway.internal/v1"),
+            llm_config_for("anthropic", "sk-anthropic", "https://gateway.internal/v1"),
+        ];
+        let resolved = resolve_masked_api_keys(request_configs, &server_configs);
+        assert_eq!(resolved[0].api_key, "sk-anthropic");
+    }
+
+    /// Same `api_base` but a different provider: the mask is kept as-is. There
+    /// is no `api_base`-only fallback — falling back would silently swap in an
+    /// unrelated provider's key.
+    #[test]
+    fn resolve_masked_api_keys_keeps_mask_when_only_api_base_matches() {
+        let request_configs = vec![llm_config_for(
+            "anthropic",
+            crate::models::API_KEY_MASK,
+            "https://gateway.internal/v1",
+        )];
+        let server_configs = vec![llm_config_for("openai", "sk-openai", "https://gateway.internal/v1")];
+        let resolved = resolve_masked_api_keys(request_configs, &server_configs);
+        assert_eq!(resolved[0].api_key, crate::models::API_KEY_MASK);
+    }
+
+    /// A masked key with no matching server-side config is kept as-is: the
+    /// provider call then fails authentication explicitly, never silently
+    /// swapped for an unrelated provider's key.
+    #[test]
+    fn resolve_masked_api_keys_keeps_unmatched_mask() {
+        let request_configs = vec![llm_config(crate::models::API_KEY_MASK, "https://other.example/v1")];
+        let server_configs = vec![llm_config("sk-server-side", "https://api.openai.com/v1")];
+        let resolved = resolve_masked_api_keys(request_configs, &server_configs);
+        assert_eq!(resolved[0].api_key, crate::models::API_KEY_MASK);
+
+        let resolved = resolve_masked_api_keys(vec![llm_config(crate::models::API_KEY_MASK, "https://x/v1")], &[]);
+        assert_eq!(resolved[0].api_key, crate::models::API_KEY_MASK);
+    }
+
+    /// Real keys (normal submit path — masking only touches the persisted
+    /// JSON) and empty keys (local providers) pass through untouched.
+    #[test]
+    fn resolve_masked_api_keys_passes_real_and_empty_keys_through() {
+        let server_configs = vec![llm_config("sk-server-side", "https://api.openai.com/v1")];
+        let resolved = resolve_masked_api_keys(
+            vec![
+                llm_config("sk-live", "https://api.openai.com/v1"),
+                llm_config("", "https://api.openai.com/v1"),
+            ],
+            &server_configs,
+        );
+        assert_eq!(resolved[0].api_key, "sk-live");
+        assert_eq!(resolved[1].api_key, "");
     }
 }

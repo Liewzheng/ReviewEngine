@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.5] - 2026-09-10
+
+### Changed
+- **Review history auto-refresh and avatar alignment (RENG-40)**: the `评审历史` page now polls every 5s so new reviews appear without manual refresh, pauses when the tab is hidden, and refreshes immediately on focus — while preserving the current search/filter/pagination/scroll state. The author avatar container is hardened (`overflow:hidden`, `img display:block`, centered initials fallback) and failed avatar images fall back to initials, eliminating the "floating" misalignment between rows. (`frontend/src/composables/useReviews.ts`, `frontend/src/views/ReviewHistory.vue`)
+
 ## [0.10.4] - 2026-09-10
 
 ### Added

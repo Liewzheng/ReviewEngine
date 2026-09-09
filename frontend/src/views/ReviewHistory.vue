@@ -799,19 +799,24 @@ watch(() => route.query, () => {
               <div class="expert-title">
                 <span>{{ exp.expertName }}</span>
                 <div class="expert-meta">
-                  <StatusBadge :status="exp.status" size="small" />
+                  <!-- Success is the default state: only flag non-success
+                       statuses (warning/error/skipped) on the collapsed row. -->
+                  <StatusBadge v-if="exp.status !== 'success'" :status="exp.status" size="small" />
                   <el-tag v-if="exp.score" size="small" :type="exp.score >= 80 ? 'success' : exp.score >= 60 ? 'warning' : 'danger'">
                     {{ exp.score }}
                   </el-tag>
-                  <!-- RENG-38: which LLM actually produced this report;
-                       absent for pre-0.10.2 records (no tag rendered). -->
-                  <el-tooltip v-if="expertLlmLabel(exp)" :content="$t('history.llm.expertTooltip')" placement="bottom">
-                    <el-tag size="small" effect="plain" class="llm-tag">{{ expertLlmLabel(exp) }}</el-tag>
-                  </el-tooltip>
                 </div>
               </div>
             </template>
             <div class="expert-content">
+              <!-- RENG-38: which LLM actually produced this report; shown as a
+                   plain meta row at the top of the expanded panel, absent for
+                   pre-0.10.2 records (no snapshot -> nothing rendered). -->
+              <div v-if="expertLlmLabel(exp)" class="expert-llm-meta">
+                <el-tooltip :content="$t('history.llm.expertTooltip')" placement="bottom">
+                  <el-tag size="small" effect="plain" class="llm-tag">{{ expertLlmLabel(exp) }}</el-tag>
+                </el-tooltip>
+              </div>
               <!-- `summary` carries the curated pre-rendered Markdown report;
                    MarkdownView renders it (marked -> DOMPurify sanitized). -->
               <div class="expert-markdown">

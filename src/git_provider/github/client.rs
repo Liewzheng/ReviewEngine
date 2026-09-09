@@ -149,6 +149,7 @@ impl Client {
             // GitHub path keeps the PR-author fallback unchanged.
             commit_author: None,
             discussion_context: None,
+            agents_md: None,
         })
     }
 

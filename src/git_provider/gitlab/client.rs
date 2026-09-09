@@ -321,6 +321,7 @@ impl Client {
             pr_author_id,
             commit_author,
             discussion_context: None,
+            agents_md: None,
         })
     }
 

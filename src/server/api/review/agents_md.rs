@@ -49,14 +49,36 @@ pub(crate) fn render_agents_md(content: &str) -> Option<String> {
 }
 
 /// Read `AGENTS.md` from a local repository path, bounded to `max_bytes`.
-/// Returns `None` when the file is missing or cannot be read.
+/// Returns `None` when the file is missing, is a symlink, or cannot be read.
+/// A symlinked `AGENTS.md` is skipped so a repo cannot point the read at a
+/// file outside the checkout; regular files only.
 pub(crate) fn read_local_agents_md(repo_path: &Path, max_bytes: usize) -> Option<String> {
     let path = repo_path.join("AGENTS.md");
-    if !path.is_file() {
-        return None;
+    // `is_file()` follows symlinks, so reject them explicitly to avoid reading
+    // a file outside the checkout via a malicious `AGENTS.md` symlink.
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            tracing::warn!(path = %path.display(), "AGENTS.md is a symlink; skipping injection");
+            return None;
+        }
+        Ok(meta) if !meta.is_file() => return None,
+        Ok(_) => {}
+        Err(_) => return None,
     }
     match std::fs::read(&path) {
-        Ok(bytes) => Some(truncate_string(String::from_utf8_lossy(&bytes).to_string(), max_bytes)),
+        Ok(bytes) => {
+            let content = String::from_utf8_lossy(&bytes).to_string();
+            if content.len() > max_bytes {
+                tracing::warn!(
+                    path = %path.display(),
+                    bytes = content.len(),
+                    max_bytes,
+                    "AGENTS.md exceeds {} bytes; truncating injected context",
+                    max_bytes
+                );
+            }
+            Some(truncate_string(content, max_bytes))
+        }
         Err(e) => {
             tracing::warn!(path = %path.display(), "failed to read AGENTS.md: {e}");
             None
@@ -100,27 +122,6 @@ pub(crate) async fn persist_agents_md(db: Option<&Arc<SqlxStore>>, task_id: Uuid
     {
         tracing::warn!(task_id = %task_id, "failed to persist review_context {AGENTS_MD_KIND}: {e:#}");
     }
-}
-
-/// Inject AGENTS.md context for a local repository review.
-pub(crate) async fn inject_local(db: Option<&Arc<SqlxStore>>, task_id: Uuid, repo_path: &Path) -> Option<String> {
-    let content = read_local_agents_md(repo_path, DEFAULT_MAX_FILE_BYTES)?;
-    let section = render_agents_md(&content)?;
-    persist_agents_md(db, task_id, &section).await;
-    Some(section)
-}
-
-/// Inject AGENTS.md context for a GitLab MR review.
-pub(crate) async fn inject_remote(
-    db: Option<&Arc<SqlxStore>>,
-    task_id: Uuid,
-    client: &crate::git_provider::gitlab::client::Client,
-    git_ref: &str,
-) -> Option<String> {
-    let content = fetch_remote_agents_md(client, git_ref).await?;
-    let section = render_agents_md(&content)?;
-    persist_agents_md(db, task_id, &section).await;
-    Some(section)
 }
 
 /// Truncate a string at a safe UTF-8 boundary.
@@ -182,5 +183,22 @@ mod tests {
         let b = sha256_hex("hello");
         assert_eq!(a, b);
         assert!(!a.is_empty());
+    }
+
+    // RENG-18 symlink guard: a symlinked AGENTS.md must be skipped so the read
+    // cannot escape the checkout.
+    #[cfg(unix)]
+    #[test]
+    fn read_local_agents_md_skips_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_dir = tempfile::tempdir().unwrap();
+        let target = target_dir.path().join("secret.md");
+        std::fs::write(&target, "secret").unwrap();
+        std::os::unix::fs::symlink(&target, dir.path().join("AGENTS.md")).unwrap();
+
+        assert!(
+            read_local_agents_md(dir.path(), DEFAULT_MAX_FILE_BYTES).is_none(),
+            "symlinked AGENTS.md must not be read"
+        );
     }
 }

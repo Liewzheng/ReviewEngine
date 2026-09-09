@@ -47,6 +47,57 @@ async fn test_resolve_source_local_repo_nonexistent_path() {
     assert!(err.contains("does not exist"));
 }
 
+/// RENG-18: the enabled AGENTS.md injection path must be exercised — the
+/// disabled path (`false`) is the one every other test uses. Build a real
+/// local git repo with an `AGENTS.md` and assert the resolved source carries
+/// the rendered section.
+#[tokio::test]
+async fn test_resolve_source_local_repo_injects_agents_md_when_enabled() {
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let run = |args: &[&str]| {
+        let status = Command::new("git").current_dir(repo).args(args).status().unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["init"]);
+    run(&["checkout", "-b", "main"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Test User"]);
+    std::fs::write(
+        repo.join("AGENTS.md"),
+        "# Agent Guidelines\n\nRun tests before merging.\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "init"]);
+
+    // Disabled path: no AGENTS.md section.
+    let source = ReviewSource::LocalRepo {
+        path: repo.to_string_lossy().to_string(),
+        base: Some("main".to_string()),
+        head: Some("main".to_string()),
+    };
+    let resolved = resolve_source(source, None, &None, false).await.unwrap();
+    assert!(resolved.agents_md.is_none(), "disabled path must not inject AGENTS.md");
+
+    // Enabled path: the rendered section is present.
+    let source = ReviewSource::LocalRepo {
+        path: repo.to_string_lossy().to_string(),
+        base: Some("main".to_string()),
+        head: Some("main".to_string()),
+    };
+    let resolved = resolve_source(source, None, &None, true).await.unwrap();
+    let section = resolved.agents_md.expect("enabled path must inject AGENTS.md");
+    assert!(
+        section.starts_with("## Agent Guidelines"),
+        "section must carry the fixed header"
+    );
+    assert!(section.contains("Run tests before merging."));
+}
+
 #[tokio::test]
 async fn test_resolve_source_local_repo_invalid_base_ref() {
     let dir = tempfile::tempdir().unwrap();

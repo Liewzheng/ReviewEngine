@@ -2,7 +2,6 @@ use std::sync::Arc;
 
 use crate::server::api::types::ReviewSource;
 use crate::team::orchestrator;
-use uuid::Uuid;
 
 pub(crate) const MAX_STATIC_DIFF_BYTES: usize = 5 * 1024 * 1024; // 5 MB
 
@@ -139,8 +138,12 @@ pub(crate) async fn resolve_source(
             let mr_info = client.fetch_mr_info().await?;
             let diff = client.fetch_diff().await?;
             // RENG-18: best-effort AGENTS.md from the MR's target branch.
+            // Read+render only; persistence happens in task.rs with the real
+            // task_id (review_contexts rows are keyed by task_id).
             let agents_md = if inject_agents_md {
-                super::agents_md::inject_remote(None, Uuid::nil(), &client, &mr_info.target_branch).await
+                super::agents_md::fetch_remote_agents_md(&client, &mr_info.target_branch)
+                    .await
+                    .and_then(|c| super::agents_md::render_agents_md(&c))
             } else {
                 None
             };
@@ -169,8 +172,11 @@ pub(crate) async fn resolve_source(
                 .get_diff(base.as_deref().unwrap_or("main"), head.as_deref(), false, None, None)
                 .await?;
             // RENG-18: best-effort AGENTS.md from the local checkout.
+            // Read+render only; persistence happens in task.rs with the real
+            // task_id (review_contexts rows are keyed by task_id).
             let agents_md = if inject_agents_md {
-                super::agents_md::inject_local(None, Uuid::nil(), repo_path).await
+                super::agents_md::read_local_agents_md(repo_path, super::agents_md::DEFAULT_MAX_FILE_BYTES)
+                    .and_then(|c| super::agents_md::render_agents_md(&c))
             } else {
                 None
             };

@@ -8,7 +8,8 @@ import type { ReviewDetail, HistoryFilters } from '../types/history';
  * Composable for the Review History page.
  *
  * Manages the paginated review list, review detail selection,
- * and review operations (delete, rerun).
+ * and review operations (delete, rerun). Also supports automatic
+ * background refresh so new reviews appear without manual interaction.
  */
 export function useReviews() {
   /** Paginated review list response (null before first load). */
@@ -110,6 +111,52 @@ export function useReviews() {
     }
   }
 
+  /* ─────────────── Auto refresh ─────────────── */
+  let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let autoRefreshParams: { filters: HistoryFilters; page: number; perPage: number } | null = null;
+
+  /**
+   * Start polling the current filtered list every `intervalMs` milliseconds.
+   * The latest filters, page and page size are captured so subsequent
+   * refreshes keep the user's view state (search, filters, pagination).
+   *
+   * Call `stopAutoRefresh` before the component unmounts.
+   */
+  function startAutoRefresh(filters: HistoryFilters, page: number, perPage: number, intervalMs = 5000) {
+    stopAutoRefresh();
+    autoRefreshParams = { filters, page, perPage };
+    autoRefreshTimer = setInterval(() => {
+      // Skip refreshes while the tab is hidden to avoid unnecessary load.
+      if (typeof document !== 'undefined' && document.hidden) return;
+      const p = autoRefreshParams;
+      if (p) {
+        fetchReviews(p.filters, p.page, p.perPage);
+      }
+    }, intervalMs);
+  }
+
+  /**
+   * Stop the background polling started by `startAutoRefresh`.
+   */
+  function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+  }
+
+  /**
+   * Refresh immediately when the page regains focus, then resume the normal
+   * polling cycle. The caller should register this with `visibilitychange`.
+   */
+  function refreshOnFocus() {
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    const p = autoRefreshParams;
+    if (p) {
+      fetchReviews(p.filters, p.page, p.perPage);
+    }
+  }
+
   /** Current page of review items. */
   const items = computed(() => data.value?.items ?? []);
   /** Total number of reviews matching the current filters. */
@@ -125,5 +172,8 @@ export function useReviews() {
     fetchReview,
     removeReview,
     rerun,
+    startAutoRefresh,
+    stopAutoRefresh,
+    refreshOnFocus,
   };
 }

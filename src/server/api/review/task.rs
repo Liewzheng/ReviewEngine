@@ -1,5 +1,5 @@
 use crate::server::api::types::{
-    ExpertResultDetail, ReviewDetail, ReviewDetailAuthor, ReviewListItem, ReviewSource, TaskStatus,
+    ExpertResultDetail, ReviewDetail, ReviewDetailAuthor, ReviewListItem, ReviewParticipant, ReviewSource, TaskStatus,
 };
 use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 
@@ -43,6 +43,21 @@ pub(crate) fn task_to_status(entry: &TaskEntry) -> TaskStatus {
         progress: entry.progress,
         expert_name: entry.expert_name.clone(),
     }
+}
+
+/// RENG-44: map the persisted participant list onto the camelCase API shape.
+/// Legacy records carry no participants → empty vector → `[]` in the JSON.
+pub(crate) fn build_review_participants(meta: &SourceMeta) -> Vec<ReviewParticipant> {
+    meta.participants
+        .iter()
+        .map(|p| ReviewParticipant {
+            name: p.name.clone(),
+            username: p.username.clone(),
+            avatar_url: p.avatar_url.clone(),
+            role: p.role,
+            bot: p.bot,
+        })
+        .collect()
 }
 
 pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
@@ -101,6 +116,7 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
             name: meta.author_name.clone(),
             avatar_url: meta.author_avatar_url.clone(),
         },
+        participants: build_review_participants(meta),
         status: status.to_string(),
         duration_ms: entry.duration_ms(),
         created_at: entry.created_at.to_rfc3339(),
@@ -126,6 +142,7 @@ pub(crate) fn build_review_list_item(entry: &TaskEntry) -> ReviewListItem {
             name: meta.author_name.clone(),
             avatar_url: meta.author_avatar_url.clone(),
         },
+        participants: build_review_participants(meta),
         status: task_status_str(&entry.state).to_string(),
         duration_ms: entry.duration_ms(),
         created_at: entry.created_at.to_rfc3339(),

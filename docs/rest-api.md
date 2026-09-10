@@ -119,7 +119,7 @@ Response 202:
 
 返回单个任务详情。`task_id` 必须是合法 UUID：非 UUID 值在路径参数解析阶段即失败，返回 `400`（如误请求 `/api/v1/reviews/history`——历史列表端点是下方单独的 `GET /api/v1/reviews`，不存在 `history` 子路径）；任务不存在返回 `404 { "error": "task not found" }`。
 
-snake_case `TaskStatus` 字段全部保留，之上合并 camelCase 结构化字段（`ReviewDetail`）：`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `status` / `durationMs` / `createdAt` / `completedAt` / `commitSha` / `experts[{expertId, expertName, status, score, summary, details}]` / `rawComment` / `rawApiResponse` / `gitlabMrUrl`。
+snake_case `TaskStatus` 字段全部保留，之上合并 camelCase 结构化字段（`ReviewDetail`）：`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `participants[]` / `status` / `durationMs` / `createdAt` / `completedAt` / `commitSha` / `experts[{expertId, expertName, status, score, summary, details}]` / `rawComment` / `rawApiResponse` / `gitlabMrUrl`。
 
 ```
 Response 200:
@@ -165,6 +165,11 @@ Response 200:
   "branch": "feature/x",
   "targetBranch": "main",
   "author": { "name": "alice", "avatarUrl": "https://gitlab.com/avatar.png" },
+  "participants": [
+    { "name": "Alice", "username": "alice", "avatarUrl": "https://gitlab.com/alice.png", "role": "author", "bot": false },
+    { "name": "Bob", "username": "bob", "avatarUrl": null, "role": "creator", "bot": false },
+    { "name": "Group Bot", "username": "group_1_bot", "avatarUrl": null, "role": "participant", "bot": true }
+  ],
   "durationMs": 28400,
   "createdAt": "2026-06-26T12:00:00Z",
   "completedAt": "2026-06-26T12:00:28Z",
@@ -184,6 +189,27 @@ Response 200:
   "gitlabMrUrl": "https://gitlab.com/owner/repo/-/merge_requests/23"
 }
 ```
+
+**`participants` 字段（RENG-42/44）**
+
+详情与列表项都带 `participants`，元素形状固定为：
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `name` | string | 显示名；provider 没有显示名时回退为 `username` |
+| `username` | string | provider 句柄（GitLab username / GitHub login）；未知时为 `""`（不是 `null`） |
+| `avatarUrl` | string \| null | 头像 URL；provider 未返回时为 `null` |
+| `role` | string | `"author"` / `"creator"` / `"participant"` |
+| `bot` | boolean | 机器人账号（GitLab `*_bot` 账号或显式 bot 标记；GitHub `type: "Bot"`） |
+
+取值与排序规则：
+
+- `author` = head commit 的作者（真正写代码的人）；`creator` = MR/PR 开启人；`participant` = 其余参与者（评论者、审核者、机器人）。
+- 顺序固定为 `author` → `creator` → `participant`；同一角色内保持 provider 返回的顺序。
+- 按人去重（用户 id 优先，其次 username，再次显示名），同一个人只保留优先级最高的一条（`author` > `creator` > `participant`）；不同机器人是不同主体，**不合并**。
+- 列表项与详情项使用同一份数据、同一套顺序，跨页一致。
+- 数据来源为 best-effort：provider 的 participants 接口失败、或某来源查不到时，只是列表变短，绝不会让评审失败。
+- **兼容性**：0.10.6 之前的旧记录没有该字段，返回 `[]`（不是 `null`、不报错）。旧字段 `author{name, avatarUrl}` 保留不删。
 
 #### `GET /api/v1/reviews`
 
@@ -206,7 +232,7 @@ Default `per_page`: 20, max `per_page`: 100. When `page` exceeds range, returns 
 
 `status` 过滤支持 `pending` / `running` / `completed` / `failed` / `cancelled`。
 
-列表项在 snake_case `TaskStatus` 字段之上合并轻量 camelCase 字段（`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `status` / `durationMs` / `createdAt` / `gitlabMrUrl`）；detail 才有的 `experts` / `rawComment` / `rawApiResponse` 不会出现在列表项中。
+列表项在 snake_case `TaskStatus` 字段之上合并轻量 camelCase 字段（`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `participants[]` / `status` / `durationMs` / `createdAt` / `gitlabMrUrl`）；detail 才有的 `experts` / `rawComment` / `rawApiResponse` 不会出现在列表项中。`participants` 的字段形状、取值、排序与去重规则见上方「`participants` 字段（RENG-42/44）」，与详情项完全一致（旧记录同样返回 `[]`）。
 
 #### `DELETE /api/v1/reviews/:task_id`
 

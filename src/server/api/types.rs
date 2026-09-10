@@ -161,11 +161,38 @@ pub struct ExpertResultDetail {
 ///
 /// `name`/`avatar_url` are `Option` so absent values serialize as `null`,
 /// consistent with the snake_case `author_name`/`author_avatar_url` fields.
+///
+/// RENG-42: this legacy single-author field is kept (the "author" column is
+/// no longer the only identity shown); new consumers should read
+/// [`ReviewParticipant`] instead.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReviewDetailAuthor {
     pub name: Option<String>,
     pub avatar_url: Option<String>,
+}
+
+/// One MR/PR participant, matching the frontend `ReviewParticipant` type
+/// (RENG-42/44). camelCase serialized; `role` keeps the persisted
+/// snake_case contract: `"author"` (head-commit author) → `"creator"`
+/// (MR/PR opener) → `"participant"` (commenters, reviewers, robots).
+///
+/// The list is ordered and de-duplicated by the provider aggregation
+/// (one entry per person, highest role wins, distinct robots stay distinct).
+/// Records persisted before 0.10.6 serialize as `[]`, never an error.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewParticipant {
+    /// Display name; falls back to `username` when the provider has none.
+    pub name: String,
+    /// Provider handle. Empty string when unknown (never `null`).
+    pub username: String,
+    /// Avatar URL, `null` when the provider returned none.
+    pub avatar_url: Option<String>,
+    /// `"author"` | `"creator"` | `"participant"`.
+    pub role: crate::models::ParticipantRole,
+    /// Robot account (GitLab `*_bot`, GitHub `type: Bot`).
+    pub bot: bool,
 }
 
 /// Structured detail response for `GET /reviews/{task_id}`, camelCase
@@ -187,6 +214,10 @@ pub struct ReviewDetail {
     pub branch: Option<String>,
     pub target_branch: Option<String>,
     pub author: ReviewDetailAuthor,
+    /// RENG-42/44: MR/PR participants, ordered `author` → `creator` →
+    /// `participant`. Empty for records persisted before 0.10.6.
+    #[serde(default)]
+    pub participants: Vec<ReviewParticipant>,
     pub status: String,
     pub duration_ms: Option<u64>,
     pub created_at: String,
@@ -213,6 +244,10 @@ pub struct ReviewListItem {
     pub branch: Option<String>,
     pub target_branch: Option<String>,
     pub author: ReviewDetailAuthor,
+    /// RENG-42/44: MR/PR participants, ordered `author` → `creator` →
+    /// `participant`. Empty for records persisted before 0.10.6.
+    #[serde(default)]
+    pub participants: Vec<ReviewParticipant>,
     pub status: String,
     pub duration_ms: Option<u64>,
     pub created_at: String,

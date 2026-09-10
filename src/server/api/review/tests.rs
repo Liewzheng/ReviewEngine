@@ -17,7 +17,7 @@ use crate::server::task_queue::source_meta_from_mr_info;
 async fn test_resolve_source_static_diff_within_limit() {
     let diff = "diff content".to_string();
     let source = ReviewSource::StaticDiff { diff: diff.clone() };
-    let result = resolve_source(source, None, &None).await;
+    let result = resolve_source(source, None, &None, false).await;
     assert!(result.is_ok());
     let resolved = result.unwrap();
     assert_eq!(resolved.diff, diff);
@@ -28,7 +28,7 @@ async fn test_resolve_source_static_diff_within_limit() {
 async fn test_resolve_source_static_diff_exceeds_limit() {
     let diff = "x".repeat(MAX_STATIC_DIFF_BYTES + 1);
     let source = ReviewSource::StaticDiff { diff };
-    let result = resolve_source(source, None, &None).await;
+    let result = resolve_source(source, None, &None, false).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("exceeds maximum size"));
@@ -41,10 +41,61 @@ async fn test_resolve_source_local_repo_nonexistent_path() {
         base: None,
         head: None,
     };
-    let result = resolve_source(source, None, &None).await;
+    let result = resolve_source(source, None, &None, false).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("does not exist"));
+}
+
+/// RENG-18: the enabled AGENTS.md injection path must be exercised — the
+/// disabled path (`false`) is the one every other test uses. Build a real
+/// local git repo with an `AGENTS.md` and assert the resolved source carries
+/// the rendered section.
+#[tokio::test]
+async fn test_resolve_source_local_repo_injects_agents_md_when_enabled() {
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path();
+    let run = |args: &[&str]| {
+        let status = Command::new("git").current_dir(repo).args(args).status().unwrap();
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["init"]);
+    run(&["checkout", "-b", "main"]);
+    run(&["config", "user.email", "test@example.com"]);
+    run(&["config", "user.name", "Test User"]);
+    std::fs::write(
+        repo.join("AGENTS.md"),
+        "# Agent Guidelines\n\nRun tests before merging.\n",
+    )
+    .unwrap();
+    std::fs::write(repo.join("main.rs"), "fn main() {}\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "init"]);
+
+    // Disabled path: no AGENTS.md section.
+    let source = ReviewSource::LocalRepo {
+        path: repo.to_string_lossy().to_string(),
+        base: Some("main".to_string()),
+        head: Some("main".to_string()),
+    };
+    let resolved = resolve_source(source, None, &None, false).await.unwrap();
+    assert!(resolved.agents_md.is_none(), "disabled path must not inject AGENTS.md");
+
+    // Enabled path: the rendered section is present.
+    let source = ReviewSource::LocalRepo {
+        path: repo.to_string_lossy().to_string(),
+        base: Some("main".to_string()),
+        head: Some("main".to_string()),
+    };
+    let resolved = resolve_source(source, None, &None, true).await.unwrap();
+    let section = resolved.agents_md.expect("enabled path must inject AGENTS.md");
+    assert!(
+        section.starts_with("## Agent Guidelines"),
+        "section must carry the fixed header"
+    );
+    assert!(section.contains("Run tests before merging."));
 }
 
 #[tokio::test]
@@ -62,7 +113,7 @@ async fn test_resolve_source_local_repo_invalid_base_ref() {
         base: Some("--help".to_string()),
         head: None,
     };
-    let result = resolve_source(source, None, &None).await;
+    let result = resolve_source(source, None, &None, false).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("must not start with '-'"));
@@ -73,7 +124,7 @@ async fn test_resolve_source_gitlab_mr_invalid_url() {
     let source = ReviewSource::GitLabMr {
         url: "not-a-valid-url".to_string(),
     };
-    let result = resolve_source(source, Some("test-token".to_string()), &None).await;
+    let result = resolve_source(source, Some("test-token".to_string()), &None, false).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("Invalid MR URL format"));
@@ -86,7 +137,7 @@ async fn test_resolve_source_gitlab_mr_requires_token() {
     let source = ReviewSource::GitLabMr {
         url: "https://gitlab.com/owner/repo/-/merge_requests/1".to_string(),
     };
-    let result = resolve_source(source, None, &None).await;
+    let result = resolve_source(source, None, &None, false).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("GitLab token required"), "unexpected error: {err}");
@@ -94,7 +145,7 @@ async fn test_resolve_source_gitlab_mr_requires_token() {
     let source = ReviewSource::GitLabMr {
         url: "https://gitlab.com/owner/repo/-/merge_requests/1".to_string(),
     };
-    let result = resolve_source(source, Some("   ".to_string()), &None).await;
+    let result = resolve_source(source, Some("   ".to_string()), &None, false).await;
     assert!(result.is_err(), "a blank token must be rejected");
 }
 
@@ -113,7 +164,7 @@ async fn test_resolve_source_local_repo_invalid_head_ref() {
         base: Some("main".to_string()),
         head: Some("; echo evil".to_string()),
     };
-    let result = resolve_source(source, None, &None).await;
+    let result = resolve_source(source, None, &None, false).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("forbidden shell metacharacters"));
@@ -624,7 +675,7 @@ async fn test_resolve_source_gitlab_mr_resolves_mr_info() {
     let source = ReviewSource::GitLabMr {
         url: format!("{}/group/project/-/merge_requests/1", server.uri()),
     };
-    let resolved = resolve_source(source, Some("test-token".to_string()), &None)
+    let resolved = resolve_source(source, Some("test-token".to_string()), &None, false)
         .await
         .expect("gitlab_mr source must resolve against the mock API");
     assert_eq!(resolved.diff, "diff --git a/a b/a\n");

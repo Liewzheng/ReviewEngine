@@ -103,6 +103,9 @@ impl PromptEngine {
             // the fixed MR/project context and the diff. None → the `{% if %}`
             // block collapses and the prompt is byte-identical to 0.9.
             "discussion_context": mr.discussion_context.as_deref(),
+            // RENG-18: project AGENTS.md guidelines, injected after discussion
+            // context and before the diff. None → block collapses.
+            "agents_md": mr.agents_md.as_deref(),
         });
 
         let user = self.env.get_template("review_user")?.render(&ctx_user)?;
@@ -414,6 +417,34 @@ mod tests {
             .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
             .unwrap();
         assert!(!user_none.contains("MR Discussion History"));
+    }
+
+    /// RENG-18: a populated `agents_md` renders between the discussion context
+    /// and the diff, and `None` collapses the block entirely.
+    #[test]
+    fn test_review_prompt_agents_md_placement() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let settings = make_test_app_config(None);
+
+        let mut mr = make_test_mr();
+        mr.agents_md = Some("## Agent Guidelines\n\nRun tests before merging.\n".to_string());
+        let (_system, user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
+            .unwrap();
+
+        assert!(user.contains("## Agent Guidelines"), "AGENTS.md section must render");
+        assert!(user.contains("Run tests before merging."));
+        let pos_agents = user.find("## Agent Guidelines").unwrap();
+        let pos_diff = user.find("## Code Changes").unwrap();
+        assert!(pos_agents < pos_diff, "AGENTS.md must precede the diff");
+
+        // None → no section.
+        let mr = make_test_mr();
+        let (_system, user_none) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
+            .unwrap();
+        assert!(!user_none.contains("## Agent Guidelines"));
     }
 
     #[test]

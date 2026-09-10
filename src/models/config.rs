@@ -118,6 +118,11 @@ pub struct ReportConfig {
     /// disables the filter silently. On by default.
     #[serde(default = "default_feedback_filtering")]
     pub feedback_filtering: bool,
+    /// If `true`, inject the target repository's AGENTS.md into review prompts
+    /// (RENG-18). When disabled, the file is never read and no context is
+    /// injected. On by default.
+    #[serde(default = "default_true")]
+    pub inject_agents_md: bool,
 }
 
 /// Parameters controlling how large diffs are processed and chunked.
@@ -419,6 +424,7 @@ impl Default for ReportConfig {
             adjudicate: true,
             adjudicate_min_severity: default_adjudicate_min_severity(),
             feedback_filtering: true,
+            inject_agents_md: true,
         }
     }
 }

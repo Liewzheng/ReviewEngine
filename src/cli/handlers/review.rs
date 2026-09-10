@@ -241,12 +241,24 @@ pub(super) fn prepare_review(
     target_branch: &str,
 ) -> (Vec<ExpertDef>, MRInfo) {
     let experts = config.build_expert_defs();
-    let mr_info = MRInfo::new(
+    let mut mr_info = MRInfo::new(
         project_path.to_string(),
         format!("Local review: {}", project_path),
         source_branch.to_string(),
         target_branch.to_string(),
     );
+    // RENG-18: inject the local checkout's AGENTS.md into the expert prompts.
+    // Best-effort — any failure leaves `agents_md` as `None` (0.10.1 shape).
+    if config.report.inject_agents_md {
+        if let Some(section) = review_engine::context::agents_md::read_local_agents_md(
+            std::path::Path::new(project_path),
+            review_engine::context::agents_md::DEFAULT_MAX_FILE_BYTES,
+        )
+        .and_then(|c| review_engine::context::agents_md::render_agents_md(&c))
+        {
+            mr_info.agents_md = Some(section);
+        }
+    }
     (experts, mr_info)
 }
 
@@ -513,5 +525,26 @@ mod tests {
         let usable = vec![serde_json::to_string(&llm_config("http://localhost:11434/v1")).unwrap()];
         let resolved = require_llm_configs(&usable, &config).expect("usable argv config must pass the gate");
         assert_eq!(resolved.len(), 1);
+    }
+
+    // RENG-18: the CLI `--local-path` path must inject the checkout's AGENTS.md
+    // into the review MRInfo when the switch is on, and skip it when off.
+    #[test]
+    fn prepare_review_injects_agents_md_from_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("AGENTS.md"), "# Agent Guidelines\n\nRun tests.\n").unwrap();
+
+        let config = empty_app_config();
+        // Switch on (default): the section is injected.
+        let (_experts, mr_info) = prepare_review(&config, dir.path().to_str().unwrap(), "local", "main");
+        let section = mr_info.agents_md.expect("agents_md must be injected when enabled");
+        assert!(section.starts_with("## Agent Guidelines"));
+        assert!(section.contains("Run tests."));
+
+        // Switch off: no injection.
+        let mut config_off = empty_app_config();
+        config_off.report.inject_agents_md = false;
+        let (_experts, mr_info) = prepare_review(&config_off, dir.path().to_str().unwrap(), "local", "main");
+        assert!(mr_info.agents_md.is_none(), "agents_md must be absent when disabled");
     }
 }

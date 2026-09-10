@@ -57,6 +57,9 @@ pub(crate) fn resolve_gitlab_token(
 pub(crate) struct ResolvedSource {
     pub diff: String,
     pub mr_info: Option<crate::models::MRInfo>,
+    /// Rendered AGENTS.md prompt section (RENG-18). `None` when disabled,
+    /// missing, or unavailable.
+    pub agents_md: Option<String>,
 }
 
 pub(crate) async fn run_review(
@@ -70,7 +73,7 @@ pub(crate) async fn run_review(
     let experts = app_config.build_expert_defs();
     // MR-based reviews reuse the freshly fetched metadata so prompts carry the
     // real title/branches; local/static sources keep the placeholder context.
-    let mr_info = resolved.mr_info.unwrap_or_else(|| {
+    let mut mr_info = resolved.mr_info.unwrap_or_else(|| {
         crate::models::MRInfo::new(
             "api".to_string(),
             "API Review".to_string(),
@@ -78,6 +81,8 @@ pub(crate) async fn run_review(
             "unknown".to_string(),
         )
     });
+    // RENG-18: attach AGENTS.md context resolved alongside the diff/MR info.
+    mr_info.agents_md = resolved.agents_md;
 
     let review_result = tokio::time::timeout(
         std::time::Duration::from_secs(600),
@@ -112,6 +117,7 @@ pub(crate) async fn resolve_source(
     source: ReviewSource,
     gitlab_token: Option<String>,
     _config: &Option<Arc<crate::models::AppConfig>>,
+    inject_agents_md: bool,
 ) -> anyhow::Result<ResolvedSource> {
     match source {
         ReviewSource::GitLabMr { url } => {
@@ -131,9 +137,20 @@ pub(crate) async fn resolve_source(
             // back-filled the record's display metadata from `mr_info`.
             let mr_info = client.fetch_mr_info().await?;
             let diff = client.fetch_diff().await?;
+            // RENG-18: best-effort AGENTS.md from the MR's target branch.
+            // Read+render only; persistence happens in task.rs with the real
+            // task_id (review_contexts rows are keyed by task_id).
+            let agents_md = if inject_agents_md {
+                super::agents_md::fetch_remote_agents_md(&client, &mr_info.target_branch)
+                    .await
+                    .and_then(|c| super::agents_md::render_agents_md(&c))
+            } else {
+                None
+            };
             Ok(ResolvedSource {
                 diff,
                 mr_info: Some(mr_info),
+                agents_md,
             })
         }
         ReviewSource::LocalRepo { path, base, head } => {
@@ -154,7 +171,20 @@ pub(crate) async fn resolve_source(
             let diff = browser
                 .get_diff(base.as_deref().unwrap_or("main"), head.as_deref(), false, None, None)
                 .await?;
-            Ok(ResolvedSource { diff, mr_info: None })
+            // RENG-18: best-effort AGENTS.md from the local checkout.
+            // Read+render only; persistence happens in task.rs with the real
+            // task_id (review_contexts rows are keyed by task_id).
+            let agents_md = if inject_agents_md {
+                super::agents_md::read_local_agents_md(repo_path, super::agents_md::DEFAULT_MAX_FILE_BYTES)
+                    .and_then(|c| super::agents_md::render_agents_md(&c))
+            } else {
+                None
+            };
+            Ok(ResolvedSource {
+                diff,
+                mr_info: None,
+                agents_md,
+            })
         }
         ReviewSource::StaticDiff { diff } => {
             if diff.len() > MAX_STATIC_DIFF_BYTES {
@@ -163,7 +193,11 @@ pub(crate) async fn resolve_source(
                     MAX_STATIC_DIFF_BYTES / (1024 * 1024)
                 );
             }
-            Ok(ResolvedSource { diff, mr_info: None })
+            Ok(ResolvedSource {
+                diff,
+                mr_info: None,
+                agents_md: None,
+            })
         }
     }
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.4] - 2026-09-10
+
+### Added
+- **Project `AGENTS.md` injected into review prompts as binding conventions (RENG-18)**: the target repository's `AGENTS.md` is loaded before the expert run — read from the local checkout for `--local-path` reviews (both the CLI and the API paths), fetched from the GitLab repository (target branch) for MR/webhook reviews — rendered into a fixed `## Agent Guidelines` section and injected between the discussion context and the diff. The review system prompt now declares those conventions **binding**: each expert must check the diff against them and name the convention in any finding that violates one, so findings align with the project's own rules instead of receiving them as passive context (empirically, passive injection produced zero convention citations; the binding instruction produced them and the findings quote the rules). The rendered section is persisted to `review_contexts` (kind `agents_md`) for content-hash reuse. Configurable via `[report] inject_agents_md` (default on). Every failure path (missing file, symlinked file, API error, oversized render, DB write) degrades gracefully — the review runs unchanged. (`src/context/agents_md.rs`, `src/server/api/review/agents_md.rs`, `src/prompt/templates.rs`, `src/prompt/engine.rs`, `src/models/config.rs`, `src/server/api/review/task.rs`, `src/server/api/review/resolve.rs`, `src/cli/handlers/review.rs`)
+
 ## [0.10.3] - 2026-09-10
 
 ### Added

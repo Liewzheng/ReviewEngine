@@ -284,6 +284,7 @@ pub(crate) async fn enqueue_review(
         _ => (None, None),
     };
     let token_for_tap = gitlab_token.clone();
+    let db_clone = state.db.clone();
 
     tokio::spawn(async move {
         while !store_clone.can_start_new_task().await {
@@ -308,8 +309,14 @@ pub(crate) async fn enqueue_review(
         // the real title/branch/author/commit) even when the review itself
         // later fails. Fill happens before the (possibly long) expert run and
         // only touches fields still blank, so enqueue-time values win.
-        let outcome = match super::resolve::resolve_source(source, gitlab_token, &cfg).await {
+        let inject_agents_md = cfg.as_ref().map(|c| c.report.inject_agents_md).unwrap_or(true);
+        let outcome = match super::resolve::resolve_source(source, gitlab_token, &cfg, inject_agents_md).await {
             Ok(mut resolved) => {
+                // RENG-18: persist the rendered AGENTS.md context so re-runs can
+                // reuse it. Best-effort; injection itself happens in run_review.
+                if let Some(section) = resolved.agents_md.as_deref() {
+                    super::agents_md::persist_agents_md(db_clone.as_ref(), task_id, section).await;
+                }
                 if let Some(ref mut info) = resolved.mr_info {
                     store_clone
                         .fill_source_meta(task_id, source_meta_from_mr_info(info))

@@ -237,6 +237,11 @@ pub struct MRInfo {
     /// Runtime-only: never serialized into task records or the DB.
     #[serde(skip, default)]
     pub discussion_context: Option<String>,
+    /// Rendered AGENTS.md section injected into review prompts (RENG-18).
+    /// Filled by the pre-review agents-md tap; `None` = no context injected.
+    /// Runtime-only: never serialized into task records or the DB.
+    #[serde(skip, default)]
+    pub agents_md: Option<String>,
 }
 
 impl MRInfo {
@@ -257,6 +262,7 @@ impl MRInfo {
             pr_author_id: None,
             commit_author: None,
             discussion_context: None,
+            agents_md: None,
         }
     }
 }

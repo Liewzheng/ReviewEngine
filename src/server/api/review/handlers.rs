@@ -179,9 +179,10 @@ pub(crate) async fn submit_review(
         return error_response_with_code(status, msg, "llmNotConfigured");
     }
 
-    // The persisted request parameters are serialized from the credential-free
-    // struct, so the token can never land in the task store; rerun re-resolves
-    // credentials from its own header / the server config.
+    // The persisted request parameters are serialized from a struct that
+    // never carries the GitLab token, so it can never land in the task store;
+    // caller-supplied LLM API keys are masked at the persistence choke point
+    // (`task::enqueue_review`, RENG-39). Rerun re-resolves both.
     let request_json = match serde_json::to_value(&request) {
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize review request"),
@@ -304,10 +305,12 @@ pub(crate) async fn rerun_review(
         return error_response(status, msg);
     }
 
-    // The stored parameters carry no credential (it is never persisted), so
-    // rerun re-resolves it under the same rule as submit: the rerun request's
-    // own X-Gitlab-Token header first, then the matching git platform, then
-    // the legacy server-side configured token.
+    // The stored parameters carry no GitLab credential (it is never
+    // persisted), and LLM API keys are masked (RENG-39); rerun re-resolves
+    // both under the same rules as submit: the credential from the rerun
+    // request's own X-Gitlab-Token header first, then the matching git
+    // platform, then the legacy server-side configured token (masked LLM keys
+    // resolve against the server-side LLM configs in `enqueue_review`).
     let gitlab_token = match resolve_gitlab_credential(&state, &request.source, &headers) {
         Ok(token) => token,
         Err((status, msg)) => return error_response(status, msg),

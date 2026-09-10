@@ -449,7 +449,10 @@ onUnmounted(() => {
                 </template>
               </el-table-column>
 
-              <el-table-column :label="$t('history.columns.author')" width="140">
+              <!-- RENG-45: `history.columns.author` now reads "Participants"
+                   (the history table's stacked cell); this table still shows
+                   one author, so it uses the plain `authorName` label. -->
+              <el-table-column :label="$t('history.columns.authorName')" width="140">
                 <template #default="{ row }">
                   <div class="author-cell">
                     <div class="author-avatar">{{ (row.author?.name || '?').charAt(0) }}</div>

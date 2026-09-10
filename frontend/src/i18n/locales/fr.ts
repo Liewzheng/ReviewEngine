@@ -172,7 +172,10 @@ export default {
     columns: {
       mrTitle: 'Titre MR',
       project: 'Projet',
-      author: 'Auteur',
+      // RENG-45 : la colonne d'identité de l'historique liste désormais tous les
+      // participants ; `authorName` est le libellé « auteur » simple (tableau de bord).
+      author: 'Participants',
+      authorName: 'Auteur',
       status: 'Statut',
       score: 'Score',
       llm: 'LLM',
@@ -184,6 +187,13 @@ export default {
     llm: {
       unknown: 'inconnu',
       expertTooltip: 'LLM ayant réellement produit ce rapport (provider/model)',
+    },
+    participants: {
+      roleAuthor: 'Auteur',
+      roleCreator: 'Ouvert par',
+      roleParticipant: 'Participant',
+      bot: 'Bot',
+      more: '+{n}',
     },
     actions: {
       rerun: 'Relancer la revue',

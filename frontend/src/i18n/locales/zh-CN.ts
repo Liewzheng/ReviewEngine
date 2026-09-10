@@ -168,7 +168,9 @@ export default {
     columns: {
       mrTitle: 'MR 标题',
       project: '项目',
-      author: '作者',
+      // RENG-45：历史表首个身份列改为「参与者」；authorName 为单作者列（仪表盘）。
+      author: '参与者',
+      authorName: '作者',
       status: '状态',
       score: '得分',
       llm: 'LLM',
@@ -180,6 +182,13 @@ export default {
     llm: {
       unknown: '未知',
       expertTooltip: '实际生成该报告的 LLM（provider/model）',
+    },
+    participants: {
+      roleAuthor: '作者',
+      roleCreator: '开启人',
+      roleParticipant: '参与者',
+      bot: '机器人',
+      more: '+{n}',
     },
     actions: {
       rerun: '重新评审',

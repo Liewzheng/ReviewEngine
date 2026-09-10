@@ -1,6 +1,14 @@
 import { request } from './api';
 import { normalizeStatus } from './status';
-import type { ReviewListItem, ReviewDetail, HistoryFilters, RiskLevel, ReviewAssessment, LlmUsage } from '../types/history';
+import type {
+  ReviewListItem,
+  ReviewDetail,
+  HistoryFilters,
+  RiskLevel,
+  ReviewAssessment,
+  ReviewParticipant,
+  LlmUsage,
+} from '../types/history';
 
 export interface ReviewsListResponse {
   items: ReviewListItem[];
@@ -42,8 +50,41 @@ interface RawReviewItem {
   gitlabMrUrl?: string;
   /** RENG-38: deduplicated LLM pairs (`reviews.llm_summary` snapshot). */
   llmSummary?: LlmUsage[] | null;
+  /** RENG-45: participants, already ordered author → creator → participant. */
+  participants?: unknown;
   /** Embedded full `ReviewOutput` JSON (carries `consolidated.assessment`). */
   result?: unknown;
+}
+
+/** Non-empty string or `undefined` — never throws on malformed input. */
+function asNonEmptyString(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.length > 0 ? raw : undefined;
+}
+
+/**
+ * RENG-45: parse the optional `participants` payload. Each entry is read
+ * through both spellings (`avatarUrl`/`avatar_url`, ...) because the list
+ * endpoint serves the snake_case `TaskStatus` shape while the detail endpoint
+ * merges camelCase fields. Malformed input degrades to `undefined` — the UI
+ * then renders the legacy single-author cell instead of erroring or blanking.
+ */
+function normalizeParticipants(raw: unknown): ReviewParticipant[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const participants: ReviewParticipant[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') continue;
+    const item = entry as Record<string, unknown>;
+    const name = asNonEmptyString(item.name) ?? asNonEmptyString(item.username);
+    if (!name) continue;
+    participants.push({
+      name,
+      username: asNonEmptyString(item.username) ?? asNonEmptyString(item.user_name),
+      avatarUrl: asNonEmptyString(item.avatarUrl) ?? asNonEmptyString(item.avatar_url) ?? null,
+      role: asNonEmptyString(item.role) ?? 'participant',
+      bot: item.bot === true || item.is_bot === true,
+    });
+  }
+  return participants.length > 0 ? participants : undefined;
 }
 
 /** Fallback band derivation, mirroring `scoring::review::score_to_risk_level`. */
@@ -120,6 +161,7 @@ function normalizeReviewListItem(raw: RawReviewItem): ReviewListItem {
     // Pass the snapshot through only when it is a non-empty array — anything
     // else (null, missing, malformed) degrades to "unknown" at render time.
     llmSummary: Array.isArray(raw.llmSummary) && raw.llmSummary.length > 0 ? raw.llmSummary : undefined,
+    participants: normalizeParticipants(raw.participants),
   };
 }
 
@@ -150,7 +192,7 @@ export async function getReviews(
 }
 
 export async function getReview(id: string): Promise<ReviewDetail> {
-  const raw = await request<ReviewDetail & { result?: unknown }>(`/reviews/${id}`);
+  const raw = await request<ReviewDetail & { result?: unknown; participants?: unknown }>(`/reviews/${id}`);
   // The merged detail response carries the raw snake_case status string
   // (`pending`/`running`/...); normalize it to the display vocabulary.
   // `rawApiResponse` is the embedded `ReviewOutput` (same payload as the
@@ -160,6 +202,7 @@ export async function getReview(id: string): Promise<ReviewDetail> {
     ...raw,
     status: normalizeStatus(raw.status),
     assessment: extractAssessment(raw.rawApiResponse ?? raw.result),
+    participants: normalizeParticipants(raw.participants),
   };
 }
 

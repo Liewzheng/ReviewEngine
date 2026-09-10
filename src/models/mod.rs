@@ -189,6 +189,201 @@ mod global_review_context_tests {
     }
 }
 
+// ─── MR/PR 参与者 (RENG-42/43) ──────────────
+
+/// A person involved in an MR/PR, as stored in `reviews.source_meta` and
+/// surfaced in the History "participants" column (RENG-42). Field names and
+/// the `snake_case` role strings are the persisted contract; the REST layer
+/// re-maps them to camelCase (`ReviewParticipant`, RENG-44).
+///
+/// Ordering and de-duplication are produced by [`aggregate_participants`]:
+/// `author` → `creator` → `participant`, one entry per person (highest role
+/// wins), distinct robots always stay distinct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Participant {
+    /// Display name; falls back to `username` when the provider has no name.
+    pub name: String,
+    /// Provider handle (`alice`, GitHub login). Empty when unknown.
+    #[serde(default)]
+    pub username: String,
+    /// Avatar URL; `None` when the provider does not return one.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// Why this person is in the list.
+    pub role: ParticipantRole,
+    /// Robot account (GitLab `*_bot` access-token users, GitHub `type: Bot`).
+    #[serde(default)]
+    pub bot: bool,
+}
+
+/// Role of a participant. Serialized `snake_case` as the persisted contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParticipantRole {
+    /// Head commit author — who wrote the code under review.
+    Author,
+    /// MR/PR opener.
+    Creator,
+    /// Any other participant (commenters, reviewers, robots).
+    Participant,
+}
+
+impl ParticipantRole {
+    /// De-dup precedence: `author > creator > participant`.
+    pub fn priority(self) -> u8 {
+        match self {
+            ParticipantRole::Author => 2,
+            ParticipantRole::Creator => 1,
+            ParticipantRole::Participant => 0,
+        }
+    }
+}
+
+/// Pre-aggregation participant record. Carries the provider's numeric user id
+/// so [`aggregate_participants`] can de-dup by id first, then username, then
+/// display name — the public [`Participant`] contract keeps no id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParticipantInput {
+    pub id: Option<u64>,
+    pub name: String,
+    pub username: String,
+    pub avatar_url: Option<String>,
+    pub role: ParticipantRole,
+    pub bot: bool,
+}
+
+impl ParticipantInput {
+    /// A record with only a display name and a role; the rest is filled in by
+    /// the provider-specific builders below.
+    pub fn new(name: impl Into<String>, role: ParticipantRole) -> Self {
+        Self {
+            id: None,
+            name: name.into(),
+            username: String::new(),
+            avatar_url: None,
+            role,
+            bot: false,
+        }
+    }
+
+    pub fn with_id(mut self, id: Option<u64>) -> Self {
+        self.id = id;
+        self
+    }
+
+    pub fn with_username(mut self, username: impl Into<String>) -> Self {
+        let username = username.into();
+        self.bot = self.bot || username_is_bot(&username);
+        self.username = username;
+        self
+    }
+
+    pub fn with_avatar(mut self, avatar_url: Option<String>) -> Self {
+        self.avatar_url = avatar_url.filter(|u| !u.trim().is_empty());
+        self
+    }
+
+    pub fn with_bot(mut self, bot: bool) -> Self {
+        self.bot = self.bot || bot;
+        self
+    }
+}
+
+/// Whether a handle looks like a provider robot account. GitLab group /
+/// project access tokens create users shaped like `group_1_bot`; GitHub marks
+/// bots with `user.type == "Bot"` (the caller ORs that flag in).
+pub fn username_is_bot(username: &str) -> bool {
+    username.trim().to_ascii_lowercase().ends_with("_bot")
+}
+
+/// Same-person test for aggregation: id when both sides have one (a mismatch
+/// means different people even with an equal name), else username, else
+/// display name — all case-insensitive.
+fn is_same_person(a: &ParticipantInput, b: &ParticipantInput) -> bool {
+    if let (Some(ia), Some(ib)) = (a.id, b.id) {
+        return ia == ib;
+    }
+    let (au, bu) = (a.username.trim(), b.username.trim());
+    if !au.is_empty() && au.eq_ignore_ascii_case(bu) {
+        return true;
+    }
+    let (an, bn) = (a.name.trim(), b.name.trim());
+    !an.is_empty() && an.eq_ignore_ascii_case(bn)
+}
+
+fn blank(s: &str) -> bool {
+    s.trim().is_empty()
+}
+
+fn blank_url(url: &Option<String>) -> bool {
+    url.as_deref().map(blank).unwrap_or(true)
+}
+
+/// Merge provider records into the persisted participant list: de-dup by
+/// person (highest role wins, blank name/username/avatar back-filled),
+/// distinct robots stay distinct (they carry different ids/usernames, so the
+/// person test never merges them), then order `author` → `creator` →
+/// `participant` (a stable sort keeps the provider's own order within a role).
+pub fn aggregate_participants(inputs: Vec<ParticipantInput>) -> Vec<Participant> {
+    let mut merged: Vec<ParticipantInput> = Vec::new();
+    for incoming in inputs {
+        if blank(&incoming.name) && blank(&incoming.username) {
+            continue;
+        }
+        match merged.iter_mut().find(|existing| is_same_person(existing, &incoming)) {
+            Some(existing) => {
+                if incoming.role.priority() > existing.role.priority() {
+                    existing.role = incoming.role;
+                }
+                if blank(&existing.name) {
+                    existing.name = incoming.name.clone();
+                }
+                if blank(&existing.username) {
+                    existing.username = incoming.username.clone();
+                }
+                if blank_url(&existing.avatar_url) {
+                    existing.avatar_url = incoming.avatar_url.clone();
+                }
+                existing.id = existing.id.or(incoming.id);
+                existing.bot = existing.bot || incoming.bot;
+            }
+            None => merged.push(incoming),
+        }
+    }
+    merged.sort_by_key(|a| std::cmp::Reverse(a.role.priority()));
+    merged
+        .into_iter()
+        .map(|input| Participant {
+            name: if blank(&input.name) {
+                input.username.clone()
+            } else {
+                input.name
+            },
+            username: input.username,
+            avatar_url: input.avatar_url.filter(|u| !blank(u)),
+            role: input.role,
+            bot: input.bot,
+        })
+        .collect()
+}
+
+/// Merge `incoming` participants into an already-aggregated `base` list,
+/// re-running the same de-dup/order rules. Used to fold note/review authors
+/// (which arrive after the MR participants fetch) into `SourceMeta`.
+pub fn merge_participants(base: &mut Vec<Participant>, incoming: Vec<Participant>) {
+    let to_input = |p: Participant| ParticipantInput {
+        id: None,
+        name: p.name,
+        username: p.username,
+        avatar_url: p.avatar_url,
+        role: p.role,
+        bot: p.bot,
+    };
+    let mut inputs: Vec<ParticipantInput> = base.drain(..).map(to_input).collect();
+    inputs.extend(incoming.into_iter().map(to_input));
+    *base = aggregate_participants(inputs);
+}
+
 // ─── GitLab MR 信息 ─────────────────────────
 
 /// Metadata about a GitLab Merge Request or GitHub Pull Request.
@@ -231,6 +426,13 @@ pub struct MRInfo {
     pub commit_author: Option<String>,
     /// Author's platform-specific unique ID (GitHub user.id / GitLab user.id).
     pub pr_author_id: Option<u64>,
+    /// RENG-43: everyone involved in the MR/PR, already de-duplicated and
+    /// ordered by [`aggregate_participants`] (head-commit author → MR/PR
+    /// opener → commenters/reviewers). Empty when the provider resolves
+    /// nobody. `#[serde(default)]` keeps previously serialized `MRInfo` JSON
+    /// (without this field) deserializable.
+    #[serde(default)]
+    pub participants: Vec<Participant>,
     /// Rendered MR discussion-history section injected into review prompts
     /// (0.10.0 §7.2). Filled by the pre-review discussion tap (DB-first,
     /// GitLab API fallback); `None` = no context injected (0.9 behaviour).
@@ -261,6 +463,7 @@ impl MRInfo {
             pr_author: None,
             pr_author_id: None,
             commit_author: None,
+            participants: Vec::new(),
             discussion_context: None,
             agents_md: None,
         }
@@ -400,5 +603,147 @@ mod tests {
             ReviewInput::LocalRepo { path, .. } => assert_eq!(path, "/tmp/test-repo"),
             _ => panic!("Expected LocalRepo variant"),
         }
+    }
+}
+
+#[cfg(test)]
+mod participants_tests {
+    use super::*;
+
+    fn input(id: Option<u64>, name: &str, username: &str, role: ParticipantRole) -> ParticipantInput {
+        ParticipantInput::new(name, role).with_id(id).with_username(username)
+    }
+
+    /// Role serialization is the persisted contract: snake_case strings the
+    /// REST layer passes through untouched.
+    #[test]
+    fn participant_role_serializes_snake_case() {
+        assert_eq!(serde_json::to_string(&ParticipantRole::Author).unwrap(), "\"author\"");
+        assert_eq!(serde_json::to_string(&ParticipantRole::Creator).unwrap(), "\"creator\"");
+        assert_eq!(
+            serde_json::to_string(&ParticipantRole::Participant).unwrap(),
+            "\"participant\""
+        );
+    }
+
+    /// Ordering is author → creator → participant regardless of input order.
+    #[test]
+    fn aggregate_orders_by_role_priority() {
+        let out = aggregate_participants(vec![
+            input(Some(3), "Carol", "carol", ParticipantRole::Participant),
+            input(Some(2), "Bob", "bob", ParticipantRole::Creator),
+            input(Some(1), "Alice", "alice", ParticipantRole::Author),
+        ]);
+        let roles: Vec<ParticipantRole> = out.iter().map(|p| p.role).collect();
+        assert_eq!(
+            roles,
+            vec![
+                ParticipantRole::Author,
+                ParticipantRole::Creator,
+                ParticipantRole::Participant
+            ]
+        );
+        let names: Vec<&str> = out.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Alice", "Bob", "Carol"]);
+    }
+
+    /// The same person arriving as both creator and author keeps only the
+    /// highest-priority entry, with blanks back-filled from the loser.
+    #[test]
+    fn aggregate_dedups_same_person_keeping_highest_role() {
+        let out = aggregate_participants(vec![
+            ParticipantInput::new("Alice", ParticipantRole::Author)
+                .with_id(Some(1))
+                .with_avatar(Some("http://img/alice".into())),
+            input(Some(1), "", "alice", ParticipantRole::Creator),
+        ]);
+        assert_eq!(out.len(), 1, "one person, one entry");
+        assert_eq!(out[0].role, ParticipantRole::Author, "author wins");
+        assert_eq!(out[0].name, "Alice");
+        assert_eq!(out[0].username, "alice", "blank username back-filled");
+        assert_eq!(out[0].avatar_url.as_deref(), Some("http://img/alice"));
+    }
+
+    /// Username de-dups when no ids are available; display name is the last
+    /// resort. Case-insensitive on both.
+    #[test]
+    fn aggregate_dedups_by_username_then_name() {
+        let out = aggregate_participants(vec![
+            input(None, "Alice A", "alice", ParticipantRole::Participant),
+            input(None, "Alice A", "ALICE", ParticipantRole::Creator),
+            input(None, "Bob B", "", ParticipantRole::Participant),
+            input(None, "bob b", "", ParticipantRole::Participant),
+        ]);
+        assert_eq!(out.len(), 2, "alice and bob only");
+        assert_eq!(out[0].role, ParticipantRole::Creator, "alice upgraded by username");
+        assert_eq!(out[1].name, "Bob B");
+    }
+
+    /// Distinct robots are distinct subjects: never merged, and `_bot`
+    /// usernames (or an explicit bot flag) carry the bot marker through.
+    #[test]
+    fn aggregate_keeps_distinct_bots_and_flags_them() {
+        let out = aggregate_participants(vec![
+            ParticipantInput::new("Group Bot", ParticipantRole::Participant).with_username("group_1_bot"),
+            ParticipantInput::new("Other Bot", ParticipantRole::Participant).with_username("other_2_bot"),
+            ParticipantInput::new("Reviewer", ParticipantRole::Participant)
+                .with_username("reviewer")
+                .with_bot(true),
+            ParticipantInput::new("Human", ParticipantRole::Creator).with_username("human"),
+        ]);
+        assert_eq!(out.len(), 4, "four distinct subjects");
+        let bots: Vec<bool> = out.iter().map(|p| p.bot).collect();
+        assert!(bots.iter().filter(|b| **b).count() == 3, "three bots: {bots:?}");
+        let human = out.iter().find(|p| p.username == "human").unwrap();
+        assert!(!human.bot, "plain handles are not bots");
+    }
+
+    /// People without an avatar keep `avatar_url: None` (no fabricated URL),
+    /// and a missing display name falls back to the username.
+    #[test]
+    fn aggregate_handles_missing_avatar_and_missing_name() {
+        let out = aggregate_participants(vec![input(Some(5), "", "ghost", ParticipantRole::Participant)]);
+        assert_eq!(out[0].name, "ghost", "name falls back to username");
+        assert!(out[0].avatar_url.is_none());
+    }
+
+    /// No provider participants at all is a valid, empty result.
+    #[test]
+    fn aggregate_empty_input_yields_empty() {
+        assert!(aggregate_participants(Vec::new()).is_empty());
+    }
+
+    /// `merge_participants` re-runs the same rules across sources.
+    #[test]
+    fn merge_participants_folds_extra_people_into_existing_list() {
+        let mut base = aggregate_participants(vec![
+            input(Some(1), "Alice", "alice", ParticipantRole::Author),
+            input(Some(2), "Bob", "bob", ParticipantRole::Creator),
+        ]);
+        // A note author already known is not duplicated; a new one is appended.
+        merge_participants(
+            &mut base,
+            vec![
+                Participant {
+                    name: "Bob".into(),
+                    username: "bob".into(),
+                    avatar_url: Some("http://img/bob".into()),
+                    role: ParticipantRole::Participant,
+                    bot: false,
+                },
+                Participant {
+                    name: "Carol".into(),
+                    username: "carol".into(),
+                    avatar_url: None,
+                    role: ParticipantRole::Participant,
+                    bot: false,
+                },
+            ],
+        );
+        assert_eq!(base.len(), 3);
+        let bob = base.iter().find(|p| p.username == "bob").unwrap();
+        assert_eq!(bob.role, ParticipantRole::Creator, "higher role survives the merge");
+        assert_eq!(bob.avatar_url.as_deref(), Some("http://img/bob"), "avatar back-filled");
+        assert_eq!(base.last().unwrap().name, "Carol", "participants stay last");
     }
 }

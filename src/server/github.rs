@@ -252,6 +252,7 @@ pub(crate) fn source_meta_from_pr_payload(payload: &PrHookPayload) -> SourceMeta
         author_avatar_url: non_empty(&payload.author_avatar_url),
         gitlab_mr_url: non_empty(&payload.pr_url),
         commit_sha: non_empty(&payload.sha),
+        ..SourceMeta::default()
     }
 }
 

@@ -167,7 +167,17 @@ pub struct DiscussionNote {
     pub project: String,
     pub mr_iid: u64,
     pub note_id: u64,
+    /// Author handle: username when the provider returns one, else the
+    /// display name (webhook ingestion) or `user#<id>` (API fallback).
     pub author: String,
+    /// RENG-43: provider user id of the author, `None` when the payload
+    /// omitted it. Stored as TEXT (`migrations/0003_participant_meta.sql`) so
+    /// both SQLite and PostgreSQL accept the same bind.
+    pub author_id: Option<u64>,
+    /// RENG-43: author avatar URL (GitLab returns it on every note author).
+    pub author_avatar_url: Option<String>,
+    /// RENG-43: robot account flag (`user.bot` or a `_bot` handle).
+    pub author_bot: bool,
     pub body: String,
     /// The note's own creation time (from the webhook payload), NOT the
     /// ingestion time.

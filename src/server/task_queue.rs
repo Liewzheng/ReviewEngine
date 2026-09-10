@@ -34,6 +34,12 @@ pub struct SourceMeta {
     pub author_avatar_url: Option<String>,
     pub gitlab_mr_url: Option<String>,
     pub commit_sha: Option<String>,
+    /// RENG-43: everyone involved in the MR/PR (head-commit author → MR/PR
+    /// opener → commenters/reviewers/robots), already de-duplicated and
+    /// ordered. `#[serde(default)]` keeps pre-0.10.6 `source_meta` rows
+    /// deserializable — they read back as `[]`.
+    #[serde(default)]
+    pub participants: Vec<crate::models::Participant>,
 }
 
 /// Map the MR metadata resolved by the review pipeline (`MRInfo`, fetched
@@ -44,7 +50,10 @@ pub struct SourceMeta {
 ///
 /// Author precedence (RENG-27): the head commit's author wins over the MR
 /// creator — the commit author is who wrote the code, the MR creator is
-/// only the fallback.
+/// only the fallback. RENG-43: the provider-resolved participant list is
+/// carried through verbatim (ordering/de-dup already applied by the client);
+/// note authors are merged in by the caller, which is the layer that can read
+/// `mr_discussions`.
 pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMeta {
     fn non_empty(s: &str) -> Option<String> {
         let trimmed = s.trim();
@@ -64,6 +73,7 @@ pub(crate) fn source_meta_from_mr_info(info: &crate::models::MRInfo) -> SourceMe
             .and_then(non_empty)
             .or_else(|| info.pr_author.clone()),
         commit_sha: non_empty(&info.git_hash),
+        participants: info.participants.clone(),
         ..SourceMeta::default()
     }
 }
@@ -408,6 +418,12 @@ impl TaskStore {
             }
             if is_blank(&meta.commit_sha) {
                 meta.commit_sha = candidate.commit_sha;
+            }
+            // RENG-43: participants are a list, not an Option<String>: fill
+            // only when nothing has been recorded yet, so note-author merges
+            // done by the caller are never clobbered.
+            if meta.participants.is_empty() {
+                meta.participants = candidate.participants;
             }
             filled = Some(entry.source_meta.clone());
         }
@@ -768,6 +784,13 @@ mod tests {
             author_avatar_url: None,
             gitlab_mr_url: None,
             commit_sha: Some("deadbeef".to_string()),
+            participants: vec![crate::models::Participant {
+                name: "Alice".to_string(),
+                username: "alice".to_string(),
+                avatar_url: Some("http://avatar/alice".to_string()),
+                role: crate::models::ParticipantRole::Author,
+                bot: false,
+            }],
         }
     }
 
@@ -808,6 +831,91 @@ mod tests {
         info.commit_author = Some("   ".to_string());
         let meta = source_meta_from_mr_info(&info);
         assert_eq!(meta.author_name.as_deref(), Some("mr-creator"));
+    }
+
+    /// RENG-43: the provider-resolved participant list is carried through
+    /// verbatim, ordered and de-duplicated.
+    #[test]
+    fn source_meta_from_mr_info_carries_participants() {
+        let mut info = crate::models::MRInfo::new(
+            "group/proj".to_string(),
+            "t".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        );
+        info.participants = vec![
+            crate::models::Participant {
+                name: "Alice".to_string(),
+                username: "alice".to_string(),
+                avatar_url: Some("http://img/alice".to_string()),
+                role: crate::models::ParticipantRole::Author,
+                bot: false,
+            },
+            crate::models::Participant {
+                name: "Group Bot".to_string(),
+                username: "group_1_bot".to_string(),
+                avatar_url: None,
+                role: crate::models::ParticipantRole::Participant,
+                bot: true,
+            },
+        ];
+        let meta = source_meta_from_mr_info(&info);
+        assert_eq!(meta.participants.len(), 2);
+        assert_eq!(meta.participants[0].role, crate::models::ParticipantRole::Author);
+        assert!(meta.participants[1].bot);
+    }
+
+    /// RENG-43: no participants resolved (or a pre-0.10.6 provider) is a
+    /// valid empty list, not an error.
+    #[test]
+    fn source_meta_from_mr_info_without_participants_is_empty() {
+        let info = crate::models::MRInfo::new(
+            "group/proj".to_string(),
+            "t".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+        );
+        assert!(source_meta_from_mr_info(&info).participants.is_empty());
+    }
+
+    /// RENG-43: `source_meta` rows written before 0.10.6 carry no
+    /// `participants` key — decoding them must succeed and read back as `[]`.
+    #[test]
+    fn legacy_source_meta_without_participants_deserializes() {
+        let legacy = r#"{
+            "mr_title": "Fix login bug",
+            "project": "group/proj",
+            "author_name": "alice",
+            "author_avatar_url": "http://img/alice",
+            "commit_sha": "abc123"
+        }"#;
+        let meta: SourceMeta = serde_json::from_str(legacy).expect("legacy row must decode");
+        assert_eq!(meta.author_name.as_deref(), Some("alice"));
+        assert!(meta.participants.is_empty(), "missing field reads back as []");
+
+        // The whole row may also be the empty object `{}` (0001's column
+        // default) — still decodable.
+        let empty: SourceMeta = serde_json::from_str("{}").expect("empty source_meta must decode");
+        assert!(empty.participants.is_empty());
+    }
+
+    /// RENG-43: a legacy row's `participants` round-trips as `[]` and a
+    /// freshly written list survives the encode/decode cycle.
+    #[test]
+    fn source_meta_participants_round_trip() {
+        let mut meta = SourceMeta::default();
+        meta.participants = vec![crate::models::Participant {
+            name: "Alice".to_string(),
+            username: "alice".to_string(),
+            avatar_url: None,
+            role: crate::models::ParticipantRole::Creator,
+            bot: false,
+        }];
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: SourceMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.participants, meta.participants);
+        // Role strings are the persisted contract.
+        assert!(json.contains("\"role\":\"creator\""));
     }
 
     /// F2 guard: hand-seeded rows with created_at later than completed_at
@@ -861,6 +969,34 @@ mod tests {
         // Candidate-absent fields stay absent.
         assert!(meta.author_avatar_url.is_none());
         assert!(meta.gitlab_mr_url.is_none());
+        // RENG-43: an empty participant list is blank and gets filled.
+        assert_eq!(meta.participants.len(), 1);
+        assert_eq!(meta.participants[0].username, "alice");
+    }
+
+    /// RENG-43: once participants are recorded (including note authors merged
+    /// in by the caller) a later fill must not replace the list.
+    #[tokio::test]
+    async fn fill_source_meta_does_not_clobber_existing_participants() {
+        let store = TaskStore::new();
+        let id = store
+            .create(Some(SourceMeta {
+                participants: vec![crate::models::Participant {
+                    name: "Carol".to_string(),
+                    username: "carol".to_string(),
+                    avatar_url: None,
+                    role: crate::models::ParticipantRole::Participant,
+                    bot: false,
+                }],
+                ..SourceMeta::default()
+            }))
+            .await;
+
+        store.fill_source_meta(id, candidate_meta()).await;
+
+        let meta = store.get(id).await.expect("task exists").source_meta;
+        assert_eq!(meta.participants.len(), 1, "existing list must survive");
+        assert_eq!(meta.participants[0].username, "carol");
     }
 
     #[tokio::test]

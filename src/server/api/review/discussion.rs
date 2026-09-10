@@ -70,31 +70,38 @@ impl DiscussionTap {
         }
     }
 
-    /// Load, render, and persist the discussion section for one review task.
-    /// `Some(section)` is attached to `MRInfo::discussion_context`; `None` =
-    /// degrade to the 0.9 prompt. `task_id` must be a live `reviews` row
-    /// (FK target of `review_contexts`); callers without a task store skip
-    /// the tap entirely.
-    pub(crate) async fn inject(
+    /// Load this MR's notes exactly as the §7.2 tap would: DB-first, API
+    /// fallback with back-fill. `None` on any failure. Exposed to the task
+    /// fill path so note authors can join the participant list (RENG-43) from
+    /// the same, already-fetched note set.
+    pub(crate) async fn load_notes(
         &self,
-        task_id: Uuid,
         project: &str,
         mr_iid: u64,
         gitlab_token: &str,
         mr_url: &str,
-    ) -> Option<String> {
+    ) -> Option<Vec<DiscussionNote>> {
         let instance_base = self.instance_base.clone();
         let platform = self.platform.clone();
         let token = gitlab_token.to_string();
         let url = mr_url.to_string();
-        let notes = load_discussion_notes(&self.db, &self.platform, project, mr_iid, move || async move {
+        load_discussion_notes(&self.db, &self.platform, project, mr_iid, move || async move {
             fetch_notes_via_api(&platform, &instance_base, project, mr_iid, &token, &url).await
         })
-        .await?;
+        .await
+    }
+
+    /// Render + persist an already-loaded note set for one review task.
+    /// `Some(section)` is attached to `MRInfo::discussion_context`; `None` =
+    /// degrade to the 0.9 prompt. `task_id` must be a live `reviews` row
+    /// (FK target of `review_contexts`). Split from the load step so the fill
+    /// path loads the notes once and uses them for both the participant list
+    /// and the prompt section.
+    pub(crate) async fn inject_notes(&self, task_id: Uuid, notes: &[DiscussionNote]) -> Option<String> {
         if notes.is_empty() {
             return None;
         }
-        let section = render_discussion_context(&notes);
+        let section = render_discussion_context(notes);
         if section.len() > MAX_CONTEXT_BYTES {
             tracing::warn!(
                 task_id = %task_id,
@@ -118,6 +125,24 @@ impl DiscussionTap {
         }
         Some(section)
     }
+}
+
+/// RENG-43: turn stored note authors into MR participants. Identity fields
+/// (`author_id` / `author_avatar_url` / `author_bot`) come from migration
+/// 0003; `author` is the provider handle when one was available, else the
+/// display name, so it doubles as the username for de-duplication.
+pub(crate) fn participants_from_notes(notes: &[DiscussionNote]) -> Vec<crate::models::Participant> {
+    let seeds = notes
+        .iter()
+        .map(|note| {
+            crate::models::ParticipantInput::new(note.author.clone(), crate::models::ParticipantRole::Participant)
+                .with_id(note.author_id)
+                .with_username(note.author.clone())
+                .with_avatar(note.author_avatar_url.clone())
+                .with_bot(note.author_bot)
+        })
+        .collect();
+    crate::models::aggregate_participants(seeds)
 }
 
 /// Render notes (already ordered `(created_at, note_id)` ascending — the
@@ -225,6 +250,8 @@ async fn fetch_notes_via_api(
                 continue;
             }
         }
+        // RENG-43: bot detection before `username` is moved into `author`.
+        let author_bot = note.author.bot || crate::models::username_is_bot(&note.author.username);
         let author = if note.author.username.is_empty() {
             if note.author.name.is_empty() {
                 format!("user#{}", note.author.id)
@@ -247,6 +274,9 @@ async fn fetch_notes_via_api(
             mr_iid,
             note_id: note.id.max(0) as u64,
             author,
+            author_id: Some(note.author.id),
+            author_avatar_url: note.author.avatar_url.clone().filter(|u| !u.trim().is_empty()),
+            author_bot,
             body: note.body,
             created_at,
         });
@@ -272,6 +302,9 @@ mod tests {
             mr_iid: 7,
             note_id,
             author: author.to_string(),
+            author_id: Some(note_id + 100),
+            author_avatar_url: Some(format!("http://avatar/{author}")),
+            author_bot: false,
             body: body.to_string(),
             created_at: chrono::Utc.timestamp_opt(1_700_000_000 + secs, 0).unwrap(),
         }
@@ -377,6 +410,35 @@ mod tests {
         assert!(notes.is_none());
     }
 
+    /// RENG-43: stored note authors become participants with their id, avatar
+    /// and robot flag; `_bot` handles are flagged even without the explicit
+    /// payload field.
+    #[tokio::test]
+    async fn participants_from_notes_carry_identity_and_bot_flag() {
+        let mut bot = note(2, "group_1_bot", "beep", 20);
+        bot.author_id = Some(9);
+        bot.author_avatar_url = Some("http://avatar/bot".into());
+        let notes = vec![
+            note(1, "alice", "first", 10),
+            bot,
+            note(1, "alice", "duplicate author", 30),
+        ];
+        let participants = participants_from_notes(&notes);
+        assert_eq!(participants.len(), 2, "one entry per author");
+        assert_eq!(participants[0].username, "alice");
+        assert_eq!(participants[0].avatar_url.as_deref(), Some("http://avatar/alice"));
+        assert!(!participants[0].bot);
+        assert!(participants[1].bot, "`_bot` handle detected at conversion");
+        assert_eq!(participants[1].username, "group_1_bot");
+        assert_eq!(participants[1].role, crate::models::ParticipantRole::Participant);
+    }
+
+    /// RENG-43: no notes means no participant contributions (never an error).
+    #[test]
+    fn participants_from_empty_notes_is_empty() {
+        assert!(participants_from_notes(&[]).is_empty());
+    }
+
     /// (e) upsert_review_context on the same (task_id, kind) twice: no error,
     /// the content is rewritten.
     #[tokio::test]
@@ -455,9 +517,11 @@ mod tests {
             platform: "default".to_string(),
             instance_base: String::new(), // DB has rows → fallback never runs
         };
-        let section = tap
-            .inject(entry.task_id, "group/proj", 7, "token", "http://x/-/merge_requests/7")
-            .await;
+        let notes = tap
+            .load_notes("group/proj", 7, "token", "http://x/-/merge_requests/7")
+            .await
+            .expect("stored notes must load");
+        let section = tap.inject_notes(entry.task_id, &notes).await;
         assert!(section.is_none(), "oversized render must be skipped");
         let count: i64 = ::sqlx::query_scalar("SELECT COUNT(*) FROM review_contexts WHERE task_id = ?")
             .bind(entry.task_id.to_string())

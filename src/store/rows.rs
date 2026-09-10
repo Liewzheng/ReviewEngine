@@ -440,30 +440,57 @@ pub(crate) fn expert_report_rows(task_id: &Uuid, result: &Value, created_at: Str
 use crate::store::traits::DiscussionNote;
 
 /// Raw decode target for `SELECT platform, project, mr_iid, note_id, author,
-/// body, created_at FROM mr_discussions`, in column order.
-pub(crate) type DiscussionRowTuple = (String, String, i64, i64, String, String, String);
+/// author_id, author_avatar_url, author_bot, body, created_at FROM
+/// mr_discussions`, in column order. `author_id` is the TEXT-stored provider
+/// id; `author_bot` is the INTEGER 0/1 bool.
+pub(crate) type DiscussionRowTuple = (
+    String,
+    String,
+    i64,
+    i64,
+    String,
+    Option<String>,
+    Option<String>,
+    i64,
+    String,
+    String,
+);
 
 fn u64_from_i64(value: i64, what: &str) -> Result<u64> {
     u64::try_from(value).with_context(|| format!("mr_discussions.{what} out of range: {value}"))
 }
 
-/// `DiscussionNote.mr_iid` / `note_id` as bindable i64 (BIGINT columns).
-pub(crate) fn discussion_ids(note: &DiscussionNote) -> Result<(i64, i64)> {
+/// `DiscussionNote.mr_iid` / `note_id` as bindable i64 (BIGINT columns), and
+/// the author id as the decimal string the TEXT column stores.
+pub(crate) fn discussion_binds(note: &DiscussionNote) -> Result<(i64, i64, Option<String>)> {
     Ok((
         i64::try_from(note.mr_iid).with_context(|| format!("mr_iid out of range: {}", note.mr_iid))?,
         i64::try_from(note.note_id).with_context(|| format!("note_id out of range: {}", note.note_id))?,
+        note.author_id.map(|id| id.to_string()),
     ))
 }
 
 pub(crate) fn discussion_from_row(
-    (platform, project, mr_iid, note_id, author, body, created_at): DiscussionRowTuple,
+    (platform, project, mr_iid, note_id, author, author_id, author_avatar_url, author_bot, body, created_at): DiscussionRowTuple,
 ) -> Result<DiscussionNote> {
+    let author_id = author_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            s.parse::<u64>()
+                .with_context(|| format!("mr_discussions.author_id is not a u64: {s:?}"))
+        })
+        .transpose()?;
     Ok(DiscussionNote {
         platform,
         project,
         mr_iid: u64_from_i64(mr_iid, "mr_iid")?,
         note_id: u64_from_i64(note_id, "note_id")?,
         author,
+        author_id,
+        author_avatar_url: author_avatar_url.filter(|u| !u.trim().is_empty()),
+        author_bot: author_bot != 0,
         body,
         created_at: decode_ts(&created_at).context("mr_discussions.created_at")?,
     })

@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info};
 
-use crate::models::MRInfo;
+use crate::models::{aggregate_participants, MRInfo, ParticipantInput, ParticipantRole};
 
-use super::types::{GitHubUser, PrReview, PullRequest, ReviewComment};
+use super::types::{GitHubUser, PrReview, PrUser, PullRequest, ReviewComment};
 
 /// GitHub REST API client.
 #[derive(Clone)]
@@ -132,6 +132,32 @@ impl Client {
             *sha = Some(pr.head.sha.clone());
         }
 
+        // RENG-43: participants — the PR opener (creator) plus everyone who
+        // commented or reviewed. Both listings are best-effort: a failure
+        // degrades to fewer participants, never a failed review.
+        let mut seeds = vec![participant_from_pr_user(&pr.user, ParticipantRole::Creator)];
+        match self.list_review_comments().await {
+            Ok(comments) => {
+                seeds.extend(
+                    comments
+                        .iter()
+                        .map(|c| participant_from_pr_user(&c.user, ParticipantRole::Participant)),
+                );
+            }
+            Err(e) => tracing::warn!("failed to list review comments for participants (best-effort): {e:#}"),
+        }
+        match self.list_pr_reviews().await {
+            Ok(reviews) => {
+                seeds.extend(
+                    reviews
+                        .iter()
+                        .map(|r| participant_from_pr_user(&r.user, ParticipantRole::Participant)),
+                );
+            }
+            Err(e) => tracing::warn!("failed to list PR reviews for participants (best-effort): {e:#}"),
+        }
+        let participants = aggregate_participants(seeds);
+
         Ok(MRInfo {
             project_path: format!("{}/{}", self.owner, self.repo),
             mr_iid: pr.number,
@@ -146,8 +172,11 @@ impl Client {
             pr_author: Some(pr.user.login),
             pr_author_id: Some(pr.user.id),
             // RENG-27: commit-author resolution is GitLab-only for now; the
-            // GitHub path keeps the PR-author fallback unchanged.
+            // GitHub path keeps the PR-author fallback unchanged, so no
+            // `author`-role participant is produced here (RENG-43 records the
+            // PR opener as `creator`).
             commit_author: None,
+            participants,
             discussion_context: None,
             agents_md: None,
         })
@@ -430,6 +459,22 @@ impl Client {
 
         Ok(resp.json().await?)
     }
+}
+
+/// RENG-43: map a GitHub user onto an aggregation record. `login` doubles as
+/// the display name (GitHub does not expose a separate display name here) and
+/// as the de-dup key; `type == "Bot"` marks robots.
+fn participant_from_pr_user(user: &PrUser, role: ParticipantRole) -> ParticipantInput {
+    let name = if user.login.trim().is_empty() {
+        format!("user#{}", user.id)
+    } else {
+        user.login.clone()
+    };
+    ParticipantInput::new(name, role)
+        .with_id(Some(user.id))
+        .with_username(user.login.clone())
+        .with_avatar(user.avatar_url.clone())
+        .with_bot(user.is_bot())
 }
 
 /// Percent-encode each segment of a repository file path for the contents

@@ -217,6 +217,7 @@ fn source_meta_with_commit() -> SourceMeta {
         author_avatar_url: Some("http://avatar".to_string()),
         gitlab_mr_url: Some("http://gitlab/mr/1".to_string()),
         commit_sha: Some("abc123".to_string()),
+        ..SourceMeta::default()
     }
 }
 

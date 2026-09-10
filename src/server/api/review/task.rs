@@ -318,19 +318,28 @@ pub(crate) async fn enqueue_review(
                     super::agents_md::persist_agents_md(db_clone.as_ref(), task_id, section).await;
                 }
                 if let Some(ref mut info) = resolved.mr_info {
-                    store_clone
-                        .fill_source_meta(task_id, source_meta_from_mr_info(info))
-                        .await;
+                    // RENG-43: notes are loaded once — their authors join the
+                    // participant list, the same set feeds the §7.2 prompt tap.
+                    let notes = match (tap.as_ref(), mr_url.as_deref(), token_for_tap.as_deref()) {
+                        (Some(tap), Some(url), Some(token)) => {
+                            tap.load_notes(&info.project_path, u64::from(info.mr_iid), token, url)
+                                .await
+                        }
+                        _ => None,
+                    };
+                    let mut meta = source_meta_from_mr_info(info);
+                    if let Some(notes) = notes.as_deref() {
+                        crate::models::merge_participants(
+                            &mut meta.participants,
+                            crate::server::api::review::discussion::participants_from_notes(notes),
+                        );
+                    }
+                    store_clone.fill_source_meta(task_id, meta).await;
                     // §7.2: inject the MR discussion history into the prompt
                     // context. Best-effort — any failure degrades to `None`
                     // and the review runs with the 0.9 prompt.
-                    if let (Some(tap), Some(url), Some(token)) =
-                        (tap.as_ref(), mr_url.as_deref(), token_for_tap.as_deref())
-                    {
-                        if let Some(section) = tap
-                            .inject(task_id, &info.project_path, u64::from(info.mr_iid), token, url)
-                            .await
-                        {
+                    if let (Some(tap), Some(notes)) = (tap.as_ref(), notes.as_deref()) {
+                        if let Some(section) = tap.inject_notes(task_id, notes).await {
                             info.discussion_context = Some(section);
                         }
                     }

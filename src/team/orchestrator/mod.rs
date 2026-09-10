@@ -169,7 +169,10 @@ impl TeamOrchestrator for DefaultOrchestrator {
                     prompt_engine.build_aggregator_prompt(&reports, &mr_info, _global_context.as_ref(), "en")?;
                 let llm_config = select_llm_config(aggregator, llm_configs);
                 let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
-                let agg_report = crate::output::parser::parse_aggregator_response(&result.content)?;
+                let mut agg_report = crate::output::parser::parse_aggregator_response(&result.content)?;
+                // RENG-38: snapshot the aggregator's actual LLM.
+                agg_report.llm_provider = Some(result.provider.clone());
+                agg_report.llm_model = Some(result.model.clone());
                 Some(agg_report)
             } else {
                 None
@@ -321,7 +324,12 @@ pub async fn run_aggregator(
         }
     }
 
-    crate::output::parser::parse_aggregator_response(&result.content)
+    crate::output::parser::parse_aggregator_response(&result.content).map(|mut agg| {
+        // RENG-38: snapshot the aggregator's actual LLM.
+        agg.llm_provider = Some(result.provider.clone());
+        agg.llm_model = Some(result.model.clone());
+        agg
+    })
 }
 
 /// Resolve the review input into raw diff text and MR info.

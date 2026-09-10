@@ -39,6 +39,8 @@ fn test_render_team_report_with_findings() {
         raw_llm_response: String::new(),
         parse_error: None,
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     }];
     let metrics = vec![ExpertMetrics {
         name: "security".to_string(),
@@ -79,6 +81,8 @@ fn test_render_team_report_with_custom_scoring() {
         raw_llm_response: String::new(),
         parse_error: None,
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     }];
     let metrics = vec![ExpertMetrics {
         name: "security".to_string(),
@@ -124,6 +128,8 @@ fn test_render_team_report_backward_compatible() {
         raw_llm_response: String::new(),
         parse_error: None,
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     }];
     let metrics = vec![ExpertMetrics {
         name: "security".to_string(),
@@ -354,6 +360,8 @@ fn test_render_expert_section_plain_report_unchanged() {
         raw_llm_response: "raw".to_string(),
         parse_error: None,
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     };
     assert_eq!(render_expert_section(&report), report.markdown);
 }
@@ -367,6 +375,8 @@ fn test_render_expert_section_parse_error_surfaces_instead_of_no_issues() {
         raw_llm_response: "review:\n  findings: [unclosed".to_string(),
         parse_error: Some("YAML parse failed".to_string()),
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     };
     let section = render_expert_section(&report);
     assert!(
@@ -389,6 +399,8 @@ fn test_render_expert_section_raw_dump_path_referenced() {
         raw_llm_response: "x".repeat(1200),
         parse_error: None,
         raw_dump_path: Some("/tmp/report.raw/security.1.response.txt".to_string()),
+        llm_provider: None,
+        llm_model: None,
     };
     let section = render_expert_section(&report);
     assert!(section.contains("Raw LLM response"), "raw section must be present");

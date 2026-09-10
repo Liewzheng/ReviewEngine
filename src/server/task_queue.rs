@@ -90,6 +90,12 @@ pub struct TaskEntry {
     pub source_meta: SourceMeta,
     pub progress: Option<u8>,        // 0-100
     pub expert_name: Option<String>, // current active expert
+    /// RENG-38: JSON snapshot of the deduplicated `[{provider, model}]` LLM
+    /// pairs that produced this review's reports (see
+    /// [`crate::models::ReviewOutput::llm_usages`]). Filled on terminal
+    /// `update` from `result` so the in-memory path (db=None) and the
+    /// write-through row carry the same value.
+    pub llm_summary: Option<String>,
 }
 
 /// A real-time event broadcast to SSE subscribers when a task's state changes.
@@ -220,6 +226,7 @@ impl TaskStore {
             source_meta: source_meta.unwrap_or_default(),
             progress: None,
             expert_name: None,
+            llm_summary: None,
         };
         self.inner.write().await.insert(id, entry.clone());
         let _ = self.tx.send(TaskEvent {
@@ -303,6 +310,9 @@ impl TaskStore {
             entry.state = new_state.clone();
             entry.result = result;
             entry.error = error.clone();
+            // RENG-38: refresh the LLM-usage snapshot from the new result
+            // (terminal transitions carry it; mid-flight updates clear it).
+            entry.llm_summary = entry.result.as_ref().and_then(crate::store::rows::llm_summary_json);
             if new_state == TaskState::Completed || new_state == TaskState::Failed || new_state == TaskState::Cancelled
             {
                 entry.completed_at = Some(chrono::Utc::now());
@@ -820,6 +830,7 @@ mod tests {
             source_meta: SourceMeta::default(),
             progress: None,
             expert_name: None,
+            llm_summary: None,
         };
         assert_eq!(entry.duration_ms(), Some(0), "inverted span must clamp, not wrap");
 
@@ -952,6 +963,8 @@ mod tests {
             raw_llm_response: "raw".to_string(),
             parse_error: None,
             raw_dump_path: None,
+            llm_provider: None,
+            llm_model: None,
         };
         crate::models::ReviewOutput {
             reports: vec![report("security"), report("performance")],

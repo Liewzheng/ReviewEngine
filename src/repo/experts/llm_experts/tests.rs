@@ -409,6 +409,7 @@ impl LLMProvider for ScriptedProvider {
             content: self.bodies[i].clone(),
             total_tokens: 1,
             model: "mock".to_string(),
+            provider: "mock".to_string(),
         })
     }
 }

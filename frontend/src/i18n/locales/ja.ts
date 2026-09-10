@@ -174,10 +174,15 @@ export default {
       author: '作成者',
       status: 'ステータス',
       score: 'スコア',
+      llm: 'LLM',
       duration: '所要時間',
       created: '作成日時',
       time: '時間',
       actions: '操作',
+    },
+    llm: {
+      unknown: '不明',
+      expertTooltip: 'このレポートを実際に生成した LLM（provider/model）',
     },
     actions: {
       rerun: 'レビューを再実行',

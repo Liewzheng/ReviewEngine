@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.10.3] - 2026-09-10
+
+### Added
+- **Review history shows the LLM that actually produced each report (RENG-38)**: `CompletionResult` now carries the hitting provider's name — `complete_with_fallback` attributes a success to the exact fallback-chain config that answered, not the caller's primary — and every expert/aggregator production point snapshots `(provider, model)` onto the report (`ExpertReport.llm_provider/llm_model`, `AggregatedReport.llm_provider/llm_model`, both `Option`, `#[serde(default)]` so pre-0.10.2 JSON still deserializes). Migration `0002_llm_snapshot.sql` adds `expert_reports.llm_provider/llm_model` (denormalized per-expert snapshot — deliberately name snapshots, not FK references: `llm_providers` is rewritten DELETE+INSERT on every config save, so foreign keys would dangle) and `reviews.llm_summary` (deduplicated `[{provider, model}]` JSON, written on terminal completion so the history list never parses `reviews.result`). API: `GET /reviews/{id}` experts gain `llmProvider`/`llmModel`, `GET /reviews` items gain `llmSummary`; the History page shows a per-expert `provider/model` tag in the detail drawer and a compact LLM column in the list. Records predating 0.10.2 carry NULLs and render as "未知"/not shown — never an error. Note: the lead-overview, verifier, and adjudicator passes also call the LLM but produce no expert report row, so their provider/model is not yet snapshotted (deferred). (`src/llm/provider.rs`, `src/llm/client/mod.rs`, `src/models/finding.rs`, `src/team/orchestrator/pipeline.rs`, `src/team/orchestrator/mod.rs`, `src/expert/mod.rs`, `migrations/0002_llm_snapshot.sql`, `src/store/rows.rs`, `src/store/sqlx.rs`, `src/server/task_queue.rs`, `src/server/api/types.rs`, `src/server/api/review/task.rs`, `frontend/src/types/history.ts`, `frontend/src/services/reviews.ts`, `frontend/src/views/ReviewHistory.vue`, `frontend/src/i18n/locales/*` ×6)
+
 ## [0.10.2] - 2026-09-08
 
 ### Fixed

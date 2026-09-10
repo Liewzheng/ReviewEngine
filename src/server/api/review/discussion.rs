@@ -396,6 +396,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             started_at: None,
             completed_at: None,
+            llm_summary: None,
         };
         db.create(&entry).await.unwrap();
 
@@ -438,6 +439,7 @@ mod tests {
                 created_at: chrono::Utc::now(),
                 started_at: None,
                 completed_at: None,
+                llm_summary: None,
             }
         };
         db.create(&entry).await.unwrap();

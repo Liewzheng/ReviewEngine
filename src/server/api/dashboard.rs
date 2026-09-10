@@ -229,6 +229,7 @@ mod tests {
             },
             progress: None,
             expert_name: None,
+            llm_summary: None,
         }
     }
 

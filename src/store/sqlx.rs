@@ -325,8 +325,8 @@ impl ReviewStore for SqlxStore {
         let row = rows::task_entry_to_row(entry)?;
         let sql = self.sql(
             "INSERT INTO reviews (task_id, state, source_meta, project, repository, request, \
-             result, error, progress, created_at, started_at, completed_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             result, error, progress, llm_summary, created_at, started_at, completed_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         ::sqlx::query(&sql)
             .bind(&row.task_id)
@@ -338,6 +338,7 @@ impl ReviewStore for SqlxStore {
             .bind(&row.result)
             .bind(&row.error)
             .bind(row.progress)
+            .bind(&row.llm_summary)
             .bind(&row.created_at)
             .bind(&row.started_at)
             .bind(&row.completed_at)
@@ -378,7 +379,7 @@ impl ReviewStore for SqlxStore {
         let report_created_at = row.completed_at.clone().unwrap_or_else(|| encode_ts(&Utc::now()));
         let mut tx = self.pool().begin().await.context("begin complete review")?;
         let update = self.sql(
-            "UPDATE reviews SET state = ?, result = ?, error = ?, completed_at = ?, progress = ? \
+            "UPDATE reviews SET state = ?, result = ?, error = ?, completed_at = ?, progress = ?, llm_summary = ? \
              WHERE task_id = ?",
         );
         let res = ::sqlx::query(&update)
@@ -387,6 +388,7 @@ impl ReviewStore for SqlxStore {
             .bind(&row.error)
             .bind(&row.completed_at)
             .bind(row.progress)
+            .bind(&row.llm_summary)
             .bind(&row.task_id)
             .execute(&mut *tx)
             .await
@@ -404,8 +406,8 @@ impl ReviewStore for SqlxStore {
             match rows::expert_report_rows(&entry.task_id, result, report_created_at) {
                 Ok(report_rows) => {
                     let insert = self.sql(
-                        "INSERT INTO expert_reports (task_id, expert_name, report, duration_ms, created_at) \
-                         VALUES (?, ?, ?, ?, ?)",
+                        "INSERT INTO expert_reports (task_id, expert_name, report, duration_ms, llm_provider, llm_model, created_at) \
+                         VALUES (?, ?, ?, ?, ?, ?, ?)",
                     );
                     for report in &report_rows {
                         ::sqlx::query(&insert)
@@ -413,6 +415,8 @@ impl ReviewStore for SqlxStore {
                             .bind(&report.expert_name)
                             .bind(&report.report)
                             .bind(report.duration_ms)
+                            .bind(&report.llm_provider)
+                            .bind(&report.llm_model)
                             .bind(&report.created_at)
                             .execute(&mut *tx)
                             .await
@@ -1006,6 +1010,7 @@ mod tests {
             },
             progress: None,
             expert_name: None,
+            llm_summary: None,
         };
         ReviewStore::create(&store, &entry).await.unwrap();
 
@@ -1046,6 +1051,7 @@ mod tests {
             created_at,
             started_at,
             completed_at,
+            llm_summary: None,
         })
         .unwrap();
         assert_eq!(decoded.task_id, entry.task_id);
@@ -1062,6 +1068,147 @@ mod tests {
         );
         assert_eq!(decoded.created_at, entry.created_at.trunc_subsecs(6));
         assert!(decoded.expert_name.is_none(), "live-only field is not persisted");
+    }
+
+    /// RENG-38: completing a review persists the LLM usage snapshot —
+    /// per-expert `expert_reports.llm_provider/llm_model` columns and the
+    /// deduplicated `reviews.llm_summary` list — and the read path hands the
+    /// summary back on the decoded `TaskEntry`.
+    #[tokio::test]
+    async fn complete_persists_llm_snapshot_columns() {
+        let store = fresh_store().await;
+
+        fn report(expert: &str, provider: &str, model: &str) -> crate::models::ExpertReport {
+            crate::models::ExpertReport {
+                expert_name: expert.to_string(),
+                findings: Vec::new(),
+                markdown: String::new(),
+                raw_llm_response: String::new(),
+                parse_error: None,
+                raw_dump_path: None,
+                llm_provider: Some(provider.to_string()),
+                llm_model: Some(model.to_string()),
+            }
+        }
+
+        let entry = TaskEntry {
+            task_id: uuid::Uuid::new_v4(),
+            state: TaskState::Pending,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            error: None,
+            request: None,
+            source_meta: Default::default(),
+            progress: None,
+            expert_name: None,
+            llm_summary: None,
+        };
+        ReviewStore::create(&store, &entry).await.unwrap();
+
+        // Two experts share one provider/model pair (must dedup), a third
+        // uses a different model on the same provider.
+        let mut output = crate::models::ReviewOutput::new(vec![
+            report("security", "xiaomi", "mimo-v2.5-pro"),
+            report("performance", "xiaomi", "mimo-v2.5-pro"),
+            report("quality", "xiaomi", "mimo-v2-pro"),
+        ]);
+        output.aggregated = Some(crate::models::AggregatedReport {
+            findings: Vec::new(),
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: Some("anthropic".to_string()),
+            llm_model: Some("claude-4".to_string()),
+        });
+        let mut completed = entry.clone();
+        completed.state = TaskState::Completed;
+        completed.completed_at = Some(Utc::now());
+        completed.result = Some(serde_json::to_value(&output).unwrap());
+        ReviewStore::complete(&store, &completed).await.unwrap();
+
+        // Per-expert snapshot columns are populated from the report JSON.
+        let rows: Vec<(String, Option<String>, Option<String>)> = ::sqlx::query_as(
+            "SELECT expert_name, llm_provider, llm_model FROM expert_reports WHERE task_id = ? ORDER BY expert_name",
+        )
+        .bind(completed.task_id.to_string())
+        .fetch_all(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            rows[0],
+            (
+                "performance".to_string(),
+                Some("xiaomi".to_string()),
+                Some("mimo-v2.5-pro".to_string())
+            )
+        );
+        // ORDER BY expert_name: performance, quality, security.
+        assert_eq!(rows[1].1.as_deref(), Some("xiaomi"));
+        assert_eq!(rows[1].2.as_deref(), Some("mimo-v2-pro"));
+
+        // The review-level summary dedups pairs in first-seen order and
+        // includes the aggregator's pair.
+        let summary: Option<String> = ::sqlx::query_scalar("SELECT llm_summary FROM reviews WHERE task_id = ?")
+            .bind(completed.task_id.to_string())
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        let summary = summary.expect("llm_summary must be set");
+        let usages: Vec<crate::models::LlmUsage> = serde_json::from_str(&summary).unwrap();
+        assert_eq!(
+            usages,
+            vec![
+                crate::models::LlmUsage {
+                    provider: "xiaomi".into(),
+                    model: "mimo-v2.5-pro".into()
+                },
+                crate::models::LlmUsage {
+                    provider: "xiaomi".into(),
+                    model: "mimo-v2-pro".into()
+                },
+                crate::models::LlmUsage {
+                    provider: "anthropic".into(),
+                    model: "claude-4".into()
+                },
+            ]
+        );
+
+        // Read path: the decoded entry carries the summary back.
+        let decoded = ReviewStore::get_review(&store, completed.task_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded.llm_summary.as_deref(), Some(summary.as_str()));
+
+        // A result without llm snapshots (pre-0.10.2 shape) leaves the
+        // columns NULL rather than erroring.
+        let legacy = crate::models::ReviewOutput::new(vec![{
+            let mut r = report("security", "xiaomi", "mimo-v2.5-pro");
+            r.llm_provider = None;
+            r.llm_model = None;
+            r
+        }]);
+        let mut legacy_entry = entry.clone();
+        legacy_entry.task_id = uuid::Uuid::new_v4();
+        ReviewStore::create(&store, &legacy_entry).await.unwrap();
+        legacy_entry.state = TaskState::Completed;
+        legacy_entry.completed_at = Some(Utc::now());
+        legacy_entry.result = Some(serde_json::to_value(&legacy).unwrap());
+        ReviewStore::complete(&store, &legacy_entry).await.unwrap();
+        let (provider, summary): (Option<String>, Option<String>) = ::sqlx::query_as(
+            "SELECT (SELECT llm_provider FROM expert_reports WHERE task_id = ?), llm_summary FROM reviews WHERE task_id = ?",
+        )
+        .bind(legacy_entry.task_id.to_string())
+        .bind(legacy_entry.task_id.to_string())
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert!(provider.is_none(), "legacy report must keep llm_provider NULL");
+        assert!(summary.is_none(), "legacy review must keep llm_summary NULL");
     }
 
     // ─── DiscussionStore (step 6a) ───

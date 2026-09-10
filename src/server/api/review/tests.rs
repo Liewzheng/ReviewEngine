@@ -150,6 +150,8 @@ fn make_report(name: &str, findings: Vec<crate::models::Finding>) -> crate::mode
         raw_llm_response: format!("raw {}", name),
         parse_error: None,
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     }
 }
 

@@ -173,10 +173,15 @@ export default {
       author: '작성자',
       status: '상태',
       score: '점수',
+      llm: 'LLM',
       duration: '소요 시간',
       created: '생성 시간',
       time: '시간',
       actions: '작업',
+    },
+    llm: {
+      unknown: '알 수 없음',
+      expertTooltip: '이 리포트를 실제로 생성한 LLM (provider/model)',
     },
     actions: {
       rerun: '리뷰 다시 실행',

@@ -262,6 +262,8 @@ fn consolidate_chunk_findings(
         raw_llm_response: String::new(),
         parse_error: None,
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     };
     let consolidator = match app_config {
         Some(c) => ConsolidatorConfig {

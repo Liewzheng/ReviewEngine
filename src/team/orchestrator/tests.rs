@@ -32,6 +32,8 @@ fn make_report(expert_name: &str, findings: Vec<Finding>) -> ExpertReport {
         raw_llm_response: String::new(),
         parse_error: None,
         raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
     }
 }
 

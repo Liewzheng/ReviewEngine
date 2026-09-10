@@ -41,7 +41,11 @@ pub async fn run_single_expert(
     let config = crate::llm::select_llm_config(expert, llm_configs);
     let result = llm_client.complete_with_fallback(&config, &system, &user).await?;
 
-    Ok(parser::parse_llm_response(&expert.name, &result.content))
+    let mut report = parser::parse_llm_response(&expert.name, &result.content);
+    // RENG-38: snapshot the LLM that actually produced this report.
+    report.llm_provider = Some(result.provider.clone());
+    report.llm_model = Some(result.model.clone());
+    Ok(report)
 }
 
 /// Execute the aggregator expert to merge multiple expert reports.
@@ -65,5 +69,10 @@ pub async fn run_aggregator_expert(
     let config = crate::llm::select_llm_config(aggregator, llm_configs);
     let result = llm_client.complete_with_fallback(&config, &system, &user).await?;
 
-    parser::parse_aggregator_response(&result.content)
+    parser::parse_aggregator_response(&result.content).map(|mut agg| {
+        // RENG-38: snapshot the aggregator's actual LLM.
+        agg.llm_provider = Some(result.provider.clone());
+        agg.llm_model = Some(result.model.clone());
+        agg
+    })
 }

@@ -175,10 +175,15 @@ export default {
       author: 'Auteur',
       status: 'Statut',
       score: 'Score',
+      llm: 'LLM',
       duration: 'Durée',
       created: 'Créée',
       time: 'Heure',
       actions: 'Actions',
+    },
+    llm: {
+      unknown: 'inconnu',
+      expertTooltip: 'LLM ayant réellement produit ce rapport (provider/model)',
     },
     actions: {
       rerun: 'Relancer la revue',

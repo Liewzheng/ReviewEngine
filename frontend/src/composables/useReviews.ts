@@ -8,7 +8,8 @@ import type { ReviewDetail, HistoryFilters } from '../types/history';
  * Composable for the Review History page.
  *
  * Manages the paginated review list, review detail selection,
- * and review operations (delete, rerun).
+ * and review operations (delete, rerun). Also supports automatic
+ * background refresh so new reviews appear without manual interaction.
  */
 export function useReviews() {
   /** Paginated review list response (null before first load). */
@@ -25,17 +26,39 @@ export function useReviews() {
    * @param filters - Search/filter criteria (status, project, date range).
    * @param page - Page number (1-based).
    * @param perPage - Items per page.
+   * @param silent - When true, refresh in the background: `loading` is left
+   *   untouched (so the view keeps rendering the table instead of swapping in
+   *   the skeleton) and a failed request is ignored instead of clearing the
+   *   list the user is currently looking at.
    */
-  async function fetchReviews(filters: HistoryFilters, page: number = 1, perPage: number = 20) {
-    loading.value = true;
-    error.value = null;
+  async function fetchReviews(
+    filters: HistoryFilters,
+    page: number = 1,
+    perPage: number = 20,
+    silent: boolean = false
+  ) {
+    if (!silent) {
+      loading.value = true;
+      error.value = null;
+    }
     try {
-      data.value = await getReviews(filters, page, perPage);
+      const result = await getReviews(filters, page, perPage);
+      data.value = result;
+      // A successful background refresh clears a stale error from the first load.
+      if (silent) {
+        error.value = null;
+      }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
-      data.value = null;
+      // Background polling must not wipe the list on a single transient
+      // network failure; keep the last good data and skip the error banner.
+      if (!silent) {
+        error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+        data.value = null;
+      }
     } finally {
-      loading.value = false;
+      if (!silent) {
+        loading.value = false;
+      }
     }
   }
 
@@ -110,6 +133,58 @@ export function useReviews() {
     }
   }
 
+  /* ─────────────── Auto refresh ─────────────── */
+  let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  let autoRefreshParams: { filters: HistoryFilters; page: number; perPage: number } | null = null;
+
+  /**
+   * Start polling the current filtered list every `intervalMs` milliseconds.
+   * The latest filters, page and page size are captured so subsequent
+   * refreshes keep the user's view state (search, filters, pagination).
+   *
+   * Refreshes are silent: no skeleton replaces the table and a failed poll
+   * leaves the currently displayed list intact.
+   *
+   * Call `stopAutoRefresh` before the component unmounts.
+   */
+  function startAutoRefresh(filters: HistoryFilters, page: number, perPage: number, intervalMs = 5000) {
+    stopAutoRefresh();
+    autoRefreshParams = { filters, page, perPage };
+    autoRefreshTimer = setInterval(() => {
+      // Skip refreshes while the tab is hidden to avoid unnecessary load.
+      if (typeof document !== 'undefined' && document.hidden) return;
+      const p = autoRefreshParams;
+      if (p) {
+        fetchReviews(p.filters, p.page, p.perPage, true);
+      }
+    }, intervalMs);
+  }
+
+  /**
+   * Stop the background polling started by `startAutoRefresh`.
+   */
+  function stopAutoRefresh() {
+    if (autoRefreshTimer) {
+      clearInterval(autoRefreshTimer);
+      autoRefreshTimer = null;
+    }
+  }
+
+  /**
+   * Refresh immediately when the page regains focus, then resume the normal
+   * polling cycle. The caller should register this with `visibilitychange`.
+   *
+   * Like the polling cycle this is a silent refresh: the table stays mounted
+   * and a failure does not clear the list already on screen.
+   */
+  function refreshOnFocus() {
+    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
+    const p = autoRefreshParams;
+    if (p) {
+      fetchReviews(p.filters, p.page, p.perPage, true);
+    }
+  }
+
   /** Current page of review items. */
   const items = computed(() => data.value?.items ?? []);
   /** Total number of reviews matching the current filters. */
@@ -125,5 +200,8 @@ export function useReviews() {
     fetchReview,
     removeReview,
     rerun,
+    startAutoRefresh,
+    stopAutoRefresh,
+    refreshOnFocus,
   };
 }

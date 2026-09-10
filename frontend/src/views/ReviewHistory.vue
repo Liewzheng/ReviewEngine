@@ -39,6 +39,9 @@ const loading = reviews.loading
 const drawerOpen = ref(false)
 const selectedReview = reviews.selectedReview
 
+/* Track avatar URLs that failed to load so we can fall back to initials. */
+const failedAvatars = ref<Set<string>>(new Set())
+
 const page = ref(1)
 const pageSize = ref(25)
 
@@ -452,14 +455,33 @@ const paginationInfo = computed(() => {
 })
 
 /* ─────────────── Init ─────────────── */
+/** Refresh immediately when the user returns to this tab. */
+function handleVisibilityChange() {
+  if (document.visibilityState === 'visible') {
+    reviews.refreshOnFocus()
+  }
+}
+
 onMounted(() => {
   readUrl()
-  fetchReviewsData()
+  fetchReviewsData().then(() => {
+    reviews.startAutoRefresh(filters.value, page.value, pageSize.value)
+  })
+  document.addEventListener('visibilitychange', handleVisibilityChange)
+})
+
+onBeforeUnmount(() => {
+  reviews.stopAutoRefresh()
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
 watch(() => route.query, () => {
   readUrl()
-  fetchReviewsData()
+  fetchReviewsData().then(() => {
+    // URL changes (filter/pagination) update the auto-refresh baseline so
+    // subsequent background polls keep the new state.
+    reviews.startAutoRefresh(filters.value, page.value, pageSize.value)
+  })
 }, { deep: true })
 </script>
 
@@ -608,7 +630,12 @@ watch(() => route.query, () => {
             <template #default="{ row }">
               <div class="author-cell">
                 <div class="author-avatar">
-                  <img v-if="row.author.avatarUrl" :src="row.author.avatarUrl" alt="" />
+                  <img
+                    v-if="row.author.avatarUrl && !failedAvatars.has(row.author.avatarUrl)"
+                    :src="row.author.avatarUrl"
+                    alt=""
+                    @error="row.author.avatarUrl && failedAvatars.add(row.author.avatarUrl)"
+                  />
                   <span v-else>{{ getInitials(row.author.name) }}</span>
                 </div>
                 <span class="author-name">{{ row.author.name }}</span>
@@ -1011,6 +1038,8 @@ watch(() => route.query, () => {
   font-size: 11px;
   font-weight: 600;
   flex-shrink: 0;
+  overflow: hidden;
+  position: relative;
 }
 
 .author-avatar img {
@@ -1018,6 +1047,15 @@ watch(() => route.query, () => {
   height: 100%;
   border-radius: 50%;
   object-fit: cover;
+  display: block;
+}
+
+.author-avatar span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
 }
 
 .author-name {

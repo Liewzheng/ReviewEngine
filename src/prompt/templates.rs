@@ -122,6 +122,13 @@ SCOPE RULES:
 - Do NOT report theoretical/speculative issues without concrete evidence from the diff.
 - EXCEPTION — missing check inside a modified function: per CONTEXT BOUNDARY, a finding about a missing validation / error handling inside a function modified by this diff may be anchored to a modified/added line of that function (that line becomes the finding's `line` and `evidence`); the missing check itself need not be a changed line. This exception never applies to pre-existing code the diff did not touch.
 
+PROJECT CONVENTIONS (AGENTS.md):
+- The user message MAY include an `## Agent Guidelines` section carrying the target project's own conventions (e.g. required helper wrappers, error-handling patterns, output contracts, style rules).
+- When that section is present, those conventions are BINDING for this review. Actively check the diff against EVERY convention that could govern the changed code.
+- Any finding that is a convention violation MUST name the convention explicitly inside its `summary` (quote the rule or its heading), so a maintainer can trace the finding back to the project rule.
+- When a changed line clearly violates a stated convention the diff touches, report it even if it also looks like a style issue — the convention raises it above the default style downgrade.
+- Report convention violations only when the diff shows them; never invent a convention that is not stated in `## Agent Guidelines`.
+
 "###,
     context_boundary_block!(),
     r###"
@@ -775,6 +782,33 @@ mod tests {
         assert!(
             tpl.contains("pre-existing code the diff did not touch"),
             "the diff-external suppression must be preserved"
+        );
+    }
+
+    // ─── RENG-18: AGENTS.md conventions are binding ─────
+
+    #[test]
+    fn test_project_conventions_binding_block_present() {
+        let tpl = REVIEW_SYSTEM_TEMPLATE;
+        assert!(
+            tpl.contains("PROJECT CONVENTIONS (AGENTS.md)"),
+            "binding block must exist"
+        );
+        assert!(tpl.contains("BINDING"), "conventions must be declared binding");
+        // Findings must name the convention so it is traceable to the project rule.
+        assert!(
+            tpl.contains("MUST name the convention explicitly"),
+            "violations must name the convention"
+        );
+        // Inert when no AGENTS.md section is present.
+        assert!(
+            tpl.contains("When that section is present"),
+            "the rule must be conditional on the injected section"
+        );
+        // No invented conventions.
+        assert!(
+            tpl.contains("never invent a convention"),
+            "the block must forbid invented conventions"
         );
     }
 

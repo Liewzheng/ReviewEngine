@@ -6,8 +6,12 @@ import type { DashboardResponse } from '../services/dashboard';
 /**
  * Composable for the Dashboard page.
  *
- * Fetches dashboard KPIs on mount and auto-refreshes every 60 seconds.
- * Returns reactive `data`, `loading`, `error`, and a manual `refresh` method.
+ * Owns a single 60-second background poll of the dashboard KPIs; the page
+ * drives the initial load and manual refreshes through `refresh` (non-silent,
+ * so the user gets the skeleton + error surfacing) and sets its own
+ * "last updated" timestamp. The poll is silent: it never flips `loading`
+ * (which gates the page's `v-if` skeleton) and a failed poll keeps the last
+ * good data instead of surfacing an error.
  */
 export function useDashboard() {
   /** Dashboard response data (null before first load). */
@@ -21,23 +25,32 @@ export function useDashboard() {
 
   /**
    * Fetch dashboard data from the server.
-   * Called automatically on mount and by the refresh timer.
+   * @param silent - When true, refresh in the background: `loading` is left
+   *   untouched and a failed request keeps the last good data.
    */
-  async function fetch() {
-    loading.value = true;
-    error.value = null;
+  async function fetch(silent: boolean = false) {
+    if (!silent) {
+      loading.value = true;
+      error.value = null;
+    }
     try {
       data.value = await getDashboard();
+      if (silent) {
+        error.value = null;
+      }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+      if (!silent) {
+        error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+      }
     } finally {
-      loading.value = false;
+      if (!silent) {
+        loading.value = false;
+      }
     }
   }
 
   onMounted(() => {
-    fetch();
-    timer = setInterval(fetch, 60000);
+    timer = setInterval(() => fetch(true), 60000);
   });
 
   onUnmounted(() => {

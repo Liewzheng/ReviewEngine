@@ -43,8 +43,12 @@ const recentlyUpdated = ref<string[]>([])
 // --- Auto refresh ---
 // Shared polling composable (also pauses while the tab is hidden and fires
 // immediately on return). 3s cadence: the queue is a live operations view.
+// Ticks are silent: neither fetch touches the loading counter that gates the
+// page's `v-if` skeleton, so a poll can no longer unmount and remount the
+// stats row and all task grids every 3s; a failed poll keeps the last good
+// data. Only the initial load and the manual Refresh button fetch visibly.
 const queueAutoRefresh = useAutoRefresh(async () => {
-  await Promise.all([queue.fetchStats(), queue.fetchTasks()])
+  await Promise.all([queue.fetchStats(true), queue.fetchTasks(undefined, 1, 50, true)])
 }, 3000)
 
 // --- Computed stats with fallback ---

@@ -192,9 +192,13 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
    * While local edits are pending (dirty or an auto-save is in flight) the
    * fetched state is left in the `useConfig` cache but NOT written over the
    * form, so a background refresh can never clobber in-progress edits.
+   * @param silent - Passed through to `cfg.fetch`: background polls stay
+   *   silent so they never flip the page-level `loading` that gates the
+   *   form's `v-if` (which would unmount the whole subtree, destroying
+   *   open dialogs and input focus).
    */
-  async function loadConfig() {
-    await cfg.fetch();
+  async function loadConfig(silent: boolean = false) {
+    await cfg.fetch(silent);
     if (!cfg.config.value) return;
     if (configDirty.value || saveInFlight) return;
     applyConfig(cfg.config.value);

@@ -159,12 +159,14 @@ watch(() => cardsError.value, (err) => {
 /* ------------------------------------------------------------------ */
 /*  Auto-refresh: poll runtime health every 30s via the shared          */
 /*  composable (pauses while hidden, immediate fetch on return). The    */
-/*  config echo is NOT polled — it resyncs on mutations, and polling it */
-/*  would fight in-flight dialog edits.                                 */
+/*  tick is silent — it never flips `loading` and a failed poll keeps   */
+/*  the last good provider list. The config echo is NOT polled — it     */
+/*  resyncs on mutations, and polling it would fight in-flight dialog   */
+/*  edits.                                                              */
 /* ------------------------------------------------------------------ */
 
 const llmAutoRefresh = useAutoRefresh(async () => {
-  await llm.fetch()
+  await llm.fetch(true)
   checkLlmConfigured()
 }, 30_000)
 

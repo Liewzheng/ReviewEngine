@@ -19,20 +19,52 @@ export function useExperts() {
 
   /**
    * Fetch the full expert list from the server.
-   * Populates `experts.value` on success.
+   * Populates `experts.value` on success, reconciling in place so existing
+   * expert objects keep their identity across refreshes.
+   * @param silent - When true, refresh in the background: `loading` is left
+   *   untouched (no skeleton swap) and a failed request keeps the last good
+   *   list instead of wiping it.
    */
-  async function fetch() {
-    loading.value = true;
-    error.value = null;
+  async function fetch(silent: boolean = false) {
+    if (!silent) {
+      loading.value = true;
+      error.value = null;
+    }
     try {
       const response = await getExperts();
-      experts.value = response.experts;
+      reconcileExperts(response.experts);
+      if (silent) {
+        error.value = null;
+      }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
-      experts.value = [];
+      if (!silent) {
+        error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+        experts.value = [];
+      }
     } finally {
-      loading.value = false;
+      if (!silent) {
+        loading.value = false;
+      }
     }
+  }
+
+  /**
+   * Merge a fresh fetch into the existing list instead of replacing it:
+   * experts already present are mutated in place (`Object.assign`), so an
+   * optimistic toggle rollback or a weight-slider drag that holds a
+   * reference to an expert object is never orphaned by a background
+   * refresh. New experts are appended in server order; removed ones drop out.
+   */
+  function reconcileExperts(fetched: Expert[]) {
+    const known = new Map(experts.value.map((e) => [e.id, e]));
+    experts.value = fetched.map((f) => {
+      const existing = known.get(f.id);
+      if (existing) {
+        Object.assign(existing, f);
+        return existing;
+      }
+      return f;
+    });
   }
 
   /**

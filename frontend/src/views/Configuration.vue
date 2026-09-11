@@ -339,10 +339,16 @@ function handleResize() {
   windowWidth.value = window.innerWidth
 }
 
-/* Background auto-refresh (10s). `loadConfig` refuses to write fetched state
- * over the form while local edits are dirty or an auto-save is in flight,
- * so polling can't clobber in-progress edits. */
-const configAutoRefresh = useAutoRefresh(() => loadConfig(), 10_000)
+/* Background auto-refresh (10s). The tick is silent: it never flips
+ * `cfg.loading`, so the form's `v-if` gate keeps the whole subtree mounted
+ * and open dialogs / input focus survive every poll (a non-silent fetch would
+ * swap the skeleton in and unmount them). A failed poll keeps the last good
+ * config and never swaps the page into the `el-empty` error state — only the
+ * initial load and the manual Refresh button do a visible, error-surfacing
+ * fetch. `loadConfig` also refuses to write fetched state over the form while
+ * local edits are dirty or an auto-save is in flight, so polling can't clobber
+ * in-progress edits. */
+const configAutoRefresh = useAutoRefresh(() => loadConfig(true), 10_000)
 
 // --- Lifecycle ---
 onMounted(() => {

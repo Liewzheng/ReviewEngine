@@ -24,17 +24,31 @@ export function useConfig() {
   /**
    * Fetch the current configuration from the server.
    * Sets `config.value` on success, or `error.value` on failure.
+   * @param silent - When true, refresh in the background: `loading` is left
+   *   untouched (so the view keeps rendering the form instead of swapping in
+   *   the skeleton) and a failed request keeps the last good config instead
+   *   of swapping the page into its error state.
    */
-  async function fetch() {
-    loading.value = true;
-    error.value = null;
+  async function fetch(silent: boolean = false) {
+    if (!silent) {
+      loading.value = true;
+      error.value = null;
+    }
     try {
       config.value = await getConfig();
+      // A successful background refresh clears a stale error from the first load.
+      if (silent) {
+        error.value = null;
+      }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
-      config.value = null;
+      if (!silent) {
+        error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+        config.value = null;
+      }
     } finally {
-      loading.value = false;
+      if (!silent) {
+        loading.value = false;
+      }
     }
   }
 

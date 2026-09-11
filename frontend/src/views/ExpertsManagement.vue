@@ -72,8 +72,8 @@ const avgWeight = computed(() => {
 })
 
 // ========== Methods ==========
-const fetchExperts = async () => {
-  await expertsStore.fetch()
+const fetchExperts = async (silent: boolean = false) => {
+  await expertsStore.fetch(silent)
 }
 
 /* Every card control is live: the switch and slider optimistically mutate the
@@ -99,19 +99,23 @@ const handleToggle = async (id: string, enabled: boolean) => {
 }
 
 /* Weight slider drags emit per pixel: debounce the PUT (500ms after the last
- * movement) and remember the pre-drag value for rollback. `weightSavePending`
- * also gates the background auto-refresh so a poll can't snap the slider
- * back mid-drag. */
+ * movement) and remember the pre-drag value for rollback. The whole debounce
+ * window is gated via `weightDragPending` so a background tick can neither
+ * replace the list nor snap the slider back mid-drag; `weightSavePending`
+ * additionally covers the commit await itself. */
 const WEIGHT_DEBOUNCE_MS = 500
 const weightTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const previousWeights = new Map<string, number>()
 const weightSavePending = ref(false)
+/** True from the first drag movement until the debounced commit fires. */
+const weightDragPending = ref(false)
 
 const handleWeightChange = (id: string, weight: number) => {
   const expert = experts.value.find((e: Expert) => e.id === id)
   if (!expert) return
   if (!previousWeights.has(id)) previousWeights.set(id, expert.weight)
   expert.weight = weight
+  weightDragPending.value = true
   const existing = weightTimers.get(id)
   if (existing) clearTimeout(existing)
   weightTimers.set(id, setTimeout(() => commitWeight(id), WEIGHT_DEBOUNCE_MS))
@@ -119,6 +123,7 @@ const handleWeightChange = (id: string, weight: number) => {
 
 const commitWeight = async (id: string) => {
   weightTimers.delete(id)
+  if (weightTimers.size === 0) weightDragPending.value = false
   const expert = experts.value.find((e: Expert) => e.id === id)
   const previous = previousWeights.get(id)
   previousWeights.delete(id)
@@ -162,14 +167,16 @@ const getScoreType = (score?: number): 'success' | 'warning' | 'danger' | 'info'
 
 // ========== Lifecycle ==========
 /* Background auto-refresh (10s), e.g. to reflect experts changed elsewhere.
- * Skipped while a debounced weight save is pending so a poll can't snap a
- * slider back mid-drag (the optimistic local value is about to persist). */
+ * The tick is silent: it never flips `loading` (so the grid — and any open
+ * detail dialog — is never unmounted by a poll) and reconciles the fetched
+ * list in place, preserving expert object identities. Ticks are additionally
+ * skipped while a weight-slider debounce window is open (`weightDragPending`)
+ * so a poll can never replace the list or snap a slider back mid-drag. The
+ * initial load and any later remount path do a normal, visible fetch. */
 const expertsAutoRefresh = useAutoRefresh(
-  () => {
-    if (weightSavePending.value) return
-    return fetchExperts()
-  },
+  () => fetchExperts(true),
   10_000,
+  { isPaused: () => weightDragPending.value }
 )
 
 onMounted(() => {

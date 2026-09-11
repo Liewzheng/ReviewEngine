@@ -21,20 +21,51 @@ export function useLlmStatus() {
 
   /**
    * Fetch the full provider list from the server.
-   * Populates `providers.value` on success.
+   * Populates `providers.value` on success, reconciling in place so existing
+   * provider objects keep their identity across refreshes.
+   * @param silent - When true, refresh in the background: `loading` is left
+   *   untouched and a failed request keeps the last good list instead of
+   *   wiping it.
    */
-  async function fetch() {
-    loading.value = true;
-    error.value = null;
+  async function fetch(silent: boolean = false) {
+    if (!silent) {
+      loading.value = true;
+      error.value = null;
+    }
     try {
       const response = await getProviders();
-      providers.value = response.items;
+      reconcileProviders(response.items);
+      if (silent) {
+        error.value = null;
+      }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
-      providers.value = [];
+      if (!silent) {
+        error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+        providers.value = [];
+      }
     } finally {
-      loading.value = false;
+      if (!silent) {
+        loading.value = false;
+      }
     }
+  }
+
+  /**
+   * Merge a fresh fetch into the existing list instead of replacing it:
+   * providers already present are mutated in place, so a connectivity
+   * `test()` that captured an element reference is never orphaned by a
+   * background refresh. New providers are appended in server order.
+   */
+  function reconcileProviders(fetched: LlmProvider[]) {
+    const known = new Map(providers.value.map((p) => [p.id, p]));
+    providers.value = fetched.map((f) => {
+      const existing = known.get(f.id);
+      if (existing) {
+        Object.assign(existing, f);
+        return existing;
+      }
+      return f;
+    });
   }
 
   /**

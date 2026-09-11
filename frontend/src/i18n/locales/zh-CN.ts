@@ -192,11 +192,9 @@ export default {
     },
     actions: {
       rerun: '重新评审',
-      viewDetails: '查看详情',
       more: '更多操作',
       viewComment: '查看原始评论',
       copyId: '复制评审 ID',
-      viewLogs: '查看日志',
     },
     rerun: {
       title: '重新评审',

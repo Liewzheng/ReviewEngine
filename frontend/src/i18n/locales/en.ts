@@ -205,11 +205,9 @@ export default {
     },
     actions: {
       rerun: 'Re-run review',
-      viewDetails: 'View details',
       more: 'More actions',
       viewComment: 'View original comment',
       copyId: 'Copy review ID',
-      viewLogs: 'View logs',
     },
     rerun: {
       title: 'Re-run Review',

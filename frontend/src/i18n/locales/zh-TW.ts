@@ -192,11 +192,9 @@ export default {
     },
     actions: {
       rerun: '重新審查',
-      viewDetails: '查看詳情',
       more: '更多操作',
       viewComment: '查看原始評論',
       copyId: '複製審查 ID',
-      viewLogs: '查看日誌',
     },
     rerun: {
       title: '重新審查',

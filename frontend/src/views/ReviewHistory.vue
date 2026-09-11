@@ -5,12 +5,10 @@ import {
   Search,
   Close,
   Refresh,
-  ArrowRight,
   More,
   Download,
   Link,
   DocumentCopy,
-  Tickets,
   Clock,
   User as UserIcon,
   Share,
@@ -325,10 +323,6 @@ function copyReviewId(id: string) {
   }).catch(() => {
     ElNotification.warning({ title: t('common.copyFailed'), message: t('common.copyFailedMessage') })
   })
-}
-
-function viewLogs(row: ReviewListItem) {
-  router.push(`/logs?reviewId=${row.id}`)
 }
 
 function viewOriginalComment(row: ReviewListItem) {
@@ -762,30 +756,22 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.actions')" width="140" fixed="right">
+          <el-table-column width="72" fixed="right">
             <template #default="{ row }">
-              <el-button-group class="actions-group">
-                <el-tooltip :content="$t('history.actions.rerun')">
-                  <el-button size="small" :icon="Refresh" @click.stop="handleRerun(row)" :aria-label="$t('history.actions.rerun')" />
-                </el-tooltip>
-                <el-tooltip :content="$t('history.actions.viewDetails')">
-                  <el-button size="small" :icon="ArrowRight" @click.stop="openDrawer(row)" :aria-label="$t('history.actions.viewDetails')" />
-                </el-tooltip>
-                <el-dropdown trigger="click" @command="(cmd: string) => {
-                  if (cmd === 'comment') viewOriginalComment(row)
-                  if (cmd === 'copy') copyReviewId(row.id)
-                  if (cmd === 'logs') viewLogs(row)
-                }">
-                  <el-button size="small" :icon="More" @click.stop :aria-label="$t('history.actions.more')" />
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item command="comment" :icon="Link">{{ $t('history.actions.viewComment') }}</el-dropdown-item>
-                      <el-dropdown-item command="copy" :icon="DocumentCopy">{{ $t('history.actions.copyId') }}</el-dropdown-item>
-                      <el-dropdown-item command="logs" :icon="Tickets">{{ $t('history.actions.viewLogs') }}</el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
-              </el-button-group>
+              <el-dropdown trigger="click" @command="(cmd: string) => {
+                if (cmd === 'rerun') handleRerun(row)
+                if (cmd === 'comment') viewOriginalComment(row)
+                if (cmd === 'copy') copyReviewId(row.id)
+              }">
+                <el-button size="small" :icon="More" @click.stop :aria-label="$t('history.actions.more')" />
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="rerun" :icon="Refresh">{{ $t('history.actions.rerun') }}</el-dropdown-item>
+                    <el-dropdown-item command="comment" :icon="Link">{{ $t('history.actions.viewComment') }}</el-dropdown-item>
+                    <el-dropdown-item command="copy" :icon="DocumentCopy">{{ $t('history.actions.copyId') }}</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </template>
           </el-table-column>
         </el-table>
@@ -1256,10 +1242,6 @@ watch(() => route.query, () => {
   color: var(--text-secondary);
   line-height: 1.3;
   white-space: nowrap;
-}
-
-.actions-group {
-  display: flex;
 }
 
 /* Pagination */

@@ -194,11 +194,9 @@ export default {
     },
     actions: {
       rerun: '리뷰 다시 실행',
-      viewDetails: '상세 보기',
       more: '추가 작업',
       viewComment: '원본 댓글 보기',
       copyId: '리뷰 ID 복사',
-      viewLogs: '로그 보기',
     },
     rerun: {
       title: '리뷰 다시 실행',

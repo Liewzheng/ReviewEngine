@@ -195,11 +195,9 @@ export default {
     },
     actions: {
       rerun: 'レビューを再実行',
-      viewDetails: '詳細を表示',
       more: 'その他の操作',
       viewComment: '元のコメントを表示',
       copyId: 'レビュー ID をコピー',
-      viewLogs: 'ログを表示',
     },
     rerun: {
       title: 'レビューを再実行',

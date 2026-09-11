@@ -197,11 +197,9 @@ export default {
     },
     actions: {
       rerun: 'Relancer la revue',
-      viewDetails: 'Voir les détails',
       more: "Plus d'actions",
       viewComment: "Voir le commentaire d'origine",
       copyId: "Copier l'ID de revue",
-      viewLogs: 'Voir les journaux',
     },
     rerun: {
       title: 'Relancer la revue',

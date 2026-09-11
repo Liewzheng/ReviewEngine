@@ -23,7 +23,7 @@ export function useAutoRefresh(fetchFn: () => Promise<void> | void, intervalMs =
    * One poll tick: skipped while the tab is hidden or a previous tick is
    * still running (prevents overlapping fetches on a slow network). Errors
    * are swallowed — views keep their last good state and surface their own
-   * error handling.
+   * error handling — but logged so a failing poll leaves a trace.
    */
   async function tick(): Promise<void> {
     if (typeof document !== 'undefined' && document.hidden) return;
@@ -31,17 +31,11 @@ export function useAutoRefresh(fetchFn: () => Promise<void> | void, intervalMs =
     inFlight = true;
     try {
       await fetchFn();
-    } catch {
-      /* keep last good state */
+    } catch (err) {
+      console.warn('[auto-refresh] poll failed', err);
     } finally {
       inFlight = false;
     }
-  }
-
-  /** Immediate refresh, e.g. when the tab regains visibility. */
-  function refreshOnVisible(): void {
-    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
-    tick();
   }
 
   function handleVisibilityChange(): void {
@@ -74,5 +68,5 @@ export function useAutoRefresh(fetchFn: () => Promise<void> | void, intervalMs =
     }
   }
 
-  return { start, stop, refreshOnVisible };
+  return { start, stop };
 }

@@ -477,24 +477,17 @@ const paginationInfo = computed(() => {
 })
 
 /* ─────────────── Init ─────────────── */
-/** Refresh immediately when the user returns to this tab. */
-function handleVisibilityChange() {
-  if (document.visibilityState === 'visible') {
-    reviews.refreshOnFocus()
-  }
-}
-
+// Note: the visibilitychange → immediate refresh wiring lives inside
+// useAutoRefresh (started below), so this page no longer registers its own.
 onMounted(() => {
   readUrl()
   fetchReviewsData().then(() => {
     reviews.startAutoRefresh(filters.value, page.value, pageSize.value)
   })
-  document.addEventListener('visibilitychange', handleVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   reviews.stopAutoRefresh()
-  document.removeEventListener('visibilitychange', handleVisibilityChange)
 })
 
 watch(() => route.query, () => {

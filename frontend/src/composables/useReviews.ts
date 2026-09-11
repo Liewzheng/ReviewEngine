@@ -1,6 +1,7 @@
 import { ref, computed } from 'vue';
 import { getReviews, getReview, deleteReview, rerunReview } from '../services/reviews';
 import { i18n } from '../i18n';
+import { useAutoRefresh } from './useAutoRefresh';
 import type { ReviewsListResponse } from '../services/reviews';
 import type { ReviewDetail, HistoryFilters } from '../types/history';
 
@@ -134,55 +135,37 @@ export function useReviews() {
   }
 
   /* ─────────────── Auto refresh ─────────────── */
-  let autoRefreshTimer: ReturnType<typeof setInterval> | null = null;
+  // Delegates to the generic composable; this wrapper only pins the current
+  // filters/page/page-size so polls keep the user's view state. Refreshes are
+  // silent: no skeleton replaces the table and a failed poll leaves the
+  // currently displayed list intact.
   let autoRefreshParams: { filters: HistoryFilters; page: number; perPage: number } | null = null;
+
+  const autoRefresh = useAutoRefresh(() => {
+    const p = autoRefreshParams;
+    if (p) {
+      return fetchReviews(p.filters, p.page, p.perPage, true);
+    }
+  });
 
   /**
    * Start polling the current filtered list every `intervalMs` milliseconds.
    * The latest filters, page and page size are captured so subsequent
    * refreshes keep the user's view state (search, filters, pagination).
-   *
-   * Refreshes are silent: no skeleton replaces the table and a failed poll
-   * leaves the currently displayed list intact.
+   * Re-starting with new parameters is safe.
    *
    * Call `stopAutoRefresh` before the component unmounts.
    */
   function startAutoRefresh(filters: HistoryFilters, page: number, perPage: number, intervalMs = 5000) {
-    stopAutoRefresh();
     autoRefreshParams = { filters, page, perPage };
-    autoRefreshTimer = setInterval(() => {
-      // Skip refreshes while the tab is hidden to avoid unnecessary load.
-      if (typeof document !== 'undefined' && document.hidden) return;
-      const p = autoRefreshParams;
-      if (p) {
-        fetchReviews(p.filters, p.page, p.perPage, true);
-      }
-    }, intervalMs);
+    autoRefresh.start(intervalMs);
   }
 
   /**
    * Stop the background polling started by `startAutoRefresh`.
    */
   function stopAutoRefresh() {
-    if (autoRefreshTimer) {
-      clearInterval(autoRefreshTimer);
-      autoRefreshTimer = null;
-    }
-  }
-
-  /**
-   * Refresh immediately when the page regains focus, then resume the normal
-   * polling cycle. The caller should register this with `visibilitychange`.
-   *
-   * Like the polling cycle this is a silent refresh: the table stays mounted
-   * and a failure does not clear the list already on screen.
-   */
-  function refreshOnFocus() {
-    if (typeof document === 'undefined' || document.visibilityState !== 'visible') return;
-    const p = autoRefreshParams;
-    if (p) {
-      fetchReviews(p.filters, p.page, p.perPage, true);
-    }
+    autoRefresh.stop();
   }
 
   /** Current page of review items. */
@@ -202,6 +185,5 @@ export function useReviews() {
     rerun,
     startAutoRefresh,
     stopAutoRefresh,
-    refreshOnFocus,
   };
 }

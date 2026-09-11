@@ -225,6 +225,15 @@ pub struct AppState {
     /// `PUT /api/v1/config` and consulted for `gitlab_mr` credential
     /// resolution and per-instance webhook verification.
     pub git_platforms: RwLock<Vec<crate::models::GitPlatformConfig>>,
+    /// Startup-recorded env/CLI git integration flags (RENG-32): the classic
+    /// `--gitlab-token` / `GITLAB_TOKEN` / `--github-token` / `GITHUB_TOKEN`
+    /// channels wire webhook/MR-fetch clients directly and never appear in
+    /// `git_platforms`, so the dashboard health panel ORs these in when
+    /// deciding whether an integration is configured. Write-once at startup
+    /// before the state is shared; `false` everywhere else (tests,
+    /// embedded use).
+    pub env_gitlab_configured: bool,
+    pub env_github_configured: bool,
     /// Where `PUT /api/v1/config` persists UI-managed state
     /// (`ui-state.toml`, see `server::api::config::persist`). `None`
     /// disables persistence (tests, embedded use) so unit tests never
@@ -267,6 +276,8 @@ impl AppState {
             log_collector: None,
             ui_config: RwLock::new(UiConfig::default()),
             git_platforms: RwLock::new(Vec::new()),
+            env_gitlab_configured: false,
+            env_github_configured: false,
             ui_state_path: None,
             ui_state_env: None,
             feedback_store: None,

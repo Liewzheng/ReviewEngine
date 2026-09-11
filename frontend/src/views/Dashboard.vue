@@ -373,7 +373,6 @@ onUnmounted(() => {
                 </div>
                 <div class="health-row-right">
                   <StatusBadge :status="item.status" show-text size="small" />
-                  <span v-if="item.latencyMs" class="health-latency">{{ item.latencyMs }}ms</span>
                 </div>
               </div>
             </div>
@@ -392,8 +391,7 @@ onUnmounted(() => {
                 </div>
                 <div class="health-row-right">
                   <StatusBadge :status="item.status" show-text size="small" />
-                  <span v-if="item.latencyMs" class="health-latency">{{ item.latencyMs }}ms</span>
-                  <span v-else-if="item.message" class="health-latency">{{ item.message }}</span>
+                  <span v-if="item.message" class="health-latency">{{ item.message }}</span>
                 </div>
               </div>
             </div>

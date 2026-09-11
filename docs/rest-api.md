@@ -820,19 +820,37 @@ Response 200:
 
 #### `GET /api/v1/dashboard`
 
-聚合返回 Dashboard 页面所需的 KPI、24h 趋势、系统健康与最近 reviews。task store 未初始化时返回全零默认值。
+聚合返回 Dashboard 页面所需的 KPI、24h 趋势、系统健康与最近 reviews。
+
+**数据源（0.10.8 / RENG-32）**：KPI、24h 趋势、recentReviews 一律来自持久化 `reviews` 表（0.10.0 SQLite/PG 存储）——内存任务队列的 reaper 会在完成 30 分钟后删除条目，曾导致「库里 100+ 条、Dashboard 全零」。`activeQueue` 是唯一保留内存数据源的字段（活跃 pending+running 是实时队列状态，DB 反而是错源）。`REVIEW_DISABLE_DB=1` / 无 DB 时整体回退到内存任务存储（与 `/reviews` 的 DB 优先、内存兜底策略一致）；两者皆无则返回默认值。历史读取失败返回 `500`（与 `/reviews` 相同），而不是编造零值。
+
+**窗口语义**：全部按服务器本地时区计算（容器内请设置 `TZ` 固定时区，否则用镜像默认的 UTC）。「本周」= 当前 ISO 周（周一 00:00 起）；「今日/昨日」= 本地自然日。
+
+**KPI 语义与空数据表示**：
+
+- `reviewsThisWeek`：本周创建的评审数（不限状态）。
+- `reviewsTrend`：本周 vs 上周的相对百分比变化（如 `+25.0`）；上周无数据时为 `null`。
+- `activeQueue`：内存队列中 pending + running 的实时数量。
+- `successRate`：本周 `completed/(completed+failed)`（%），窗口与卡片「本周」标签一致；本周无终态评审时为 `null`。
+- `successTrend`：今日成功率 vs 昨日的**百分比点位差**（如 `+20.0`）；任一昨日/今日无终态评审时为 `null`。
+- `avgDurationMs`：本周已完成评审的平均耗时；本周无已完成评审时为 `null`。
+- `durationTrend`：本周平均耗时 vs 上周的相对百分比变化；任一窗口无数据时为 `null`。
+
+所有 `null` 在前端渲染为「—」，绝不显示编造的 `0.0%`。
+
+**成本**：前端每 60s 轮询。计数走 SQL `COUNT(*)`（只取 total，不物化行）；平均耗时 / 24h 分桶 / recentReviews 才物化行，各窗口最多取最新 500 条（`created_at` 索引范围扫描）。
 
 ```
 Response 200:
 {
   "kpis": {
     "reviewsThisWeek": 12,
-    "reviewsTrend": 0.0,
+    "reviewsTrend": 25.0,          // 或 null（上周无数据）
     "activeQueue": 1,
-    "successRate": 91.7,
-    "successTrend": 0.0,
-    "avgDurationMs": 28400,
-    "durationTrend": 0.0
+    "successRate": 91.7,           // 或 null（本周无终态评审）
+    "successTrend": 5.0,           // 或 null（昨日/今日无终态评审）
+    "avgDurationMs": 28400,        // 或 null（本周无已完成评审）
+    "durationTrend": -12.5         // 或 null（对比窗口无数据）
   },
   "trend": [ { "time": 1789948800, "value": 2 } ],
   "health": { "integrations": [], "llmProviders": [], "overall": "success", "lastChecked": "..." },
@@ -850,7 +868,11 @@ Response 200:
 }
 ```
 
-`recentReviews` 不再按状态过滤（pending / running / completed / failed / cancelled 都会出现），`status` 使用与 `/reviews` 一致的真实状态词汇（不再输出 `"success"`）。
+`trend`：最近 24 小时的 24 个小时桶（按 `created_at` 归桶，保留旧版滚动小时窗口形状），卡片合计 = 窗口内总和。
+
+`recentReviews`：最新 5 条（`created_at` DESC），不再按状态过滤（pending / running / completed / failed / cancelled 都会出现），`status` 使用与 `/reviews` 一致的真实状态词汇（不再输出 `"success"`）。
+
+`health.integrations`（0.10.8 起）：按**实际 git 集成配置**检测，两条配置通道任一满足即报 `success`——`git_platforms` 表（即 `PUT /api/v1/config` 的 Git 平台列表）中存在任一 `type=gitlab` / `type=github` 平台，**或**启动时经 env/CLI 配置了凭据（`GITLAB_TOKEN` / `--gitlab-token`、`GITHUB_TOKEN` / `--github-token`；该通道直接接入 webhook / MR 拉取客户端，不经过 `git_platforms`）；不再通过 LLM provider 名称猜测。`latencyMs` 字段已移除（原恒为 0 的占位值；真实连通性/延迟探测用 `POST /api/v1/llm/providers/{id}/test`）。
 
 ---
 

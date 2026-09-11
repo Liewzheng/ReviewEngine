@@ -7,7 +7,7 @@
       <span class="kpi-label">{{ label }}</span>
     </div>
     <div class="kpi-value">{{ formattedValue }}</div>
-    <div v-if="trend !== undefined" class="kpi-trend" :class="trendClass">
+    <div v-if="trend != null" class="kpi-trend" :class="trendClass">
       <el-icon :size="14">
         <component :is="trendIcon" />
       </el-icon>
@@ -28,10 +28,12 @@ import type { Component } from 'vue'
 
 interface Props {
   label: string
-  value: number
+  /** Null when the metric has no data (e.g. no reviews this week) — renders "—". */
+  value: number | null
   format?: 'number' | 'percent' | 'duration'
   icon: Component
-  trend?: number
+  /** Null/undefined when the comparison window has no data — renders "—" instead of a fake 0%. */
+  trend?: number | null
   trendLabel?: string
 }
 
@@ -42,6 +44,7 @@ const props = withDefaults(defineProps<Props>(), {
 })
 
 const formattedValue = computed(() => {
+  if (props.value === null) return '—'
   if (props.format === 'number') {
     return new Intl.NumberFormat().format(props.value)
   }
@@ -57,21 +60,21 @@ const formattedValue = computed(() => {
 })
 
 const trendClass = computed(() => {
-  if (props.trend === undefined) return 'kpi-trend-neutral'
+  if (props.trend == null) return 'kpi-trend-neutral'
   if (props.trend > 0) return 'kpi-trend-up'
   if (props.trend < 0) return 'kpi-trend-down'
   return 'kpi-trend-neutral'
 })
 
 const trendIcon = computed(() => {
-  if (props.trend === undefined) return Minus
+  if (props.trend == null) return Minus
   if (props.trend > 0) return ArrowUp
   if (props.trend < 0) return ArrowDown
   return Minus
 })
 
 const trendText = computed(() => {
-  if (props.trend === undefined) return '—'
+  if (props.trend == null) return '—'
   const sign = props.trend > 0 ? '+' : ''
   return `${sign}${props.trend}% ${props.trendLabel ?? t('dashboard.kpis.vsLastWeek')}`
 })

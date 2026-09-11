@@ -279,6 +279,16 @@ pub async fn run() -> Result<()> {
                 llm_from_env: !env_llm_entries.is_empty(),
                 llm_entries: env_llm_entries,
             });
+            // RENG-32: the dashboard health panel treats these tokens as a
+            // configured integration even though they never appear in
+            // `git_platforms` (they wire webhook/MR-fetch clients directly).
+            // Recorded here, before the state is shared.
+            app_state.env_gitlab_configured = gitlab_token_opt.is_some();
+            app_state.env_github_configured = github_token
+                .clone()
+                .or_else(|| std::env::var("GITHUB_TOKEN").ok())
+                .filter(|s| !s.is_empty())
+                .is_some();
             // 0.10.0 persistence (design/persistence.md §6.1, strict order):
             // 1) resolve DB URL → pool → migrate (failure aborts startup;
             //    REVIEW_DISABLE_DB=1 bypasses to 0.9 behaviour);

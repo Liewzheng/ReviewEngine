@@ -1,11 +1,16 @@
 export interface KpiData {
   reviewsThisWeek: number;
-  reviewsTrend: number;
+  /** WoW relative change (%) vs last week; null when last week had no reviews — rendered as "—". */
+  reviewsTrend: number | null;
   activeQueue: number;
-  successRate: number;
-  successTrend: number;
-  avgDurationMs: number;
-  durationTrend: number;
+  /** completed/(completed+failed) this week (%); null when the week has no terminal reviews. */
+  successRate: number | null;
+  /** Percentage-point delta vs yesterday; null when either day has no terminal reviews. */
+  successTrend: number | null;
+  /** Average duration of completed reviews this week; null when there were none. */
+  avgDurationMs: number | null;
+  /** WoW relative change (%) of the weekly average duration; null without both weeks' data. */
+  durationTrend: number | null;
 }
 
 export interface TrendPoint {
@@ -20,7 +25,7 @@ export interface HealthStatus {
   service: string;
   type: HealthStatusType;
   status: HealthState;
-  latencyMs?: number;
+  /** Free-form probe detail (e.g. "Configured" / "Missing API key"). */
   message?: string;
 }
 

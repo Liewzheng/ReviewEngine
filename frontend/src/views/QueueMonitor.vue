@@ -17,6 +17,7 @@ import type { QueueStats, QueueTask } from '../types/queue'
 import StatsCard from '../components/QueueMonitor/StatsCard.vue'
 import TaskCard from '../components/QueueMonitor/TaskCard.vue'
 import { useQueue } from '../composables/useQueue'
+import { useAutoRefresh } from '../composables/useAutoRefresh'
 
 const { t } = useI18n()
 
@@ -38,8 +39,17 @@ const loading = queue.loading
 // --- Local UI state ---
 const sseConnected = ref(false)
 const recentlyUpdated = ref<string[]>([])
-const isRefreshing = ref(false)
-let refreshInterval: ReturnType<typeof setInterval> | null = null
+
+// --- Auto refresh ---
+// Shared polling composable (also pauses while the tab is hidden and fires
+// immediately on return). 3s cadence: the queue is a live operations view.
+// Ticks are silent: neither fetch touches the loading counter that gates the
+// page's `v-if` skeleton, so a poll can no longer unmount and remount the
+// stats row and all task grids every 3s; a failed poll keeps the last good
+// data. Only the initial load and the manual Refresh button fetch visibly.
+const queueAutoRefresh = useAutoRefresh(async () => {
+  await Promise.all([queue.fetchStats(true), queue.fetchTasks(undefined, 1, 50, true)])
+}, 3000)
 
 // --- Computed stats with fallback ---
 const stats = computed<QueueStats>(() => queue.stats.value ?? {
@@ -72,27 +82,6 @@ const loadQueueData = async () => {
   await queue.fetchStats()
   await queue.fetchTasks()
   sseConnected.value = true
-}
-
-// --- Auto refresh ---
-const startAutoRefresh = () => {
-  stopAutoRefresh()
-  refreshInterval = setInterval(async () => {
-    if (isRefreshing.value) return
-    isRefreshing.value = true
-    try {
-      await Promise.all([queue.fetchStats(), queue.fetchTasks()])
-    } finally {
-      isRefreshing.value = false
-    }
-  }, 3000)
-}
-
-const stopAutoRefresh = () => {
-  if (refreshInterval) {
-    clearInterval(refreshInterval)
-    refreshInterval = null
-  }
 }
 
 // --- Pause / Resume ---
@@ -263,12 +252,12 @@ watch(() => queue.error.value, (err) => {
 // --- Lifecycle ---
 onMounted(() => {
   loadQueueData().then(() => {
-    startAutoRefresh()
+    queueAutoRefresh.start()
   })
 })
 
 onUnmounted(() => {
-  stopAutoRefresh()
+  queueAutoRefresh.stop()
 })
 </script>
 

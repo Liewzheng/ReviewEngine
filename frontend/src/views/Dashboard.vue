@@ -42,9 +42,6 @@ const chartContainer = ref<HTMLElement | null>(null)
 let chart: IChartApi | null = null
 let lineSeries: ISeriesApi<'Line'> | null = null
 
-// Auto-refresh timer
-let autoRefreshTimer: ReturnType<typeof setInterval> | null = null
-
 // ─── Error Handling ─────────────────────────────────
 
 watch(() => dashboard.error.value, (err) => {
@@ -229,16 +226,16 @@ function onRowClick(row: RecentReview) {
 }
 
 // ─── Lifecycle ──────────────────────────────────────
+// The single 60s background poll lives in `useDashboard` (silent — it never
+// flips `loading`, so no per-minute skeleton flash). The page only drives
+// the initial load and the manual Refresh button through `refreshData`, and
+// owns the chart lifecycle.
 
 onMounted(() => {
   refreshData()
-  autoRefreshTimer = setInterval(() => {
-    refreshData()
-  }, 60000)
 })
 
 onUnmounted(() => {
-  if (autoRefreshTimer) clearInterval(autoRefreshTimer)
   if (chart) {
     chart.remove()
     chart = null

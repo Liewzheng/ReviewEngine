@@ -11,7 +11,6 @@ import {
   OfficeBuilding,
   Star,
   View as IconView,
-  Edit,
   WarningFilled,
 } from '@element-plus/icons-vue'
 import type { Expert } from '../../types/expert'
@@ -20,14 +19,12 @@ import { categoryColorMap, categoryLabelMap } from '../../types/expert'
 const props = defineProps<{
   expert: Expert
   index: number
-  isEditing?: boolean
 }>()
 
 const emit = defineEmits<{
   (e: 'toggle', id: string, enabled: boolean): void
   (e: 'weight-change', id: string, weight: number): void
   (e: 'view-details', expert: Expert): void
-  (e: 'edit-card', expert: Expert): void
 }>()
 
 const cardStyle = computed(() => ({
@@ -67,10 +64,6 @@ const handleWeightChange = (val: number) => {
 
 const handleViewDetails = () => {
   emit('view-details', props.expert)
-}
-
-const handleEdit = () => {
-  emit('edit-card', props.expert)
 }
 </script>
 
@@ -125,7 +118,6 @@ const handleEdit = () => {
         :max="100"
         :step="5"
         :show-stops="true"
-        :disabled="!isEditing"
         class="weight-slider"
       />
     </div>
@@ -148,11 +140,6 @@ const handleEdit = () => {
         @click="handleViewDetails">
         <el-icon><IconView /></el-icon>
         {{ $t('experts.card.viewDetails') }}
-      </el-button>
-      <el-button size="small" type="primary" :aria-label="$t('experts.editAria', { name: expert.name })"
-        @click="handleEdit">
-        <el-icon><Edit /></el-icon>
-        {{ $t('common.edit') }}
       </el-button>
     </div>
   </div>

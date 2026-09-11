@@ -5,7 +5,7 @@
       <div class="card-header">
         <el-icon><Connection /></el-icon>
         <span>{{ $t('config.gitPlatforms.title') }}</span>
-        <div v-if="isEditing" class="header-action">
+        <div class="header-action">
           <el-button size="small" type="primary" @click="openAddDialog">
             <el-icon><Plus /></el-icon>
             {{ $t('config.gitPlatforms.addBtn') }}
@@ -19,7 +19,7 @@
         :description="$t('config.gitPlatforms.empty')"
         :image-size="80"
       >
-        <el-button v-if="isEditing" size="small" type="primary" @click="openAddDialog">
+        <el-button size="small" type="primary" @click="openAddDialog">
           <el-icon><Plus /></el-icon>
           {{ $t('config.gitPlatforms.addBtn') }}
         </el-button>
@@ -35,27 +35,22 @@
               <span v-else class="platform-item-token">{{ $t('config.notSet') }}</span>
             </div>
             <div class="platform-item-actions">
-              <!-- The connectivity probe is a read-only check, so it must stay
-                   clickable in view mode: an explicit :disabled="false" short-
-                   circuits the disabled injected by the surrounding el-form
-                   (useFormDisabled: component prop wins over form context). -->
+              <!-- The connectivity probe is a read-only check that posts the
+                   row's (possibly masked) token to the server-side probe. -->
               <el-button
                 size="small"
                 text
                 :loading="testingIndex === index"
-                :disabled="false"
                 @click="testPlatform(index)"
               >
                 {{ $t('config.gitPlatforms.test') }}
               </el-button>
-              <template v-if="isEditing">
-                <el-button size="small" text @click="openEditDialog(index)">
-                  {{ $t('common.edit') }}
-                </el-button>
-                <el-button size="small" text type="danger" @click="confirmRemove(index)">
-                  <el-icon><Delete /></el-icon>
-                </el-button>
-              </template>
+              <el-button size="small" text @click="openEditDialog(index)">
+                {{ $t('common.edit') }}
+              </el-button>
+              <el-button size="small" text type="danger" @click="confirmRemove(index)">
+                <el-icon><Delete /></el-icon>
+              </el-button>
             </div>
           </div>
         </div>
@@ -218,16 +213,14 @@ import { testGitPlatform } from '../../services/config';
 const props = defineProps<{
   /** Configured git platform entries (secrets masked as returned by GET /config). */
   platforms: GitPlatformConfig[];
-  /** Whether the page is in edit mode. */
-  isEditing: boolean;
 }>();
 
 const emit = defineEmits<{
-  /** Stage a new platform entry for the next save. */
+  /** Stage a new platform entry; the page's auto-save persists it. */
   add: [entry: GitPlatformConfig];
-  /** Replace the entry at `index` for the next save. */
+  /** Replace the entry at `index`; the page's auto-save persists it. */
   edit: [index: number, entry: GitPlatformConfig];
-  /** Drop the entry at `index` for the next save. */
+  /** Drop the entry at `index`; the page's auto-save persists it. */
   remove: [index: number];
 }>();
 

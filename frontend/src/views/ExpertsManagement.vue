@@ -3,8 +3,6 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Plus,
-  Edit as IconEdit,
-  Check,
   Close,
   Search,
   WarningFilled,
@@ -14,6 +12,7 @@ import { useI18n } from 'vue-i18n'
 import type { Expert, ExpertCategory, ExpertReviewSummary } from '../types/expert'
 import { categoryColorMap, categoryLabelMap } from '../types/expert'
 import { useExperts } from '../composables/useExperts'
+import { useAutoRefresh } from '../composables/useAutoRefresh'
 import ExpertCard from '../components/ExpertsManagement/ExpertCard.vue'
 
 const router = useRouter()
@@ -25,11 +24,8 @@ const expertsStore = useExperts()
 // ========== State ==========
 const experts = expertsStore.experts
 const loading = expertsStore.loading
-const isEditing = ref(false)
 const detailModalVisible = ref(false)
-const editModalVisible = ref(false)
 const selectedExpert = ref<Expert | null>(null)
-const editingExpert = ref<Expert | null>(null)
 const searchQuery = ref('')
 const filterCategory = ref<ExpertCategory | 'all'>('all')
 
@@ -76,78 +72,86 @@ const avgWeight = computed(() => {
 })
 
 // ========== Methods ==========
-const fetchExperts = async () => {
-  await expertsStore.fetch()
+const fetchExperts = async (silent: boolean = false) => {
+  await expertsStore.fetch(silent)
 }
 
-function handleApiError(error: unknown, fallback: string) {
-  console.error(fallback, error)
-}
+/* Every card control is live: the switch and slider optimistically mutate the
+ * local expert, PUT to the server, and roll back + notify on failure. */
 
 const handleToggle = async (id: string, enabled: boolean) => {
+  const expert = experts.value.find((e: Expert) => e.id === id)
+  if (!expert) return
+  const previous = expert.enabled
+  expert.enabled = enabled
   try {
     await expertsStore.update(id, { enabled })
-    const name = experts.value.find((e: Expert) => e.id === id)?.name ?? id
     ElNotification({
       title: enabled ? t('experts.toggle.enabledTitle') : t('experts.toggle.disabledTitle'),
-      message: enabled ? t('experts.toggle.enabledMessage', { name }) : t('experts.toggle.disabledMessage', { name }),
+      message: enabled ? t('experts.toggle.enabledMessage', { name: expert.name }) : t('experts.toggle.disabledMessage', { name: expert.name }),
       type: enabled ? 'success' : 'warning',
       duration: 2000,
     })
   } catch (e) {
-    handleApiError(e, 'Failed to toggle expert')
+    expert.enabled = previous
+    notifyUpdateFailed(expert.name, e)
   }
 }
 
-const handleWeightChange = async (id: string, weight: number) => {
+/* Weight slider drags emit per pixel: debounce the PUT (500ms after the last
+ * movement) and remember the pre-drag value for rollback. The whole debounce
+ * window is gated via `weightDragPending` so a background tick can neither
+ * replace the list nor snap the slider back mid-drag; `weightSavePending`
+ * additionally covers the commit await itself. */
+const WEIGHT_DEBOUNCE_MS = 500
+const weightTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const previousWeights = new Map<string, number>()
+const weightSavePending = ref(false)
+/** True from the first drag movement until the debounced commit fires. */
+const weightDragPending = ref(false)
+
+const handleWeightChange = (id: string, weight: number) => {
+  const expert = experts.value.find((e: Expert) => e.id === id)
+  if (!expert) return
+  if (!previousWeights.has(id)) previousWeights.set(id, expert.weight)
+  expert.weight = weight
+  weightDragPending.value = true
+  const existing = weightTimers.get(id)
+  if (existing) clearTimeout(existing)
+  weightTimers.set(id, setTimeout(() => commitWeight(id), WEIGHT_DEBOUNCE_MS))
+}
+
+const commitWeight = async (id: string) => {
+  weightTimers.delete(id)
+  if (weightTimers.size === 0) weightDragPending.value = false
+  const expert = experts.value.find((e: Expert) => e.id === id)
+  const previous = previousWeights.get(id)
+  previousWeights.delete(id)
+  if (!expert || previous === undefined || expert.weight === previous) return
+  weightSavePending.value = true
   try {
-    await expertsStore.update(id, { weight })
+    await expertsStore.update(id, { weight: expert.weight })
   } catch (e) {
-    handleApiError(e, 'Failed to update expert weight')
+    expert.weight = previous
+    notifyUpdateFailed(expert.name, e)
+  } finally {
+    weightSavePending.value = false
   }
+}
+
+function notifyUpdateFailed(name: string, error: unknown) {
+  console.error('Failed to update expert', error)
+  ElNotification({
+    title: t('common.error'),
+    message: t('experts.updateFailed', { name }),
+    type: 'error',
+    duration: 5000,
+  })
 }
 
 const handleViewDetails = (expert: Expert) => {
   selectedExpert.value = expert
   detailModalVisible.value = true
-}
-
-const handleEditCard = (expert: Expert) => {
-  editingExpert.value = { ...expert }
-  editModalVisible.value = true
-}
-
-const saveEdit = async () => {
-  if (!editingExpert.value) return
-
-  try {
-    await expertsStore.update(editingExpert.value.id, {
-      enabled: editingExpert.value.enabled,
-      weight: editingExpert.value.weight,
-    })
-    editModalVisible.value = false
-
-    ElNotification({
-      title: t('experts.savedTitle'),
-      message: t('experts.savedMessage', { name: editingExpert.value.name }),
-      type: 'success',
-      duration: 2000,
-    })
-
-    editingExpert.value = null
-  } catch (e) {
-    handleApiError(e, 'Failed to save expert changes')
-  }
-}
-
-const toggleGlobalEdit = () => {
-  isEditing.value = !isEditing.value
-  ElNotification({
-    title: isEditing.value ? t('experts.editModeOnTitle') : t('experts.editModeOffTitle'),
-    message: isEditing.value ? t('experts.editModeOnMessage') : t('experts.editModeOffMessage'),
-    type: 'info',
-    duration: 2000,
-  })
 }
 
 const handleRowClick = (row: ExpertReviewSummary) => {
@@ -161,39 +165,29 @@ const getScoreType = (score?: number): 'success' | 'warning' | 'danger' | 'info'
   return 'danger'
 }
 
-// ========== Unsaved Changes Guard ==========
-const hasUnsavedChanges = computed(() => isEditing.value)
-
-const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-  if (hasUnsavedChanges.value) {
-    e.preventDefault()
-    e.returnValue = ''
-  }
-}
-
-const unregisterGuard = router.beforeEach((to, from, next) => {
-  if (hasUnsavedChanges.value && to.path !== from.path) {
-    const confirm = window.confirm(t('experts.unsavedConfirm'))
-    if (confirm) {
-      isEditing.value = false
-      next()
-    } else {
-      next(false)
-    }
-  } else {
-    next()
-  }
-})
-
 // ========== Lifecycle ==========
+/* Background auto-refresh (10s), e.g. to reflect experts changed elsewhere.
+ * The tick is silent: it never flips `loading` (so the grid — and any open
+ * detail dialog — is never unmounted by a poll) and reconciles the fetched
+ * list in place, preserving expert object identities. Ticks are additionally
+ * skipped while a weight-slider debounce window is open (`weightDragPending`)
+ * so a poll can never replace the list or snap a slider back mid-drag. The
+ * initial load and any later remount path do a normal, visible fetch. */
+const expertsAutoRefresh = useAutoRefresh(
+  () => fetchExperts(true),
+  10_000,
+  { isPaused: () => weightDragPending.value }
+)
+
 onMounted(() => {
   fetchExperts()
-  window.addEventListener('beforeunload', handleBeforeUnload)
+  expertsAutoRefresh.start()
 })
 
 onBeforeUnmount(() => {
-  window.removeEventListener('beforeunload', handleBeforeUnload)
-  unregisterGuard()
+  expertsAutoRefresh.stop()
+  weightTimers.forEach((timer) => clearTimeout(timer))
+  weightTimers.clear()
 })
 </script>
 
@@ -206,14 +200,6 @@ onBeforeUnmount(() => {
         <p class="page-subtitle">{{ $t('experts.subtitle') }}</p>
       </div>
       <div class="header-actions">
-        <el-button
-          :type="isEditing ? 'success' : 'default'"
-          :aria-label="isEditing ? $t('experts.doneEditingAria') : $t('experts.enterEditModeAria')"
-          @click="toggleGlobalEdit"
-        >
-          <el-icon><component :is="isEditing ? Check : IconEdit" /></el-icon>
-          {{ isEditing ? $t('experts.doneEditing') : $t('experts.editMode') }}
-        </el-button>
         <el-tooltip :content="$t('experts.comingSoon')" placement="top">
           <el-button type="primary" disabled :aria-label="$t('experts.addExpertComingSoonAria')">
             <el-icon><Plus /></el-icon>
@@ -302,11 +288,9 @@ onBeforeUnmount(() => {
         :key="expert.id"
         :expert="expert"
         :index="index"
-        :is-editing="isEditing"
         @toggle="handleToggle"
         @weight-change="handleWeightChange"
         @view-details="handleViewDetails"
-        @edit-card="handleEditCard"
       />
     </div>
 
@@ -419,74 +403,6 @@ onBeforeUnmount(() => {
         <el-button @click="detailModalVisible = false">
           <el-icon><Close /></el-icon>
           {{ $t('common.close') }}
-        </el-button>
-      </template>
-    </el-dialog>
-
-    <!-- Edit Modal -->
-    <el-dialog
-      v-model="editModalVisible"
-      :title="$t('experts.editTitle')"
-      width="500px"
-      class="expert-dialog"
-      :aria-label="$t('experts.detailsAria')"
-      destroy-on-close
-    >
-      <el-form v-if="editingExpert" label-position="top">
-        <el-form-item :label="$t('experts.edit.name')">
-          <el-input v-model="editingExpert.name" readonly />
-        </el-form-item>
-        <el-form-item :label="$t('experts.edit.category')">
-          <el-select v-model="editingExpert.category" disabled style="width: 100%">
-            <el-option
-              v-for="(label, value) in categoryLabelMap"
-              :key="value"
-              :label="label"
-              :value="value"
-            />
-          </el-select>
-        </el-form-item>
-        <el-form-item :label="$t('experts.edit.enabled')">
-          <el-switch
-            v-model="editingExpert.enabled"
-            :active-color="'var(--success)'"
-            :inactive-color="'var(--offline)'"
-          />
-        </el-form-item>
-        <el-form-item :label="$t('experts.edit.weight')">
-          <el-slider
-            v-model="editingExpert.weight"
-            :max="100"
-            :step="5"
-            :show-stops="true"
-            show-input
-          />
-        </el-form-item>
-        <el-form-item :label="$t('experts.edit.description')">
-          <el-input
-            v-model="editingExpert.description"
-            type="textarea"
-            :rows="4"
-            readonly
-            resize="none"
-          />
-        </el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button
-          :aria-label="$t('experts.cancelEditAria')"
-          @click="editModalVisible = false"
-        >
-          <el-icon><Close /></el-icon>
-          {{ $t('common.cancel') }}
-        </el-button>
-        <el-button
-          type="primary"
-          :aria-label="$t('experts.saveChangesAria')"
-          @click="saveEdit"
-        >
-          <el-icon><Check /></el-icon>
-          {{ $t('common.saveChanges') }}
         </el-button>
       </template>
     </el-dialog>

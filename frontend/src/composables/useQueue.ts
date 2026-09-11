@@ -25,17 +25,29 @@ export function useQueue() {
 
   /**
    * Fetch current queue statistics (active, queued, failed counts).
+   * @param silent - When true, refresh in the background: the loading counter
+   *   is left untouched (no skeleton swap) and a failed request keeps the
+   *   last good stats instead of clearing them.
    */
-  async function fetchStats() {
-    loadingCount.value++;
-    error.value = null;
+  async function fetchStats(silent: boolean = false) {
+    if (!silent) {
+      loadingCount.value++;
+      error.value = null;
+    }
     try {
       stats.value = await getQueueStats();
+      if (silent) {
+        error.value = null;
+      }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
-      stats.value = null;
+      if (!silent) {
+        error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+        stats.value = null;
+      }
     } finally {
-      loadingCount.value--;
+      if (!silent) {
+        loadingCount.value--;
+      }
     }
   }
 
@@ -44,17 +56,29 @@ export function useQueue() {
    * @param status - Filter by task status (optional).
    * @param page - Page number (1-based).
    * @param perPage - Items per page.
+   * @param silent - When true, refresh in the background: the loading counter
+   *   is left untouched (no skeleton swap) and a failed request keeps the
+   *   last good task list instead of clearing it.
    */
-  async function fetchTasks(status?: string, page: number = 1, perPage: number = 50) {
-    loadingCount.value++;
-    error.value = null;
+  async function fetchTasks(status?: string, page: number = 1, perPage: number = 50, silent: boolean = false) {
+    if (!silent) {
+      loadingCount.value++;
+      error.value = null;
+    }
     try {
       data.value = await getQueueTasks(status, page, perPage);
+      if (silent) {
+        error.value = null;
+      }
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
-      data.value = null;
+      if (!silent) {
+        error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+        data.value = null;
+      }
     } finally {
-      loadingCount.value--;
+      if (!silent) {
+        loadingCount.value--;
+      }
     }
   }
 

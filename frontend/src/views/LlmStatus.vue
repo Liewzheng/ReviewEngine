@@ -5,6 +5,7 @@ import { useI18n } from 'vue-i18n'
 import { RefreshRight, Cpu, CircleCheck, Warning, CircleClose, Remove, Plus } from '@element-plus/icons-vue'
 import { useLlmStatus } from '../composables/useLlmStatus'
 import { useProviderCards } from '../composables/useProviderCards'
+import { useAutoRefresh } from '../composables/useAutoRefresh'
 import type { ProviderCardState } from '../composables/llmPayload'
 import { getSystemHealth } from '../services/health'
 import ProviderConfigCard from '../components/Config/ProviderConfigCard.vue'
@@ -156,34 +157,18 @@ watch(() => cardsError.value, (err) => {
 })
 
 /* ------------------------------------------------------------------ */
-/*  Auto-refresh (QueueMonitor pattern): poll runtime health every     */
-/*  30s. The config echo is NOT polled — it resyncs on mutations, and  */
-/*  polling it would fight in-flight dialog edits.                     */
+/*  Auto-refresh: poll runtime health every 30s via the shared          */
+/*  composable (pauses while hidden, immediate fetch on return). The    */
+/*  tick is silent — it never flips `loading` and a failed poll keeps   */
+/*  the last good provider list. The config echo is NOT polled — it     */
+/*  resyncs on mutations, and polling it would fight in-flight dialog   */
+/*  edits.                                                              */
 /* ------------------------------------------------------------------ */
 
-let refreshTimer: ReturnType<typeof setInterval> | null = null
-const isPolling = ref(false)
-
-function startAutoRefresh() {
-  stopAutoRefresh()
-  refreshTimer = setInterval(async () => {
-    if (isPolling.value) return
-    isPolling.value = true
-    try {
-      await llm.fetch()
-      checkLlmConfigured()
-    } finally {
-      isPolling.value = false
-    }
-  }, 30_000)
-}
-
-function stopAutoRefresh() {
-  if (refreshTimer) {
-    clearInterval(refreshTimer)
-    refreshTimer = null
-  }
-}
+const llmAutoRefresh = useAutoRefresh(async () => {
+  await llm.fetch(true)
+  checkLlmConfigured()
+}, 30_000)
 
 /* ------------------------------------------------------------------ */
 /*  Lifecycle                                                         */
@@ -193,11 +178,11 @@ onMounted(() => {
   llm.fetch()
   loadProviderCards()
   checkLlmConfigured()
-  startAutoRefresh()
+  llmAutoRefresh.start()
 })
 
 onUnmounted(() => {
-  stopAutoRefresh()
+  llmAutoRefresh.stop()
 })
 </script>
 

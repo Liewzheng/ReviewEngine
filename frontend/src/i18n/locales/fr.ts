@@ -27,7 +27,6 @@ export default {
     cancel: 'Annuler',
     close: 'Fermer',
     save: 'Enregistrer',
-    saveChanges: 'Enregistrer les modifications',
     refresh: 'Actualiser',
     reset: 'Réinitialiser',
     retry: 'Réessayer',
@@ -315,34 +314,23 @@ export default {
   },
   config: {
     title: 'Configuration',
-    subtitle: {
-      edit: 'Mode édition — pensez à enregistrer vos modifications',
-      view: 'Gérer les paramètres de Review-Engine',
-    },
-    editBtn: 'Modifier la configuration',
+    subtitle: 'Gérer les paramètres de Review-Engine — les modifications sont enregistrées automatiquement',
     loadFailed: 'Échec du chargement de la configuration',
-    saved: 'Configuration enregistrée avec succès',
+    autoSave: {
+      saving: 'Enregistrement…',
+      saved: 'Modifications enregistrées automatiquement',
+      failed: "Échec de l'enregistrement — modifications conservées, nouvelle tentative à la prochaine modification",
+    },
     saveFailed: "Échec de l'enregistrement de la configuration",
     refreshedTitle: 'Actualisé',
     refreshed: 'Configuration actualisée',
     notSet: '(non défini)',
-    noChangesToSave: 'Aucune modification à enregistrer',
     llmNotConfiguredBanner:
       "Aucun LLM utilisable n'est encore configuré — les revues nécessitent un LLM pour s'exécuter. Renseignez l'URL de base de l'API et la clé dans « Paramètres LLM » ci-dessous, ou ajoutez-en un dans « Fournisseurs LLM supplémentaires ».",
     validation: {
       invalidUrl: 'Veuillez saisir une URL valide',
-      title: 'Erreur de validation',
       modelRequired: 'Le modèle par défaut est requis',
       expertRequired: 'Au moins un expert est requis',
-      fixBeforeSave: "Veuillez corriger les erreurs de validation avant d'enregistrer",
-      saveWithWarnings: 'Certains champs obligatoires sont manquants ; enregistrement avec les valeurs actuelles',
-    },
-    unsaved: {
-      title: 'Modifications non enregistrées',
-      discardConfirm:
-        'Vous avez des modifications non enregistrées. Les abandonner et quitter ?',
-      discard: 'Abandonner',
-      stay: 'Rester',
     },
     llm: {
       title: 'Paramètres LLM',

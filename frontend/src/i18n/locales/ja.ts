@@ -27,7 +27,6 @@ export default {
     cancel: 'キャンセル',
     close: '閉じる',
     save: '保存',
-    saveChanges: '変更を保存',
     refresh: '再読み込み',
     reset: 'リセット',
     retry: '再試行',
@@ -313,33 +312,23 @@ export default {
   },
   config: {
     title: '設定',
-    subtitle: {
-      edit: '編集モード — 変更を保存するのを忘れないでください',
-      view: 'Review-Engine の設定を管理',
-    },
-    editBtn: '設定を編集',
+    subtitle: 'Review-Engine の設定を管理 — 変更は自動的に保存されます',
     loadFailed: '設定の読み込みに失敗しました',
-    saved: '設定を保存しました',
+    autoSave: {
+      saving: '保存中…',
+      saved: '変更は自動的に保存されました',
+      failed: '保存に失敗しました — 変更は保持され、次の編集時に再試行されます',
+    },
     saveFailed: '設定の保存に失敗しました',
     refreshedTitle: '再読み込みしました',
     refreshed: '設定を再読み込みしました',
     notSet: '（未設定）',
-    noChangesToSave: '保存する変更がありません',
     llmNotConfiguredBanner:
       '利用可能な LLM がまだ設定されていません — レビューの実行には LLM が必要です。下の「LLM 設定」で API ベース URL とキーを入力するか、「追加の LLM プロバイダー」で追加してください。',
     validation: {
       invalidUrl: '有効な URL を入力してください',
-      title: '検証エラー',
       modelRequired: 'デフォルトモデルは必須です',
       expertRequired: 'エキスパートが 1 人以上必要です',
-      fixBeforeSave: '保存する前に検証エラーを修正してください',
-      saveWithWarnings: '一部の必須項目が未入力です。現在の内容のまま保存します',
-    },
-    unsaved: {
-      title: '未保存の変更',
-      discardConfirm: '未保存の変更があります。破棄して移動しますか？',
-      discard: '破棄',
-      stay: 'このページに留まる',
     },
     llm: {
       title: 'LLM 設定',

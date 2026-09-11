@@ -37,7 +37,6 @@ export default {
     cancel: 'Cancel',
     close: 'Close',
     save: 'Save',
-    saveChanges: 'Save Changes',
     refresh: 'Refresh',
     reset: 'Reset',
     retry: 'Retry',
@@ -323,33 +322,23 @@ export default {
   },
   config: {
     title: 'Configuration',
-    subtitle: {
-      edit: 'Edit mode — remember to save your changes',
-      view: 'Manage Review-Engine settings',
-    },
-    editBtn: 'Edit Configuration',
+    subtitle: 'Manage Review-Engine settings — changes save automatically',
     loadFailed: 'Failed to load configuration',
-    saved: 'Configuration saved successfully',
+    autoSave: {
+      saving: 'Saving…',
+      saved: 'All changes saved',
+      failed: 'Save failed — changes kept, retrying on next edit',
+    },
     saveFailed: 'Failed to save configuration',
     refreshedTitle: 'Refreshed',
     refreshed: 'Configuration refreshed',
     notSet: '(not set)',
-    noChangesToSave: 'No changes to save',
     llmNotConfiguredBanner:
       'No usable LLM configured yet — reviews need an LLM to run. Fill in the API Base URL and key under "LLM Settings" below, or add one under "Additional LLM Providers".',
     validation: {
       invalidUrl: 'Please enter a valid URL',
-      title: 'Validation Error',
       modelRequired: 'Default Model is required',
       expertRequired: 'At least one expert is required',
-      fixBeforeSave: 'Please fix validation errors before saving',
-      saveWithWarnings: 'Some required fields are missing; saving with current values',
-    },
-    unsaved: {
-      title: 'Unsaved Changes',
-      discardConfirm: 'You have unsaved changes. Discard and leave?',
-      discard: 'Discard',
-      stay: 'Stay',
     },
     llm: {
       title: 'LLM Settings',

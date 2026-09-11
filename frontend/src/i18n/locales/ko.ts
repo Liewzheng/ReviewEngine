@@ -27,7 +27,6 @@ export default {
     cancel: '취소',
     close: '닫기',
     save: '저장',
-    saveChanges: '변경 사항 저장',
     refresh: '새로고침',
     reset: '초기화',
     retry: '다시 시도',
@@ -312,33 +311,23 @@ export default {
   },
   config: {
     title: '설정',
-    subtitle: {
-      edit: '편집 모드 — 변경 사항을 저장하는 것을 잊지 마세요',
-      view: 'Review-Engine 설정 관리',
-    },
-    editBtn: '설정 편집',
+    subtitle: 'Review-Engine 설정 관리 — 변경 사항이 자동으로 저장됩니다',
     loadFailed: '설정을 불러오지 못했습니다',
-    saved: '설정이 저장되었습니다',
+    autoSave: {
+      saving: '저장 중…',
+      saved: '변경 사항이 자동으로 저장되었습니다',
+      failed: '저장 실패 — 변경 사항은 유지되며 다음 수정 시 다시 시도됩니다',
+    },
     saveFailed: '설정 저장 실패',
     refreshedTitle: '새로고침됨',
     refreshed: '설정을 새로고침했습니다',
     notSet: '（설정되지 않음）',
-    noChangesToSave: '저장할 변경 사항이 없습니다',
     llmNotConfiguredBanner:
       '아직 사용 가능한 LLM이 구성되지 않았습니다 — 리뷰를 실행하려면 LLM이 필요합니다. 아래 "LLM 설정"에서 API 기본 URL과 키를 입력하거나 "추가 LLM 제공자"에서 추가하세요.',
     validation: {
       invalidUrl: '유효한 URL을 입력하세요',
-      title: '검증 오류',
       modelRequired: '기본 모델이 필요합니다',
       expertRequired: '전문가가 1명 이상 필요합니다',
-      fixBeforeSave: '저장 전에 검증 오류를 수정하세요',
-      saveWithWarnings: '일부 필수 항목이 입력되지 않았습니다. 현재 내용으로 저장합니다',
-    },
-    unsaved: {
-      title: '저장되지 않은 변경 사항',
-      discardConfirm: '저장되지 않은 변경 사항이 있습니다. 버리고 나가시겠습니까?',
-      discard: '버리기',
-      stay: '이 페이지에 머무르기',
     },
     llm: {
       title: 'LLM 설정',

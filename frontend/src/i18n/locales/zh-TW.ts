@@ -27,7 +27,6 @@ export default {
     cancel: '取消',
     close: '關閉',
     save: '儲存',
-    saveChanges: '儲存變更',
     refresh: '重新整理',
     reset: '重設',
     retry: '重試',
@@ -308,33 +307,23 @@ export default {
   },
   config: {
     title: '設定',
-    subtitle: {
-      edit: '編輯模式 — 記得儲存您的變更',
-      view: '管理 Review-Engine 設定',
-    },
-    editBtn: '編輯設定',
+    subtitle: '管理 Review-Engine 設定 — 變更將自動儲存',
     loadFailed: '載入設定失敗',
-    saved: '設定已成功儲存',
+    autoSave: {
+      saving: '儲存中…',
+      saved: '變更已自動儲存',
+      failed: '儲存失敗 — 已保留變更，將在下次修改時重試',
+    },
     saveFailed: '儲存設定失敗',
     refreshedTitle: '已重新整理',
     refreshed: '設定已重新整理',
     notSet: '（未設定）',
-    noChangesToSave: '沒有可儲存的變更',
     llmNotConfiguredBanner:
       '尚未設定可用的 LLM — 審查需要 LLM 才能執行。請在下方「LLM 設定」填寫 API 基礎 URL 與密鑰，或在「其他 LLM 提供者」中新增。',
     validation: {
       invalidUrl: '請輸入有效的 URL',
-      title: '驗證錯誤',
       modelRequired: '必須填寫預設模型',
       expertRequired: '至少需要一位專家',
-      fixBeforeSave: '儲存前請先修正驗證錯誤',
-      saveWithWarnings: '部分必填欄位未填寫，將以目前內容儲存',
-    },
-    unsaved: {
-      title: '未儲存的變更',
-      discardConfirm: '您有未儲存的變更。捨棄並離開？',
-      discard: '捨棄',
-      stay: '留在本頁',
     },
     llm: {
       title: 'LLM 設定',

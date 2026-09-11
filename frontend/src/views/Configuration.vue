@@ -5,38 +5,19 @@
       <div class="header-left">
         <h2 class="page-title">{{ $t('config.title') }}</h2>
         <p class="page-subtitle">
-          {{ isEditing ? $t('config.subtitle.edit') : $t('config.subtitle.view') }}
+          {{ $t('config.subtitle') }}
         </p>
       </div>
       <div class="header-actions">
-        <template v-if="!isEditing">
-          <el-button type="primary" @click="enterEditMode">
-            <el-icon><Edit /></el-icon>
-            <span>{{ $t('config.editBtn') }}</span>
-          </el-button>
-          <el-button @click="refreshConfig">
-            <el-icon><Refresh /></el-icon>
-            <span>{{ $t('common.refresh') }}</span>
-          </el-button>
-        </template>
-        <template v-else>
-          <!-- Tooltip explains why Save is disabled; the wrapper span is needed
-               because a disabled button swallows pointer events. -->
-          <el-tooltip :content="$t('config.noChangesToSave')" :disabled="dirty" placement="top">
-            <span class="save-button-wrapper">
-              <el-badge :is-dot="dirty" type="danger">
-                <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
-                  <el-icon><Check /></el-icon>
-                  <span>{{ $t('common.saveChanges') }}</span>
-                </el-button>
-              </el-badge>
-            </span>
-          </el-tooltip>
-          <el-button @click="cancelEdit">
-            <el-icon><Close /></el-icon>
-            <span>{{ $t('common.cancel') }}</span>
-          </el-button>
-        </template>
+        <!-- Instant-save status: non-blocking indicator fed by the debounced
+             auto-save in useConfigForm. -->
+        <span v-if="saveStatus !== 'idle'" class="save-status" :data-status="saveStatus">
+          {{ saveStatusText }}
+        </span>
+        <el-button @click="refreshConfig">
+          <el-icon><Refresh /></el-icon>
+          <span>{{ $t('common.refresh') }}</span>
+        </el-button>
       </div>
     </div>
 
@@ -53,10 +34,8 @@
     <!-- Form -->
     <el-form
       v-else
-      ref="formRef"
       :model="config"
       :rules="rules"
-      :disabled="!isEditing"
       :label-position="labelPosition"
       label-width="auto"
       class="config-form"
@@ -66,7 +45,6 @@
       <GitPlatformsSection
         ref="gitPlatformsCardRef"
         :platforms="config.gitPlatforms"
-        :is-editing="isEditing"
         @add="addGitPlatform"
         @edit="editGitPlatform"
         @remove="removeGitPlatform"
@@ -85,7 +63,7 @@
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.rules.minScore')" prop="rules.minScore">
                 <div class="slider-with-value">
-                  <el-slider v-model="config.rules.minScore" :disabled="!isEditing" :min="0" :max="100" :step="5" />
+                  <el-slider v-model="config.rules.minScore" :min="0" :max="100" :step="5" />
                   <span class="slider-value">{{ config.rules.minScore }}</span>
                 </div>
               </el-form-item>
@@ -100,7 +78,6 @@
                      writes 0 back, so saving keeps 0 as 0. -->
                 <el-input-number
                   v-model="maxDurationInput"
-                  :disabled="!isEditing"
                   :min="0"
                   :max="3600"
                   :step="30"
@@ -111,19 +88,18 @@
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.rules.blockOnCritical')" prop="rules.blockOnCritical">
-                <el-switch v-model="config.rules.blockOnCritical" :disabled="!isEditing" />
+                <el-switch v-model="config.rules.blockOnCritical" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.rules.autoCommentOnPass')" prop="rules.autoCommentOnPass">
-                <el-switch v-model="config.rules.autoCommentOnPass" :disabled="!isEditing" />
+                <el-switch v-model="config.rules.autoCommentOnPass" />
               </el-form-item>
             </el-col>
             <el-col :xs="24">
               <el-form-item :label="$t('config.rules.commentTemplate')" prop="rules.commentTemplate">
                 <el-input
                   v-model="config.rules.commentTemplate"
-                  :disabled="!isEditing"
                   type="textarea"
                   :rows="4"
                   :maxlength="2000"
@@ -150,6 +126,7 @@
                     v-model="patternInputValue"
                     size="small"
                     @keyup.enter="addPattern"
+                    @keyup.esc="discardPatternInput"
                     @blur="addPattern"
                   />
                   <el-button v-else size="small" @click="showPatternInput">
@@ -161,7 +138,7 @@
             </el-col>
             <el-col :xs="24">
               <el-form-item :label="$t('config.rules.requiredExperts')" prop="rules.requiredExperts">
-                <el-checkbox-group v-model="config.rules.requiredExperts" :disabled="!isEditing">
+                <el-checkbox-group v-model="config.rules.requiredExperts">
                   <el-checkbox value="Security" label="Security" />
                   <el-checkbox value="Performance" label="Performance" />
                   <el-checkbox value="Quality" label="Quality" />
@@ -197,7 +174,7 @@
           <el-row :gutter="20">
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.advanced.logLevel')" prop="advanced.logLevel">
-                <el-select v-model="config.advanced.logLevel" :disabled="!isEditing" style="width: 100%">
+                <el-select v-model="config.advanced.logLevel" style="width: 100%">
                   <el-option label="Debug" value="debug" />
                   <el-option label="Info" value="info" />
                   <el-option label="Warn" value="warn" />
@@ -207,32 +184,32 @@
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.advanced.logRetention')" prop="advanced.logRetentionDays">
-                <el-input-number v-model="config.advanced.logRetentionDays" :disabled="!isEditing" :min="1" :max="90" style="width: 100%" />
+                <el-input-number v-model="config.advanced.logRetentionDays" :min="1" :max="90" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.advanced.sseHeartbeat')" prop="advanced.sseHeartbeatInterval">
-                <el-input-number v-model="config.advanced.sseHeartbeatInterval" :disabled="!isEditing" :min="5" :max="60" style="width: 100%" />
+                <el-input-number v-model="config.advanced.sseHeartbeatInterval" :min="5" :max="60" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.advanced.maxConcurrent')" prop="advanced.maxConcurrentReviews">
-                <el-input-number v-model="config.advanced.maxConcurrentReviews" :disabled="!isEditing" :min="1" :max="20" style="width: 100%" />
+                <el-input-number v-model="config.advanced.maxConcurrentReviews" :min="1" :max="20" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.advanced.requestTimeout')" prop="advanced.requestTimeout">
-                <el-input-number v-model="config.advanced.requestTimeout" :disabled="!isEditing" :min="10" :max="300" style="width: 100%" />
+                <el-input-number v-model="config.advanced.requestTimeout" :min="10" :max="300" style="width: 100%" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.advanced.enableMetrics')" prop="advanced.enableMetrics">
-                <el-switch v-model="config.advanced.enableMetrics" :disabled="!isEditing" />
+                <el-switch v-model="config.advanced.enableMetrics" />
               </el-form-item>
             </el-col>
             <el-col :xs="24" :sm="12">
               <el-form-item :label="$t('config.advanced.debugMode')" prop="advanced.debugMode">
-                <el-switch v-model="config.advanced.debugMode" :disabled="!isEditing" />
+                <el-switch v-model="config.advanced.debugMode" />
               </el-form-item>
             </el-col>
             <!-- Runtime info, not config: no `prop`, stays disabled in edit
@@ -247,43 +224,26 @@
         </div>
       </el-card>
     </el-form>
-
-    <!-- Mobile Sticky Actions -->
-    <div v-if="isEditing" class="mobile-actions">
-      <el-tooltip :content="$t('config.noChangesToSave')" :disabled="dirty" placement="top">
-        <span class="save-button-wrapper">
-          <el-badge :is-dot="dirty" type="danger" class="mobile-badge">
-            <el-button type="primary" :loading="saving" :disabled="!dirty" @click="saveChanges">
-              {{ $t('common.saveChanges') }}
-            </el-button>
-          </el-badge>
-        </span>
-      </el-tooltip>
-      <el-button @click="cancelEdit">{{ $t('common.cancel') }}</el-button>
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onUnmounted } from 'vue'
-import { onBeforeRouteLeave } from 'vue-router'
 import {
   ArrowDown,
   ArrowUp,
-  Check,
-  Close,
   Collection,
-  Edit,
   Plus,
   Refresh,
   Tools,
 } from '@element-plus/icons-vue'
-import { ElMessageBox, ElNotification } from 'element-plus'
+import { ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import { useConfig } from '../composables/useConfig'
 import { useConfigForm } from '../composables/useConfigForm'
+import { useAutoRefresh } from '../composables/useAutoRefresh'
 import { getSystemHealth } from '../services/health'
-import type { AppConfig, GitPlatformConfig } from '../types/config'
+import type { GitPlatformConfig } from '../types/config'
 import type { StorageBackendKind } from '../types/dashboard'
 import GitPlatformsSection from '../components/Config/GitPlatformsSection.vue'
 
@@ -293,19 +253,15 @@ const cfg = useConfig()
 
 const {
   config,
-  isEditing,
-  formRef,
-  configDirty,
+  saveStatus,
   rules,
   patternInputVisible,
   patternInputValue,
   setPatternInputRef,
   showPatternInput,
   addPattern,
+  discardPatternInput,
   removePattern,
-  enterEditMode,
-  restoreSnapshot,
-  commitSnapshot,
   loadConfig,
   refreshConfig,
 } = useConfigForm(cfg)
@@ -313,8 +269,16 @@ const {
 // --- State ---
 const loading = cfg.loading
 const loadError = computed(() => !!cfg.error.value)
-const saving = cfg.saving
 const showAdvanced = ref(false)
+
+/* Header auto-save indicator text. The el-form `:rules` still render inline
+ * validation (e.g. requiredExperts) as the user edits. */
+const saveStatusText = computed(() => {
+  if (saveStatus.value === 'saving') return t('config.autoSave.saving')
+  if (saveStatus.value === 'saved') return t('config.autoSave.saved')
+  if (saveStatus.value === 'error') return t('config.autoSave.failed')
+  return ''
+})
 
 /* Read-only runtime info: the persistence backend in use, from
  * GET /system/health (`storage_backend`, 0.10.0). Fail-silent — a health
@@ -333,22 +297,14 @@ function loadStorageBackend() {
     .catch(() => {})
 }
 
-// Card refs for flash animation
-const gitPlatformsCardRef = ref<HTMLElement>()
-const rulesCardRef = ref<HTMLElement>()
-const advancedCardRef = ref<HTMLElement>()
-
 // Responsive layout
 const windowWidth = ref(window.innerWidth)
 const labelPosition = computed(() => (windowWidth.value >= 1024 ? 'left' : 'top'))
 
-// --- Computed ---
-const dirty = computed(() => configDirty.value)
-
 // Display proxy for `rules.maxReviewDurationSeconds`: the stored 0 renders as
 // an empty input (placeholder explains "0 = unlimited") instead of a fake 30;
 // clearing the input stores 0 again. The underlying config model only ever
-// holds real numbers, so save/snapshot/dirty tracking are unaffected.
+// holds real numbers, so save/dirty tracking are unaffected.
 const maxDurationInput = computed<number | undefined>({
   get: () => (config.rules.maxReviewDurationSeconds === 0 ? undefined : config.rules.maxReviewDurationSeconds),
   set: (val) => {
@@ -358,8 +314,8 @@ const maxDurationInput = computed<number | undefined>({
 
 // --- Methods ---
 // Git platform rows live on the main reactive `config`, so these mutations feed
-// the existing configDirty JSON comparison and ride along in the PUT /config
-// payload (full-replace semantics; blank/masked secrets keep stored values).
+// the dirty comparison and ride along in the next debounced PUT /config
+// (full-replace semantics; blank/masked secrets keep stored values).
 function addGitPlatform(entry: GitPlatformConfig) {
   config.gitPlatforms.push(entry)
   ElNotification({
@@ -378,106 +334,22 @@ function removeGitPlatform(index: number) {
   config.gitPlatforms.splice(index, 1)
 }
 
-function cancelEdit() {
-  restoreSnapshot()
-}
-
-async function saveChanges() {
-  if (!formRef.value) return
-  const valid = await formRef.value.validate().catch(() => false)
-  // Missing/incorrect fields keep their inline validation errors, but they
-  // must not block saving: the backend treats empty secret/token fields as
-  // "keep the stored value", so a partially-filled form saves safely. Warn,
-  // then save with whatever is present.
-  if (!valid) {
-    ElNotification({
-      title: t('config.validation.title'),
-      message: t('config.validation.saveWithWarnings'),
-      type: 'warning',
-      duration: 4000,
-    })
-  }
-
-  try {
-    // LLM settings are managed on the LLM page (/llm): omit the `llm` key so
-    // this save never touches the stored LLM section (the backend deep-merges
-    // the payload over the stored config; omitted sections are preserved).
-    const payload: Partial<AppConfig> = JSON.parse(JSON.stringify(config))
-    delete payload.llm
-    await cfg.save(payload)
-    commitSnapshot()
-
-    ElNotification({
-      title: t('common.success'),
-      message: t('config.saved'),
-      type: 'success',
-      duration: 3000,
-    })
-
-    // Flash border animation on each card individually. Template refs on
-    // <el-card> resolve to the component instance, not a DOM element, so the
-    // root node must be reached via `$el` (calling classList on the instance
-    // itself throws and lands in the catch above, showing a bogus error
-    // notification after a successful save).
-    const cardRefs = [gitPlatformsCardRef, rulesCardRef, advancedCardRef]
-    cardRefs.forEach((cardRef) => {
-      const el = (cardRef.value as unknown as { $el?: HTMLElement })?.$el
-      if (el?.classList) {
-        el.classList.add('flash-success')
-        setTimeout(() => el.classList.remove('flash-success'), 600)
-      }
-    })
-  } catch {
-    ElNotification({
-      title: t('common.error'),
-      message: t('config.saveFailed'),
-      type: 'error',
-      duration: 5000,
-    })
-  }
-}
-
-// --- Navigation Guard ---
-onBeforeRouteLeave(async (_to, _from, next) => {
-  if (isEditing.value && dirty.value) {
-    try {
-      await ElMessageBox.confirm(
-        t('config.unsaved.discardConfirm'),
-        t('config.unsaved.title'),
-        {
-          confirmButtonText: t('config.unsaved.discard'),
-          cancelButtonText: t('config.unsaved.stay'),
-          type: 'warning',
-        }
-      )
-      next()
-    } catch {
-      next(false)
-    }
-  } else {
-    next()
-  }
-})
-
-// --- Before unload ---
-function handleBeforeUnload(e: BeforeUnloadEvent) {
-  if (isEditing.value && dirty.value) {
-    e.preventDefault()
-    e.returnValue = ''
-  }
-}
-
 // --- Resize handler ---
 function handleResize() {
   windowWidth.value = window.innerWidth
 }
 
+/* Background auto-refresh (10s). `loadConfig` refuses to write fetched state
+ * over the form while local edits are dirty or an auto-save is in flight,
+ * so polling can't clobber in-progress edits. */
+const configAutoRefresh = useAutoRefresh(() => loadConfig(), 10_000)
+
 // --- Lifecycle ---
 onMounted(() => {
-  window.addEventListener('beforeunload', handleBeforeUnload)
   window.addEventListener('resize', handleResize)
   loadConfig()
   loadStorageBackend()
+  configAutoRefresh.start()
 })
 
 // --- Error handling ---
@@ -493,8 +365,8 @@ watch(() => cfg.error.value, (err) => {
 })
 
 onUnmounted(() => {
-  window.removeEventListener('beforeunload', handleBeforeUnload)
   window.removeEventListener('resize', handleResize)
+  configAutoRefresh.stop()
 })
 </script>
 
@@ -554,11 +426,6 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-}
-
-/* Wrapper lets the tooltip hover target survive the disabled save button */
-.save-button-wrapper {
-  display: inline-flex;
 }
 
 /* Skeleton */
@@ -645,31 +512,6 @@ onUnmounted(() => {
   font-family: var(--font-mono);
 }
 
-/* Disabled slider — override Element Plus bare-dot default */
-.slider-with-value :deep(.el-slider.is-disabled) {
-  cursor: default;
-}
-.slider-with-value :deep(.el-slider.is-disabled .el-slider__runway) {
-  background-color: var(--border-color);
-  cursor: default;
-}
-.slider-with-value :deep(.el-slider.is-disabled .el-slider__bar) {
-  background-color: var(--primary);
-  opacity: 0.5;
-}
-.slider-with-value :deep(.el-slider.is-disabled .el-slider__button) {
-  border-color: var(--primary);
-  opacity: 0.7;
-  width: 14px;
-  height: 14px;
-}
-.slider-with-value :deep(.el-slider.is-disabled .el-slider__button-wrapper) {
-  cursor: default;
-}
-.slider-with-value :deep(.el-slider.is-disabled .el-slider__stop) {
-  display: none;
-}
-
 /* Tag input */
 .tag-input {
   display: flex;
@@ -715,63 +557,29 @@ onUnmounted(() => {
   color: var(--text-primary);
 }
 
-/* Flash animation */
-@keyframes flashBorder {
-  0% {
-    border-color: var(--border-color);
-  }
-  50% {
-    border-color: var(--success);
-    box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
-  }
-  100% {
-    border-color: var(--border-color);
-  }
+/* Auto-save status indicator (header) */
+.save-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
 }
 
-.config-card.flash-success {
-  animation: flashBorder 0.6s ease;
+.save-status[data-status='saving'] {
+  color: var(--text-secondary);
 }
 
-/* Shake animation for validation errors */
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  25% { transform: translateX(-4px); }
-  75% { transform: translateX(4px); }
+.save-status[data-status='saved'] {
+  color: var(--success);
 }
 
-.shake-error {
-  animation: shake 0.3s ease-in-out;
-}
-
-/* Mobile sticky actions */
-.mobile-actions {
-  display: none;
-  position: fixed;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  padding: 12px 16px;
-  background: var(--bg-surface);
-  border-top: 1px solid var(--border-color);
-  gap: 12px;
-  justify-content: flex-end;
-  z-index: 50;
-}
-
-.mobile-badge :deep(.el-badge__content) {
-  top: 4px;
-  right: 4px;
+.save-status[data-status='error'] {
+  color: var(--error);
 }
 
 /* Responsive */
 @media (max-width: 767px) {
   .header-actions {
     display: none;
-  }
-
-  .mobile-actions {
-    display: flex;
   }
 
   .page-header {
@@ -786,11 +594,9 @@ onUnmounted(() => {
   .card-body {
     padding: 16px;
   }
-
   :deep(.el-form-item__label) {
     font-size: 13px;
   }
-
   :deep(.el-slider) {
     width: 100%;
   }
@@ -802,7 +608,6 @@ onUnmounted(() => {
   }
 }
 
-/* Transitions for edit mode buttons */
 .header-actions .el-button {
   transition: all 0.15s ease;
 }

@@ -561,12 +561,14 @@ impl ReviewStore for SqlxStore {
 #[async_trait]
 impl DiscussionStore for SqlxStore {
     async fn upsert_note(&self, note: &DiscussionNote) -> Result<()> {
-        let (mr_iid, note_id) = rows::discussion_ids(note)?;
+        let (mr_iid, note_id, author_id) = rows::discussion_binds(note)?;
         let sql = self.sql(
-            "INSERT INTO mr_discussions (platform, project, mr_iid, note_id, author, body, created_at, ingested_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO mr_discussions (platform, project, mr_iid, note_id, author, author_id, author_avatar_url, author_bot, body, created_at, ingested_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT (platform, project, mr_iid, note_id) DO UPDATE SET \
-             body = excluded.body, author = excluded.author",
+             body = excluded.body, author = excluded.author, \
+             author_id = excluded.author_id, author_avatar_url = excluded.author_avatar_url, \
+             author_bot = excluded.author_bot",
         );
         ::sqlx::query(&sql)
             .bind(&note.platform)
@@ -574,6 +576,9 @@ impl DiscussionStore for SqlxStore {
             .bind(mr_iid)
             .bind(note_id)
             .bind(&note.author)
+            .bind(author_id)
+            .bind(note.author_avatar_url.as_deref())
+            .bind(i64::from(note.author_bot))
             .bind(&note.body)
             .bind(encode_ts(&note.created_at))
             .bind(encode_ts(&Utc::now()))
@@ -591,7 +596,7 @@ impl DiscussionStore for SqlxStore {
     async fn list_notes(&self, platform: &str, project: &str, mr_iid: u64) -> Result<Vec<DiscussionNote>> {
         let mr_iid = i64::try_from(mr_iid).with_context(|| format!("mr_iid out of range: {mr_iid}"))?;
         let sql = self.sql(
-            "SELECT platform, project, mr_iid, note_id, author, body, created_at FROM mr_discussions \
+            "SELECT platform, project, mr_iid, note_id, author, author_id, author_avatar_url, author_bot, body, created_at FROM mr_discussions \
              WHERE platform = ? AND project = ? AND mr_iid = ? ORDER BY created_at, note_id",
         );
         let rows = ::sqlx::query_as::<_, rows::DiscussionRowTuple>(&sql)
@@ -1220,6 +1225,9 @@ mod tests {
             mr_iid: 7,
             note_id,
             author: "alice".into(),
+            author_id: Some(42),
+            author_avatar_url: Some("http://avatar/alice".into()),
+            author_bot: false,
             body: body.into(),
             created_at: DateTime::parse_from_rfc3339(created_at).unwrap().with_timezone(&Utc),
         }
@@ -1257,14 +1265,24 @@ mod tests {
         let bodies: Vec<&str> = notes.iter().map(|n| n.body.as_str()).collect();
         assert_eq!(bodies, vec!["first", "second", "third", "fourth"]);
         assert_eq!(notes[0].created_at.to_rfc3339(), "2026-09-03T10:00:00+00:00");
+        // RENG-43: the author identity columns round-trip too.
+        assert_eq!(notes[0].author_id, Some(42));
+        assert_eq!(notes[0].author_avatar_url.as_deref(), Some("http://avatar/alice"));
+        assert!(!notes[0].author_bot);
 
-        // Edit via upsert keeps position, updates body.
+        // Edit via upsert keeps position, updates body (and author identity).
         let mut edited = note(2, "2026-09-03T10:00:00Z", "second (edited)");
         edited.author = "bob".into();
+        edited.author_id = Some(99);
+        edited.author_avatar_url = None;
+        edited.author_bot = true;
         store.upsert_note(&edited).await.unwrap();
         let notes = store.list_notes("default", "group/proj", 7).await.unwrap();
         assert_eq!(notes.len(), 4);
         assert_eq!(notes[1].body, "second (edited)");
         assert_eq!(notes[1].author, "bob");
+        assert_eq!(notes[1].author_id, Some(99), "author id is updated in place");
+        assert_eq!(notes[1].author_avatar_url, None);
+        assert!(notes[1].author_bot);
     }
 }

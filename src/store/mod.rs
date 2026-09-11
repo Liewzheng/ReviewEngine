@@ -334,7 +334,10 @@ mod tests {
             .fetch_one(store.pool())
             .await
             .unwrap();
-        assert_eq!(applied, 2, "0001_init + 0002_llm_snapshot should be recorded");
+        assert_eq!(
+            applied, 3,
+            "0001_init + 0002_llm_snapshot + 0003_participant_meta should be recorded"
+        );
 
         // 0002 (RENG-38): the snapshot columns exist on both history tables.
         let er_cols: Vec<String> = ::sqlx::query_scalar("SELECT name FROM pragma_table_info('expert_reports')")
@@ -357,6 +360,18 @@ mod tests {
             rv_cols.iter().any(|c| c == "llm_summary"),
             "reviews missing llm_summary"
         );
+
+        // 0003 (RENG-43): the discussion-author columns exist too.
+        let d_cols: Vec<String> = ::sqlx::query_scalar("SELECT name FROM pragma_table_info('mr_discussions')")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        for expected in ["author_id", "author_avatar_url", "author_bot"] {
+            assert!(
+                d_cols.iter().any(|c| c == expected),
+                "mr_discussions missing {expected}, got {d_cols:?}"
+            );
+        }
     }
 
     /// 验证点 A(b): `?` placeholder INSERT + SELECT round trip on SQLite

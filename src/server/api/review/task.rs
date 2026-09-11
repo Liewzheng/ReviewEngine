@@ -1,5 +1,5 @@
 use crate::server::api::types::{
-    ExpertResultDetail, ReviewDetail, ReviewDetailAuthor, ReviewListItem, ReviewSource, TaskStatus,
+    ExpertResultDetail, ReviewDetail, ReviewDetailAuthor, ReviewListItem, ReviewParticipant, ReviewSource, TaskStatus,
 };
 use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 
@@ -43,6 +43,21 @@ pub(crate) fn task_to_status(entry: &TaskEntry) -> TaskStatus {
         progress: entry.progress,
         expert_name: entry.expert_name.clone(),
     }
+}
+
+/// RENG-44: map the persisted participant list onto the camelCase API shape.
+/// Legacy records carry no participants → empty vector → `[]` in the JSON.
+pub(crate) fn build_review_participants(meta: &SourceMeta) -> Vec<ReviewParticipant> {
+    meta.participants
+        .iter()
+        .map(|p| ReviewParticipant {
+            name: p.name.clone(),
+            username: p.username.clone(),
+            avatar_url: p.avatar_url.clone(),
+            role: p.role,
+            bot: p.bot,
+        })
+        .collect()
 }
 
 pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
@@ -101,6 +116,7 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
             name: meta.author_name.clone(),
             avatar_url: meta.author_avatar_url.clone(),
         },
+        participants: build_review_participants(meta),
         status: status.to_string(),
         duration_ms: entry.duration_ms(),
         created_at: entry.created_at.to_rfc3339(),
@@ -126,6 +142,7 @@ pub(crate) fn build_review_list_item(entry: &TaskEntry) -> ReviewListItem {
             name: meta.author_name.clone(),
             avatar_url: meta.author_avatar_url.clone(),
         },
+        participants: build_review_participants(meta),
         status: task_status_str(&entry.state).to_string(),
         duration_ms: entry.duration_ms(),
         created_at: entry.created_at.to_rfc3339(),
@@ -318,19 +335,28 @@ pub(crate) async fn enqueue_review(
                     super::agents_md::persist_agents_md(db_clone.as_ref(), task_id, section).await;
                 }
                 if let Some(ref mut info) = resolved.mr_info {
-                    store_clone
-                        .fill_source_meta(task_id, source_meta_from_mr_info(info))
-                        .await;
+                    // RENG-43: notes are loaded once — their authors join the
+                    // participant list, the same set feeds the §7.2 prompt tap.
+                    let notes = match (tap.as_ref(), mr_url.as_deref(), token_for_tap.as_deref()) {
+                        (Some(tap), Some(url), Some(token)) => {
+                            tap.load_notes(&info.project_path, u64::from(info.mr_iid), token, url)
+                                .await
+                        }
+                        _ => None,
+                    };
+                    let mut meta = source_meta_from_mr_info(info);
+                    if let Some(notes) = notes.as_deref() {
+                        crate::models::merge_participants(
+                            &mut meta.participants,
+                            crate::server::api::review::discussion::participants_from_notes(notes),
+                        );
+                    }
+                    store_clone.fill_source_meta(task_id, meta).await;
                     // §7.2: inject the MR discussion history into the prompt
                     // context. Best-effort — any failure degrades to `None`
                     // and the review runs with the 0.9 prompt.
-                    if let (Some(tap), Some(url), Some(token)) =
-                        (tap.as_ref(), mr_url.as_deref(), token_for_tap.as_deref())
-                    {
-                        if let Some(section) = tap
-                            .inject(task_id, &info.project_path, u64::from(info.mr_iid), token, url)
-                            .await
-                        {
+                    if let (Some(tap), Some(notes)) = (tap.as_ref(), notes.as_deref()) {
+                        if let Some(section) = tap.inject_notes(task_id, notes).await {
                             info.discussion_context = Some(section);
                         }
                     }

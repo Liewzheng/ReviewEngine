@@ -27,6 +27,20 @@ export interface ReviewAuthor {
 }
 
 /**
+ * One person involved in a review (RENG-45). `author` is the head-commit
+ * author, `creator` the MR/PR opener, `participant` everyone else (commenters,
+ * robots). The backend already returns them in that order — render the array
+ * as-is, without re-sorting.
+ */
+export interface ReviewParticipant {
+  name: string
+  username?: string
+  avatarUrl?: string | null
+  role: 'author' | 'creator' | 'participant' | string
+  bot?: boolean
+}
+
+/**
  * One LLM `provider/model` pair observed during a review (RENG-38), from the
  * backend's `reviews.llm_summary` snapshot (`ReviewOutput::llm_usages`).
  */
@@ -67,6 +81,9 @@ export interface ReviewListItem {
   // RENG-38: deduplicated LLM pairs used by this review (`reviews.llm_summary`).
   // Absent for records predating 0.10.2 and non-completed tasks.
   llmSummary?: LlmUsage[] | null
+  // RENG-45: absent/empty for records predating the field — the UI then falls
+  // back to the legacy single-`author` rendering.
+  participants?: ReviewParticipant[]
 }
 
 export interface ReviewDetail {
@@ -87,6 +104,8 @@ export interface ReviewDetail {
   rawApiResponse?: object
   gitlabMrUrl?: string
   assessment?: ReviewAssessment
+  // RENG-45: see `ReviewListItem.participants`.
+  participants?: ReviewParticipant[]
 }
 
 export interface HistoryFilters {

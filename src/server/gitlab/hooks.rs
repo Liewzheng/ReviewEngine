@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use super::super::dispatcher::MrDispatcher;
-use crate::server::api::review::discussion::DiscussionTap;
+use crate::server::api::review::discussion::{participants_from_notes, DiscussionTap};
 use crate::server::task_queue::{record_task_outcome, record_task_started, SourceMeta, TaskStore};
 use crate::store::traits::{DiscussionNote, DiscussionStore};
 use crate::store::SqlxStore;
@@ -66,19 +66,41 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
     // Author (RENG-27): prefer the head commit's author — the person who
     // actually wrote the code under review. Fall back to the MR author block
     // (whoever opened the MR, e.g. an admin account), then the webhook
-    // trigger user. MRInfo will back-fill the authoritative author once the
+    // trigger user. MRInfo back-fills the authoritative author once the
     // review pipeline resolves the MR metadata.
-    let author_name = parsed["object_attributes"]["last_commit"]["author"]["name"]
+    let commit_author_name = parsed["object_attributes"]["last_commit"]["author"]["name"]
         .as_str()
-        .or_else(|| parsed["object_attributes"]["author"]["name"].as_str())
-        .or_else(|| parsed["user"]["name"].as_str())
+        .map(str::trim);
+    let mr_author_name = parsed["object_attributes"]["author"]["name"].as_str().map(str::trim);
+    let trigger_user_name = parsed["user"]["name"].as_str().map(str::trim);
+    let author_name = commit_author_name
+        .or(mr_author_name)
+        .or(trigger_user_name)
         .unwrap_or("")
         .to_string();
-    let author_avatar_url = parsed["object_attributes"]["author"]["avatar_url"]
-        .as_str()
-        .or_else(|| parsed["user"]["avatar_url"].as_str())
-        .unwrap_or("")
-        .to_string();
+    // RENG-43: an avatar is only attached when we can tell it belongs to the
+    // same person as `author_name`. `object_attributes.author` (MR opener) and
+    // `user` (webhook trigger) are not necessarily the commit author, so the
+    // avatar is taken from whichever block carries the SAME name — and left
+    // empty otherwise (a mismatched avatar is worse than none). The opener's
+    // own avatar survives via the participant list (role=creator).
+    let author_avatar_url = [
+        (
+            mr_author_name,
+            parsed["object_attributes"]["author"]["avatar_url"].as_str(),
+        ),
+        (trigger_user_name, parsed["user"]["avatar_url"].as_str()),
+    ]
+    .into_iter()
+    .find_map(|(block_name, avatar)| {
+        if block_name == Some(author_name.as_str()) {
+            avatar.filter(|a| !a.trim().is_empty())
+        } else {
+            None
+        }
+    })
+    .unwrap_or("")
+    .to_string();
 
     Ok(MrHookPayload {
         action,
@@ -127,17 +149,26 @@ async fn run_webhook_review(
     let outcome = async {
         let (mut info, diff) = super::super::resolve_review_source(&mr_url, &gitlab_token).await?;
         if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
-            store
-                .fill_source_meta(id, crate::server::task_queue::source_meta_from_mr_info(&info))
-                .await;
+            // RENG-43: load the MR's stored discussion notes once. Their
+            // authors join the participant list, and the same set feeds the
+            // §7.2 prompt tap below (webhook-ingested or API-back-filled).
+            let notes = match tap.as_ref() {
+                Some(tap) => {
+                    tap.load_notes(&info.project_path, u64::from(info.mr_iid), &gitlab_token, &mr_url)
+                        .await
+                }
+                None => None,
+            };
+            let mut meta = crate::server::task_queue::source_meta_from_mr_info(&info);
+            if let Some(notes) = notes.as_deref() {
+                crate::models::merge_participants(&mut meta.participants, participants_from_notes(notes));
+            }
+            store.fill_source_meta(id, meta).await;
             // §7.2 discussion-context injection: best-effort, `None`
             // degrades to the 0.9 prompt. Requires the live task row
             // (`review_contexts.task_id` FK), hence tied to the task store.
-            if let Some(tap) = tap.as_ref() {
-                if let Some(section) = tap
-                    .inject(id, &info.project_path, u64::from(info.mr_iid), &gitlab_token, &mr_url)
-                    .await
-                {
+            if let (Some(tap), Some(notes)) = (tap.as_ref(), notes.as_deref()) {
+                if let Some(section) = tap.inject_notes(id, notes).await {
                     info.discussion_context = Some(section);
                 }
             }
@@ -305,6 +336,7 @@ pub(crate) fn source_meta_from_payload(payload: &MrHookPayload) -> SourceMeta {
         author_avatar_url: non_empty(&payload.author_avatar_url),
         gitlab_mr_url: non_empty(&payload.mr_url),
         commit_sha: non_empty(&payload.sha),
+        ..SourceMeta::default()
     }
 }
 
@@ -632,10 +664,21 @@ async fn ingest_note(
         }
     }
 
-    let author = parsed["user"]["username"]
+    let author_username = parsed["user"]["username"].as_str().unwrap_or("");
+    let author = if author_username.is_empty() {
+        parsed["user"]["name"].as_str().unwrap_or("")
+    } else {
+        author_username
+    };
+    // RENG-43: note authors feed the review's participant list, so keep the
+    // provider identity (id / avatar / robot flag) at ingestion time.
+    let author_id = parsed["user"]["id"].as_u64();
+    let author_avatar_url = parsed["user"]["avatar_url"]
         .as_str()
-        .or_else(|| parsed["user"]["name"].as_str())
-        .unwrap_or("");
+        .filter(|s| !s.trim().is_empty())
+        .map(str::to_string);
+    let author_bot =
+        parsed["user"]["bot"].as_bool().unwrap_or(false) || crate::models::username_is_bot(author_username);
     let created_at = parse_note_created_at(attrs["created_at"].as_str()).unwrap_or_else(|| {
         tracing::warn!("note {note_id}: unparseable created_at, using ingestion time");
         chrono::Utc::now()
@@ -648,6 +691,9 @@ async fn ingest_note(
         mr_iid,
         note_id,
         author: author.to_string(),
+        author_id,
+        author_avatar_url,
+        author_bot,
         body: body.to_string(),
         created_at,
     };
@@ -811,6 +857,7 @@ mod tests {
             author_avatar_url: Some("http://avatar".to_string()),
             gitlab_mr_url: Some(MR_URL.to_string()),
             commit_sha: Some(SHA.to_string()),
+            ..SourceMeta::default()
         }
     }
 
@@ -1099,6 +1146,65 @@ mod tests {
             .await
             .unwrap();
         crate::store::decode_ts(&ingested).unwrap();
+    }
+
+    /// RENG-43: the note webhook must persist the author identity that feeds
+    /// the participant list — id, avatar, and the robot flag (`user.bot` or a
+    /// `_bot` handle).
+    #[tokio::test]
+    async fn note_ingestion_persists_author_identity_and_bot_flag() {
+        let db = fresh_db().await;
+        let dispatcher = MrDispatcher::new();
+        let mut payload: Value = serde_json::from_str(&note_payload(777, "rebuild it", 9, "group_1_bot")).unwrap();
+        payload["user"]["avatar_url"] = Value::String("http://avatar/bot".to_string());
+        let _ = handle_note_hook(
+            &payload.to_string(),
+            &dispatcher,
+            "",
+            None,
+            None,
+            Some(db.clone()),
+            None,
+        )
+        .await
+        .expect("hook must succeed");
+
+        let notes = db.list_notes("default", "group/proj", 7).await.unwrap();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].author_id, Some(9));
+        assert_eq!(notes[0].author_avatar_url.as_deref(), Some("http://avatar/bot"));
+        assert!(notes[0].author_bot, "`_bot` handle must be flagged as a robot");
+    }
+
+    /// RENG-43 regression guard: the webhook `author_avatar_url` must never
+    /// borrow the avatar of a *different* person. When the head-commit author
+    /// differs from the MR opener, the avatar is left empty (the opener's own
+    /// avatar survives through the participant list, role=creator).
+    #[test]
+    fn parse_mr_hook_payload_does_not_mismatch_avatar_across_people() {
+        let body = r#"{
+            "object_attributes": {
+                "action": "open",
+                "iid": 7,
+                "title": "Fix login bug",
+                "source_branch": "feature/login",
+                "target_branch": "main",
+                "url": "http://gitlab.internal:8929/group/proj/-/merge_requests/7",
+                "last_commit": {"id": "abc123", "author": {"name": "commit-author"}},
+                "author": {"name": "mr-opener", "avatar_url": "http://avatar/opener"}
+            },
+            "project": {
+                "path_with_namespace": "group/proj",
+                "web_url": "http://gitlab.internal:8929/group/proj"
+            },
+            "user": {"name": "trigger-user", "avatar_url": "http://avatar/trigger"}
+        }"#;
+        let payload = parse_mr_hook_payload(body, "glpat-test").expect("payload must parse");
+        assert_eq!(payload.author_name, "commit-author");
+        assert_eq!(
+            payload.author_avatar_url, "",
+            "an avatar from a different person must not be attached"
+        );
     }
 
     /// Matched platform supplies the `platform` column; the MR iid falls

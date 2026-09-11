@@ -5,12 +5,10 @@ import {
   Search,
   Close,
   Refresh,
-  ArrowRight,
   More,
   Download,
   Link,
   DocumentCopy,
-  Tickets,
   Clock,
   User as UserIcon,
   Share,
@@ -20,7 +18,7 @@ import {
 import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import type { ApiError } from '../services/api'
-import type { ReviewListItem, ExpertResult, HistoryFilters, RiskLevel } from '../types/history'
+import type { ReviewListItem, ExpertResult, HistoryFilters, RiskLevel, ReviewParticipant } from '../types/history'
 import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
@@ -327,10 +325,6 @@ function copyReviewId(id: string) {
   })
 }
 
-function viewLogs(row: ReviewListItem) {
-  router.push(`/logs?reviewId=${row.id}`)
-}
-
 function viewOriginalComment(row: ReviewListItem) {
   if (row.gitlabMrUrl) {
     window.open(row.gitlabMrUrl, '_blank')
@@ -388,6 +382,34 @@ function getInitials(name: string): string {
     .join('')
     .toUpperCase()
     .slice(0, 2)
+}
+
+/* ─────────────── Participants (RENG-45) ─────────────── */
+/** Avatars drawn in the list cell; the rest collapse into a "+K" badge. */
+const MAX_VISIBLE_PARTICIPANTS = 4
+
+/**
+ * Participants of a row, `[]` when the record predates the field or the
+ * payload was malformed (the service layer already dropped those). An empty
+ * array keeps the cell on the legacy single-author rendering.
+ */
+function participantsOf(row: ReviewListItem): ReviewParticipant[] {
+  return Array.isArray(row.participants) ? row.participants : []
+}
+
+function visibleParticipants(row: ReviewListItem): ReviewParticipant[] {
+  return participantsOf(row).slice(0, MAX_VISIBLE_PARTICIPANTS)
+}
+
+function hiddenParticipantCount(row: ReviewListItem): number {
+  return Math.max(0, participantsOf(row).length - MAX_VISIBLE_PARTICIPANTS)
+}
+
+/* Maps a participant role onto its i18n key under `history.participants`. */
+function participantRoleKey(role: string): string {
+  if (role === 'author') return 'history.participants.roleAuthor'
+  if (role === 'creator') return 'history.participants.roleCreator'
+  return 'history.participants.roleParticipant'
 }
 
 /* ─────────────── Score & Risk badges ─────────────── */
@@ -626,9 +648,56 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
+          <!-- RENG-45: the cell shows an overlapping avatar stack (the backend
+               already orders author → creator → participant). Records that
+               predate `participants` keep the legacy single-author cell. -->
           <el-table-column :label="$t('history.columns.author')" width="160" sortable :sort-by="['author.name']">
             <template #default="{ row }">
-              <div class="author-cell">
+              <el-tooltip v-if="participantsOf(row).length > 0" placement="top" effect="light">
+                <!-- Hover lists EVERY participant, in the same order as the
+                     avatars — the stack is what collapses, not this. -->
+                <template #content>
+                  <div class="participants-tooltip">
+                    <div
+                      v-for="(p, i) in participantsOf(row)"
+                      :key="`${i}-${p.username ?? p.name}`"
+                      class="participants-tooltip-row"
+                    >
+                      <div class="participants-tooltip-avatar">
+                        <img
+                          v-if="p.avatarUrl && !failedAvatars.has(p.avatarUrl)"
+                          :src="p.avatarUrl"
+                          alt=""
+                          @error="p.avatarUrl && failedAvatars.add(p.avatarUrl)"
+                        />
+                        <span v-else>{{ getInitials(p.name) }}</span>
+                      </div>
+                      <span class="participants-tooltip-name">{{ p.name }}</span>
+                      <span class="participants-tooltip-role">{{ $t(participantRoleKey(p.role)) }}</span>
+                      <span v-if="p.bot" class="participants-tooltip-bot">{{ $t('history.participants.bot') }}</span>
+                    </div>
+                  </div>
+                </template>
+                <div class="participant-stack">
+                  <div
+                    v-for="(p, i) in visibleParticipants(row)"
+                    :key="`${i}-${p.username ?? p.name}`"
+                    class="author-avatar participant-avatar"
+                  >
+                    <img
+                      v-if="p.avatarUrl && !failedAvatars.has(p.avatarUrl)"
+                      :src="p.avatarUrl"
+                      alt=""
+                      @error="p.avatarUrl && failedAvatars.add(p.avatarUrl)"
+                    />
+                    <span v-else>{{ getInitials(p.name) }}</span>
+                  </div>
+                  <div v-if="hiddenParticipantCount(row) > 0" class="author-avatar participant-more">
+                    {{ $t('history.participants.more', { n: hiddenParticipantCount(row) }) }}
+                  </div>
+                </div>
+              </el-tooltip>
+              <div v-else class="author-cell">
                 <div class="author-avatar">
                   <img
                     v-if="row.author.avatarUrl && !failedAvatars.has(row.author.avatarUrl)"
@@ -687,30 +756,22 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.actions')" width="140" fixed="right">
+          <el-table-column width="72" fixed="right">
             <template #default="{ row }">
-              <el-button-group class="actions-group">
-                <el-tooltip :content="$t('history.actions.rerun')">
-                  <el-button size="small" :icon="Refresh" @click.stop="handleRerun(row)" :aria-label="$t('history.actions.rerun')" />
-                </el-tooltip>
-                <el-tooltip :content="$t('history.actions.viewDetails')">
-                  <el-button size="small" :icon="ArrowRight" @click.stop="openDrawer(row)" :aria-label="$t('history.actions.viewDetails')" />
-                </el-tooltip>
-                <el-dropdown trigger="click" @command="(cmd: string) => {
-                  if (cmd === 'comment') viewOriginalComment(row)
-                  if (cmd === 'copy') copyReviewId(row.id)
-                  if (cmd === 'logs') viewLogs(row)
-                }">
-                  <el-button size="small" :icon="More" @click.stop :aria-label="$t('history.actions.more')" />
-                  <template #dropdown>
-                    <el-dropdown-menu>
-                      <el-dropdown-item command="comment" :icon="Link">{{ $t('history.actions.viewComment') }}</el-dropdown-item>
-                      <el-dropdown-item command="copy" :icon="DocumentCopy">{{ $t('history.actions.copyId') }}</el-dropdown-item>
-                      <el-dropdown-item command="logs" :icon="Tickets">{{ $t('history.actions.viewLogs') }}</el-dropdown-item>
-                    </el-dropdown-menu>
-                  </template>
-                </el-dropdown>
-              </el-button-group>
+              <el-dropdown trigger="click" @command="(cmd: string) => {
+                if (cmd === 'rerun') handleRerun(row)
+                if (cmd === 'comment') viewOriginalComment(row)
+                if (cmd === 'copy') copyReviewId(row.id)
+              }">
+                <el-button size="small" :icon="More" @click.stop :aria-label="$t('history.actions.more')" />
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item command="rerun" :icon="Refresh">{{ $t('history.actions.rerun') }}</el-dropdown-item>
+                    <el-dropdown-item command="comment" :icon="Link">{{ $t('history.actions.viewComment') }}</el-dropdown-item>
+                    <el-dropdown-item command="copy" :icon="DocumentCopy">{{ $t('history.actions.copyId') }}</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </template>
           </el-table-column>
         </el-table>
@@ -1063,6 +1124,99 @@ watch(() => route.query, () => {
   color: var(--text-primary);
 }
 
+/* RENG-45: participants cell — GitLab-style overlapping avatar stack. The
+   avatars keep the 28px `.author-avatar` box, so participants without a
+   (loadable) picture still hold their slot instead of collapsing the row. */
+.participant-stack {
+  display: flex;
+  align-items: center;
+}
+
+.participant-avatar + .participant-avatar,
+.participant-avatar + .participant-more {
+  margin-left: -8px;
+}
+
+/* Ring in the card's own colour so the overlap reads as a stack rather than a
+   smear. A box-shadow (not a border) keeps the inner image at the full 28px
+   and does not add to the row height. */
+.participant-avatar,
+.participant-more {
+  box-shadow: 0 0 0 2px var(--bg-card);
+}
+
+.participant-more {
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-color);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* Hover list: one row per participant (author → creator → the rest), matching
+   the avatar order — nothing is dropped when the stack collapses. */
+.participants-tooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.participants-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.participants-tooltip-avatar {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--brand);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 9px;
+  font-weight: 600;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.participants-tooltip-avatar img {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  display: block;
+}
+
+.participants-tooltip-name {
+  font-size: 12px;
+  color: var(--text-primary);
+}
+
+.participants-tooltip-role {
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.participants-tooltip-bot {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  white-space: nowrap;
+  letter-spacing: 0.04em;
+}
+
 .duration-text {
   font-family: var(--font-mono);
   font-size: 13px;
@@ -1088,10 +1242,6 @@ watch(() => route.query, () => {
   color: var(--text-secondary);
   line-height: 1.3;
   white-space: nowrap;
-}
-
-.actions-group {
-  display: flex;
 }
 
 /* Pagination */

@@ -168,7 +168,9 @@ export default {
     columns: {
       mrTitle: 'MR 標題',
       project: '專案',
-      author: '作者',
+      // RENG-45：歷史表首個身分欄改為「參與者」；authorName 為單作者欄（儀表板）。
+      author: '參與者',
+      authorName: '作者',
       status: '狀態',
       score: '得分',
       llm: 'LLM',
@@ -181,13 +183,18 @@ export default {
       unknown: '未知',
       expertTooltip: '實際產生該報告的 LLM（provider/model）',
     },
+    participants: {
+      roleAuthor: '作者',
+      roleCreator: '開啟者',
+      roleParticipant: '參與者',
+      bot: '機器人',
+      more: '+{n}',
+    },
     actions: {
       rerun: '重新審查',
-      viewDetails: '查看詳情',
       more: '更多操作',
       viewComment: '查看原始評論',
       copyId: '複製審查 ID',
-      viewLogs: '查看日誌',
     },
     rerun: {
       title: '重新審查',

@@ -264,15 +264,8 @@ impl Client {
             description: Option<String>,
             source_branch: String,
             target_branch: String,
-            author: Option<GitLabAuthor>,
+            author: Option<GlUser>,
             diff_refs: Option<DiffRefs>,
-        }
-
-        #[derive(serde::Deserialize)]
-        struct GitLabAuthor {
-            id: Option<u64>,
-            username: Option<String>,
-            name: Option<String>,
         }
 
         #[derive(serde::Deserialize)]
@@ -296,15 +289,25 @@ impl Client {
             .and_then(|a| a.username.clone().or_else(|| a.name.clone()));
         let pr_author_id = gl.author.as_ref().and_then(|a| a.id);
 
-        // RENG-27: resolve the head commit's author so the History "author"
-        // column can show who wrote the code rather than who opened the MR.
-        // Best-effort: any failure degrades to None and callers fall back to
-        // the MR author — it must never fail the review.
+        // RENG-43: participants are aggregated from the MR participants
+        // endpoint, the head-commit author (RENG-27) and the MR opener.
+        // Note authors are folded in later by the server layer (they live in
+        // `mr_discussions`). Both fetches are best-effort: a failure yields
+        // fewer participants, never a failed review.
+        let fetched = self.fetch_participants().await;
         let commit_author = if git_hash.is_empty() {
             None
         } else {
-            self.fetch_commit_author(&git_hash).await
+            self.fetch_commit_author(&git_hash, &fetched).await
         };
+        let mut seeds: Vec<ParticipantInput> = Vec::new();
+        if let Some(author) = &commit_author {
+            seeds.push(author.as_input(ParticipantRole::Author));
+        }
+        if let Some(opener) = gl.author {
+            seeds.push(opener.into_input(ParticipantRole::Creator));
+        }
+        seeds.extend(fetched);
 
         Ok(MRInfo {
             project_path: self.project_path.clone(),
@@ -319,27 +322,81 @@ impl Client {
             merge_commit_sha: None,
             pr_author,
             pr_author_id,
-            commit_author,
+            commit_author: commit_author.as_ref().map(|a| a.name.clone()),
+            participants: aggregate_participants(seeds),
             discussion_context: None,
             agents_md: None,
         })
     }
 
-    /// Best-effort lookup of a commit's `author_name` via
+    /// Best-effort MR participants lookup (RENG-43) via
+    /// `GET /projects/:id/merge_requests/:iid/participants`.
+    ///
+    /// Returns `[]` on every failure (network error, non-2xx, unparseable
+    /// body) and logs a warning: participants are display metadata, never
+    /// review input, so this must not fail the review. Each record starts as
+    /// [`ParticipantRole::Participant`]; the caller re-roles the MR opener and
+    /// head-commit author.
+    pub async fn fetch_participants(&self) -> Vec<ParticipantInput> {
+        let path = format!("merge_requests/{}/participants", self.mr_iid);
+        let value: serde_json::Value = match self.get_json(&path).await {
+            Ok(value) => value,
+            Err(e) => {
+                tracing::warn!(
+                    "failed to fetch participants for MR !{} (best-effort, continuing): {e:#}",
+                    self.mr_iid
+                );
+                return Vec::new();
+            }
+        };
+        let users: Vec<GlUser> = match serde_json::from_value(value) {
+            Ok(users) => users,
+            Err(e) => {
+                tracing::warn!(
+                    "unexpected participants payload for MR !{} (best-effort, continuing): {e:#}",
+                    self.mr_iid
+                );
+                return Vec::new();
+            }
+        };
+        users
+            .into_iter()
+            .map(|u| u.into_input(ParticipantRole::Participant))
+            .collect()
+    }
+
+    /// Best-effort head-commit author lookup via
     /// `GET /projects/:id/repository/commits/:sha`.
     ///
     /// Returns `None` on any failure (network error, non-2xx, missing/blank
-    /// field) — the commit author is display metadata, not review input, so
-    /// this never propagates an error.
-    async fn fetch_commit_author(&self, sha: &str) -> Option<String> {
+    /// `author_name`) — the commit author is display metadata, not review
+    /// input, so this never propagates an error. RENG-43: the author is also
+    /// matched against the already-fetched MR `participants` (by handle,
+    /// display name or email) to borrow that person's username and avatar;
+    /// with no match the result keeps only the name (`avatar_url: None`) —
+    /// no extra `/users` lookup is made, by design.
+    async fn fetch_commit_author(&self, sha: &str, participants: &[ParticipantInput]) -> Option<CommitAuthor> {
         let path = format!("repository/commits/{sha}");
         let value: serde_json::Value = self.get_json(&path).await.ok()?;
         let name = value["author_name"].as_str()?.trim();
         if name.is_empty() {
-            None
-        } else {
-            Some(name.to_string())
+            return None;
         }
+        let email = value["author_email"].as_str().unwrap_or("").trim();
+        // The participants endpoint returns no email, so the email arm only
+        // ever matches a handle that is itself an email address.
+        let matched = participants.iter().find(|p| {
+            [p.username.trim(), p.name.trim()].iter().any(|candidate| {
+                !candidate.is_empty()
+                    && (candidate.eq_ignore_ascii_case(name)
+                        || (!email.is_empty() && candidate.eq_ignore_ascii_case(email)))
+            })
+        });
+        Some(CommitAuthor {
+            name: name.to_string(),
+            username: matched.map(|p| p.username.trim().to_string()).filter(|u| !u.is_empty()),
+            avatar_url: matched.and_then(|p| p.avatar_url.clone()),
+        })
     }
 
     pub async fn fetch_diff(&self) -> Result<String> {
@@ -737,6 +794,57 @@ impl Client {
     }
 }
 
+/// A GitLab user object as returned by the MR participants endpoint and the
+/// MR payload's `author` block (RENG-43).
+#[derive(Debug, Clone, serde::Deserialize)]
+struct GlUser {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    /// Robot/service account flag — GitLab only exposes it on some payloads,
+    /// hence the `_bot` username heuristic in [`ParticipantInput::with_username`].
+    #[serde(default)]
+    bot: bool,
+}
+
+impl GlUser {
+    /// Convert to an aggregation record. A missing display name falls back to
+    /// the handle so a name-only person is never dropped.
+    fn into_input(self, role: ParticipantRole) -> ParticipantInput {
+        let username = self.username.unwrap_or_default();
+        let name = self.name.unwrap_or_default();
+        let display = if name.trim().is_empty() { username.clone() } else { name };
+        ParticipantInput::new(display, role)
+            .with_id(self.id)
+            .with_username(username)
+            .with_avatar(self.avatar_url)
+            .with_bot(self.bot)
+    }
+}
+
+/// Resolved head-commit author (RENG-27 + RENG-43): the commit's display
+/// name, plus the username/avatar borrowed from the MR participants list when
+/// the author could be matched there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitAuthor {
+    pub name: String,
+    pub username: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+impl CommitAuthor {
+    fn as_input(&self, role: ParticipantRole) -> ParticipantInput {
+        ParticipantInput::new(self.name.clone(), role)
+            .with_username(self.username.clone().unwrap_or_default())
+            .with_avatar(self.avatar_url.clone())
+    }
+}
+
 /// A GitLab MR discussion thread.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Discussion {
@@ -769,6 +877,14 @@ pub struct NoteAuthor {
     pub username: String,
     #[serde(default)]
     pub name: String,
+    /// RENG-43: GitLab already returns this on every note author; it was
+    /// simply not deserialized before.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// Robot/service account flag; absent on older GitLab versions (the
+    /// `_bot` username heuristic covers those).
+    #[serde(default)]
+    pub bot: bool,
 }
 
 fn encode_project_path(path: &str) -> String {
@@ -1253,6 +1369,18 @@ mod tests {
         assert_eq!(info.commit_author.as_deref(), Some("isletspace"));
         // MR author is still populated as the fallback source.
         assert_eq!(info.pr_author.as_deref(), Some("alice"));
+        // RENG-43: with no participants list to match against, the commit
+        // author stays name-only (no extra `/users` lookup by design) while
+        // the MR opener becomes the creator participant.
+        let author = info
+            .participants
+            .iter()
+            .find(|p| p.role == ParticipantRole::Author)
+            .expect("author participant");
+        assert_eq!(author.name, "isletspace");
+        assert!(author.username.is_empty());
+        assert!(author.avatar_url.is_none());
+        assert!(info.participants.iter().any(|p| p.role == ParticipantRole::Creator));
     }
 
     /// RENG-27: a failing commit lookup must degrade to `None` (callers fall
@@ -1281,6 +1409,155 @@ mod tests {
         let info = client.fetch_mr_info().await.unwrap();
         assert!(info.commit_author.is_none());
         assert_eq!(info.pr_author.as_deref(), Some("alice"));
+    }
+
+    // ─── fetch_participants / RENG-43 participant aggregation ───
+
+    /// The participants endpoint is parsed into aggregation records; a `_bot`
+    /// handle is flagged as a robot and a missing display name falls back to
+    /// the handle.
+    #[tokio::test]
+    async fn test_fetch_participants_maps_users_and_flags_bots() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/participants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": 1, "username": "alice", "name": "Alice A", "avatar_url": "http://img/alice"},
+                {"id": 2, "username": "group_1_bot", "name": "Group Bot"},
+                {"id": 3, "username": "carol"}
+            ])))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let participants = client.fetch_participants().await;
+        assert_eq!(participants.len(), 3);
+        assert_eq!(participants[0].id, Some(1));
+        assert_eq!(participants[0].username, "alice");
+        assert_eq!(participants[0].avatar_url.as_deref(), Some("http://img/alice"));
+        assert!(!participants[0].bot);
+        assert!(participants[1].bot, "`_bot` handle must become a robot");
+        assert_eq!(
+            participants[2].name, "carol",
+            "missing display name falls back to handle"
+        );
+        assert!(participants[2].avatar_url.is_none(), "no avatar stays None");
+    }
+
+    /// Participants are display metadata: a failing endpoint or an unexpected
+    /// payload yields `[]` and never propagates an error.
+    #[tokio::test]
+    async fn test_fetch_participants_degrades_to_empty_on_failure() {
+        let failing = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/participants"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&failing)
+            .await;
+        assert!(make_test_client(&failing).fetch_participants().await.is_empty());
+
+        let garbage = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/participants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"unexpected": true})))
+            .mount(&garbage)
+            .await;
+        assert!(make_test_client(&garbage).fetch_participants().await.is_empty());
+    }
+
+    /// Participants aggregate `author` → `creator` → `participant`, de-dup by
+    /// user id, and the head-commit author borrows the matching participant's
+    /// username/avatar even though the commit API returns neither.
+    #[tokio::test]
+    async fn test_fetch_mr_info_aggregates_participants_with_roles_and_dedup() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 2, "username": "bob", "name": "Bob B", "avatar_url": "http://img/bob"},
+                "diff_refs": {"head_sha": "deadbeef"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/participants"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+                {"id": 1, "username": "alice", "name": "Alice A", "avatar_url": "http://img/alice"},
+                {"id": 2, "username": "bob", "name": "Bob B", "avatar_url": "http://img/bob"},
+                {"id": 3, "username": "carol", "name": "Carol C"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/repository/commits/deadbeef"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "deadbeef",
+                "author_name": "Alice A",
+                "author_email": "alice@example.com"
+            })))
+            .mount(&server)
+            .await;
+
+        let info = make_test_client(&server).fetch_mr_info().await.unwrap();
+        assert_eq!(info.commit_author.as_deref(), Some("Alice A"));
+        let names: Vec<&str> = info.participants.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["Alice A", "Bob B", "Carol C"]);
+        assert_eq!(info.participants.len(), 3, "the same people must not repeat");
+        assert_eq!(info.participants[0].role, ParticipantRole::Author);
+        assert_eq!(
+            info.participants[0].username, "alice",
+            "username borrowed from participants"
+        );
+        assert_eq!(
+            info.participants[0].avatar_url.as_deref(),
+            Some("http://img/alice"),
+            "avatar borrowed from participants"
+        );
+        assert_eq!(info.participants[1].role, ParticipantRole::Creator);
+        assert_eq!(info.participants[2].role, ParticipantRole::Participant);
+        assert!(info.participants[2].avatar_url.is_none(), "participant without avatar");
+    }
+
+    /// A dead participants endpoint (and an unreachable commit lookup) must
+    /// still resolve the MR: the opener is recorded as creator and the review
+    /// proceeds.
+    #[tokio::test]
+    async fn test_fetch_mr_info_participants_failure_still_completes() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 7, "username": "alice", "name": "Alice A"},
+                "diff_refs": {"head_sha": "deadbeef"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/participants"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/repository/commits/deadbeef"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+
+        let info = make_test_client(&server).fetch_mr_info().await.unwrap();
+        assert_eq!(
+            info.participants.len(),
+            1,
+            "opener survives a dead participants endpoint"
+        );
+        assert_eq!(info.participants[0].role, ParticipantRole::Creator);
+        assert_eq!(info.participants[0].name, "Alice A");
+        assert_eq!(info.participants[0].avatar_url, None);
     }
 
     // ─── fetch_file_raw ───────────────────────────

@@ -180,7 +180,10 @@ export default {
     columns: {
       mrTitle: 'MR Title',
       project: 'Project',
-      author: 'Author',
+      // RENG-45: the history table's first identity column now lists everyone
+      // involved; `authorName` is the plain single-author label (Dashboard).
+      author: 'Participants',
+      authorName: 'Author',
       status: 'Status',
       score: 'Score',
       llm: 'LLM',
@@ -193,13 +196,18 @@ export default {
       unknown: 'unknown',
       expertTooltip: 'LLM that actually produced this report (provider/model)',
     },
+    participants: {
+      roleAuthor: 'Author',
+      roleCreator: 'Opened by',
+      roleParticipant: 'Participant',
+      bot: 'Bot',
+      more: '+{n}',
+    },
     actions: {
       rerun: 'Re-run review',
-      viewDetails: 'View details',
       more: 'More actions',
       viewComment: 'View original comment',
       copyId: 'Copy review ID',
-      viewLogs: 'View logs',
     },
     rerun: {
       title: 'Re-run Review',

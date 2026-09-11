@@ -170,7 +170,9 @@ export default {
     columns: {
       mrTitle: 'MR 제목',
       project: '프로젝트',
-      author: '작성자',
+      // RENG-45: 이력 표의 식별 열은 '참여자'로. authorName은 단일 작성자 열(대시보드).
+      author: '참여자',
+      authorName: '작성자',
       status: '상태',
       score: '점수',
       llm: 'LLM',
@@ -183,13 +185,18 @@ export default {
       unknown: '알 수 없음',
       expertTooltip: '이 리포트를 실제로 생성한 LLM (provider/model)',
     },
+    participants: {
+      roleAuthor: '작성자',
+      roleCreator: '생성자',
+      roleParticipant: '참여자',
+      bot: '봇',
+      more: '+{n}',
+    },
     actions: {
       rerun: '리뷰 다시 실행',
-      viewDetails: '상세 보기',
       more: '추가 작업',
       viewComment: '원본 댓글 보기',
       copyId: '리뷰 ID 복사',
-      viewLogs: '로그 보기',
     },
     rerun: {
       title: '리뷰 다시 실행',

@@ -171,7 +171,9 @@ export default {
     columns: {
       mrTitle: 'MR タイトル',
       project: 'プロジェクト',
-      author: '作成者',
+      // RENG-45: 履歴テーブルの識別列は「参加者」に。authorName は単一作成者列（ダッシュボード）。
+      author: '参加者',
+      authorName: '作成者',
       status: 'ステータス',
       score: 'スコア',
       llm: 'LLM',
@@ -184,13 +186,18 @@ export default {
       unknown: '不明',
       expertTooltip: 'このレポートを実際に生成した LLM（provider/model）',
     },
+    participants: {
+      roleAuthor: '作者',
+      roleCreator: '起票者',
+      roleParticipant: '参加者',
+      bot: 'ボット',
+      more: '+{n}',
+    },
     actions: {
       rerun: 'レビューを再実行',
-      viewDetails: '詳細を表示',
       more: 'その他の操作',
       viewComment: '元のコメントを表示',
       copyId: 'レビュー ID をコピー',
-      viewLogs: 'ログを表示',
     },
     rerun: {
       title: 'レビューを再実行',

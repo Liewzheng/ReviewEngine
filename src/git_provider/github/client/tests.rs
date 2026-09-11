@@ -145,6 +145,97 @@ async fn test_create_review_comment_ok() {
     assert!(result.is_ok());
 }
 
+// ─── fetch_pr_info participants (RENG-43) ───────
+
+/// The PR opener becomes the `creator` participant, commenters/reviewers
+/// become `participant`s, avatars survive and `type: "Bot"` marks robots.
+#[tokio::test]
+async fn test_fetch_pr_info_aggregates_participants() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "number": 1,
+            "title": "Test PR",
+            "body": "description",
+            "head": {"label": "owner:branch", "ref": "feature", "sha": "abc123"},
+            "base": {"label": "owner:main", "ref": "main", "sha": "def456"},
+            "user": {"id": 100, "login": "testuser", "avatar_url": "http://img/testuser", "type": "User"},
+            "merge_commit_sha": null,
+            "merged": false
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/1/comments"))
+        .and(query_param("per_page", "100"))
+        .and(NoPage)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 1, "body": "c", "user": {"id": 200, "login": "reviewer", "avatar_url": "http://img/reviewer", "type": "User"}}
+        ])))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/1/reviews"))
+        .and(query_param("per_page", "100"))
+        .and(NoPage)
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"id": 42, "body": "r", "user": {"id": 300, "login": "dependabot[bot]", "type": "Bot"}, "state": "COMMENTED"},
+            // A second review by the same commenter must not duplicate them.
+            {"id": 43, "body": "r2", "user": {"id": 200, "login": "reviewer", "avatar_url": "http://img/reviewer", "type": "User"}, "state": "APPROVED"}
+        ])))
+        .mount(&server)
+        .await;
+
+    let info = make_client(&server).fetch_pr_info().await.unwrap();
+    let roles: Vec<ParticipantRole> = info.participants.iter().map(|p| p.role).collect();
+    assert_eq!(
+        roles,
+        vec![
+            ParticipantRole::Creator,
+            ParticipantRole::Participant,
+            ParticipantRole::Participant
+        ]
+    );
+    assert_eq!(info.participants.len(), 3, "repeat reviewer must not duplicate");
+    assert_eq!(info.participants[0].username, "testuser");
+    assert_eq!(info.participants[0].avatar_url.as_deref(), Some("http://img/testuser"));
+    let bot = info
+        .participants
+        .iter()
+        .find(|p| p.username.contains("dependabot"))
+        .expect("bot participant");
+    assert!(bot.bot, "GitHub type=Bot must be flagged");
+    assert!(!info.participants[0].bot);
+}
+
+/// Participants are best-effort: when both listings fail the PR still
+/// resolves with the opener alone.
+#[tokio::test]
+async fn test_fetch_pr_info_participant_listings_failure_degrades() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "number": 1,
+            "title": "Test PR",
+            "body": null,
+            "head": {"label": "o:b", "ref": "feature", "sha": "abc123"},
+            "base": {"label": "o:main", "ref": "main", "sha": "def456"},
+            "user": {"id": 100, "login": "testuser"},
+            "merge_commit_sha": null,
+            "merged": false
+        })))
+        .mount(&server)
+        .await;
+    // No comment/review mocks → 404 on both listings.
+
+    let info = make_client(&server).fetch_pr_info().await.unwrap();
+    assert_eq!(info.participants.len(), 1);
+    assert_eq!(info.participants[0].role, ParticipantRole::Creator);
+    assert!(info.participants[0].avatar_url.is_none());
+}
+
 // ─── list_review_comments (paginated) ───────────
 
 #[tokio::test]

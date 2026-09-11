@@ -43,6 +43,21 @@ pub struct PrUser {
     pub id: u64,
     /// GitHub login / username.
     pub login: String,
+    /// RENG-43: avatar URL — GitHub returns it on every user object; it was
+    /// simply not deserialized before. `None` on payloads that omit it.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// RENG-43: GitHub account type (`"User"`, `"Organization"`, `"Bot"`).
+    /// Drives the bot marker on participants; absent on partial payloads.
+    #[serde(rename = "type", default)]
+    pub user_type: Option<String>,
+}
+
+impl PrUser {
+    /// Whether this account is a robot (`type == "Bot"`).
+    pub fn is_bot(&self) -> bool {
+        self.user_type.as_deref() == Some("Bot")
+    }
 }
 
 /// A review comment on a PR (inline or top-level).

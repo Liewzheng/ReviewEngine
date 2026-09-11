@@ -217,6 +217,7 @@ fn source_meta_with_commit() -> SourceMeta {
         author_avatar_url: Some("http://avatar".to_string()),
         gitlab_mr_url: Some("http://gitlab/mr/1".to_string()),
         commit_sha: Some("abc123".to_string()),
+        ..SourceMeta::default()
     }
 }
 
@@ -1864,6 +1865,113 @@ async fn get_review_db_read_with_live_overlay() {
     // Unknown task → 404.
     let resp = get_review(State(state), Path(Uuid::new_v4())).await.into_response();
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// RENG-44: the participant list reaches BOTH the list items and the detail
+/// response (camelCase, same order in both), alongside the retained legacy
+/// `author{name, avatarUrl}` field.
+#[tokio::test]
+async fn participants_surface_on_list_and_detail() {
+    use crate::models::{Participant, ParticipantRole};
+
+    let (state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    let mut meta = source_meta_with_commit();
+    meta.participants = vec![
+        Participant {
+            name: "Alice".to_string(),
+            username: "alice".to_string(),
+            avatar_url: Some("http://img/alice".to_string()),
+            role: ParticipantRole::Author,
+            bot: false,
+        },
+        Participant {
+            name: "Bob".to_string(),
+            username: "bob".to_string(),
+            avatar_url: None,
+            role: ParticipantRole::Creator,
+            bot: false,
+        },
+        Participant {
+            name: "Group Bot".to_string(),
+            username: "group_1_bot".to_string(),
+            avatar_url: None,
+            role: ParticipantRole::Participant,
+            bot: true,
+        },
+    ];
+    seed_review_row(
+        &db,
+        id,
+        "completed",
+        "2026-09-01T10:00:00.000000Z",
+        Some("2026-09-01T10:05:00.000000Z"),
+        &meta,
+        None,
+    )
+    .await;
+
+    let json = list_json(state.clone(), empty_params()).await;
+    assert_eq!(json["total"], 1);
+    let item = &json["items"][0];
+    assert_eq!(item["participants"][0]["name"], "Alice");
+    assert_eq!(item["participants"][0]["username"], "alice");
+    assert_eq!(item["participants"][0]["avatarUrl"], "http://img/alice");
+    assert_eq!(item["participants"][0]["role"], "author");
+    assert_eq!(item["participants"][0]["bot"], false);
+    assert_eq!(item["participants"][1]["role"], "creator");
+    assert!(item["participants"][1]["avatarUrl"].is_null(), "no avatar → null");
+    assert_eq!(item["participants"][2]["role"], "participant");
+    assert_eq!(item["participants"][2]["bot"], true);
+    assert_eq!(item["author"]["name"], "alice", "legacy author field is retained");
+
+    let list_participants = item["participants"].clone();
+    let resp = get_review(State(state), Path(id)).await.into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "detail must resolve, got {json}");
+    assert_eq!(
+        json["participants"], list_participants,
+        "detail and list must expose the same participants"
+    );
+    assert_eq!(json["author"]["name"], "alice", "legacy author field is retained");
+}
+
+/// RENG-44 compatibility: a pre-0.10.6 row whose `source_meta` has no
+/// `participants` key must serialize `[]` on both endpoints — never `null`
+/// and never a 500.
+#[tokio::test]
+async fn legacy_record_without_participants_returns_empty_array() {
+    let (state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    // Hand-seed the raw old-shaped JSON, bypassing SourceMeta serialization,
+    // exactly as a row written by 0.10.5 would look.
+    let legacy = r#"{"mr_title":"Legacy MR","project":"group/proj","repository":"group/proj","author_name":"alice","author_avatar_url":"http://img/alice","commit_sha":"abc123"}"#;
+    sqlx::query(
+        "INSERT INTO reviews (task_id, state, source_meta, project, repository, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(id.to_string())
+    .bind("completed")
+    .bind(legacy)
+    .bind("group/proj")
+    .bind("group/proj")
+    .bind("2026-09-01T10:00:00.000000Z")
+    .execute(db.pool())
+    .await
+    .unwrap();
+
+    let json = list_json(state.clone(), empty_params()).await;
+    assert_eq!(json["total"], 1, "legacy row must still be listed");
+    assert_eq!(json["items"][0]["participants"], serde_json::json!([]));
+    assert_eq!(
+        json["items"][0]["author"]["name"], "alice",
+        "legacy author field is preserved"
+    );
+
+    let resp = get_review(State(state), Path(id)).await.into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "legacy row must not fail, got {json}");
+    assert_eq!(json["participants"], serde_json::json!([]));
 }
 
 /// (c) db=None (REVIEW_DISABLE_DB=1 / tests) keeps the 0.9 in-memory

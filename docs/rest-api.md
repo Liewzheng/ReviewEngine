@@ -872,7 +872,7 @@ Response 200:
 
 `recentReviews`：最新 5 条（`created_at` DESC），不再按状态过滤（pending / running / completed / failed / cancelled 都会出现），`status` 使用与 `/reviews` 一致的真实状态词汇（不再输出 `"success"`）。
 
-`health.integrations`（0.10.8 起）：按**实际 git 平台配置**（`git_platforms` 表，即 `PUT /api/v1/config` 的 Git 平台列表）检测——存在任一 `type=gitlab` 平台则 GitLab API 为 `success`，`github` 同理（该平台类型上线后即生效）；不再通过 LLM provider 名称猜测。`latencyMs` 字段已移除（原恒为 0 的占位值；真实连通性/延迟探测用 `POST /api/v1/llm/providers/{id}/test`）。
+`health.integrations`（0.10.8 起）：按**实际 git 集成配置**检测，两条配置通道任一满足即报 `success`——`git_platforms` 表（即 `PUT /api/v1/config` 的 Git 平台列表）中存在任一 `type=gitlab` / `type=github` 平台，**或**启动时经 env/CLI 配置了凭据（`GITLAB_TOKEN` / `--gitlab-token`、`GITHUB_TOKEN` / `--github-token`；该通道直接接入 webhook / MR 拉取客户端，不经过 `git_platforms`）；不再通过 LLM provider 名称猜测。`latencyMs` 字段已移除（原恒为 0 的占位值；真实连通性/延迟探测用 `POST /api/v1/llm/providers/{id}/test`）。
 
 ---
 

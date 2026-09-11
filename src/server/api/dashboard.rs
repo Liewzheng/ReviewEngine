@@ -366,19 +366,30 @@ fn compute_trend(items: &[TaskEntry]) -> Vec<serde_json::Value> {
 
 async fn compute_health(state: &AppState) -> serde_json::Value {
     // RENG-32: integration status reflects the ACTUALLY configured git
-    // platform instances — `state.git_platforms` is the runtime mirror of
-    // the `git_platforms` DB table (startup replay + hot updates by
-    // `PUT /api/v1/config`). The previous implementation grepped LLM
-    // provider NAMES for "gitlab"/"github", so a working integration showed
-    // "offline" unless an LLM happened to be named after it. Only
-    // "gitlab" exists as a platform type today; the "github" check is the
-    // same honest lookup, ready for when that platform lands.
+    // integrations, which arrive through two channels:
+    //   1. `state.git_platforms` — the runtime mirror of the `git_platforms`
+    //      DB table (startup replay + hot updates by `PUT /api/v1/config`);
+    //   2. the startup-recorded env/CLI flags (`env_gitlab_configured` /
+    //      `env_github_configured`): the classic `--gitlab-token` /
+    //      `GITLAB_TOKEN` / `--github-token` / `GITHUB_TOKEN` configuration
+    //      wires webhook/MR-fetch clients directly and never appears in
+    //      `git_platforms` — without this OR, a working env-configured
+    //      integration read as "offline" (verified on a real deployment).
+    // The previous implementation grepped LLM provider NAMES for
+    // "gitlab"/"github", so a working integration showed "offline" unless
+    // an LLM happened to be named after it. Only "gitlab" exists as a
+    // platform type today; the "github" check is the same honest lookup,
+    // ready for when that platform lands.
     let platforms = state.git_platforms.read().unwrap();
     let mut integrations = Vec::new();
-    for (service, platform_type) in [("GitLab API", "gitlab"), ("GitHub API", "github")] {
-        let configured = platforms
-            .iter()
-            .any(|p| p.platform_type.eq_ignore_ascii_case(platform_type));
+    for (service, platform_type, env_configured) in [
+        ("GitLab API", "gitlab", state.env_gitlab_configured),
+        ("GitHub API", "github", state.env_github_configured),
+    ] {
+        let configured = env_configured
+            || platforms
+                .iter()
+                .any(|p| p.platform_type.eq_ignore_ascii_case(platform_type));
         integrations.push(serde_json::json!({
             "service": service,
             "type": "integration",
@@ -869,6 +880,45 @@ mod tests {
         let llm = json["health"]["llmProviders"].as_array().unwrap();
         assert!(llm.is_empty(), "no LLM configured in this state");
         assert_eq!(json["health"]["overall"], "offline");
+    }
+
+    /// The env/CLI channel alone (`GITLAB_TOKEN` / `--gitlab-token` recorded
+    /// at startup) marks the integration configured even when no
+    /// `git_platforms` entry exists — the deployment shape verified by
+    /// human testing.
+    #[tokio::test]
+    async fn dashboard_health_env_flag_marks_gitlab_configured() {
+        let (mut state, _db) = state_with_db().await;
+        // No git_platforms entries; only the startup-recorded env flag.
+        Arc::get_mut(&mut state).unwrap().env_gitlab_configured = true;
+
+        let (status, json) = dashboard_json(state).await;
+        assert_eq!(status, StatusCode::OK);
+        let integrations = json["health"]["integrations"].as_array().unwrap();
+        let by_service: std::collections::HashMap<&str, &serde_json::Value> = integrations
+            .iter()
+            .map(|i| (i["service"].as_str().unwrap(), i))
+            .collect();
+        assert_eq!(by_service["GitLab API"]["status"], "success");
+        assert_eq!(by_service["GitLab API"]["message"], "Configured");
+        assert_eq!(by_service["GitHub API"]["status"], "offline");
+    }
+
+    /// Neither channel configured (no platform entries, no env/CLI tokens)
+    /// → both integrations offline.
+    #[tokio::test]
+    async fn dashboard_health_offline_without_platform_or_env_flag() {
+        let (state, _db) = state_with_db().await;
+
+        let (status, json) = dashboard_json(state).await;
+        assert_eq!(status, StatusCode::OK);
+        let integrations = json["health"]["integrations"].as_array().unwrap();
+        let by_service: std::collections::HashMap<&str, &serde_json::Value> = integrations
+            .iter()
+            .map(|i| (i["service"].as_str().unwrap(), i))
+            .collect();
+        assert_eq!(by_service["GitLab API"]["status"], "offline");
+        assert_eq!(by_service["GitHub API"]["status"], "offline");
     }
 
     /// The LLM provider health rows survive without latencyMs.

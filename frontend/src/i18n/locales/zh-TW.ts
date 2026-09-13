@@ -115,7 +115,7 @@ export default {
       vsYesterday: '較昨日',
     },
     trend: {
-      title: '24 小時活動趨勢',
+      title: '活動趨勢',
       total: '總計：{count} 次審查',
       empty: '過去 24 小時內無活動',
       view24h: '24H',

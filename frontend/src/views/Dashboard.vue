@@ -64,7 +64,7 @@ const trendModeOptions = computed(() => [
 const activeTrend = computed<TrendPoint[]>(() =>
   trendMode.value === 'daily' ? trendDaily.value : trend.value,
 )
-/** Footer total follows the visible window (24h sum vs 30-day sum). */
+/** Footer total follows the visible window (24h sum vs 14-day sum). */
 const activeTrendTotal = computed(() => activeTrend.value.reduce((sum, p) => sum + p.value, 0))
 const hasTrendData = computed(() => trend.value.length > 0 || trendDaily.value.length > 0)
 
@@ -291,12 +291,14 @@ function initChart() {
     ? chart.addSeries(HistogramSeries, {
         color: seriesColor,
         priceFormat: integerTicks,
+        lastValueVisible: false,
         autoscaleInfoProvider: floorAutoscale(),
       })
     : chart.addSeries(LineSeries, {
         color: seriesColor,
         lineWidth: 2,
         priceFormat: integerTicks,
+        lastValueVisible: false,
         crosshairMarkerVisible: true,
         crosshairMarkerRadius: 4,
         crosshairMarkerBorderColor: seriesColor,

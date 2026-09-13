@@ -119,7 +119,7 @@ export default {
       vsYesterday: 'vs hier',
     },
     trend: {
-      title: "Tendance d'activité sur 24 h",
+      title: "Tendance d'activité",
       total: 'Total : {count} revues',
       empty: 'Aucune activité au cours des dernières 24 heures',
       view24h: '24H',

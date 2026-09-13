@@ -49,9 +49,9 @@ const WINDOW_ROW_CAP: u64 = 500;
 /// Recent-reviews card size (latest N, `created_at` DESC).
 const RECENT_REVIEWS_LIMIT: u64 = 5;
 
-/// Daily-trend length: one point per calendar day for the last 30 local days
+/// Daily-trend length: one point per calendar day for the last 14 local days
 /// INCLUDING today (today is the final, partial day).
-const TREND_DAILY_DAYS: i64 = 30;
+const TREND_DAILY_DAYS: i64 = 14;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/", get(get_dashboard))
@@ -200,8 +200,8 @@ async fn collect_dashboard(
     let yesterday_end = today_start - chrono::Duration::microseconds(1);
     let last_week_start = week_start - chrono::Duration::days(7);
     let last_week_end = week_start - chrono::Duration::microseconds(1);
-    // First day covered by the daily trend (local midnight 29 days ago —
-    // local_midnight, not `today_start - 29d`: across a DST transition a
+    // First day covered by the daily trend (local midnight 13 days ago —
+    // local_midnight, not `today_start - 13d`: across a DST transition a
     // local day is not 86400 s, so fixed-second arithmetic would drift an
     // hour off the calendar-day anchor).
     let trend_window_start = local_midnight(
@@ -273,9 +273,10 @@ async fn collect_dashboard(
     let kpis = compute_kpis(&counts, active_queue);
 
     // One shared bounded fetch feeds BOTH trend series: the 24h rolling
-    // buckets and the 30-day daily buckets read the same newest-≤WINDOW_ROW_CAP
-    // rows of [trend_window_start, now] (29 days ago ⊂ covers the 24h
-    // window), so the 60s poll pays for a single window query instead of two.
+    // buckets and the 14-day daily buckets read the same newest-≤WINDOW_ROW_CAP
+    // rows of [trend_window_start, now] (13 days ago trivially covers the
+    // 24h window), so the 60s poll pays for a single window query instead of
+    // two.
     let (trend_rows, _) = source
         .window(None, Some(trend_window_start), None, WINDOW_ROW_CAP)
         .await?;
@@ -823,7 +824,7 @@ mod tests {
     /// Aug 31 02:00 local and one at Sep 1 02:00 local land in two different
     /// buckets (the month boundary is a midnight line, not a multiple of
     /// 86400 s from "now"), each `time` is that day's local midnight, and the
-    /// window is the 30 local days ending today. Fixed anchor keeps this
+    /// window is the 14 local days ending today. Fixed anchor keeps this
     /// deterministic regardless of the host timezone or when it runs.
     #[test]
     fn daily_trend_buckets_by_local_calendar_day() {
@@ -836,14 +837,15 @@ mod tests {
         sep1_review.created_at = sep1 + chrono::Duration::hours(2);
 
         let points = compute_trend_daily(&[aug31_review, sep1_review], now);
-        assert_eq!(points.len(), 30, "exactly 30 daily points");
-        // Window: Aug 15 ..= Sep 13 (30 local days, today last), oldest first.
+        assert_eq!(points.len(), 14, "exactly 14 daily points");
+        // Window: Aug 31 ..= Sep 13 (14 local days, today last), oldest first —
+        // so the Aug 31 review lands in the FIRST bucket.
         assert_eq!(
             points[0]["time"].as_i64().unwrap(),
-            local_midnight(NaiveDate::from_ymd_opt(2026, 8, 15).unwrap(), now).timestamp()
+            local_midnight(NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(), now).timestamp()
         );
         assert_eq!(
-            points[29]["time"].as_i64().unwrap(),
+            points[13]["time"].as_i64().unwrap(),
             local_midnight(NaiveDate::from_ymd_opt(2026, 9, 13).unwrap(), now).timestamp()
         );
         // Month boundary: each review sits in its own day's bucket, keyed by
@@ -866,31 +868,31 @@ mod tests {
         }
     }
 
-    /// Empty DB: `trendDaily` is still 30 zero points on the correct local
-    /// midnight anchors — first = 29 days ago's midnight, last = today's
+    /// Empty DB: `trendDaily` is still 14 zero points on the correct local
+    /// midnight anchors — first = 13 days ago's midnight, last = today's
     /// midnight, i.e. the same `day_start` anchor the KPI today/yesterday
     /// windows use.
     #[tokio::test]
-    async fn dashboard_daily_trend_empty_db_30_zero_points() {
+    async fn dashboard_daily_trend_empty_db_14_zero_points() {
         let (state, _db) = state_with_db().await;
         let (status, json) = dashboard_json(state).await;
         assert_eq!(status, StatusCode::OK);
         let daily = json["trendDaily"].as_array().unwrap();
-        assert_eq!(daily.len(), 30, "exactly 30 daily points");
+        assert_eq!(daily.len(), 14, "exactly 14 daily points");
         assert!(
             daily.iter().all(|p| p["value"] == 0),
             "empty DB → all-zero values, never fabricated counts"
         );
         let now = Local::now();
         assert_eq!(
-            daily[29]["time"].as_i64().unwrap(),
+            daily[13]["time"].as_i64().unwrap(),
             day_start(now).timestamp(),
             "today's local midnight is the LAST point (same anchor as the KPI today window)"
         );
         assert_eq!(
             daily[0]["time"].as_i64().unwrap(),
-            local_midnight(now.date_naive() - chrono::Duration::days(29), now).timestamp(),
-            "first point is 29 days ago's local midnight"
+            local_midnight(now.date_naive() - chrono::Duration::days(13), now).timestamp(),
+            "first point is 13 days ago's local midnight"
         );
         for w in daily.windows(2) {
             assert!(w[0]["time"].as_i64().unwrap() < w[1]["time"].as_i64().unwrap());
@@ -899,7 +901,7 @@ mod tests {
         assert_eq!(json["trend"].as_array().unwrap().len(), 24);
     }
 
-    /// End-to-end from the DB: reviews seeded at 30 days ago (OUTSIDE the
+    /// End-to-end from the DB: reviews seeded at 14 days ago (OUTSIDE the
     /// window), the first bucket's day, yesterday late night, and this
     /// morning produce exactly the expected buckets — today is the last
     /// point and holds this morning's review.
@@ -908,17 +910,17 @@ mod tests {
         let (state, db) = state_with_db().await;
         let now = Local::now();
         let today_start = day_start(now);
-        let first_day_start = local_midnight(now.date_naive() - chrono::Duration::days(29), now);
-        // 30 days ago: one day BEFORE the window → must not appear anywhere.
+        let first_day_start = local_midnight(now.date_naive() - chrono::Duration::days(13), now);
+        // 14 days ago: one day BEFORE the window → must not appear anywhere.
         seed_review(
             &db,
             TaskState::Completed,
-            today_start - chrono::Duration::days(30),
+            today_start - chrono::Duration::days(14),
             "too-old",
             chrono::Duration::seconds(30),
         )
         .await;
-        // First bucket (29 days ago), yesterday 23:30, today 09:00.
+        // First bucket (13 days ago), yesterday 23:30, today 09:00.
         for (ts, title) in [
             (first_day_start + chrono::Duration::hours(9), "first-day"),
             (today_start - chrono::Duration::minutes(30), "yesterday-late"),
@@ -930,15 +932,15 @@ mod tests {
         let (status, json) = dashboard_json(state).await;
         assert_eq!(status, StatusCode::OK);
         let daily = json["trendDaily"].as_array().unwrap();
-        assert_eq!(daily.len(), 30);
-        assert_eq!(daily[0]["value"], 1, "first bucket holds the 29-days-ago review");
-        assert_eq!(daily[28]["value"], 1, "yesterday 23:30 → yesterday's bucket");
-        assert_eq!(daily[29]["time"].as_i64().unwrap(), today_start.timestamp());
-        assert_eq!(daily[29]["value"], 1, "today is the LAST point and is partial");
+        assert_eq!(daily.len(), 14);
+        assert_eq!(daily[0]["value"], 1, "first bucket holds the 13-days-ago review");
+        assert_eq!(daily[12]["value"], 1, "yesterday 23:30 → yesterday's bucket");
+        assert_eq!(daily[13]["time"].as_i64().unwrap(), today_start.timestamp());
+        assert_eq!(daily[13]["value"], 1, "today is the LAST point and is partial");
         assert_eq!(
             daily.iter().map(|p| p["value"].as_u64().unwrap()).sum::<u64>(),
             3,
-            "the 30-days-ago review is outside the window"
+            "the 14-days-ago review is outside the window"
         );
     }
 
@@ -1144,7 +1146,7 @@ mod tests {
         assert!(json["kpis"]["successRate"].is_null());
         assert!(json["recentReviews"].as_array().unwrap().is_empty());
         let daily = json["trendDaily"].as_array().unwrap();
-        assert_eq!(daily.len(), 30, "default daily series keeps the 30-point shape");
+        assert_eq!(daily.len(), 14, "default daily series keeps the 14-point shape");
         assert!(daily.iter().all(|p| p["value"] == 0));
         assert_eq!(json["health"]["overall"], "offline");
     }

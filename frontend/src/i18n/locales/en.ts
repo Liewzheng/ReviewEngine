@@ -130,6 +130,9 @@ export default {
       title: '24h Activity Trend',
       total: 'Total: {count} reviews',
       empty: 'No activity in the last 24 hours',
+      view24h: '24H',
+      viewDaily: 'Daily',
+      tooltipReviews: '{count} reviews',
     },
     health: {
       title: 'System Health',

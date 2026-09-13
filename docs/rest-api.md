@@ -820,7 +820,7 @@ Response 200:
 
 #### `GET /api/v1/dashboard`
 
-聚合返回 Dashboard 页面所需的 KPI、24h 趋势、系统健康与最近 reviews。
+聚合返回 Dashboard 页面所需的 KPI、24h 趋势、30 天按日趋势、系统健康与最近 reviews。
 
 **数据源（0.10.8 / RENG-32）**：KPI、24h 趋势、recentReviews 一律来自持久化 `reviews` 表（0.10.0 SQLite/PG 存储）——内存任务队列的 reaper 会在完成 30 分钟后删除条目，曾导致「库里 100+ 条、Dashboard 全零」。`activeQueue` 是唯一保留内存数据源的字段（活跃 pending+running 是实时队列状态，DB 反而是错源）。`REVIEW_DISABLE_DB=1` / 无 DB 时整体回退到内存任务存储（与 `/reviews` 的 DB 优先、内存兜底策略一致）；两者皆无则返回默认值。历史读取失败返回 `500`（与 `/reviews` 相同），而不是编造零值。
 
@@ -838,7 +838,7 @@ Response 200:
 
 所有 `null` 在前端渲染为「—」，绝不显示编造的 `0.0%`。
 
-**成本**：前端每 60s 轮询。计数走 SQL `COUNT(*)`（只取 total，不物化行）；平均耗时 / 24h 分桶 / recentReviews 才物化行，各窗口最多取最新 500 条（`created_at` 索引范围扫描）。
+**成本**：前端每 60s 轮询。计数走 SQL `COUNT(*)`（只取 total，不物化行）；平均耗时 / 趋势分桶 / recentReviews 才物化行，各窗口最多取最新 500 条（`created_at` 索引范围扫描）。24h 与 30 天按日两条趋势序列**共用同一次**有界窗口行拉取（29 天前的本地零点起，覆盖 24h 窗口），轮询不额外增加查询次数。
 
 ```
 Response 200:
@@ -853,6 +853,7 @@ Response 200:
     "durationTrend": -12.5         // 或 null（对比窗口无数据）
   },
   "trend": [ { "time": 1789948800, "value": 2 } ],
+  "trendDaily": [ { "time": 1789056000, "value": 5 } ],
   "health": { "integrations": [], "llmProviders": [], "overall": "success", "lastChecked": "..." },
   "recentReviews": [
     {
@@ -869,6 +870,8 @@ Response 200:
 ```
 
 `trend`：最近 24 小时的 24 个小时桶（按 `created_at` 归桶，保留旧版滚动小时窗口形状），卡片合计 = 窗口内总和。
+
+`trendDaily`（0.10.9 / RENG-50）：最近 30 个**自然日**（含今日，今日为最后一个不完整桶）的按日分桶，恰好 30 个点，最旧 → 最新（与 `trend` 排序约定一致）。`time` = 当日本地 00:00 的 unix 时间戳（与 KPI「今日/昨日」窗口同一 `day_start` 本地时区锚点，按日历日归桶——跨 DST  transition 的 23h/25h 日也是整日历日）；`value` = `created_at` 落入 `[当日 00:00, 次日 00:00)` 的评审数（不限状态）。与 `trend` 共用同一次有界行拉取（窗口内最新 ≤500 行），极重负载下同样退化为「窗口内最新 500 行」。无存储的默认响应同样给出 30 个零值点（时间戳锚点不变）。
 
 `recentReviews`：最新 5 条（`created_at` DESC），不再按状态过滤（pending / running / completed / failed / cancelled 都会出现），`status` 使用与 `/reviews` 一致的真实状态词汇（不再输出 `"success"`）。
 

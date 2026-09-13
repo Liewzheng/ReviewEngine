@@ -292,6 +292,7 @@ function initChart() {
         color: seriesColor,
         priceFormat: integerTicks,
         lastValueVisible: false,
+        priceLineVisible: false,
         autoscaleInfoProvider: floorAutoscale(),
       })
     : chart.addSeries(LineSeries, {
@@ -299,6 +300,7 @@ function initChart() {
         lineWidth: 2,
         priceFormat: integerTicks,
         lastValueVisible: false,
+        priceLineVisible: false,
         crosshairMarkerVisible: true,
         crosshairMarkerRadius: 4,
         crosshairMarkerBorderColor: seriesColor,

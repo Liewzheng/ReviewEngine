@@ -216,6 +216,27 @@ function floorAutoscale(): (base: () => AutoscaleInfo | null) => AutoscaleInfo |
   }
 }
 
+/**
+ * Canvas colors must be CONCRETE values: lightweight-charts paints on canvas
+ * and parses colors on a detached scratch context, which cannot resolve CSS
+ * `var(--…)` references — invalid strings are silently dropped and the chart
+ * renders with near-black defaults. Resolve the theme vars through
+ * getComputedStyle at init (per init, so theme switches re-resolve on the
+ * next toggle rebuild), falling back to the dark palette constants.
+ */
+const CHART_COLOR_FALLBACKS: Record<string, string> = {
+  '--chart-grid': 'rgba(148, 163, 184, 0.28)',
+  '--chart-text': '#cbd5e1',
+  '--chart-line': '#818cf8',
+  '--chart-bar': '#a78bfa',
+  '--bg-primary': '#121314',
+}
+
+function resolveChartColor(varName: string): string {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim()
+  return value || CHART_COLOR_FALLBACKS[varName] || '#a78bfa'
+}
+
 function initChart() {
   if (!chartContainer.value) return
   if (chart) {
@@ -227,26 +248,29 @@ function initChart() {
   resizeObserver = null
 
   const daily = trendMode.value === 'daily'
+  const gridColor = resolveChartColor('--chart-grid')
+  const textColor = resolveChartColor('--chart-text')
+  const seriesColor = resolveChartColor(daily ? '--chart-bar' : '--chart-line')
   chart = createChart(chartContainer.value, {
     layout: {
       background: { color: 'transparent' },
-      textColor: 'var(--chart-text)',
+      textColor,
       attributionLogo: false,
     },
     // Readability (RENG-50): clearly visible medium-gray horizontal grid, no
     // vertical clutter, high-contrast tick text (palette in style.css).
     grid: {
-      vertLines: { visible: false, color: 'var(--chart-grid)' },
-      horzLines: { color: 'var(--chart-grid)', style: LineStyle.Solid },
+      vertLines: { visible: false, color: gridColor },
+      horzLines: { color: gridColor, style: LineStyle.Solid },
     },
     crosshair: {
       mode: CrosshairMode.Magnet,
-      vertLine: { color: 'var(--chart-grid)' },
-      horzLine: { color: 'var(--chart-grid)' },
+      vertLine: { color: gridColor },
+      horzLine: { color: gridColor },
     },
-    rightPriceScale: { borderColor: 'var(--chart-grid)' },
+    rightPriceScale: { borderColor: gridColor },
     timeScale: {
-      borderColor: 'var(--chart-grid)',
+      borderColor: gridColor,
       timeVisible: !daily,
       tickMarkFormatter: daily ? formatDailyTick : undefined,
     },
@@ -261,18 +285,22 @@ function initChart() {
 
   // No native rounded-top histograms in lightweight-charts v5 — a bright
   // solid bar in the accent's violet family instead (no canvas hacks).
+  // priceFormat pins Y ticks to integers (counts, never "50.00").
+  const integerTicks = { type: 'price', precision: 0, minMove: 1 } as const
   activeSeries = daily
     ? chart.addSeries(HistogramSeries, {
-        color: 'var(--chart-bar)',
+        color: seriesColor,
+        priceFormat: integerTicks,
         autoscaleInfoProvider: floorAutoscale(),
       })
     : chart.addSeries(LineSeries, {
-        color: 'var(--chart-line)',
+        color: seriesColor,
         lineWidth: 2,
+        priceFormat: integerTicks,
         crosshairMarkerVisible: true,
         crosshairMarkerRadius: 4,
-        crosshairMarkerBorderColor: 'var(--chart-line)',
-        crosshairMarkerBackgroundColor: 'var(--bg-primary)',
+        crosshairMarkerBorderColor: seriesColor,
+        crosshairMarkerBackgroundColor: resolveChartColor('--bg-primary'),
         autoscaleInfoProvider: floorAutoscale(),
       })
 
@@ -288,12 +316,16 @@ function initChart() {
 }
 
 function updateChartData() {
-  if (!activeSeries || !activeTrend.value.length) return
+  if (!chart || !activeSeries || !activeTrend.value.length) return
   const data = activeTrend.value.map((p) => ({
     time: p.time as UTCTimestamp,
     value: p.value,
   }))
   activeSeries.setData(data)
+  // Fit the visible range to the data: the default time-scale state shows a
+  // fixed ~150 bars of history (default bar spacing), leaving the series
+  // right-clustered in a mostly empty plot when the window has fewer points.
+  chart.timeScale().fitContent()
 }
 
 function hideTooltip() {
@@ -760,7 +792,8 @@ onUnmounted(() => {
   font-size: 12px;
   white-space: nowrap;
   pointer-events: none;
-  z-index: 5;
+  /* above the chart canvases and the (now hidden) attribution-logo layer */
+  z-index: 30;
 }
 
 .trend-tooltip.below {

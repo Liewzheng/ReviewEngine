@@ -117,9 +117,12 @@ export default {
       vsYesterday: '어제 대비',
     },
     trend: {
-      title: '24시간 활동 추이',
+      title: '활동 추이',
       total: '총 {count}건의 리뷰',
       empty: '지난 24시간 동안 활동이 없습니다',
+      view24h: '24H',
+      viewDaily: '일별',
+      tooltipReviews: '리뷰 {count}건',
     },
     health: {
       title: '시스템 상태',

@@ -115,9 +115,12 @@ export default {
       vsYesterday: '较昨日',
     },
     trend: {
-      title: '24 小时活动趋势',
+      title: '活动趋势',
       total: '总计：{count} 次评审',
       empty: '过去 24 小时无活动',
+      view24h: '24H',
+      viewDaily: '按天',
+      tooltipReviews: '{count} 次评审',
     },
     health: {
       title: '系统健康',

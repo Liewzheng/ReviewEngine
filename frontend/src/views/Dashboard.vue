@@ -14,7 +14,20 @@ import {
 } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
-import { createChart, LineSeries, LineStyle, CrosshairMode, type IChartApi, type ISeriesApi } from 'lightweight-charts'
+import {
+  createChart,
+  LineSeries,
+  HistogramSeries,
+  LineStyle,
+  CrosshairMode,
+  TickMarkType,
+  type IChartApi,
+  type ISeriesApi,
+  type MouseEventParams,
+  type AutoscaleInfo,
+  type Time,
+  type UTCTimestamp,
+} from 'lightweight-charts'
 import { useDashboard } from '../composables/useDashboard'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
@@ -34,13 +47,39 @@ const lastUpdated = ref<string | null>(null)
 // Data refs (computed from composable)
 const kpis = computed<KpiData | null>(() => dashboard.data.value?.kpis ?? null)
 const trend = computed<TrendPoint[]>(() => dashboard.data.value?.trend ?? [])
+const trendDaily = computed<TrendPoint[]>(() => dashboard.data.value?.trendDaily ?? [])
 const health = computed<SystemHealth | null>(() => dashboard.data.value?.health ?? null)
 const recentReviews = computed<RecentReview[]>(() => dashboard.data.value?.recentReviews ?? [])
 
+// ─── Trend granularity toggle (RENG-50) ─────────────
+// Session-only state (plain ref, no persistence); both series arrive in the
+// same /dashboard payload, so switching never refetches.
+type TrendMode = 'hourly' | 'daily'
+const trendMode = ref<TrendMode>('hourly')
+const trendModeOptions = computed(() => [
+  { label: t('dashboard.trend.view24h'), value: 'hourly' },
+  { label: t('dashboard.trend.viewDaily'), value: 'daily' },
+])
+/** Series rendered for the active granularity. */
+const activeTrend = computed<TrendPoint[]>(() =>
+  trendMode.value === 'daily' ? trendDaily.value : trend.value,
+)
+/** Footer total follows the visible window (24h sum vs 14-day sum). */
+const activeTrendTotal = computed(() => activeTrend.value.reduce((sum, p) => sum + p.value, 0))
+const hasTrendData = computed(() => trend.value.length > 0 || trendDaily.value.length > 0)
+
 // Chart refs
 const chartContainer = ref<HTMLElement | null>(null)
+const tooltipVisible = ref(false)
+const tooltipLabel = ref('')
+const tooltipCount = ref(0)
+const tooltipBelow = ref(false)
+const tooltipStyle = computed(() => ({ left: `${tooltipX.value}px`, top: `${tooltipY.value}px` }))
+const tooltipX = ref(0)
+const tooltipY = ref(0)
 let chart: IChartApi | null = null
-let lineSeries: ISeriesApi<'Line'> | null = null
+let activeSeries: ISeriesApi<'Line'> | ISeriesApi<'Histogram'> | null = null
+let resizeObserver: ResizeObserver | null = null
 
 // ─── Error Handling ─────────────────────────────────
 
@@ -135,66 +174,213 @@ function cellStyle(): Record<string, string> {
 
 // ─── Lightweight Charts ───────────────────────────────
 
+const CHART_HEIGHT = 280
+
+function pad2(n: number): string {
+  return n.toString().padStart(2, '0')
+}
+
+/** 24H tooltip / hour-range label: the bucket point sits at the window END. */
+function formatHour(ts: number): string {
+  return `${pad2(new Date(ts * 1000).getHours())}:00`
+}
+
+/** Daily tooltip label: full local date, `2026-09-09` style. */
+function formatDailyDate(ts: number): string {
+  const d = new Date(ts * 1000)
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`
+}
+
+/** Daily axis labels: sparse `M/D` (9/1) date ticks. */
+function formatDailyTick(time: Time, tickMarkType: TickMarkType): string | null {
+  if (tickMarkType !== TickMarkType.DayOfMonth && tickMarkType !== TickMarkType.Month) return null
+  const d = new Date((time as UTCTimestamp) * 1000)
+  return `${d.getMonth() + 1}/${d.getDate()}`
+}
+
+/**
+ * Pin the Y axis floor to 0 on both views so all-zero windows hug the floor
+ * instead of the library's degenerate ±ε auto-range around 0. lightweight-
+ * charts has no price-scale `min` option — a series autoscale provider
+ * returning `priceRange.minValue = 0` is the supported mechanism.
+ */
+function floorAutoscale(): (base: () => AutoscaleInfo | null) => AutoscaleInfo | null {
+  return (base) => {
+    const info = base()
+    if (!info?.priceRange) return info
+    const max = info.priceRange.maxValue
+    return {
+      priceRange: { minValue: 0, maxValue: max > 0 ? max : 1 },
+      margins: { above: 10, below: 0 },
+    }
+  }
+}
+
+/**
+ * Canvas colors must be CONCRETE values: lightweight-charts paints on canvas
+ * and parses colors on a detached scratch context, which cannot resolve CSS
+ * `var(--…)` references — invalid strings are silently dropped and the chart
+ * renders with near-black defaults. Resolve the theme vars through
+ * getComputedStyle at init (per init, so theme switches re-resolve on the
+ * next toggle rebuild), falling back to the dark palette constants.
+ */
+const CHART_COLOR_FALLBACKS: Record<string, string> = {
+  '--chart-grid': 'rgba(148, 163, 184, 0.28)',
+  '--chart-text': '#cbd5e1',
+  '--chart-line': '#818cf8',
+  '--chart-bar': '#a78bfa',
+  '--bg-primary': '#121314',
+}
+
+function resolveChartColor(varName: string): string {
+  const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim()
+  return value || CHART_COLOR_FALLBACKS[varName] || '#a78bfa'
+}
+
 function initChart() {
   if (!chartContainer.value) return
   if (chart) {
     chart.remove()
     chart = null
-    lineSeries = null
+    activeSeries = null
   }
+  resizeObserver?.disconnect()
+  resizeObserver = null
 
+  const daily = trendMode.value === 'daily'
+  const gridColor = resolveChartColor('--chart-grid')
+  const textColor = resolveChartColor('--chart-text')
+  const seriesColor = resolveChartColor(daily ? '--chart-bar' : '--chart-line')
   chart = createChart(chartContainer.value, {
     layout: {
       background: { color: 'transparent' },
-      textColor: 'var(--text-secondary)',
+      textColor,
+      attributionLogo: false,
     },
+    // Readability (RENG-50): clearly visible medium-gray horizontal grid, no
+    // vertical clutter, high-contrast tick text (palette in style.css).
     grid: {
-      vertLines: { color: 'var(--border-color)', style: LineStyle.SparseDotted },
-      horzLines: { color: 'var(--border-color)', style: LineStyle.SparseDotted },
+      vertLines: { visible: false, color: gridColor },
+      horzLines: { color: gridColor, style: LineStyle.Solid },
     },
-    crosshair: { mode: CrosshairMode.Magnet },
-    rightPriceScale: { borderColor: 'var(--border-color)' },
-    timeScale: { borderColor: 'var(--border-color)', timeVisible: true },
+    crosshair: {
+      mode: CrosshairMode.Magnet,
+      vertLine: { color: gridColor },
+      horzLine: { color: gridColor },
+    },
+    rightPriceScale: { borderColor: gridColor },
+    timeScale: {
+      borderColor: gridColor,
+      timeVisible: !daily,
+      tickMarkFormatter: daily ? formatDailyTick : undefined,
+    },
+    localization: {
+      timeFormatter: daily ? (time: UTCTimestamp) => formatDailyDate(time) : undefined,
+    },
     handleScroll: false,
     handleScale: false,
     width: chartContainer.value.clientWidth,
-    height: 280,
+    height: CHART_HEIGHT,
   })
 
-  lineSeries = chart.addSeries(LineSeries, {
-    color: 'var(--brand)',
-    lineWidth: 2,
-    crosshairMarkerVisible: true,
-    crosshairMarkerRadius: 4,
-    crosshairMarkerBorderColor: 'var(--brand)',
-    crosshairMarkerBackgroundColor: 'var(--bg-primary)',
-  })
+  // No native rounded-top histograms in lightweight-charts v5 — a bright
+  // solid bar in the accent's violet family instead (no canvas hacks).
+  // priceFormat pins Y ticks to integers (counts, never "50.00").
+  const integerTicks = { type: 'price', precision: 0, minMove: 1 } as const
+  activeSeries = daily
+    ? chart.addSeries(HistogramSeries, {
+        color: seriesColor,
+        priceFormat: integerTicks,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        autoscaleInfoProvider: floorAutoscale(),
+      })
+    : chart.addSeries(LineSeries, {
+        color: seriesColor,
+        lineWidth: 2,
+        priceFormat: integerTicks,
+        lastValueVisible: false,
+        priceLineVisible: false,
+        crosshairMarkerVisible: true,
+        crosshairMarkerRadius: 4,
+        crosshairMarkerBorderColor: seriesColor,
+        crosshairMarkerBackgroundColor: resolveChartColor('--bg-primary'),
+        autoscaleInfoProvider: floorAutoscale(),
+      })
 
+  chart.subscribeCrosshairMove(onCrosshairMove)
   updateChartData()
 
-  const resizeObserver = new ResizeObserver(() => {
+  resizeObserver = new ResizeObserver(() => {
     if (chart && chartContainer.value) {
-      chart.applyOptions({ width: chartContainer.value.clientWidth, height: 280 })
+      chart.applyOptions({ width: chartContainer.value.clientWidth, height: CHART_HEIGHT })
     }
   })
   resizeObserver.observe(chartContainer.value)
 }
 
 function updateChartData() {
-  if (!lineSeries || !trend.value.length) return
-  const data: any[] = trend.value.map(p => ({
-    time: p.time,
+  if (!chart || !activeSeries || !activeTrend.value.length) return
+  const data = activeTrend.value.map((p) => ({
+    time: p.time as UTCTimestamp,
     value: p.value,
   }))
-  lineSeries.setData(data)
+  activeSeries.setData(data)
+  // Fit the visible range to the data: the default time-scale state shows a
+  // fixed ~150 bars of history (default bar spacing), leaving the series
+  // right-clustered in a mostly empty plot when the window has fewer points.
+  chart.timeScale().fitContent()
 }
 
-watch(() => trend.value, () => {
-  nextTick(() => {
-    if (!chart) initChart()
-    else updateChartData()
-  })
-}, { deep: true })
+function hideTooltip() {
+  tooltipVisible.value = false
+}
+
+/**
+ * Owner-spec hover card: window label left, review count right, dark rounded
+ * floating card. Positioned above the crosshair point (flips below near the
+ * top edge), clamped horizontally inside the chart.
+ */
+function onCrosshairMove(param: MouseEventParams) {
+  if (!chartContainer.value || !activeSeries) return
+  const point = param.seriesData.get(activeSeries) as { value: number } | undefined
+  if (!param.time || !param.point || !point) {
+    hideTooltip()
+    return
+  }
+  const time = param.time as UTCTimestamp
+  tooltipLabel.value =
+    trendMode.value === 'daily'
+      ? formatDailyDate(time)
+      : `${formatHour(time - 3600)} – ${formatHour(time)}`
+  tooltipCount.value = point.value
+
+  const width = chartContainer.value.clientWidth
+  tooltipX.value = Math.max(96, Math.min(param.point.x, width - 96))
+  tooltipBelow.value = param.point.y < 56
+  tooltipY.value = tooltipBelow.value ? param.point.y + 18 : param.point.y - 12
+  tooltipVisible.value = true
+}
+
+// Poll update: refresh the ACTIVE series' data in place (no re-init, no
+// refetch — both series ride the same /dashboard payload).
+watch(
+  activeTrend,
+  () => {
+    nextTick(() => {
+      if (!chart) initChart()
+      else updateChartData()
+    })
+  },
+  { deep: true },
+)
+
+// Granularity switch: rebuild the chart (series type, time scale and axis
+// formatting differ between the two views).
+watch(trendMode, () => {
+  hideTooltip()
+  nextTick(initChart)
+})
 
 // ─── Table Helpers ──────────────────────────────────
 
@@ -236,9 +422,12 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  resizeObserver?.disconnect()
+  resizeObserver = null
   if (chart) {
     chart.remove()
     chart = null
+    activeSeries = null
   }
 })
 </script>
@@ -314,7 +503,7 @@ onUnmounted(() => {
 
     <!-- Row 2: Trend + Health -->
     <div class="row-two">
-      <!-- 24h Activity Trend -->
+      <!-- Activity Trend (24H / daily granularity toggle) -->
       <CardPanel :body-style="{ padding: '0' }">
         <template #header>
           <div class="card-header">
@@ -322,14 +511,31 @@ onUnmounted(() => {
               <el-icon :size="18"><TrendCharts /></el-icon>
               <span>{{ $t('dashboard.trend.title') }}</span>
             </div>
+            <el-segmented
+              v-model="trendMode"
+              :options="trendModeOptions"
+              size="small"
+              class="trend-mode-switch"
+            />
           </div>
         </template>
         <div class="trend-body">
           <el-skeleton v-if="loading" :rows="5" animated />
-          <template v-else-if="trend.length > 0">
-            <div ref="chartContainer" class="chart-container" />
+          <template v-else-if="hasTrendData">
+            <div class="chart-wrap">
+              <div ref="chartContainer" class="chart-container" />
+              <div
+                v-show="tooltipVisible"
+                class="trend-tooltip"
+                :class="{ below: tooltipBelow }"
+                :style="tooltipStyle"
+              >
+                <span class="trend-tooltip-label">{{ tooltipLabel }}</span>
+                <span class="trend-tooltip-value">{{ $t('dashboard.trend.tooltipReviews', { count: tooltipCount }) }}</span>
+              </div>
+            </div>
             <div class="trend-summary">
-              <span class="trend-total">{{ $t('dashboard.trend.total', { count: trend.reduce((a, b) => a + b.value, 0) }) }}</span>
+              <span class="trend-total">{{ $t('dashboard.trend.total', { count: activeTrendTotal }) }}</span>
             </div>
           </template>
           <div v-else class="trend-empty">
@@ -565,9 +771,62 @@ onUnmounted(() => {
   padding: 16px 20px 20px;
 }
 
+.chart-wrap {
+  position: relative;
+}
+
 .chart-container {
   height: 280px;
   width: 100%;
+}
+
+/* Owner-spec hover card: dark rounded floating card, window label left,
+   review count right. Never intercepts mouse (the crosshair drives it). */
+.trend-tooltip {
+  position: absolute;
+  transform: translate(-50%, -100%);
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  background: rgba(26, 28, 30, 0.95);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+  font-size: 12px;
+  white-space: nowrap;
+  pointer-events: none;
+  /* above the chart canvases and the (now hidden) attribution-logo layer */
+  z-index: 30;
+}
+
+.trend-tooltip.below {
+  transform: translate(-50%, 0);
+}
+
+.trend-tooltip-label {
+  color: var(--text-secondary);
+}
+
+.trend-tooltip-value {
+  color: var(--text-primary);
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+/* Granularity toggle: capsule container, highlighted active segment. */
+.trend-mode-switch :deep(.el-segmented) {
+  --el-segmented-bg-color: var(--bg-surface);
+  --el-segmented-color: var(--text-secondary);
+  --el-segmented-item-hover-bg-color: var(--bg-hover);
+  --el-segmented-item-hover-color: var(--text-primary);
+  --el-segmented-item-selected-bg-color: var(--brand);
+  --el-segmented-item-selected-color: #ffffff;
+  border-radius: 999px;
+}
+
+.trend-mode-switch :deep(.el-segmented__item-selected) {
+  border-radius: 999px;
 }
 
 .trend-summary {

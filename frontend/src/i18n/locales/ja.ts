@@ -118,9 +118,12 @@ export default {
       vsYesterday: '昨日比',
     },
     trend: {
-      title: '24 時間のアクティビティ傾向',
+      title: 'アクティビティ傾向',
       total: '合計：{count} 件のレビュー',
       empty: '過去 24 時間にアクティビティはありません',
+      view24h: '24H',
+      viewDaily: '日別',
+      tooltipReviews: '{count} 件のレビュー',
     },
     health: {
       title: 'システム状態',

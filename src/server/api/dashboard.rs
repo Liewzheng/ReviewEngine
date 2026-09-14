@@ -1,6 +1,7 @@
 //! REST API endpoints for the dashboard overview page.
 //!
-//! Aggregates KPIs, 24h trend, system health, and recent reviews.
+//! Aggregates KPIs, 24h trend, 30-day daily trend, system health, and recent
+//! reviews.
 //!
 //! RENG-32: every review-derived figure (KPIs / 24h trend / recentReviews)
 //! is aggregated from the persistent `ReviewStore` (0.10.0, SQLite/PG) —
@@ -26,9 +27,10 @@
 //!
 //! Cost: the frontend polls every 60 s. Counts are SQL `COUNT(*)` via
 //! `list_reviews`' total (per_page=1, nothing materialized); only the two
-//! duration averages, the 24h bucketing, and recentReviews materialize
-//! rows — each capped at [`WINDOW_ROW_CAP`] of the newest rows in its
-//! window (a few hundred rows per poll, indexed `created_at` range scans).
+//! duration averages, the trend bucketing (one shared window fetch feeds both
+//! the 24h and the 30-day daily series), and recentReviews materialize rows —
+//! each capped at [`WINDOW_ROW_CAP`] of the newest rows in its window (a few
+//! hundred rows per poll, indexed `created_at` range scans).
 
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use std::sync::Arc;
@@ -46,6 +48,10 @@ const WINDOW_ROW_CAP: u64 = 500;
 
 /// Recent-reviews card size (latest N, `created_at` DESC).
 const RECENT_REVIEWS_LIMIT: u64 = 5;
+
+/// Daily-trend length: one point per calendar day for the last 14 local days
+/// INCLUDING today (today is the final, partial day).
+const TREND_DAILY_DAYS: i64 = 14;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/", get(get_dashboard))
@@ -119,6 +125,7 @@ async fn get_dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse 
             return Json(serde_json::json!({
                 "kpis": default_kpis(),
                 "trend": default_trend(),
+                "trendDaily": default_trend_daily(),
                 "health": health,
                 "recentReviews": [],
             }))
@@ -126,8 +133,8 @@ async fn get_dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         }
     };
 
-    let collected = collect_dashboard(source, week_start, today_start, active_queue).await;
-    let (kpis, trend, recent_reviews) = match collected {
+    let collected = collect_dashboard(source, now_local, week_start, today_start, active_queue).await;
+    let (kpis, trend, trend_daily, recent_reviews) = match collected {
         Ok(payload) => payload,
         Err(e) => {
             // Same policy as the /reviews handler: a failed history read is
@@ -144,6 +151,7 @@ async fn get_dashboard(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     Json(serde_json::json!({
         "kpis": kpis,
         "trend": trend,
+        "trendDaily": trend_daily,
         "health": health,
         "recentReviews": recent_reviews,
     }))
@@ -170,14 +178,21 @@ struct WindowCounts {
 }
 
 /// Runs the dashboard queries against one source and assembles the
-/// kpis/trend/recentReviews payload. `week_start` / `today_start` are the
-/// local-time window anchors computed by the caller.
+/// kpis/trend/trendDaily/recentReviews payload. `now_local` is the anchor all
+/// local-time windows are computed from; `week_start` / `today_start` are its
+/// precomputed ISO-week / day anchors.
 async fn collect_dashboard(
     source: ReviewSource<'_>,
+    now_local: DateTime<Local>,
     week_start: DateTime<Utc>,
     today_start: DateTime<Utc>,
     active_queue: u64,
-) -> anyhow::Result<(serde_json::Value, Vec<serde_json::Value>, Vec<serde_json::Value>)> {
+) -> anyhow::Result<(
+    serde_json::Value,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+    Vec<serde_json::Value>,
+)> {
     // The store filters are inclusive on both ends; shave 1µs off each open
     // end so adjacent windows (yesterday/today, last week/this week) never
     // double-count a row created exactly on the boundary.
@@ -185,7 +200,14 @@ async fn collect_dashboard(
     let yesterday_end = today_start - chrono::Duration::microseconds(1);
     let last_week_start = week_start - chrono::Duration::days(7);
     let last_week_end = week_start - chrono::Duration::microseconds(1);
-    let day_ago = Utc::now() - chrono::Duration::hours(24);
+    // First day covered by the daily trend (local midnight 13 days ago —
+    // local_midnight, not `today_start - 13d`: across a DST transition a
+    // local day is not 86400 s, so fixed-second arithmetic would drift an
+    // hour off the calendar-day anchor).
+    let trend_window_start = local_midnight(
+        now_local.date_naive() - chrono::Duration::days(TREND_DAILY_DAYS - 1),
+        now_local,
+    );
 
     // ── Counts (per_page=1: only the exact SQL COUNT total is used) ──
     let this_week_all = source.window(None, Some(week_start), None, 1).await?.1;
@@ -250,13 +272,21 @@ async fn collect_dashboard(
     };
     let kpis = compute_kpis(&counts, active_queue);
 
-    let (trend_rows, _) = source.window(None, Some(day_ago), None, WINDOW_ROW_CAP).await?;
+    // One shared bounded fetch feeds BOTH trend series: the 24h rolling
+    // buckets and the 14-day daily buckets read the same newest-≤WINDOW_ROW_CAP
+    // rows of [trend_window_start, now] (13 days ago trivially covers the
+    // 24h window), so the 60s poll pays for a single window query instead of
+    // two.
+    let (trend_rows, _) = source
+        .window(None, Some(trend_window_start), None, WINDOW_ROW_CAP)
+        .await?;
     let trend = compute_trend(&trend_rows);
+    let trend_daily = compute_trend_daily(&trend_rows, now_local);
 
     let (recent_rows, _) = source.window(None, None, None, RECENT_REVIEWS_LIMIT).await?;
     let recent_reviews = compute_recent_reviews(&recent_rows);
 
-    Ok((kpis, trend, recent_reviews))
+    Ok((kpis, trend, trend_daily, recent_reviews))
 }
 
 /// 00:00 local time on `date`, expressed as UTC. The conversion uses the
@@ -358,6 +388,34 @@ fn compute_trend(items: &[TaskEntry]) -> Vec<serde_json::Value> {
             .count() as u64;
         points.push(serde_json::json!({
             "time": hour_end.timestamp(),
+            "value": count,
+        }));
+    }
+    points
+}
+
+/// RENG-50: one point per calendar day for the last [`TREND_DAILY_DAYS`]
+/// local days INCLUDING today (the final, partial day), ordered oldest →
+/// newest like `compute_trend`. `time` is that day's local midnight as a unix
+/// timestamp — the same `local_midnight` anchor math `day_start` uses, so the
+/// daily series lines up exactly with the KPI "today" window — and `value`
+/// counts reviews whose `created_at` falls in `[midnight, next midnight)`.
+/// Each bucket's bounds go through `local_midnight` rather than fixed-second
+/// arithmetic so DST-transition days (23 h / 25 h) still bucket by calendar
+/// day.
+fn compute_trend_daily(items: &[TaskEntry], now: DateTime<Local>) -> Vec<serde_json::Value> {
+    let today = now.date_naive();
+    let mut points = Vec::with_capacity(TREND_DAILY_DAYS as usize);
+    for age in (0..TREND_DAILY_DAYS).rev() {
+        let day = today - chrono::Duration::days(age);
+        let day_start_ts = local_midnight(day, now);
+        let day_end_ts = local_midnight(day + chrono::Duration::days(1), now);
+        let count = items
+            .iter()
+            .filter(|e| e.created_at >= day_start_ts && e.created_at < day_end_ts)
+            .count() as u64;
+        points.push(serde_json::json!({
+            "time": day_start_ts.timestamp(),
             "value": count,
         }));
     }
@@ -479,6 +537,12 @@ fn default_trend() -> Vec<serde_json::Value> {
             })
         })
         .collect()
+}
+
+/// No-store fallback for the daily series: same shape as `compute_trend_daily`
+/// on empty input (30 zero points on the local-midnight anchors).
+fn default_trend_daily() -> Vec<serde_json::Value> {
+    compute_trend_daily(&[], Local::now())
 }
 
 #[cfg(test)]
@@ -756,6 +820,130 @@ mod tests {
         assert_eq!(json["kpis"]["reviewsThisWeek"].as_u64().unwrap(), expected_this_week);
     }
 
+    /// RENG-50: the daily series buckets by LOCAL CALENDAR DAY — a review at
+    /// Aug 31 02:00 local and one at Sep 1 02:00 local land in two different
+    /// buckets (the month boundary is a midnight line, not a multiple of
+    /// 86400 s from "now"), each `time` is that day's local midnight, and the
+    /// window is the 14 local days ending today. Fixed anchor keeps this
+    /// deterministic regardless of the host timezone or when it runs.
+    #[test]
+    fn daily_trend_buckets_by_local_calendar_day() {
+        let now = local(2026, 9, 13, 15, 30, 0);
+        let aug31 = local_midnight(NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(), now);
+        let sep1 = local_midnight(NaiveDate::from_ymd_opt(2026, 9, 1).unwrap(), now);
+        let mut aug31_review = entry("00000000-0000-0000-0000-000000000010", TaskState::Completed);
+        aug31_review.created_at = aug31 + chrono::Duration::hours(2);
+        let mut sep1_review = entry("00000000-0000-0000-0000-000000000011", TaskState::Completed);
+        sep1_review.created_at = sep1 + chrono::Duration::hours(2);
+
+        let points = compute_trend_daily(&[aug31_review, sep1_review], now);
+        assert_eq!(points.len(), 14, "exactly 14 daily points");
+        // Window: Aug 31 ..= Sep 13 (14 local days, today last), oldest first —
+        // so the Aug 31 review lands in the FIRST bucket.
+        assert_eq!(
+            points[0]["time"].as_i64().unwrap(),
+            local_midnight(NaiveDate::from_ymd_opt(2026, 8, 31).unwrap(), now).timestamp()
+        );
+        assert_eq!(
+            points[13]["time"].as_i64().unwrap(),
+            local_midnight(NaiveDate::from_ymd_opt(2026, 9, 13).unwrap(), now).timestamp()
+        );
+        // Month boundary: each review sits in its own day's bucket, keyed by
+        // that day's local-midnight timestamp.
+        let by_time: std::collections::HashMap<i64, u64> = points
+            .iter()
+            .map(|p| (p["time"].as_i64().unwrap(), p["value"].as_u64().unwrap()))
+            .collect();
+        assert_eq!(by_time[&aug31.timestamp()], 1, "Aug 31 review → Aug 31 bucket");
+        assert_eq!(by_time[&sep1.timestamp()], 1, "Sep 1 review → Sep 1 bucket");
+        assert_eq!(
+            by_time.values().map(|v| *v).sum::<u64>(),
+            2,
+            "no review is double-counted across the boundary"
+        );
+        // Oldest → newest ordering, one midnight-step apart.
+        for w in points.windows(2) {
+            let (a, b) = (w[0]["time"].as_i64().unwrap(), w[1]["time"].as_i64().unwrap());
+            assert!(a < b, "points must be strictly increasing");
+        }
+    }
+
+    /// Empty DB: `trendDaily` is still 14 zero points on the correct local
+    /// midnight anchors — first = 13 days ago's midnight, last = today's
+    /// midnight, i.e. the same `day_start` anchor the KPI today/yesterday
+    /// windows use.
+    #[tokio::test]
+    async fn dashboard_daily_trend_empty_db_14_zero_points() {
+        let (state, _db) = state_with_db().await;
+        let (status, json) = dashboard_json(state).await;
+        assert_eq!(status, StatusCode::OK);
+        let daily = json["trendDaily"].as_array().unwrap();
+        assert_eq!(daily.len(), 14, "exactly 14 daily points");
+        assert!(
+            daily.iter().all(|p| p["value"] == 0),
+            "empty DB → all-zero values, never fabricated counts"
+        );
+        let now = Local::now();
+        assert_eq!(
+            daily[13]["time"].as_i64().unwrap(),
+            day_start(now).timestamp(),
+            "today's local midnight is the LAST point (same anchor as the KPI today window)"
+        );
+        assert_eq!(
+            daily[0]["time"].as_i64().unwrap(),
+            local_midnight(now.date_naive() - chrono::Duration::days(13), now).timestamp(),
+            "first point is 13 days ago's local midnight"
+        );
+        for w in daily.windows(2) {
+            assert!(w[0]["time"].as_i64().unwrap() < w[1]["time"].as_i64().unwrap());
+        }
+        // The 24h series is untouched by the addition.
+        assert_eq!(json["trend"].as_array().unwrap().len(), 24);
+    }
+
+    /// End-to-end from the DB: reviews seeded at 14 days ago (OUTSIDE the
+    /// window), the first bucket's day, yesterday late night, and this
+    /// morning produce exactly the expected buckets — today is the last
+    /// point and holds this morning's review.
+    #[tokio::test]
+    async fn dashboard_daily_trend_counts_db_rows_with_today_last() {
+        let (state, db) = state_with_db().await;
+        let now = Local::now();
+        let today_start = day_start(now);
+        let first_day_start = local_midnight(now.date_naive() - chrono::Duration::days(13), now);
+        // 14 days ago: one day BEFORE the window → must not appear anywhere.
+        seed_review(
+            &db,
+            TaskState::Completed,
+            today_start - chrono::Duration::days(14),
+            "too-old",
+            chrono::Duration::seconds(30),
+        )
+        .await;
+        // First bucket (13 days ago), yesterday 23:30, today 09:00.
+        for (ts, title) in [
+            (first_day_start + chrono::Duration::hours(9), "first-day"),
+            (today_start - chrono::Duration::minutes(30), "yesterday-late"),
+            (today_start + chrono::Duration::hours(9), "this-morning"),
+        ] {
+            seed_review(&db, TaskState::Completed, ts, title, chrono::Duration::seconds(30)).await;
+        }
+
+        let (status, json) = dashboard_json(state).await;
+        assert_eq!(status, StatusCode::OK);
+        let daily = json["trendDaily"].as_array().unwrap();
+        assert_eq!(daily.len(), 14);
+        assert_eq!(daily[0]["value"], 1, "first bucket holds the 13-days-ago review");
+        assert_eq!(daily[12]["value"], 1, "yesterday 23:30 → yesterday's bucket");
+        assert_eq!(daily[13]["time"].as_i64().unwrap(), today_start.timestamp());
+        assert_eq!(daily[13]["value"], 1, "today is the LAST point and is partial");
+        assert_eq!(
+            daily.iter().map(|p| p["value"].as_u64().unwrap()).sum::<u64>(),
+            3,
+            "the 14-days-ago review is outside the window"
+        );
+    }
+
     /// recentReviews comes from the DB, newest first, capped at 5, with the
     /// fields the cards render.
     #[tokio::test]
@@ -957,6 +1145,9 @@ mod tests {
         assert!(json["kpis"]["reviewsTrend"].is_null());
         assert!(json["kpis"]["successRate"].is_null());
         assert!(json["recentReviews"].as_array().unwrap().is_empty());
+        let daily = json["trendDaily"].as_array().unwrap();
+        assert_eq!(daily.len(), 14, "default daily series keeps the 14-point shape");
+        assert!(daily.iter().all(|p| p["value"] == 0));
         assert_eq!(json["health"]["overall"], "offline");
     }
 

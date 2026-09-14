@@ -50,6 +50,8 @@ export default {
     unavailable: 'Indisponible',
     commandCopied: 'Commande copiée dans le presse-papiers.',
     testConnection: 'Tester la connexion',
+    lastTest: 'Dernier test : {date}',
+    dismissTestResult: 'Masquer le résultat du test',
     status: {
       operational: 'Opérationnel',
       degraded: 'Dégradé',

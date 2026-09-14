@@ -50,6 +50,8 @@ export default {
     unavailable: '利用不可',
     commandCopied: 'コマンドをクリップボードにコピーしました。',
     testConnection: '接続テスト',
+    lastTest: '最終テスト: {date}',
+    dismissTestResult: 'テスト結果を閉じる',
     status: {
       operational: '稼働中',
       degraded: '性能低下',

@@ -50,6 +50,8 @@ export default {
     unavailable: '無法使用',
     commandCopied: '指令已複製到剪貼簿。',
     testConnection: '測試連線',
+    lastTest: '上次測試：{date}',
+    dismissTestResult: '關閉測試結果',
     status: {
       operational: '運作正常',
       degraded: '效能下降',

@@ -1,7 +1,8 @@
 import { ref, computed } from 'vue';
 import { getProviders, testProvider } from '../services/llm';
 import { i18n } from '../i18n';
-import type { LlmProvider } from '../types/llm';
+import { useTransientResult } from './useTransientResult';
+import type { LlmProvider, TestResult } from '../types/llm';
 
 /**
  * Composable for the LLM Status page.
@@ -18,6 +19,20 @@ export function useLlmStatus() {
   const error = ref<string | null>(null);
   /** ID of the provider currently being tested (null when idle). */
   const testingId = ref<string | null>(null);
+
+  /**
+   * Last connectivity-test result per provider id (RENG-54).
+   *
+   * Session state, deliberately kept OUT of `providers`: the page polls
+   * `GET /llm/providers` every 30 s and `reconcileProviders` writes the
+   * server's answer onto those objects in place, so a result stored there is
+   * gone on the next tick — the server has no per-request latency to report
+   * (it answers `latencyMs: 0` until real stats land), which is the whole
+   * reason the test exists. Written only by `test()`; cleared by the card's
+   * dismiss control, by an edit that invalidates the tested configuration, or
+   * by leaving the page (this composable instance is page-scoped).
+   */
+  const testResults = useTransientResult<TestResult>();
 
   /**
    * Fetch the full provider list from the server.
@@ -70,7 +85,13 @@ export function useLlmStatus() {
 
   /**
    * Test connectivity for a specific provider.
-   * Updates the provider's status and latency in-place.
+   *
+   * The outcome is recorded in `testResults` under the provider id and is NOT
+   * merged into the provider list: that list is the server's health payload
+   * (reconciled in place on every poll tick), so a value written there would
+   * survive only until the next refresh (RENG-54). A transport failure is
+   * recorded the same way — the test was run and it failed — before the error
+   * is rethrown for the page's error notification.
    * @param id - Provider identifier to test.
    * @returns The test result with success status and latency.
    */
@@ -79,18 +100,12 @@ export function useLlmStatus() {
     error.value = null;
     try {
       const result = await testProvider(id);
-      const idx = providers.value.findIndex((p) => p.id === id);
-      if (idx !== -1) {
-        providers.value[idx] = {
-          ...providers.value[idx],
-          status: result.success ? 'healthy' : 'error',
-          latencyMs: result.latencyMs ?? providers.value[idx].latencyMs,
-          lastChecked: new Date().toISOString(),
-        };
-      }
+      testResults.set(id, result);
       return result;
     } catch (e) {
-      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+      const message = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+      testResults.set(id, { success: false, error: message });
+      error.value = message;
       throw e;
     } finally {
       testingId.value = null;
@@ -111,6 +126,7 @@ export function useLlmStatus() {
     loading,
     error,
     testingId,
+    testResults,
     healthyCount,
     degradedCount,
     errorCount,

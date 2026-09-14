@@ -79,12 +79,27 @@ With the stored list `[xiaomi, deepseek]` and `deepseek` selected as primary, a 
 
 ### What happens on failure
 
-Each provider gets up to 3 attempts for retriable failures (429 rate limit, 5xx, timeouts, connection errors) with exponential backoff and jitter; other 4xx errors (bad key, bad request) fail fast and the chain advances immediately. The chain advance is logged at INFO with the failed provider/model, the reason, and the next provider; when a later entry answers, a second INFO line names both the primary that did not answer and the provider that served the call:
+The retry decision comes from the **HTTP status** of the failure, not from the wording of the error message (RENG-35):
+
+- **408 (request timeout), 429 (rate limit) and every 5xx** are retried — up to 3 attempts per provider, with exponential backoff and jitter.
+- **Every other 4xx is permanent** and gives up after a single attempt: no second request, no backoff sleep. That is the credential case (401 wrong or revoked key, 403 key without access) and the request case (400 bad body, 404 unknown model) — re-sending the identical request cannot change either answer.
+- **A failure with no HTTP status** (connection refused, DNS, TLS, timeout, unparsable response) keeps the historical retry: it is usually a transient network problem.
+
+A permanent failure is logged with its status and attempt count, and the chain then advances immediately:
+
+```text
+LLM request failed permanently (401), not retrying
+  provider=deepseek model=deepseek-chat status=401 attempt=1 max_retries=3
+```
+
+The chain advance is logged at INFO with the failed provider/model, the reason, and the next provider; when a later entry answers, a second INFO line names both the primary that did not answer and the provider that served the call:
 
 ```text
 LLM fallback engaged: the primary provider did not answer, this call was served by a later chain entry
   primary_provider=deepseek used_provider=xiaomi used_model=mimo-v2.5 chain_position=2
 ```
+
+A permanent verdict ends only that config's attempts, not the chain: the next entry is a different provider with its own credentials, which is the case the fallback exists for. So a wrong key on the primary costs one request and then runs on the next provider that works, and a run where *every* key is wrong costs one request per provider instead of three.
 
 Search the log stream for `LLM fallback engaged` to see whether reviews are actually running on the fallback chain — that is the signature of an unreachable or misconfigured primary.
 

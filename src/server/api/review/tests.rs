@@ -779,11 +779,11 @@ impl Drop for GitLabRuntimeGuard {
 
 fn gitlab_mr_body() -> serde_json::Value {
     serde_json::json!({
-        // Parseable but unreachable: the URL passes enqueue-time validation
-        // (and exercises host:port MR URLs end-to-end), then the enqueued
-        // task fails fast on the loopback fetch (port 9, discard — refused,
-        // no external network) — the handler contract is what is tested.
-        "source": {"type": "gitlab_mr", "url": "http://127.0.0.1:9/owner/repo/-/merge_requests/1"}
+        // Parseable and not a local address, so it passes the enqueue-time URL
+        // gates (parse + RENG-33 host routing): the enqueued task then fails
+        // fast on the unresolvable `.invalid` host (RFC 6762 — never resolves,
+        // no external network I/O) and the handler contract is what is tested.
+        "source": {"type": "gitlab_mr", "url": "http://gitlab.invalid:8929/owner/repo/-/merge_requests/1"}
     })
 }
 
@@ -1385,9 +1385,8 @@ async fn submit_rejects_invalid_webhook_urls_with_400() {
 #[tokio::test]
 async fn submit_accepts_loopback_webhook() {
     let state = state_with_store();
-    // gitlab_mr + header: the enqueued task fails fast on the loopback
-    // fetch (connection refused, no external network), then the callback
-    // POST to an unused loopback port fails closed.
+    // gitlab_mr + header: the enqueued task fails on the unresolvable MR host,
+    // then the callback POST to an unused loopback port fails closed.
     let mut body = gitlab_mr_body();
     body["webhook"] = serde_json::json!("http://127.0.0.1:9/hook");
     let resp = submit_review(
@@ -2174,4 +2173,324 @@ async fn list_reviews_db_drifted_row_projects_materialized_column() {
     );
     assert_eq!(item["repository"], "grp/proj");
     assert_eq!(item["duration_ms"], 5 * 60 * 1000);
+}
+
+// ─── RENG-33: MR URL routing on the manual submit path ───────────────
+
+/// A git platform entry for the review-routing tests: token only (the shape a
+/// REST-routing entry actually has — no webhook credentials).
+fn review_platform(name: &str, base_url: &str, internal_base_url: &str) -> crate::models::GitPlatformConfig {
+    crate::models::GitPlatformConfig {
+        name: name.to_string(),
+        platform_type: "gitlab".to_string(),
+        base_url: base_url.to_string(),
+        internal_base_url: internal_base_url.to_string(),
+        token: "glpat-platform".to_string(),
+        webhook_secret: String::new(),
+        webhook_signing_secret: String::new(),
+        allowed_projects: Vec::new(),
+    }
+}
+
+fn state_with_platforms(platforms: Vec<crate::models::GitPlatformConfig>) -> Arc<AppState> {
+    let state = state_with_store();
+    *state.git_platforms.write().unwrap() = platforms;
+    state
+}
+
+async fn store_total(store: &TaskStore) -> u64 {
+    let (_, total) = store.list(None, 1, 20, None, None, None, None, None).await;
+    total
+}
+
+fn gitlab_mr_url_body(url: &str) -> serde_json::Value {
+    serde_json::json!({"source": {"type": "gitlab_mr", "url": url}})
+}
+
+/// The exact "the host is unreachable and nothing claims it" message, asserted
+/// verbatim by the tests below so its remedies cannot silently drift.
+const UNREACHABLE_HOST_ERROR: &str = "unreachable from the review server";
+
+/// RENG-33 (a): a submission whose host matches a configured platform is FETCHED
+/// on that platform's `internal_base_url` (the reachable address) and the
+/// rewritten URL is what the task record stores as its MR URL.
+#[tokio::test]
+async fn submit_gitlab_mr_rewrites_host_onto_matched_platform_internal_base_url() {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "title": "Add login endpoint",
+            "description": "desc",
+            "source_branch": "feature/login",
+            "target_branch": "main",
+            "author": {"id": 7, "username": "alice", "name": "Alice A"},
+            "diff_refs": {"base_sha": "base1", "head_sha": "deadbeef", "start_sha": "start1"}
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/raw_diffs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/a b/a\n"))
+        .mount(&server)
+        .await;
+
+    // The user pastes the address their browser uses (the platform's
+    // `base_url`); the server can only reach the instance on `internal_base_url`.
+    let state = state_with_platforms(vec![review_platform(
+        "nas",
+        "https://gitlab.invalid:8443",
+        &server.uri(),
+    )]);
+    let store = state.task_store.clone().unwrap();
+    let submitted = "https://gitlab.invalid:8443/group/project/-/merge_requests/1";
+
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(gitlab_mr_url_body(submitted))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    // The async review really fetches the rewritten URL: wait for the mock
+    // (which is ONLY mounted on `internal_base_url`) to serve the MR fetch.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        let fetched = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .any(|r| r.url.path().contains("merge_requests/1"));
+        if fetched {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the review must fetch the rewritten internal_base_url, not {submitted}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // The rewritten URL is the persisted MR URL, and the submitted host is
+    // nowhere in the stored task (the original is not preserved — docs/rest-api.md).
+    let entry = store.get(task_id).await.expect("task must be stored");
+    let expected = format!("{}/group/project/-/merge_requests/1", server.uri());
+    assert_eq!(
+        entry.source_meta.gitlab_mr_url.as_deref(),
+        Some(expected.as_str()),
+        "the task record must carry the URL the review fetched"
+    );
+    assert_eq!(entry.source_meta.project.as_deref(), Some("group/project"));
+    let stored = serde_json::to_string(&entry.request).unwrap();
+    assert!(
+        !stored.contains("gitlab.invalid"),
+        "the submitted (unreachable) host must not be persisted: {stored}"
+    );
+    assert!(
+        stored.contains(&expected),
+        "the persisted request must replay the rewritten URL: {stored}"
+    );
+}
+
+/// RENG-33 (b)+(d): a URL on a local address that no platform claims is
+/// rejected with an actionable 400 and leaves NO history record — the reported
+/// symptom (`POST /reviews` accepted, then "Failed to send GET" and an
+/// `Untitled Review` row).
+#[tokio::test]
+async fn submit_gitlab_mr_with_local_host_and_no_matching_platform_returns_actionable_400() {
+    // With a platform configured under the container-reachable host (the
+    // reported local-testbed setup) and with none at all.
+    let cases: [(&str, Vec<crate::models::GitPlatformConfig>); 4] = [
+        (
+            "http://localhost:8929/group/project/-/merge_requests/1",
+            vec![review_platform("testbed", "http://host.docker.internal:8929", "")],
+        ),
+        ("http://127.0.0.1:8929/group/project/-/merge_requests/1", Vec::new()),
+        ("http://0.0.0.0:8929/group/project/-/merge_requests/1", Vec::new()),
+        (
+            "http://gitlab.localhost:8929/group/project/-/merge_requests/1",
+            Vec::new(),
+        ),
+    ];
+    for (url, platforms) in cases {
+        let state = state_with_platforms(platforms);
+        let store = state.task_store.clone().unwrap();
+        let resp = submit_review(
+            State(state),
+            headers_with_gitlab_token("glpat-header-token"),
+            Ok(Json(gitlab_mr_url_body(url))),
+        )
+        .await
+        .into_response();
+        let (status, json) = response_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "url {url} must be rejected, got {json}"
+        );
+        let error = json["error"].as_str().unwrap();
+        assert!(error.contains(UNREACHABLE_HOST_ERROR), "url {url}: {error}");
+        assert!(
+            error.contains("host.docker.internal"),
+            "the fix must name the container-local alias: {error}"
+        );
+        assert!(
+            error.contains("internalBaseUrl") && error.contains("internal_base_url"),
+            "the fix must name the platform field to configure: {error}"
+        );
+        assert_eq!(store_total(&store).await, 0, "url {url} must not enqueue a task");
+    }
+}
+
+/// RENG-33 (b): the error names the offending host, not just the class.
+#[tokio::test]
+async fn unreachable_host_error_names_the_host() {
+    let state = state_with_platforms(Vec::new());
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(gitlab_mr_url_body(
+            "http://localhost:8929/group/project/-/merge_requests/1",
+        ))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error = json["error"].as_str().unwrap();
+    assert!(error.contains("`localhost`"), "must name the host: {error}");
+    // The credential transport rule is untouched by the new gate.
+    assert!(
+        !error.contains("glpat-header-token"),
+        "must never echo the token: {error}"
+    );
+}
+
+/// RENG-33 (c): a malformed URL keeps its existing 422 — the parse gate runs
+/// before the host-routing gate, so a local host alone never turns a parse
+/// failure into the routing error.
+#[tokio::test]
+async fn malformed_gitlab_mr_url_still_returns_422() {
+    for url in [
+        "not-a-valid-url",
+        "http://localhost:/group/project/-/merge_requests/1",
+        "http://localhost:abc/group/project/-/merge_requests/1",
+        "http://localhost:8929/group/project/-/merge_requests/not-a-number",
+        "http://[::1]:8929/group/project/-/merge_requests/1",
+    ] {
+        let state = state_with_platforms(Vec::new());
+        let store = state.task_store.clone().unwrap();
+        let resp = submit_review(
+            State(state),
+            headers_with_gitlab_token("glpat-header-token"),
+            Ok(Json(gitlab_mr_url_body(url))),
+        )
+        .await
+        .into_response();
+        let (status, json) = response_json(resp).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "url {url} must stay 422, got {json}"
+        );
+        let error = json["error"].as_str().unwrap();
+        assert!(error.starts_with("invalid gitlab_mr url:"), "url {url}: {error}");
+        assert!(!error.contains(UNREACHABLE_HOST_ERROR), "url {url}: {error}");
+        assert_eq!(store_total(&store).await, 0, "url {url} must not enqueue a task");
+    }
+}
+
+/// RENG-33 (e): a URL no platform claims whose host is not a local address is
+/// submitted verbatim — the rewrite must not touch hosts the server may well
+/// reach (e.g. gitlab.com), and must not reject them.
+#[tokio::test]
+async fn unmatched_reachable_host_passes_through_unchanged() {
+    let state = state_with_platforms(vec![review_platform("testbed", "http://gitlab.internal:8929", "")]);
+    let store = state.task_store.clone().unwrap();
+    let submitted = "https://gitlab.com/group/project/-/merge_requests/7";
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(gitlab_mr_url_body(submitted))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    let entry = store.get(task_id).await.expect("task must be stored");
+    assert_eq!(
+        entry.source_meta.gitlab_mr_url.as_deref(),
+        Some(submitted),
+        "an already-reachable URL must be kept as submitted"
+    );
+}
+
+/// A URL already on the platform's `internal_base_url` (e.g. pasted from inside
+/// the network) identifies its platform and settles on the same address.
+#[tokio::test]
+async fn submit_gitlab_mr_on_internal_base_url_is_kept_and_routed_to_its_platform() {
+    let state = state_with_platforms(vec![review_platform(
+        "nas",
+        "https://gitlab.example.com:8443",
+        "https://gitlab.example.com",
+    )]);
+    let store = state.task_store.clone().unwrap();
+    let submitted = "https://gitlab.example.com/group/project/-/merge_requests/2";
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(gitlab_mr_url_body(submitted))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    let entry = store.get(task_id).await.expect("task must be stored");
+    assert_eq!(entry.source_meta.gitlab_mr_url.as_deref(), Some(submitted));
+}
+
+/// The enqueue-time routing gate re-applies on rerun, exactly like the URL
+/// parse: a stored request whose host is local and unclaimed is rejected
+/// instead of queuing a task that can only fail.
+#[tokio::test]
+async fn rerun_reapplies_the_mr_url_routing_gate() {
+    let state = state_with_store();
+    let store = state.task_store.clone().unwrap();
+    let stored = gitlab_mr_url_body("http://localhost:8929/owner/repo/-/merge_requests/1");
+    let original_id = store
+        .create_with_request(Some(SourceMeta::default()), Some(stored))
+        .await;
+    store
+        .update(original_id, TaskState::Failed, None, Some("boom".to_string()))
+        .await;
+
+    let resp = rerun_review(
+        State(state),
+        Path(original_id),
+        headers_with_gitlab_token("glpat-rerun-token"),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "got {json}");
+    assert!(
+        json["error"].as_str().unwrap().contains(UNREACHABLE_HOST_ERROR),
+        "rerun must surface the same actionable error: {json}"
+    );
+    assert_eq!(store_total(&store).await, 1, "a rejected rerun must not queue a task");
+    assert_eq!(
+        store.get(original_id).await.unwrap().state,
+        TaskState::Failed,
+        "the original record must be untouched"
+    );
 }

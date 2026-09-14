@@ -5,6 +5,7 @@
 pub(crate) mod agents_md;
 pub(crate) mod discussion;
 mod handlers;
+mod mr_url;
 mod resolve;
 mod task;
 #[cfg(test)]

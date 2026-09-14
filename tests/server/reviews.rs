@@ -11,13 +11,14 @@ use super::{
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-/// A gitlab_mr body with a parseable but unreachable MR URL (loopback discard
-/// port): enqueue-time URL validation passes, and the enqueued task fails fast
-/// on connection refused (no external network I/O), so these tests exercise
-/// the HTTP contract only.
+/// A gitlab_mr body with a parseable but unreachable MR URL — the reserved
+/// `.invalid` TLD never resolves. It is not a local address, so it passes the
+/// enqueue-time URL gates (parse + RENG-33 host routing); the enqueued task
+/// then fails fast on the failed lookup (no external network I/O), so these
+/// tests exercise the HTTP contract only.
 fn gitlab_mr_body() -> serde_json::Value {
     serde_json::json!({
-        "source": {"type": "gitlab_mr", "url": "http://127.0.0.1:9/owner/repo/-/merge_requests/1"}
+        "source": {"type": "gitlab_mr", "url": "http://gitlab.invalid:8929/owner/repo/-/merge_requests/1"}
     })
 }
 

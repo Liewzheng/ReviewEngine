@@ -20,9 +20,12 @@ pub use hooks::{
     note_starts_with_command, parse_mr_hook_payload, spawn_mr_review_task, MrHookPayload,
 };
 // §7.2 discussion-context tap shares the note-ingestion helpers (self-echo
-// guards, instance-base derivation, timestamp parsing).
+// guards, instance-base derivation, timestamp parsing). `rewrite_url_to_platform`
+// + `review_base_url` are shared with the REST review-submit path (RENG-33),
+// which re-hosts a manually submitted MR URL exactly like a webhook payload.
 pub(crate) use hooks::{
-    is_command_note, is_self_report, parse_note_created_at, review_base_url, self_user_id_cached, url_origin,
+    is_command_note, is_self_report, parse_note_created_at, review_base_url, rewrite_url_to_platform,
+    self_user_id_cached, url_origin,
 };
 
 use std::sync::{OnceLock, RwLock};

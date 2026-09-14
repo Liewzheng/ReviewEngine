@@ -98,6 +98,17 @@ A Git 平台 entry has two URL fields for setups where the payload's `external_u
 
 When set, review-time MR URLs are rewritten onto the internal URL before any GitLab API call. Leave it empty to fall back to **Base URL**, then to the payload URL if that also cannot be parsed. Changing the internal URL does not change webhook matching (only `base_url` identifies the instance).
 
+### Manual submissions (REST `POST /api/v1/reviews`)
+
+The same rewrite applies to a manually submitted `gitlab_mr` URL (RENG-33), using the same matcher and the same rewrite function the webhook path uses:
+
+- A submitted URL whose `host[:port]` matches an entry's **Base URL** — or its **Internal URL**, when configured — is re-hosted onto that entry's **Internal URL** (falling back to **Base URL**) before the review runs. Path and query string are preserved; the host is compared case-insensitively, an explicitly written default port (80/443) folds to "unwritten", any other port is compared strictly, and the path / trailing slash never take part in the match.
+- The rewritten URL is what the review fetches **and** what the task records as its MR URL (`gitlabMrUrl`); the address you typed is not stored (it is logged once at submit time with the platform it matched).
+- A submitted URL whose host is a local address (`localhost`, `127.0.0.0/8`, `0.0.0.0`, `::1`) that **no** entry matches is rejected up front with `400` and an actionable message — submit the address the server can reach (`host.docker.internal` inside Docker) instead, or add/edit an entry so `baseUrl` covers the address you browse to and `internalBaseUrl` the address the server reaches. Nothing is queued, so no empty "Untitled Review" row appears in the history.
+- A host no entry claims and that is not a local address is fetched exactly as submitted (e.g. `https://gitlab.com/...`).
+
+See `docs/rest-api.md` §1 for the exact status codes and error text.
+
 ## Security details
 
 When signing is enabled, GitLab sends the following Standard Webhooks headers in every request:

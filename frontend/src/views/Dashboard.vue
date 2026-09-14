@@ -28,6 +28,7 @@ import {
   type UTCTimestamp,
 } from 'lightweight-charts'
 import { useDashboard } from '../composables/useDashboard'
+import { useTheme } from '../composables/useTheme'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
@@ -38,6 +39,9 @@ import type { KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/d
 const router = useRouter()
 const { t } = useI18n()
 const dashboard = useDashboard()
+// The app's shared theme state (RENG-51): a light/dark switch re-applies the
+// chart palette, which is resolved to concrete canvas colors (see `chartTheme`).
+const { isDark } = useTheme()
 
 // Loading & refresh state. `lastUpdated` / `pollFailed` come from the
 // composable so the header marker advances on every successful 60s poll tick,
@@ -193,8 +197,8 @@ function floorAutoscale(): (base: () => AutoscaleInfo | null) => AutoscaleInfo |
  * and parses colors on a detached scratch context, which cannot resolve CSS
  * `var(--…)` references — invalid strings are silently dropped and the chart
  * renders with near-black defaults. Resolve the theme vars through
- * getComputedStyle at init (per init, so theme switches re-resolve on the
- * next toggle rebuild), falling back to the dark palette constants.
+ * getComputedStyle whenever the palette is applied (chart init and every
+ * theme switch), falling back to the dark palette constants.
  */
 const CHART_COLOR_FALLBACKS: Record<string, string> = {
   '--chart-grid': 'rgba(148, 163, 184, 0.28)',
@@ -209,6 +213,43 @@ function resolveChartColor(varName: string): string {
   return value || CHART_COLOR_FALLBACKS[varName] || '#a78bfa'
 }
 
+/**
+ * The theme-derived chart configuration, re-resolved from the live CSS vars
+ * on every call. Shared by `initChart` (which adds the static, non-theme
+ * options) and `applyChartTheme` (RENG-51: a light/dark switch re-applies
+ * this fragment, keeping the series, its data and the pinned scale options
+ * that `initChart` set).
+ */
+function chartTheme() {
+  const daily = trendMode.value === 'daily'
+  const gridColor = resolveChartColor('--chart-grid')
+  const textColor = resolveChartColor('--chart-text')
+  return {
+    daily,
+    seriesColor: resolveChartColor(daily ? '--chart-bar' : '--chart-line'),
+    options: {
+      layout: {
+        background: { color: 'transparent' },
+        textColor,
+        attributionLogo: false,
+      },
+      // Readability (RENG-50): clearly visible medium-gray horizontal grid, no
+      // vertical clutter, high-contrast tick text (palette in style.css).
+      grid: {
+        vertLines: { visible: false, color: gridColor },
+        horzLines: { color: gridColor, style: LineStyle.Solid },
+      },
+      crosshair: {
+        mode: CrosshairMode.Magnet,
+        vertLine: { color: gridColor },
+        horzLine: { color: gridColor },
+      },
+      rightPriceScale: { borderColor: gridColor },
+      timeScale: { borderColor: gridColor },
+    },
+  }
+}
+
 function initChart() {
   if (!chartContainer.value) return
   if (chart) {
@@ -219,30 +260,11 @@ function initChart() {
   resizeObserver?.disconnect()
   resizeObserver = null
 
-  const daily = trendMode.value === 'daily'
-  const gridColor = resolveChartColor('--chart-grid')
-  const textColor = resolveChartColor('--chart-text')
-  const seriesColor = resolveChartColor(daily ? '--chart-bar' : '--chart-line')
+  const { daily, seriesColor, options } = chartTheme()
   chart = createChart(chartContainer.value, {
-    layout: {
-      background: { color: 'transparent' },
-      textColor,
-      attributionLogo: false,
-    },
-    // Readability (RENG-50): clearly visible medium-gray horizontal grid, no
-    // vertical clutter, high-contrast tick text (palette in style.css).
-    grid: {
-      vertLines: { visible: false, color: gridColor },
-      horzLines: { color: gridColor, style: LineStyle.Solid },
-    },
-    crosshair: {
-      mode: CrosshairMode.Magnet,
-      vertLine: { color: gridColor },
-      horzLine: { color: gridColor },
-    },
-    rightPriceScale: { borderColor: gridColor },
+    ...options,
     timeScale: {
-      borderColor: gridColor,
+      ...options.timeScale,
       timeVisible: !daily,
       tickMarkFormatter: daily ? formatDailyTick : undefined,
     },
@@ -289,6 +311,33 @@ function initChart() {
     }
   })
   resizeObserver.observe(chartContainer.value)
+}
+
+/**
+ * Re-resolve the palette and apply it to the live chart (RENG-51). The colors
+ * are read once at init (a canvas chart cannot follow a CSS-variable change on
+ * its own), so a light/dark switch would otherwise leave the chart on the
+ * previous theme's palette until the granularity toggle rebuilt it.
+ *
+ * Re-applying options is enough: the series type, its data, the crosshair
+ * subscription, the integer Y ticks (`priceFormat`), the Y-floor autoscale
+ * provider, the hidden last-value badge / price line and `fitContent` are all
+ * untouched. Theme switches are rare, so there is no per-frame cost.
+ */
+function applyChartTheme() {
+  if (!chart) return
+  const { daily, seriesColor, options } = chartTheme()
+  chart.applyOptions(options)
+  if (!activeSeries) return
+  if (daily) {
+    ;(activeSeries as ISeriesApi<'Histogram'>).applyOptions({ color: seriesColor })
+  } else {
+    ;(activeSeries as ISeriesApi<'Line'>).applyOptions({
+      color: seriesColor,
+      crosshairMarkerBorderColor: seriesColor,
+      crosshairMarkerBackgroundColor: resolveChartColor('--bg-primary'),
+    })
+  }
 }
 
 function updateChartData() {
@@ -352,6 +401,13 @@ watch(
 watch(trendMode, () => {
   hideTooltip()
   nextTick(initChart)
+})
+
+// Theme switch (RENG-51): the palette is resolved to concrete canvas colors
+// at init, so re-apply it once the new theme is on <html> — no rebuild
+// needed, and no per-frame work (theme switches are rare).
+watch(isDark, () => {
+  nextTick(applyChartTheme)
 })
 
 // ─── Table Helpers ──────────────────────────────────

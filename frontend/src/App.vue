@@ -22,11 +22,14 @@ import UpgradeDialog from './components/Upgrade/UpgradeDialog.vue'
 import LanguageSwitcher from './components/common/LanguageSwitcher.vue'
 import { useUpgrade } from './composables/useUpgrade'
 import { useLocale } from './composables/useLocale'
+import { useTheme } from './composables/useTheme'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n()
 const route = useRoute()
-const isDark = ref(true)
+// Theme state is shared app-wide (RENG-51): the Dashboard chart resolves its
+// canvas colors from the theme vars and re-applies them when `isDark` flips.
+const { isDark, toggleTheme, initTheme } = useTheme()
 const sidebarCollapsed = ref(false)
 
 // --- API token auth state ---
@@ -206,13 +209,9 @@ function onBootstrapDone() {
 }
 
 onMounted(() => {
-  const saved = localStorage.getItem('theme')
-  if (saved) {
-    isDark.value = saved === 'dark'
-  } else {
-    isDark.value = true
-  }
-  applyTheme(isDark.value)
+  // Restore the persisted theme (dark when unset) before the first paint of
+  // the shell; the `theme` nav toggle writes the same shared state.
+  initTheme()
 
   // Register the auth signal handler first, then resolve the phase. The
   // version check waits for phase resolution so its 401 (if any) routes
@@ -222,24 +221,6 @@ onMounted(() => {
     fetchCheck()
   })
 })
-
-/**
- * Apply the theme to <html>: the bespoke `data-theme` attribute drives the
- * app's own CSS vars (style.css), while the `dark` class activates the
- * official Element Plus dark palette (theme-chalk/dark/css-vars.css), which
- * themes every EP component — including poppers, drawers, and dialogs that
- * mount on <body> and never saw the bespoke vars.
- */
-function applyTheme(dark: boolean) {
-  document.documentElement.setAttribute('data-theme', dark ? 'dark' : 'light')
-  document.documentElement.classList.toggle('dark', dark)
-}
-
-const toggleTheme = () => {
-  isDark.value = !isDark.value
-  applyTheme(isDark.value)
-  localStorage.setItem('theme', isDark.value ? 'dark' : 'light')
-}
 
 const toggleSidebar = () => {
   sidebarCollapsed.value = !sidebarCollapsed.value

@@ -29,8 +29,8 @@ pub use client::CatalogClient;
 /// (`REVIEW_MODELS_DEV_API_BASE` / `REVIEW_MODELS_DEV_CACHE`): cargo runs a
 /// crate's unit tests in one process on parallel threads, so unsynchronized
 /// `set_var`/`remove_var` races leak one test's override into another — or,
-/// worse, drop the override mid-request and let the real
-/// `~/.config/review-engine/models-dev-cache.json` leak in. Async tests take
+/// worse, drop the override mid-request and let the real state-dir
+/// `models-dev-cache.json` leak in. Async tests take
 /// `ENV_LOCK.lock().await`; sync tests take `ENV_LOCK.blocking_lock()`.
 #[cfg(test)]
 pub(crate) static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -72,9 +72,6 @@ pub const API_BASE_ENV: &str = "REVIEW_MODELS_DEV_API_BASE";
 /// Env override for the disk cache file location — mirrors the
 /// `REVIEW_FEEDBACK_PATH` / `REVIEW_DISPATCH_STATE` precedent.
 pub const CACHE_PATH_ENV: &str = "REVIEW_MODELS_DEV_CACHE";
-
-/// Disk cache filename under `~/.config/review-engine/`.
-const CACHE_FILE_NAME: &str = "models-dev-cache.json";
 
 /// Serialized-size cap for disk-cache writes: a pathological or hostile
 /// upstream document must not fill the user's disk. Writes over the cap are
@@ -197,15 +194,13 @@ pub struct DiskCache {
 }
 
 /// Disk cache location: `REVIEW_MODELS_DEV_CACHE` or
-/// `~/.config/review-engine/models-dev-cache.json`. `None` when no home
-/// directory is resolvable (degraded environments run cache-less).
+/// `<state dir>/models-dev-cache.json` (see [`crate::paths`]). `None` when no
+/// state dir is resolvable (degraded environments run cache-less).
 pub fn default_cache_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var(CACHE_PATH_ENV) {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    home::home_dir().map(|dir| dir.join(".config").join("review-engine").join(CACHE_FILE_NAME))
+    crate::paths::resolve_artifact(
+        std::env::var(CACHE_PATH_ENV).ok().as_deref(),
+        crate::paths::CATALOG_CACHE_FILE_NAME,
+    )
 }
 
 /// Load the disk cache. Missing files yield `None`; corrupt files are

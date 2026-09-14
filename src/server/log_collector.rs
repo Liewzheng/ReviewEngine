@@ -294,10 +294,11 @@ pub fn push_global_entry(level: &str, message: String, metadata: Option<LogMetad
     }
 }
 
-/// Default NDJSON log file location (`~/.config/review-engine/logs.ndjson`).
-/// `None` when the home directory cannot be determined (file logging off).
+/// Default NDJSON log file location (`<state dir>/logs.ndjson`; see
+/// [`crate::paths`]). `None` when the state dir cannot be determined (file
+/// logging off).
 pub fn default_ndjson_path() -> Option<PathBuf> {
-    home::home_dir().map(|p| p.join(".config").join("review-engine").join("logs.ndjson"))
+    crate::paths::state_file(crate::paths::LOG_FILE_NAME)
 }
 
 #[cfg(test)]

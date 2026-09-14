@@ -63,7 +63,8 @@ pub struct AuthConfig {
     /// browser holds a stale persisted token.
     explicit_token_hash: Option<String>,
     /// Where `update_token` persists the digest (default
-    /// `~/.config/review-engine/auth.toml`, overridable with `REVIEW_AUTH_FILE`).
+    /// `<state dir>/auth.toml` — `~/.config/review-engine/` unless
+    /// `serve --data-dir` moved the root; overridable with `REVIEW_AUTH_FILE`).
     /// `None` keeps the token in memory only (tests / degraded environments).
     store_path: Option<PathBuf>,
     /// One-time bootstrap key required to set the FIRST token on a non-loopback
@@ -228,7 +229,8 @@ impl AuthConfig {
     }
 }
 
-/// Schema of the on-disk auth file (`~/.config/review-engine/auth.toml`).
+/// Schema of the on-disk auth file (`<state dir>/auth.toml`; the default
+/// `~/.config/review-engine/auth.toml` unless `serve --data-dir` moved it).
 ///
 /// Only the SHA-256 digest of the API token is stored — never the raw secret —
 /// so a backup or accidental copy of the config dir cannot hand out the token.
@@ -238,14 +240,13 @@ struct AuthFile {
     api_token_sha256: Option<String>,
 }
 
-/// Auth file location: `REVIEW_AUTH_FILE` or the default config path.
-fn default_auth_file_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("REVIEW_AUTH_FILE") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    home::home_dir().map(|dir| dir.join(".config").join("review-engine").join("auth.toml"))
+/// Auth file location: `REVIEW_AUTH_FILE` or `<state dir>/auth.toml` (see
+/// [`crate::paths`] — the data dir given to `serve --data-dir`).
+pub(crate) fn default_auth_file_path() -> Option<PathBuf> {
+    crate::paths::resolve_artifact(
+        std::env::var(crate::paths::AUTH_FILE_ENV).ok().as_deref(),
+        crate::paths::AUTH_FILE_NAME,
+    )
 }
 
 /// Load the persisted token digest. A missing file yields `Ok(None)`; a corrupt

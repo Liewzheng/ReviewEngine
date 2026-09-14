@@ -6,7 +6,7 @@
 //!   provider, sorted by name; 404 when the provider is unknown or SDK-only.
 //!
 //! Resolution order: fresh in-memory cache (24h TTL) → network fetch → stale
-//! disk cache (`~/.config/review-engine/models-dev-cache.json`, overridable
+//! disk cache (`<state dir>/models-dev-cache.json`, overridable
 //! via `REVIEW_MODELS_DEV_CACHE`) → stale in-memory cache → the builtin
 //! static catalog ([`catalog::builtin_catalog`]). Successful fetches refresh
 //! both caches. The endpoints never `502` on an upstream outage: the builtin

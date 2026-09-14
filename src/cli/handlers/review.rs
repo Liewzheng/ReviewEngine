@@ -53,12 +53,11 @@ pub(crate) fn has_usable_llm(configs: &[LLMConfig]) -> bool {
     configs.iter().any(|c| !c.api_base.trim().is_empty())
 }
 
-/// The user-level config file path, resolved with the same home-dir logic as
-/// `config::resolver::user_fallback`
-/// (`~/.config/review-engine/.code-audit-config.toml`).
+/// The user-level config file path, resolved through [`review_engine::paths`]
+/// (the data dir given to `serve --data-dir`, else
+/// `~/.config/review-engine/.code-audit-config.toml`).
 fn user_config_path_display() -> String {
-    home::home_dir()
-        .map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml"))
+    review_engine::paths::user_config_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|| "~/.config/review-engine/.code-audit-config.toml".to_string())
 }

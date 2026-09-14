@@ -100,12 +100,11 @@ pub fn project_config_path() -> Result<PathBuf> {
         .join(".code-audit-config.toml"))
 }
 
-/// The user-level config file, resolved with the same home-dir logic as
-/// `config::resolver::user_fallback`.
+/// The user-level config file, resolved through [`crate::paths`] (the data
+/// dir given to `serve --data-dir`, else `~/.config/review-engine`).
 pub fn user_config_path() -> Result<PathBuf> {
-    home::home_dir()
-        .map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml"))
-        .ok_or_else(|| anyhow::anyhow!("cannot determine the home directory to resolve the --global config path"))
+    review_engine::paths::user_config_path()
+        .ok_or_else(|| anyhow::anyhow!("cannot determine the state directory to resolve the --global config path"))
 }
 
 fn scope_path(scope: Scope) -> Result<PathBuf> {

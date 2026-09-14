@@ -216,6 +216,8 @@ impl MrDispatcher {
 | 服务重启 | 内存状态丢失，视为未审核（可接受，多一次 LLM 调用） |
 
 > **关于 panic 安全与持久化（状态：v0.7.10，A10 已实现）**：review 失败/panic 时调用方执行 `dispatcher.reset()` 释放 `running` 锁，后续 webhook 可正常重试（`src/server/gitlab.rs:363`、`src/server/gitlab.rs:500`）；dispatcher 作为共享单例在 router 注入（`src/server/router.rs`）。A10 已实现超时恢复与磁盘持久化：`running` 带时间戳，超过 `REVIEW_DISPATCH_TIMEOUT_SECS`（默认 900s）判过期可重新发起；状态持久化到 `REVIEW_DISPATCH_STATE`（默认 `~/.config/review-engine/dispatcher-state.json`），重启后自动加载、过期 running 自动判过期。
+>
+> **RENG-62 补充分发去重**（0.10.16）：除 SHA 外还记录**所审 diff 的内容指纹**（`content_fingerprint`，SHA-256 of the diff），amend/force-push 换了 SHA 但内容不变时同样跳过；`handle_push_hook` 仍是只记日志的 stub，不触发审核（见 `docs/integrations/gitlab.md` §When a review is triggered）。容器部署必须把 `REVIEW_DISPATCH_STATE` 指到已挂载卷（`/app/config/dispatcher-state.json`），否则容器重建会清空默认的 `/app/.config/...`，去重静默失效（见 `docs/configuration.md` §Webhook dispatch state）。
 
 ---
 

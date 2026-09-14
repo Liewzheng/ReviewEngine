@@ -26,11 +26,12 @@ export function useLlmStatus() {
    * Session state, deliberately kept OUT of `providers`: the page polls
    * `GET /llm/providers` every 30 s and `reconcileProviders` writes the
    * server's answer onto those objects in place, so a result stored there is
-   * gone on the next tick — the server has no per-request latency to report
-   * (it answers `latencyMs: 0` until real stats land), which is the whole
-   * reason the test exists. Written only by `test()`; cleared by the card's
-   * dismiss control, by an edit that invalidates the tested configuration, or
-   * by leaving the page (this composable instance is page-scoped).
+   * gone on the next tick — what the poll carries is the server's own health
+   * probe (`latencyMs` is that probe's round-trip time, RENG-36), not the
+   * measurement of the call the user just made, which is the whole reason the
+   * test exists. Written only by `test()`; cleared by the card's dismiss
+   * control, by an edit that invalidates the tested configuration, or by
+   * leaving the page (this composable instance is page-scoped).
    *
    * Keyed by `resultKey` — the provider's NAME, which is what the config echo
    * carries as `providers[].provider` and what the page keys its cards by —

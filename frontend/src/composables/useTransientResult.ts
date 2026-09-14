@@ -17,9 +17,9 @@ export interface TransientResult<T> {
  * objects derived from it. A background tick fetches the server's own
  * truth and reconciles it onto that structure in place (the RENG-41
  * silent-poll design), and the server has no notion of the probe the user
- * just ran — `GET /llm/providers` reports `latencyMs: 0` and the config
- * echo knows nothing about a test — so the next tick overwrites the value
- * the user is still reading.
+ * just ran — `GET /llm/providers` reports the values of its own health
+ * probe (RENG-36), never this test's — so the next tick overwrites the
+ * value the user is still reading.
  *
  * Entries are keyed by the operation's subject (a provider id, a platform
  * name) and are written ONLY by the operation path. They are removed

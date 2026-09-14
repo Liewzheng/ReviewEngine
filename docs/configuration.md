@@ -216,6 +216,8 @@ The page has no edit mode — every field is editable and saves itself (see [Edi
 
 LLM providers are managed on a separate **LLM page** (`/#/llm`): the primary provider and the fallback list (`[[llm]]` entries), each with API base URL, key, default model, max tokens, temperature, timeout, and retry attempts. The model dropdown auto-populates from `POST /api/v1/config/models`; **Test connection** calls `POST /api/v1/config/test` and reports success with latency or the error. Provider changes go through `POST`/`PUT`/`DELETE /api/v1/llm/providers` when you save.
 
+The status each card shows is **probed, not inferred** (0.10.18, RENG-36): the server runs the same `GET {apiBase}/models` check as Test Connection for every configured provider and caches the verdict for 60 s. Fixing or breaking a key therefore changes the badge on the next refresh — editing credentials (or the API base, or removing the provider) drops that provider's cached health immediately, so a key broken in the UI while the service keeps running no longer leaves the card reporting 正常 / Healthy (`llm.status.healthy`) while reviews fail with 401. Only the changed provider is invalidated and re-probed; the others keep their status. A provider with no key is 离线 / Offline (`llm.status.offline`) and is never probed.
+
 ### Secret handling
 
 `GET /api/v1/config` never returns a live secret: a configured LLM API key, Git platform access token, or webhook secret comes back as the mask sentinel `***`. A secret field therefore shows either what you are typing or that mask — the reveal control only toggles the draft in the input, never a stored value. On save:

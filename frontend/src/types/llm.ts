@@ -25,7 +25,11 @@ export interface LlmProvider {
   status: LlmProviderStatus
   /** Whether API credentials are configured. */
   configured: boolean
-  /** Average response latency in milliseconds. */
+  /**
+   * Round-trip time of the last health probe in milliseconds (0 when the
+   * provider was not probed, e.g. no API key stored) — the value
+   * `GET /api/v1/llm/providers` reports from its probe cache (RENG-36).
+   */
   latencyMs: number
   /** Error rate as a fraction (0.0–1.0). */
   errorRate: number

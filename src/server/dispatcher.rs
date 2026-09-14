@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::{watch, Mutex};
 
 /// Default age after which a `running` marker is considered stale — e.g. the
@@ -32,6 +33,10 @@ const STATE_PATH_ENV: &str = "REVIEW_DISPATCH_STATE";
 /// [`MrDispatcher::persistent`] 额外把状态落到 JSON 文件（默认
 /// `~/.config/review-engine/dispatcher-state.json`，可用 `REVIEW_DISPATCH_STATE`
 /// 覆盖），进程重启后不再丢失已审核的 SHA。
+///
+/// 去重同时看 **SHA** 与 **内容指纹**（[`content_fingerprint`]）：SHA 相同必然
+/// 跳过；SHA 变了但 diff 逐字节相同（amend / force-push 到同样内容）也跳过，
+/// 于是"同一处小改动反复推送"不再每轮烧一次 LLM。
 #[derive(Clone)]
 pub struct MrDispatcher {
     inner: Arc<Mutex<HashMap<String, MrStatus>>>,
@@ -43,16 +48,19 @@ struct MrStatus {
     /// When the current review started; `None` when idle.
     running_since: Option<DateTime<Utc>>,
     last_sha: Option<String>,
+    /// [`content_fingerprint`] of the diff the last review ran on.
+    last_fingerprint: Option<String>,
     signal_tx: watch::Sender<bool>,
     signal_rx: watch::Receiver<bool>,
 }
 
 impl MrStatus {
-    fn new(running_since: Option<DateTime<Utc>>, last_sha: Option<String>) -> Self {
+    fn new(running_since: Option<DateTime<Utc>>, last_sha: Option<String>, last_fingerprint: Option<String>) -> Self {
         let (signal_tx, signal_rx) = watch::channel(false);
         Self {
             running_since,
             last_sha,
+            last_fingerprint,
             signal_tx,
             signal_rx,
         }
@@ -81,6 +89,84 @@ pub enum WaitOutcome {
     TimedOut,
 }
 
+/// Whether a dispatch may be skipped because the content is unchanged (RENG-62).
+///
+/// The gate answers a question the SHA alone cannot: an amend / force-push
+/// carries a **new** SHA over **identical** content, so `try_start`'s SHA check
+/// passes while the review would reproduce exactly the round already posted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentGate {
+    /// Apply the gate — webhook push/update events, where a redundant round
+    /// costs LLM spend and re-posts the same comments.
+    Enabled,
+    /// Never skip. An explicit, user-triggered run (`/review` comment, REST
+    /// submit/rerun) must always produce a fresh review even when the content
+    /// is byte-identical to the last round.
+    Bypassed,
+}
+
+/// [`MrDispatcher::claim_content`] 的返回结果，附带可直接写日志的原因。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContentDecision {
+    /// 需要审核：首次见到该 MR，或内容已变化。
+    Review { reason: String },
+    /// 该内容已审核过：跳过，不跑任何评审。
+    Skip { reason: String },
+}
+
+impl ContentDecision {
+    /// The decision reason, already prefixed (`skipping: …` / `re-reviewing: …`).
+    pub fn reason(&self) -> &str {
+        match self {
+            Self::Review { reason } | Self::Skip { reason } => reason,
+        }
+    }
+}
+
+/// Fingerprint of the diff text a review runs on (RENG-62).
+///
+/// SHA-256, hex-encoded, over the diff **exactly as the review consumes it** —
+/// the string the provider client already returned and the experts are fed, so
+/// the gate never issues a second `fetch_diff()`. Byte-exact: whitespace and
+/// hunk order matter, because that is what the LLM sees.
+pub fn content_fingerprint(diff: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(diff.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Pure decision of the unchanged-content gate: the noted content (SHA +
+/// fingerprint) versus the content in hand.
+///
+/// | last fingerprint | fingerprint now | verdict |
+/// |---|---|---|
+/// | `None` (first sight, or a state file written before RENG-62) | any | [`ContentDecision::Review`] — fail-open, never a lost change |
+/// | equal | equal | [`ContentDecision::Skip`] |
+/// | different | any | [`ContentDecision::Review`] — the content moved, SHA change or not |
+fn decide_content(
+    last_sha: Option<&str>,
+    last_fingerprint: Option<&str>,
+    sha: &str,
+    fingerprint: &str,
+) -> ContentDecision {
+    // The SHA is only shown in the reason; the fingerprint is what decides.
+    let transition = match last_sha {
+        Some(prev) if prev != sha => format!("{prev} → {sha}"),
+        _ => sha.to_string(),
+    };
+    match last_fingerprint {
+        None => ContentDecision::Review {
+            reason: format!("re-reviewing: no reviewed content recorded (sha {sha})"),
+        },
+        Some(prev) if prev == fingerprint => ContentDecision::Skip {
+            reason: format!("skipping: content unchanged (sha {transition})"),
+        },
+        Some(_) => ContentDecision::Review {
+            reason: format!("re-reviewing: content changed (sha {transition})"),
+        },
+    }
+}
+
 /// On-disk representation of the dispatcher state.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedState {
@@ -93,6 +179,10 @@ struct PersistedEntry {
     last_sha: Option<String>,
     #[serde(default)]
     running_since: Option<DateTime<Utc>>,
+    /// Missing in state files written before RENG-62: such an entry re-reviews
+    /// once (fail-open) and records a fingerprint from then on.
+    #[serde(default)]
+    last_fingerprint: Option<String>,
 }
 
 impl MrDispatcher {
@@ -105,8 +195,21 @@ impl MrDispatcher {
     /// Dispatcher used by the long-running server: persists state to
     /// `REVIEW_DISPATCH_STATE` (default `~/.config/review-engine/dispatcher-state.json`)
     /// and honours `REVIEW_DISPATCH_TIMEOUT_SECS`.
+    ///
+    /// The resolved path is logged at startup so an operator can see where the
+    /// dedup state lives — inside a container the default lands on the
+    /// container filesystem and is lost on every recreate, which silently
+    /// disarms the SHA guard (see `docs/configuration.md`).
     pub fn persistent() -> Self {
-        Self::with_state_file(default_state_path(), configured_timeout())
+        let state_path = default_state_path();
+        match state_path.as_deref() {
+            Some(path) => tracing::info!("Dispatcher: persisting dispatch state to {}", path.display()),
+            None => tracing::warn!(
+                "Dispatcher: no dispatch state file (neither {STATE_PATH_ENV} nor a home directory is available) \
+                 — reviewed SHAs will not survive a restart"
+            ),
+        }
+        Self::with_state_file(state_path, configured_timeout())
     }
 
     /// Explicit constructor: `state_path == None` disables persistence.
@@ -132,7 +235,7 @@ impl MrDispatcher {
         let mut map = self.inner.lock().await;
         let status = map
             .entry(mr_url.to_string())
-            .or_insert_with(|| MrStatus::new(None, None));
+            .or_insert_with(|| MrStatus::new(None, None, None));
 
         if let Some(since) = status.running_since {
             if is_expired(since, self.timeout) {
@@ -152,12 +255,52 @@ impl MrDispatcher {
         ShouldStart::Go
     }
 
-    /// 标记 review 完成，记录 SHA，通知等待者。
-    pub async fn complete(&self, mr_url: &str, sha: &str) {
+    /// Content gate for a dispatch that already passed [`Self::try_start`]
+    /// (RENG-62). `fingerprint` is [`content_fingerprint`] of the diff the
+    /// review would run on — the caller already holds that diff, so the gate
+    /// costs no extra provider call.
+    ///
+    /// On [`ContentDecision::Skip`] the dispatch is **finalized here**: the SHA
+    /// is recorded (so the next event for it takes [`Self::try_start`]'s fast
+    /// path), the running marker is cleared and waiters are notified. No review
+    /// will run, and leaving the marker set would block the MR for a full
+    /// `REVIEW_DISPATCH_TIMEOUT_SECS`. The recorded fingerprint is left
+    /// untouched — it still describes the content on the MR.
+    ///
+    /// On [`ContentDecision::Review`] nothing is recorded: [`Self::complete`]
+    /// owns that once the review actually finishes.
+    pub async fn claim_content(&self, mr_url: &str, sha: &str, fingerprint: &str) -> ContentDecision {
+        let mut map = self.inner.lock().await;
+        let status = map
+            .entry(mr_url.to_string())
+            .or_insert_with(|| MrStatus::new(None, None, None));
+        let decision = decide_content(
+            status.last_sha.as_deref(),
+            status.last_fingerprint.as_deref(),
+            sha,
+            fingerprint,
+        );
+        if matches!(decision, ContentDecision::Skip { .. }) {
+            status.running_since = None;
+            status.last_sha = Some(sha.to_string());
+            status.signal_tx.send(true).ok();
+            self.persist_locked(&map);
+        }
+        decision
+    }
+
+    /// 标记 review 完成，记录 SHA（以及本次审核内容的指纹），通知等待者。
+    ///
+    /// `fingerprint`: `Some(_)` records the content this review covered
+    /// (RENG-62); `None` leaves any previously recorded fingerprint untouched.
+    pub async fn complete(&self, mr_url: &str, sha: &str, fingerprint: Option<&str>) {
         let mut map = self.inner.lock().await;
         if let Some(status) = map.get_mut(mr_url) {
             status.running_since = None;
             status.last_sha = Some(sha.to_string());
+            if let Some(fingerprint) = fingerprint {
+                status.last_fingerprint = Some(fingerprint.to_string());
+            }
             status.signal_tx.send(true).ok();
             self.persist_locked(&map);
         }
@@ -238,6 +381,7 @@ impl MrDispatcher {
                         PersistedEntry {
                             last_sha: status.last_sha.clone(),
                             running_since: status.running_since,
+                            last_fingerprint: status.last_fingerprint.clone(),
                         },
                     )
                 })
@@ -265,12 +409,17 @@ fn configured_timeout() -> Duration {
 
 /// State file location: `REVIEW_DISPATCH_STATE` or the default config path.
 fn default_state_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var(STATE_PATH_ENV) {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
+    state_path_from(std::env::var(STATE_PATH_ENV).ok().as_deref(), home::home_dir())
+}
+
+/// Resolve the state file location: a non-empty `env_value` wins verbatim;
+/// otherwise `<home>/.config/review-engine/dispatcher-state.json`; `None` (no
+/// persistence) when neither is available.
+fn state_path_from(env_value: Option<&str>, home: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(path) = env_value.filter(|value| !value.is_empty()) {
+        return Some(PathBuf::from(path));
     }
-    home::home_dir().map(|dir| dir.join(".config").join("review-engine").join("dispatcher-state.json"))
+    home.map(|dir| dir.join(".config").join("review-engine").join("dispatcher-state.json"))
 }
 
 /// Load persisted state from disk, clearing expired `running` markers.
@@ -303,13 +452,20 @@ fn load_state(path: &Path, timeout: Duration) -> HashMap<String, MrStatus> {
                     Some(since)
                 }
             });
-            (url, MrStatus::new(running_since, entry.last_sha))
+            (
+                url,
+                MrStatus::new(running_since, entry.last_sha, entry.last_fingerprint),
+            )
         })
         .collect()
 }
 
 /// Serialize `state` to `path` atomically via a temp file + rename, so a
 /// crash mid-write never leaves a truncated state file behind.
+///
+/// The parent directory is created when missing — a mounted state path such as
+/// `/app/config/dispatcher-state.json` must work even when nothing has created
+/// the directory yet.
 fn write_state_atomic(path: &Path, state: &PersistedState) -> std::io::Result<()> {
     let json = serde_json::to_string_pretty(state).map_err(std::io::Error::other)?;
     if let Some(parent) = path.parent() {
@@ -335,7 +491,7 @@ mod tests {
     async fn test_try_start_same_sha_returns_already_reviewed() {
         let d = MrDispatcher::new();
         assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
-        d.complete("mr1", "sha1").await;
+        d.complete("mr1", "sha1", None).await;
         assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::AlreadyReviewed);
     }
 
@@ -351,7 +507,7 @@ mod tests {
     async fn test_complete_and_new_sha_allows_go() {
         let d = MrDispatcher::new();
         assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
-        d.complete("mr1", "sha1").await;
+        d.complete("mr1", "sha1", None).await;
         // new SHA after completion → Go
         assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::Go);
     }
@@ -370,7 +526,7 @@ mod tests {
 
         let d2 = d.clone();
         let handle = tokio::spawn(async move {
-            d2.complete("mr1", "sha1").await;
+            d2.complete("mr1", "sha1", None).await;
         });
 
         // Wait should return Completed after complete is called
@@ -385,7 +541,7 @@ mod tests {
         assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
 
         // Signal before wait enters the await
-        d.complete("mr1", "sha1").await;
+        d.complete("mr1", "sha1", None).await;
 
         // wait() should see the signal was already sent and return Completed immediately
         assert_eq!(d.wait("mr1").await, WaitOutcome::Completed);
@@ -431,7 +587,7 @@ mod tests {
     async fn test_remove_clears_entry() {
         let d = MrDispatcher::new();
         assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
-        d.complete("mr1", "sha1").await;
+        d.complete("mr1", "sha1", None).await;
         d.remove("mr1").await;
 
         // After remove, MR is unknown again → Go (not AlreadyReviewed)
@@ -466,7 +622,7 @@ mod tests {
         assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
         assert_eq!(d.try_start("mr2", "sha1").await, ShouldStart::Go);
 
-        d.complete("mr1", "sha1").await;
+        d.complete("mr1", "sha1", None).await;
 
         // mr2 should still be running
         assert_eq!(d.try_start("mr2", "sha2").await, ShouldStart::InProgress);
@@ -510,7 +666,7 @@ mod tests {
     #[tokio::test]
     async fn test_complete_nonexistent_mr_does_not_panic() {
         let d = MrDispatcher::new();
-        d.complete("nonexistent", "sha1").await;
+        d.complete("nonexistent", "sha1", None).await;
     }
 
     #[tokio::test]
@@ -550,7 +706,7 @@ mod tests {
 
         let d1 = MrDispatcher::with_state_file(Some(path.clone()), Duration::from_secs(3600));
         assert_eq!(d1.try_start("mr1", "sha1").await, ShouldStart::Go);
-        d1.complete("mr1", "sha1").await;
+        d1.complete("mr1", "sha1", None).await;
         drop(d1);
 
         // State file exists and records the completed SHA with no running marker.
@@ -611,7 +767,7 @@ mod tests {
 
         let d1 = MrDispatcher::with_state_file(Some(path.clone()), Duration::from_secs(3600));
         assert_eq!(d1.try_start("mr1", "sha1").await, ShouldStart::Go);
-        d1.complete("mr1", "sha1").await;
+        d1.complete("mr1", "sha1", None).await;
         d1.remove("mr1").await;
         drop(d1);
 
@@ -630,10 +786,258 @@ mod tests {
             PersistedEntry {
                 last_sha: Some("sha1".to_string()),
                 running_since: None,
+                last_fingerprint: Some("fp1".to_string()),
             },
         );
         write_state_atomic(&path, &state).unwrap();
         assert!(path.exists());
         assert!(!path.with_extension("tmp").exists());
+    }
+
+    // ─── RENG-62: mounted state path ────────────────────────────────
+
+    /// `REVIEW_DISPATCH_STATE` wins verbatim; an empty value falls back to the
+    /// home-directory default; no env/host state at all disables persistence.
+    #[test]
+    fn state_path_from_prefers_the_env_override() {
+        assert_eq!(
+            state_path_from(Some("/app/config/dispatcher-state.json"), Some(PathBuf::from("/app"))),
+            Some(PathBuf::from("/app/config/dispatcher-state.json")),
+            "a non-empty REVIEW_DISPATCH_STATE must win verbatim"
+        );
+        assert_eq!(
+            state_path_from(Some(""), Some(PathBuf::from("/app"))),
+            Some(PathBuf::from("/app/.config/review-engine/dispatcher-state.json")),
+            "an empty REVIEW_DISPATCH_STATE must fall back to the default"
+        );
+        assert_eq!(
+            state_path_from(None, Some(PathBuf::from("/home/alice"))),
+            Some(PathBuf::from("/home/alice/.config/review-engine/dispatcher-state.json")),
+            "the non-container default must stay unchanged"
+        );
+        assert_eq!(
+            state_path_from(None, None),
+            None,
+            "no env value and no home directory means no persistence"
+        );
+    }
+
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                original: std::env::var(key).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// The state file is created, with its parent directory, when missing — the
+    /// mounted `/app/config/...` path must work on a directory that has never
+    /// held the file.
+    #[tokio::test]
+    async fn persistent_dispatcher_creates_the_configured_state_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config").join("dispatcher-state.json");
+        let _guard = EnvGuard::new(STATE_PATH_ENV);
+        std::env::set_var(STATE_PATH_ENV, &path);
+
+        let d = MrDispatcher::persistent();
+        assert!(
+            !path.exists(),
+            "the state file must not exist before the first dispatch"
+        );
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+        d.complete("mr1", "sha1", Some("fp1")).await;
+
+        let json: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(json["entries"]["mr1"]["last_sha"], "sha1");
+        assert_eq!(json["entries"]["mr1"]["last_fingerprint"], "fp1");
+    }
+
+    // ─── RENG-62: content-based gating ─────────────────────────────
+
+    #[test]
+    fn content_fingerprint_is_stable_and_content_sensitive() {
+        assert_eq!(content_fingerprint("diff text"), content_fingerprint("diff text"));
+        assert_eq!(content_fingerprint("diff text").len(), 64, "hex-encoded SHA-256");
+        assert_ne!(content_fingerprint("diff text"), content_fingerprint("diff text\n"));
+        assert_ne!(content_fingerprint("a"), content_fingerprint("b"));
+    }
+
+    /// The decision table: first sight reviews; identical content skips;
+    /// changed content reviews.
+    #[test]
+    fn decide_content_covers_first_sight_unchanged_and_changed() {
+        // First sight (no fingerprint recorded) → review, fail-open.
+        assert!(matches!(
+            decide_content(None, None, "sha1", "fpA"),
+            ContentDecision::Review { .. }
+        ));
+
+        // Same SHA, same content → unchanged.
+        let same = decide_content(Some("sha1"), Some("fpA"), "sha1", "fpA");
+        assert_eq!(
+            same,
+            ContentDecision::Skip {
+                reason: "skipping: content unchanged (sha sha1)".to_string()
+            }
+        );
+
+        // Amend / force-push: new SHA, byte-identical content → unchanged.
+        let amend = decide_content(Some("sha1"), Some("fpA"), "sha2", "fpA");
+        assert_eq!(
+            amend,
+            ContentDecision::Skip {
+                reason: "skipping: content unchanged (sha sha1 → sha2)".to_string()
+            }
+        );
+
+        // New SHA, different content → review, naming the transition.
+        let changed = decide_content(Some("sha1"), Some("fpA"), "sha2", "fpB");
+        assert_eq!(
+            changed,
+            ContentDecision::Review {
+                reason: "re-reviewing: content changed (sha sha1 → sha2)".to_string()
+            }
+        );
+
+        // Force-push back to an older state → the content differs from what was
+        // reviewed, so it reviews (and then records the old content as current).
+        assert!(matches!(
+            decide_content(Some("sha2"), Some("fpA"), "sha1", "fpB"),
+            ContentDecision::Review { .. }
+        ));
+    }
+
+    /// Skip path: the dispatch is finalized (SHA recorded, running marker
+    /// cleared) so the same event cannot re-enter the gate or wedge the MR.
+    #[tokio::test]
+    async fn claim_content_skips_unchanged_content_and_finalizes_dispatch() {
+        let d = MrDispatcher::new();
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+        d.complete("mr1", "sha1", Some("fpA")).await;
+
+        // Amend: new SHA, identical diff.
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::Go);
+        let decision = d.claim_content("mr1", "sha2", "fpA").await;
+        assert_eq!(
+            decision,
+            ContentDecision::Skip {
+                reason: "skipping: content unchanged (sha sha1 → sha2)".to_string()
+            }
+        );
+        assert_eq!(decision.reason(), "skipping: content unchanged (sha sha1 → sha2)");
+
+        // The skipped SHA is recorded: its next event takes the fast SHA path.
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::AlreadyReviewed);
+        // The running marker was cleared: a genuinely new SHA can go, not InProgress.
+        assert_eq!(d.try_start("mr1", "sha3").await, ShouldStart::Go);
+    }
+
+    /// Changed content with a new SHA re-reviews (and nothing is recorded until
+    /// the review completes).
+    #[tokio::test]
+    async fn claim_content_reviews_when_content_changed() {
+        let d = MrDispatcher::new();
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+        d.complete("mr1", "sha1", Some("fpA")).await;
+
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::Go);
+        assert_eq!(
+            d.claim_content("mr1", "sha2", "fpB").await,
+            ContentDecision::Review {
+                reason: "re-reviewing: content changed (sha sha1 → sha2)".to_string()
+            }
+        );
+        // Still running: the review owns the entry until complete().
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::InProgress);
+    }
+
+    /// A first-sight MR is never skipped by the gate, even when the caller has
+    /// no fingerprint to compare (fresh MR, or a pre-RENG-62 state file).
+    #[tokio::test]
+    async fn claim_content_never_skips_a_first_sight() {
+        let d = MrDispatcher::new();
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+        assert!(matches!(
+            d.claim_content("mr1", "sha1", "fpA").await,
+            ContentDecision::Review { .. }
+        ));
+    }
+
+    /// Container-recreation regression: the fingerprint survives a reload, so
+    /// the amend that follows a restart is still recognized as unchanged.
+    #[tokio::test]
+    async fn fingerprint_survives_reload_and_gates_amends() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatcher-state.json");
+
+        let d1 = MrDispatcher::with_state_file(Some(path.clone()), Duration::from_secs(3600));
+        assert_eq!(d1.try_start("mr1", "sha1").await, ShouldStart::Go);
+        d1.complete("mr1", "sha1", Some("fpA")).await;
+        drop(d1);
+
+        let d2 = MrDispatcher::with_state_file(Some(path), Duration::from_secs(3600));
+        assert_eq!(d2.try_start("mr1", "sha1").await, ShouldStart::AlreadyReviewed);
+        assert_eq!(d2.try_start("mr1", "sha2").await, ShouldStart::Go);
+        assert!(matches!(
+            d2.claim_content("mr1", "sha2", "fpA").await,
+            ContentDecision::Skip { .. }
+        ));
+    }
+
+    /// A state file written before RENG-62 carries a SHA but no fingerprint:
+    /// the next event reviews once (never a lost change) and records one.
+    #[tokio::test]
+    async fn legacy_state_without_fingerprint_reviews_once_then_records_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dispatcher-state.json");
+        std::fs::write(&path, r#"{"entries":{"mr1":{"last_sha":"sha1","running_since":null}}}"#).unwrap();
+
+        let d = MrDispatcher::with_state_file(Some(path.clone()), Duration::from_secs(3600));
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::Go);
+        assert!(matches!(
+            d.claim_content("mr1", "sha2", "fpA").await,
+            ContentDecision::Review { .. }
+        ));
+        d.complete("mr1", "sha2", Some("fpA")).await;
+
+        let d2 = MrDispatcher::with_state_file(Some(path), Duration::from_secs(3600));
+        assert_eq!(d2.try_start("mr1", "sha3").await, ShouldStart::Go);
+        assert!(matches!(
+            d2.claim_content("mr1", "sha3", "fpA").await,
+            ContentDecision::Skip { .. }
+        ));
+    }
+
+    /// `complete(..., None)` (callers without content information) leaves the
+    /// recorded fingerprint in place rather than erasing it.
+    #[tokio::test]
+    async fn complete_without_fingerprint_keeps_the_recorded_one() {
+        let d = MrDispatcher::new();
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+        d.complete("mr1", "sha1", Some("fpA")).await;
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::Go);
+        d.complete("mr1", "sha2", None).await;
+
+        assert_eq!(d.try_start("mr1", "sha3").await, ShouldStart::Go);
+        assert!(matches!(
+            d.claim_content("mr1", "sha3", "fpA").await,
+            ContentDecision::Skip { .. }
+        ));
     }
 }

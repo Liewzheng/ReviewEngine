@@ -2,7 +2,7 @@ use axum::{http::StatusCode, Json};
 use serde_json::Value;
 use std::sync::Arc;
 
-use super::super::dispatcher::MrDispatcher;
+use super::super::dispatcher::{ContentGate, MrDispatcher};
 use crate::server::api::review::discussion::{participants_from_notes, DiscussionTap};
 use crate::server::task_queue::{record_task_outcome, record_task_started, SourceMeta, TaskStore};
 use crate::store::traits::{DiscussionNote, DiscussionStore};
@@ -120,7 +120,8 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
 /// Execute a webhook-dispatched MR review on a detached task, recording its
 /// lifecycle in the task store when one is available.
 ///
-/// With a store: creates a Running task entry from `source_meta`, resolves the
+/// With a store: creates a Running task entry from `source_meta` (after the
+/// unchanged-content gate below has accepted the dispatch), resolves the
 /// MR metadata to back-fill title/branch/author, runs the review, then marks it
 /// Completed (with the full [`ReviewOutput`] result) or Failed (with the error
 /// message). Without a store this is exactly the legacy behavior — run, log,
@@ -128,6 +129,12 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
 ///
 /// `server_llm_configs` is the handler's snapshot of the server's hot-applied
 /// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]).
+///
+/// `gate` controls the RENG-62 unchanged-content check: [`ContentGate::Enabled`]
+/// for webhook push/update events, [`ContentGate::Bypassed`] for an explicit
+/// user-triggered run (`/review` comment, REST rerun). A skipped dispatch
+/// returns before the task entry is created, so nothing is enqueued and no LLM
+/// is called.
 #[allow(clippy::too_many_arguments)]
 async fn run_webhook_review(
     task_store: Option<Arc<TaskStore>>,
@@ -139,7 +146,31 @@ async fn run_webhook_review(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    gate: ContentGate,
 ) {
+    // Resolve the MR metadata + diff up front: the diff doubles as the content
+    // fingerprint for the gate below, so the gate costs no second fetch.
+    let (mut info, diff) = match super::super::resolve_review_source(&mr_url, &gitlab_token).await {
+        Ok((info, diff)) => {
+            if let Some(reason) = super::super::gate_unchanged_content(dispatcher, gate, &mr_url, &sha, &diff).await {
+                tracing::info!("Skipping review for MR !{mr_iid} ({mr_url}): {reason}");
+                return;
+            }
+            (info, diff)
+        }
+        Err(e) => {
+            tracing::error!("Review failed for MR !{}: {:?}", mr_iid, e);
+            dispatcher.reset(&mr_url).await;
+            // The task entry is created here so a failed fetch is still visible
+            // in the History panel (pre-RENG-62 the entry existed already).
+            if let Some(store) = task_store.as_ref() {
+                let id = record_task_started(store, source_meta.clone()).await;
+                record_task_outcome(store, id, &Err(e)).await;
+            }
+            return;
+        }
+    };
+
     let task_id = if let Some(store) = task_store.as_ref() {
         Some(record_task_started(store, source_meta).await)
     } else {
@@ -147,7 +178,6 @@ async fn run_webhook_review(
     };
 
     let outcome = async {
-        let (mut info, diff) = super::super::resolve_review_source(&mr_url, &gitlab_token).await?;
         if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
             // RENG-43: load the MR's stored discussion notes once. Their
             // authors join the participant list, and the same set feeds the
@@ -199,6 +229,9 @@ async fn run_webhook_review(
 
 /// Spawn a background task that runs the full review for an MR, recording its
 /// lifecycle in the task store when one is available.
+///
+/// `gate` is the RENG-62 unchanged-content policy for this dispatch; see
+/// [`run_webhook_review`].
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_mr_review_task(
     dispatcher: &MrDispatcher,
@@ -210,6 +243,7 @@ pub fn spawn_mr_review_task(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    gate: ContentGate,
 ) {
     let d = dispatcher.clone();
     tokio::spawn(async move {
@@ -223,6 +257,7 @@ pub fn spawn_mr_review_task(
             source_meta,
             tap,
             server_llm_configs,
+            gate,
         )
         .await;
     });
@@ -240,6 +275,7 @@ pub async fn handle_mr_in_progress(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    gate: ContentGate,
 ) {
     tracing::info!("MR !{} review in progress, waiting...", mr_iid);
     dispatcher.wait(mr_url).await;
@@ -256,6 +292,7 @@ pub async fn handle_mr_in_progress(
                 source_meta,
                 tap,
                 server_llm_configs,
+                gate,
             );
         }
         _ => {
@@ -266,6 +303,10 @@ pub async fn handle_mr_in_progress(
 
 /// Dispatch an MR webhook event to start or defer a review based on the
 /// dispatcher state.
+///
+/// `gate` is [`ContentGate::Enabled`] for the webhook push/update path: an
+/// amend carrying content identical to the last reviewed round is skipped by
+/// [`crate::server::gate_unchanged_content`].
 #[allow(clippy::too_many_arguments)]
 pub async fn dispatch_mr_event(
     dispatcher: &MrDispatcher,
@@ -277,6 +318,7 @@ pub async fn dispatch_mr_event(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    gate: ContentGate,
 ) {
     match dispatcher.try_start(mr_url, sha).await {
         super::super::dispatcher::ShouldStart::Go => {
@@ -290,6 +332,7 @@ pub async fn dispatch_mr_event(
                 source_meta,
                 tap,
                 server_llm_configs,
+                gate,
             );
         }
         super::super::dispatcher::ShouldStart::AlreadyReviewed => {
@@ -306,6 +349,7 @@ pub async fn dispatch_mr_event(
                 source_meta,
                 tap,
                 server_llm_configs,
+                gate,
             )
             .await;
         }
@@ -465,6 +509,7 @@ pub async fn handle_mr_hook(
             source_meta,
             tap,
             server_llm_configs,
+            ContentGate::Enabled,
         )
         .await;
     }
@@ -808,6 +853,10 @@ pub async fn handle_note_hook(
                             source_meta,
                             tap,
                             server_llm_configs,
+                            // An explicit `/review` / `/describe` command is
+                            // user intent: it always reviews, even when the
+                            // content is unchanged (RENG-62).
+                            ContentGate::Bypassed,
                         )
                         .await;
                     });
@@ -841,7 +890,10 @@ pub async fn handle_push_hook(body: &str) -> Result<Json<Value>, StatusCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::dispatcher::ShouldStart;
     use crate::server::task_queue::{record_task_outcome, record_task_started, TaskState, TaskStore};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     const MR_URL: &str = "http://gitlab.internal:8929/group/proj/-/merge_requests/7";
     const SHA: &str = "abc123";
@@ -1364,5 +1416,131 @@ mod tests {
         assert_eq!(legacy, rfc);
         assert!(parse_note_created_at(Some("not a date")).is_none());
         assert!(parse_note_created_at(None).is_none());
+    }
+
+    // ─── RENG-62: unchanged-content gate through the real review path ───
+
+    /// Mock the two GitLab endpoints `resolve_review_source` needs, so
+    /// `run_webhook_review` runs its real provider path without a network.
+    /// Participants / commit-author lookups stay unmounted: both are
+    /// best-effort and degrade to empty.
+    async fn mock_gitlab_mr(server: &MockServer, diff: &str) -> String {
+        let mr_url = format!("{}/group/proj/-/merge_requests/7", server.uri());
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/group%2Fproj/merge_requests/7"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    r#"{"title":"Fix login bug","source_branch":"feature/login","target_branch":"main"}"#,
+                ),
+            )
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/raw_diffs"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(diff))
+            .mount(server)
+            .await;
+        mr_url
+    }
+
+    fn hook_source_meta(mr_url: &str, sha: &str) -> SourceMeta {
+        SourceMeta {
+            project: Some("group/proj".to_string()),
+            repository: Some("group/proj".to_string()),
+            gitlab_mr_url: Some(mr_url.to_string()),
+            commit_sha: Some(sha.to_string()),
+            ..SourceMeta::default()
+        }
+    }
+
+    /// The redundant-round scenario: a webhook `action=update` carrying a NEW
+    /// SHA over the SAME diff must not enqueue a review at all.
+    #[tokio::test]
+    async fn unchanged_content_update_enqueues_no_review() {
+        const DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let server = MockServer::start().await;
+        let mr_url = mock_gitlab_mr(&server, DIFF).await;
+        let store = Arc::new(TaskStore::new());
+        let dispatcher = MrDispatcher::new();
+
+        // The SHA reviewed earlier: seeded through the public dispatcher API,
+        // with the fingerprint of the very diff the mock will serve.
+        assert_eq!(dispatcher.try_start(&mr_url, "sha1").await, ShouldStart::Go);
+        dispatcher
+            .complete(
+                &mr_url,
+                "sha1",
+                Some(&crate::server::dispatcher::content_fingerprint(DIFF)),
+            )
+            .await;
+
+        // Amend / update event: new SHA, unchanged diff.
+        assert_eq!(dispatcher.try_start(&mr_url, "sha2").await, ShouldStart::Go);
+        run_webhook_review(
+            Some(store.clone()),
+            &dispatcher,
+            mr_url.clone(),
+            "sha2".to_string(),
+            "glpat-test".to_string(),
+            7,
+            hook_source_meta(&mr_url, "sha2"),
+            None,
+            None,
+            ContentGate::Enabled,
+        )
+        .await;
+
+        let (items, total) = store.list(None, 1, 100, None, None, None, None, None).await;
+        assert_eq!(total, 0, "a skipped dispatch must not enqueue a task: {items:?}");
+        // The skip finalized the dispatch: the SHA is recorded and the MR is
+        // not left wedged in `running`.
+        assert_eq!(
+            dispatcher.try_start(&mr_url, "sha2").await,
+            ShouldStart::AlreadyReviewed
+        );
+        assert_eq!(dispatcher.try_start(&mr_url, "sha3").await, ShouldStart::Go);
+    }
+
+    /// An explicit user-triggered run (`/review` command) bypasses the gate:
+    /// the review is enqueued even when the content is unchanged.
+    #[tokio::test]
+    async fn explicit_rerun_bypasses_the_content_gate() {
+        let server = MockServer::start().await;
+        // Empty diff: the review short-circuits inside `run_review_common`
+        // ("No diff changes") before any LLM call, so the test asserts the
+        // dispatch decision — enqueued vs skipped — and nothing else.
+        let mr_url = mock_gitlab_mr(&server, "").await;
+        let store = Arc::new(TaskStore::new());
+        let dispatcher = MrDispatcher::new();
+
+        assert_eq!(dispatcher.try_start(&mr_url, "sha1").await, ShouldStart::Go);
+        dispatcher
+            .complete(
+                &mr_url,
+                "sha1",
+                Some(&crate::server::dispatcher::content_fingerprint("")),
+            )
+            .await;
+
+        // `/review` fabricates `sha = note_<uuid>`; bypassed gate → enqueued.
+        let note_sha = "note_00000000-0000-0000-0000-000000000000";
+        assert_eq!(dispatcher.try_start(&mr_url, note_sha).await, ShouldStart::Go);
+        run_webhook_review(
+            Some(store.clone()),
+            &dispatcher,
+            mr_url.clone(),
+            note_sha.to_string(),
+            "glpat-test".to_string(),
+            7,
+            hook_source_meta(&mr_url, note_sha),
+            None,
+            None,
+            ContentGate::Bypassed,
+        )
+        .await;
+
+        let (items, total) = store.list(None, 1, 100, None, None, None, None, None).await;
+        assert_eq!(total, 1, "an explicit rerun must always enqueue a review: {items:?}");
+        assert_eq!(items[0].state, TaskState::Completed);
     }
 }

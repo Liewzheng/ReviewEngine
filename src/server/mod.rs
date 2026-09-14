@@ -29,7 +29,7 @@ pub mod webhook;
 pub use state::AppState;
 
 use self::auth::AuthConfig;
-use self::dispatcher::MrDispatcher;
+use self::dispatcher::{content_fingerprint, ContentDecision, ContentGate, MrDispatcher};
 
 use crate::git_provider::GitProvider;
 
@@ -110,6 +110,37 @@ pub(crate) fn resolve_webhook_llm_configs(
     }
 }
 
+/// Apply the unchanged-content gate (RENG-62) to a dispatch that already passed
+/// [`MrDispatcher::try_start`].
+///
+/// The SHA guard alone cannot see an amend / force-push: the SHA changes while
+/// the diff stays byte-identical, so the round would re-review (and re-post)
+/// exactly what was already reviewed. `diff` is the diff this review would run
+/// on — the caller has just fetched it, so the fingerprint costs no extra
+/// provider call.
+///
+/// Returns the skip reason when the review must not run, `None` when it should
+/// proceed (first sight, changed content, or [`ContentGate::Bypassed`] — an
+/// explicit user-triggered run always reviews).
+pub(crate) async fn gate_unchanged_content(
+    dispatcher: &MrDispatcher,
+    gate: ContentGate,
+    mr_url: &str,
+    sha: &str,
+    diff: &str,
+) -> Option<String> {
+    if gate == ContentGate::Bypassed {
+        return None;
+    }
+    match dispatcher.claim_content(mr_url, sha, &content_fingerprint(diff)).await {
+        ContentDecision::Skip { reason } => Some(reason),
+        ContentDecision::Review { reason } => {
+            tracing::info!("Reviewing {mr_url}: {reason}");
+            None
+        }
+    }
+}
+
 /// Shared review execution logic used by both GitLab and GitHub webhook handlers.
 ///
 /// Runs the expert team against the already-resolved `mr_info` and `diff`, then:
@@ -121,9 +152,10 @@ pub(crate) fn resolve_webhook_llm_configs(
 ///
 /// 2. **Output** — built by [`build_review_output_from_reports`](crate::server::build_review_output_from_reports) from expert reports and the optional aggregator result, then published via [`publish_review`].
 ///
-/// Finally, notifies the dispatcher of completion and returns the constructed
-/// [`ReviewOutput`] (so the task store can persist expert reports for the
-/// History detail panel).
+/// Finally, notifies the dispatcher of completion — recording both the SHA and
+/// the [`content_fingerprint`] of `diff`, the content the review actually
+/// covered — and returns the constructed [`ReviewOutput`] (so the task store
+/// can persist expert reports for the History detail panel).
 ///
 /// `server_llm_configs` carries the server's hot-applied LLM providers
 /// (`AppState::llm_configs`, snapshotted by the webhook handler at dispatch
@@ -148,7 +180,7 @@ pub(crate) async fn run_review_common(
     if diff.is_empty() {
         tracing::info!("No diff changes, skipping review");
         if let (Some(d), Some(key), Some(s)) = (dispatcher, dispatch_key, sha) {
-            d.complete(key, s).await;
+            d.complete(key, s, Some(&content_fingerprint(&diff))).await;
         }
         return Ok(crate::models::ReviewOutput::new(vec![]));
     }
@@ -247,9 +279,11 @@ pub(crate) async fn run_review_common(
         tracing::warn!("Publish failed: {:?}", e);
     }
 
-    // Notify dispatcher that review is done
+    // Notify dispatcher that review is done, recording the fingerprint of the
+    // diff this review actually covered (RENG-62) so an amend carrying the same
+    // content is recognized as unchanged next time.
     if let (Some(d), Some(key), Some(s)) = (dispatcher, dispatch_key, sha) {
-        d.complete(key, s).await;
+        d.complete(key, s, Some(&content_fingerprint(&diff))).await;
     }
 
     // Log completion
@@ -511,6 +545,51 @@ mod tests {
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(output.aggregated.is_none());
+    }
+
+    // ─── gate_unchanged_content (RENG-62) ────────────────────────────
+
+    /// The explicit-rerun policy: a bypassed gate never skips, and records
+    /// nothing (the review that follows owns `complete`).
+    #[tokio::test]
+    async fn bypassed_gate_never_skips() {
+        use crate::server::dispatcher::ShouldStart;
+        const DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let d = MrDispatcher::new();
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+        d.complete("mr1", "sha1", Some(&content_fingerprint(DIFF))).await;
+        assert_eq!(d.try_start("mr1", "note_x").await, ShouldStart::Go);
+
+        assert_eq!(
+            gate_unchanged_content(&d, ContentGate::Bypassed, "mr1", "note_x", DIFF).await,
+            None,
+            "an explicit rerun must proceed regardless of the fingerprint"
+        );
+        // Still running: the caller runs the review and completes the dispatch.
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::InProgress);
+    }
+
+    /// The webhook policy: identical content is reported as a skip, with the
+    /// reason the caller logs.
+    #[tokio::test]
+    async fn enabled_gate_skips_identical_content() {
+        use crate::server::dispatcher::ShouldStart;
+        const DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\n@@ -1 +1 @@\n-old\n+new\n";
+        let d = MrDispatcher::new();
+        assert_eq!(d.try_start("mr1", "sha1").await, ShouldStart::Go);
+        d.complete("mr1", "sha1", Some(&content_fingerprint(DIFF))).await;
+        assert_eq!(d.try_start("mr1", "sha2").await, ShouldStart::Go);
+
+        assert_eq!(
+            gate_unchanged_content(&d, ContentGate::Enabled, "mr1", "sha2", DIFF).await,
+            Some("skipping: content unchanged (sha sha1 → sha2)".to_string())
+        );
+        // Changed content → the gate lets the review through.
+        assert_eq!(d.try_start("mr1", "sha3").await, ShouldStart::Go);
+        assert_eq!(
+            gate_unchanged_content(&d, ContentGate::Enabled, "mr1", "sha3", "other diff").await,
+            None
+        );
     }
 }
 

@@ -271,6 +271,27 @@ on the `./config` volume those files already mount for `REVIEW_ENGINE_CONFIG_DIR
 
 ---
 
+## Inline-note delivery policy
+
+Which review findings are posted as **inline** notes (as opposed to being listed only in the `# CodeReview Board` comment) is decided by `PublishPolicy` (`src/publisher/policy.rs`). It is constructed in code with the defaults below — there is no configuration section for it, and the only override surface is these four environment variables, read once per publish:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `REVIEW_PUBLISH_MIN_SEVERITY` | `high` | Lowest severity that may be posted inline: `critical` \| `high` \| `medium` \| `low` \| `note`. |
+| `REVIEW_PUBLISH_MIN_CONFIDENCE` | `8` | Lowest confidence (0–10) that may be posted inline. `0` disables the floor. |
+| `REVIEW_PUBLISH_MAX_INLINE_NOTES` | `2` | Maximum inline notes per round; the remainder is rolled up into the board. `0` posts none inline. |
+| `REVIEW_PUBLISH_INLINE_ON_DOCS_ONLY` | `false` | Set to `1`/`true` to keep posting inline notes for a documentation/CI-only change, which is summary-only by default. |
+
+Two further rules are not configurable and are always on: a finding must carry a **non-empty recommendation** (the corpus' out-of-scope notes were asks with no actionable content), and its line must be **inside the reviewed diff**.
+
+A malformed value is ignored with a warning and the default is kept — a typo can never silently turn inline notes off. The defaults and the effective policy are logged once per publish: `Inline-note delivery policy: severity >= high, confidence >= 8/10, 2 inline note(s) per round, an actionable recommendation, docs/CI-only changes summary-only`.
+
+A change set is **documentation/CI-only** when *every* changed file is documentation or CI configuration: `.md`/`.mdx`/`.rst`/`.adoc`/`.asciidoc`, anything under `docs/`, `doc/`, `documentation/`, `man/`, license/notice files (`LICENSE`, `LICENCE`, `COPYING`, `NOTICE`, `AUTHORS`, `CONTRIBUTORS`, also with a suffix such as `LICENSE-MIT`), anything under `.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`, `.woodpecker/`, `.travis/`, `.ci/`, `ci/`, and the CI files `.gitlab-ci.yml`, `.gitlab-ci.yaml`, `.travis.yml`, `azure-pipelines.yml`, `appveyor.yml`, `.drone.yml`, `buildkite.yml`, `.woodpecker.yml`, `codecov.yml`, `Jenkinsfile`. `config.toml` is *not* documentation — shipped configuration is reviewed as code. An unknown change set (the diff was unavailable) is never downgraded.
+
+Findings the policy withholds are never dropped: they stay in the board, and the board's `## Inline notes — delivery policy` section names the ones that were admitted but rolled up behind the cap. See the [GitLab](integrations/gitlab.md#inline-note-delivery-policy) / [GitHub](integrations/github.md#inline-note-delivery-policy) integration pages for the end-to-end behaviour.
+
+---
+
 ## Full schema
 
 For every available field, see [`docs/config-schema.md`](config-schema.md).

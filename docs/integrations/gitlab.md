@@ -140,9 +140,28 @@ Team members can trigger actions by commenting on an MR:
 When a review finishes, review-engine publishes the results back to the MR discussion:
 
 - It creates (or updates) a top-level discussion note titled `# CodeReview Board`.
-- It posts inline notes on specific files and lines for **Critical** and **High** severity findings. The inline set is the **consolidated** finding set — deduplicated across experts and filtered by the adjudication pass — and a note is only posted when its line is part of the reviewed diff, so rejected anchors (`line_code can't be blank`) no longer occur. Each note opens with its `` `path:line` `` anchor.
-- A single failing note no longer stops the batch: permanent rejections are logged and skipped, transient provider errors (transport failure, 408/429/5xx) are retried up to three attempts, and the run logs a `posted / skipped / failed` summary.
+- It posts inline notes on files and lines, chosen by the **inline-note delivery policy** below. The candidate set is the **consolidated** finding set — deduplicated across experts and filtered by the adjudication pass — and a note is only posted when its line is part of the reviewed diff, so rejected anchors (`line_code can't be blank`) no longer occur. Each note opens with its `` `path:line` `` anchor.
+- A single failing note no longer stops the batch: permanent rejections are logged and skipped, transient provider errors (transport failure, 408/429/5xx) are retried up to three attempts, and the run logs a `posted / rolled up / policy-excluded / anchor-ineligible / skipped / failed` summary.
 - The dispatcher suppresses duplicate rounds: it tracks, per MR, the last reviewed commit SHA **and** a fingerprint of the reviewed diff, so an event for an already-reviewed SHA — or one whose content is byte-identical to the last reviewed round — does not run (or re-post) another review. The state is persisted to a JSON file so it survives a server restart; in containers that file must be on a mounted volume (see [Webhook dispatch state](../configuration.md#webhook-dispatch-state)).
+
+### Inline-note delivery policy
+
+Not every high-severity finding deserves its own line-anchored note. A round's findings pass through `PublishPolicy` (`src/publisher/policy.rs`), whose defaults are:
+
+| Rule | Default | Why |
+|---|---|---|
+| Severity | `high` or above (`critical`, `high`) | The pre-0.10.19 gate admitted Critical/High but filtered almost nothing: 87 % of the notes in the RENG-59 corpus were High-or-above while the board's own severity mix was 45 % medium. |
+| Confidence | `8/10` or above | Below that a note is a guess. |
+| Actionable | a non-empty recommendation | The corpus' out-of-scope notes were largely asks with no actionable content ("update the MR description"). |
+| Anchor | the line must be in the reviewed diff | A note the provider would reject is never sent. |
+| **Per-round cap** | **2 notes** | The corpus' worst case was 2 500 comments per 1 000 changed lines on a two-line MR; the median MR carried four. |
+| **Docs/CI-only change** | summary only, **0 inline notes** | A change set whose every file is documentation or CI config (`.md`/`.mdx`/`.rst`/`.adoc`/`.asciidoc`, anything under `docs/`, `doc/`, `documentation/`, `man/`, license/notice files, anything under `.github/`, `.gitlab/`, `.circleci/`, `.buildkite/`, `.woodpecker/`, `.travis/`, `.ci/`, `ci/`, and CI files such as `.gitlab-ci.yml`, `Jenkinsfile`, `codecov.yml`) gets the board only. |
+
+Findings that pass the thresholds but do not fit the cap — and every admitted finding of a summary-only round — are **rolled up into the board**, never dropped: the comment gains an `## Inline notes — delivery policy` section that names them (severity, `` `path:line` ``, title, confidence) and states the rule that withheld them. The per-expert sections are unaffected, so every finding is on the board either way.
+
+When the cap binds, the highest-ranked findings are the ones posted. The ranking is deterministic (severity descending, then confidence descending, then file path, line, title and expert name ascending), so the same findings always select the same notes.
+
+The policy is built in code with those defaults and can be overridden with four environment variables — see [Inline-note delivery policy](../configuration.md#inline-note-delivery-policy) for the names, defaults and the fail-open behaviour on a malformed value.
 
 ## When a review is triggered
 

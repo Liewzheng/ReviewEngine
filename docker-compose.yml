@@ -76,6 +76,12 @@ services:
       # ── Config & Output Paths ──
       REVIEW_ENGINE_CONFIG_DIR: /app/config
       REVIEW_ENGINE_REPORT_DIR: /app/reports
+      # 分发去重状态(已审核的 SHA + 内容指纹)。默认落在 ~/.config(容器内即
+      # /app/.config,镜像层、未挂载),docker recreate 后被清空 → 忘记已审核的
+      # SHA,同一内容被反复重审(2026-09-14 事故:一次 recreate 后 7 个
+      # action=update 事件重审了 7 个未变的 SHA)。指向已挂载的 /app/config 卷,
+      # 状态即可跨容器重建保留;非容器运行不受影响(未设置时仍用默认路径)。
+      REVIEW_DISPATCH_STATE: /app/config/dispatcher-state.json
 
       # ── In-container Auto Upgrade (容器内自动升级) ──
       # 升级由容器内 POST /upgrade 触发:新二进制替换到 REVIEW_UPGRADE_INSTALL_DIR

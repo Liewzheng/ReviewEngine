@@ -87,6 +87,10 @@ services:
       # ── 路径与日志 ──
       REVIEW_ENGINE_CONFIG_DIR: /app/config
       REVIEW_ENGINE_REPORT_DIR: /app/reports
+      # 分发去重状态(已审核 SHA + 内容指纹)写到已挂载的 config 卷:默认
+      # ~/.config 在容器内是 /app/.config(未挂载),recreate 即丢失,导致同一
+      # 内容被重复审核并重复评论。指向 /app/config 后状态跨容器重建保留。
+      REVIEW_DISPATCH_STATE: /app/config/dispatcher-state.json
       RUST_LOG: ${RUST_LOG:-info}
       REVIEW_LOG_FORMAT: ${REVIEW_LOG_FORMAT:-json}
 

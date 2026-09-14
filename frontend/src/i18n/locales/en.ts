@@ -60,6 +60,8 @@ export default {
     unavailable: 'Unavailable',
     commandCopied: 'Command copied to clipboard.',
     testConnection: 'Test Connection',
+    lastTest: 'Last test: {date}',
+    dismissTestResult: 'Dismiss test result',
     status: {
       operational: 'Operational',
       degraded: 'Degraded',

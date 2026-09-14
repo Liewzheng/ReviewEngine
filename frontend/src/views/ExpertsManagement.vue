@@ -79,11 +79,20 @@ const fetchExperts = async (silent: boolean = false) => {
 /* Every card control is live: the switch and slider optimistically mutate the
  * local expert, PUT to the server, and roll back + notify on failure. */
 
+/* Count of expert PUTs in flight. A background tick is skipped while one is
+ * in flight (see `expertsAutoRefresh`): the poll reconciles the server's list
+ * onto the local objects in place, so a tick landing between the optimistic
+ * write and the server's answer would revert the switch (or the slider) to
+ * the value the server had before the PUT — the value the user just changed
+ * would visibly snap back for a whole poll interval (RENG-54). */
+const savesInFlight = ref(0)
+
 const handleToggle = async (id: string, enabled: boolean) => {
   const expert = experts.value.find((e: Expert) => e.id === id)
   if (!expert) return
   const previous = expert.enabled
   expert.enabled = enabled
+  savesInFlight.value++
   try {
     await expertsStore.update(id, { enabled })
     ElNotification({
@@ -95,18 +104,19 @@ const handleToggle = async (id: string, enabled: boolean) => {
   } catch (e) {
     expert.enabled = previous
     notifyUpdateFailed(expert.name, e)
+  } finally {
+    savesInFlight.value--
   }
 }
 
 /* Weight slider drags emit per pixel: debounce the PUT (500ms after the last
  * movement) and remember the pre-drag value for rollback. The whole debounce
  * window is gated via `weightDragPending` so a background tick can neither
- * replace the list nor snap the slider back mid-drag; `weightSavePending`
+ * replace the list nor snap the slider back mid-drag; `savesInFlight`
  * additionally covers the commit await itself. */
 const WEIGHT_DEBOUNCE_MS = 500
 const weightTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const previousWeights = new Map<string, number>()
-const weightSavePending = ref(false)
 /** True from the first drag movement until the debounced commit fires. */
 const weightDragPending = ref(false)
 
@@ -128,14 +138,14 @@ const commitWeight = async (id: string) => {
   const previous = previousWeights.get(id)
   previousWeights.delete(id)
   if (!expert || previous === undefined || expert.weight === previous) return
-  weightSavePending.value = true
+  savesInFlight.value++
   try {
     await expertsStore.update(id, { weight: expert.weight })
   } catch (e) {
     expert.weight = previous
     notifyUpdateFailed(expert.name, e)
   } finally {
-    weightSavePending.value = false
+    savesInFlight.value--
   }
 }
 
@@ -170,13 +180,15 @@ const getScoreType = (score?: number): 'success' | 'warning' | 'danger' | 'info'
  * The tick is silent: it never flips `loading` (so the grid — and any open
  * detail dialog — is never unmounted by a poll) and reconciles the fetched
  * list in place, preserving expert object identities. Ticks are additionally
- * skipped while a weight-slider debounce window is open (`weightDragPending`)
- * so a poll can never replace the list or snap a slider back mid-drag. The
- * initial load and any later remount path do a normal, visible fetch. */
+ * skipped while a local edit is in flight — a weight-slider debounce window
+ * (`weightDragPending`) or any expert PUT (`savesInFlight`, RENG-54) — so a
+ * poll can neither replace the list, snap a slider back mid-drag, nor revert
+ * an optimistic switch to the pre-PUT server value. The initial load and any
+ * later remount path do a normal, visible fetch. */
 const expertsAutoRefresh = useAutoRefresh(
   () => fetchExperts(true),
   10_000,
-  { isPaused: () => weightDragPending.value }
+  { isPaused: () => weightDragPending.value || savesInFlight.value > 0 }
 )
 
 onMounted(() => {

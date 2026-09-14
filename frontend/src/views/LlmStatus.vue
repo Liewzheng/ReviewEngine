@@ -126,15 +126,26 @@ function openEditDialog(card: ProviderCardState) {
 }
 
 async function handleDialogSave(form: ProviderCardState) {
-  const ok =
-    dialogMode.value === 'add'
-      ? await addCard(form)
-      : await editCard(editingCard.value?.provider ?? form.provider, form)
-  if (ok) dialogVisible.value = false
+  const editedName = editingCard.value?.provider ?? form.provider
+  const isEdit = dialogMode.value === 'edit'
+  const ok = isEdit ? await editCard(editedName, form) : await addCard(form)
+  if (ok) {
+    // The configuration that was tested just changed, so the recorded
+    // result no longer describes this provider (RENG-54).
+    if (isEdit) clearTestResultByName(editedName)
+    dialogVisible.value = false
+  }
+}
+
+/** Dismiss the recorded test result of the named provider, if any. Keyed by
+ *  the card's identity (`card.provider`), which is also `useLlmStatus`'s key. */
+function clearTestResultByName(providerName: string) {
+  llm.testResults.clear(providerName)
 }
 
 /** Card-level connectivity test rides the server-side probe (stored key),
- *  so no secret ever round-trips through the browser. */
+ *  so no secret ever round-trips through the browser. The outcome is kept as
+ *  page-session state (RENG-54) — see `cardTestResult`. */
 async function handleCardTest(card: ProviderCardState) {
   const health = healthByName.value.get(card.provider)
   if (!health) return
@@ -149,6 +160,13 @@ async function handleCardTest(card: ProviderCardState) {
   } catch {
     // Error already handled by composable (llm.error watcher notifies).
   }
+}
+
+/** Last manual test result for a card's provider. Keyed by the card's own
+ *  identity — the provider name — so reindexing the runtime provider list
+ *  (deleting or re-adding a sibling) cannot orphan it. */
+function cardTestResult(card: ProviderCardState) {
+  return llm.testResults.get(card.provider)
 }
 
 function isCardTesting(card: ProviderCardState): boolean {
@@ -337,7 +355,9 @@ onUnmounted(() => {
         :chain-position="healthByName.get(card.provider)?.chainPosition"
         :testing="isCardTesting(card)"
         :saving="cardsSaving"
+        :test-result="cardTestResult(card)"
         @test="handleCardTest(card)"
+        @clear-test="clearTestResultByName(card.provider)"
         @edit="openEditDialog(card)"
         @delete="deleteCard(card)"
         @set-primary="setPrimary(card)"

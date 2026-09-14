@@ -50,6 +50,8 @@ export default {
     unavailable: '不可用',
     commandCopied: '命令已复制到剪贴板。',
     testConnection: '测试连接',
+    lastTest: '上次测试：{date}',
+    dismissTestResult: '关闭测试结果',
     status: {
       operational: '运行正常',
       degraded: '性能下降',

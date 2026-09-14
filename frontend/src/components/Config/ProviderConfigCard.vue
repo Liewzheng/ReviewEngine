@@ -2,7 +2,9 @@
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Connection, Edit, Delete, Star } from '@element-plus/icons-vue'
-import type { LlmProvider, LlmProviderStatus } from '../../types/llm'
+import TestResultLine from '../common/TestResultLine.vue'
+import type { LlmProvider, LlmProviderStatus, TestResult } from '../../types/llm'
+import type { TransientResult } from '../../composables/useTransientResult'
 import { providerDisplayName, type ProviderCardState } from '../../composables/llmPayload'
 
 const props = defineProps<{
@@ -20,6 +22,12 @@ const props = defineProps<{
   testing?: boolean
   /** True while a mutation save is in flight (actions disabled). */
   saving?: boolean
+  /**
+   * RENG-54: outcome of the last manual Test Connection, held as page-scoped
+   * session state (see `useTransientResult`) — the health metrics below stay
+   * the server's values, so the two never overwrite each other.
+   */
+  testResult?: TransientResult<TestResult> | null
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +35,8 @@ const emit = defineEmits<{
   (e: 'edit'): void
   (e: 'delete'): void
   (e: 'set-primary'): void
+  /** Dismiss the recorded test result. */
+  (e: 'clear-test'): void
 }>()
 
 const { t } = useI18n()
@@ -110,6 +120,19 @@ const usagePercent = computed(() => props.health?.usagePercent ?? 0)
 const showUsage = computed(() => {
   const h = props.health
   return !!h && h.usagePercent !== undefined && h.configured
+})
+
+/* ------------------------------------------------------------------ */
+/*  Last manual test (RENG-54) — session state, not polled data.       */
+/* ------------------------------------------------------------------ */
+
+/** Outcome text for the recorded test result, or '' when none was recorded. */
+const testResultText = computed(() => {
+  const result = props.testResult
+  if (!result) return ''
+  return result.value.success
+    ? t('config.llm.connected', { n: result.value.latencyMs ?? 0 })
+    : t('config.llm.testFailed', { error: result.value.error ?? t('errors.unknown') })
 })
 </script>
 
@@ -197,6 +220,17 @@ const showUsage = computed(() => {
     <div v-if="health" class="last-checked">
       {{ $t('llm.lastChecked', { date: new Date(health.lastChecked).toLocaleString() }) }}
     </div>
+
+    <!-- Last manual test (RENG-54): kept as page-session state so the next
+         poll tick (30s) cannot wipe the result the user just asked for. -->
+    <TestResultLine
+      v-if="testResult && testResultText"
+      class="last-test"
+      :type="testResult.value.success ? 'success' : 'danger'"
+      :text="testResultText"
+      :at="testResult.at"
+      @dismiss="emit('clear-test')"
+    />
 
     <!-- Action Row -->
     <div class="action-row">
@@ -390,6 +424,12 @@ const showUsage = computed(() => {
   color: var(--text-secondary);
   margin-bottom: 12px;
   text-align: right;
+}
+
+/* RENG-54: the last manual test outcome sits above the actions, not in the
+   metrics row — the metrics stay the server's numbers. */
+.last-test {
+  margin-bottom: 12px;
 }
 
 .action-row {

@@ -50,6 +50,8 @@ export default {
     unavailable: '사용할 수 없음',
     commandCopied: '명령을 클립보드에 복사했습니다.',
     testConnection: '연결 테스트',
+    lastTest: '마지막 테스트: {date}',
+    dismissTestResult: '테스트 결과 닫기',
     status: {
       operational: '정상',
       degraded: '성능 저하',

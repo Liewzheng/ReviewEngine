@@ -133,7 +133,13 @@ const togglePause = async () => {
 const maxConcurrentInput = ref(8)
 let maxConcurrentTimer: ReturnType<typeof setTimeout> | null = null
 
+/* Keep the input in step with the server's value — but never while the user
+ * has an edit pending. The commit reads the input when the debounce fires, so
+ * a poll tick landing inside that 400ms window would write the server's older
+ * value back and the debounce would then persist THAT value, silently
+ * dropping what the user typed (RENG-54). */
 watch(() => stats.value.maxConcurrent, (val) => {
+  if (maxConcurrentTimer) return
   maxConcurrentInput.value = val
 }, { immediate: true })
 

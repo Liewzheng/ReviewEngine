@@ -755,6 +755,9 @@ Response 200:
       "defaultModel": "gpt-4o",
       "maxTokens": 4096,
       "temperature": 0.3,
+      "position": 0,
+      "chainPosition": 1,
+      "isPrimary": true,
       "latencyMs": 0,
       "errorRate": 0.0,
       "requestCount": 0,
@@ -767,6 +770,8 @@ Response 200:
 ```
 
 API key 永远不会在响应中返回。
+
+0.10.11 起（RENG-55）每个 provider 额外返回链序信息：`position` 为它在**存储列表**中的下标（0 起，与 `llm_providers.raw.position` 及 UI 卡片顺序一致，不受“首选”选择影响），`chainPosition` 为它在**运行时链**中的 1 起名次（首选 provider 为 1，其后按存储顺序排列），`isPrimary` 标识链首（即评审实际首先使用的 provider）。运行时链的规则见 [configuration.md](configuration.md#chain-order-and-the-primary-provider)。
 
 #### `POST /api/v1/llm/providers`
 

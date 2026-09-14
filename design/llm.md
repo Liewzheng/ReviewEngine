@@ -14,11 +14,39 @@ PageHeader
 └── Right: Refresh All button (ElButton icon: Refresh)
 
 Provider Grid
-├── ProviderCard (OpenAI)
-├── ProviderCard (Anthropic)
-├── ProviderCard (Ollama Local)
+├── ProviderCard (OpenAI)   [Primary] [Chain #1]
+├── ProviderCard (Anthropic)           [Chain #2]
+├── ProviderCard (Ollama Local)        [Chain #3]
 └── ProviderCard (Additional...)
+
+Recent Usage card (RENG-55)
+└── one row per recent review: time · provider/model [Primary not used]
 ```
+
+### 2.1 Chain order and effective-provider visibility (RENG-55)
+
+The cards are the *configuration*; the runtime order they are tried in is the
+**authoritative chain** — the persisted primary first, then the remaining
+providers in their stored order (`ordered_llm_configs` in `src/llm/mod.rs`).
+The page must therefore make three things visible, all of them derived from
+existing payloads (no new data source):
+
+- **Primary** — `primaryBadge` on the card whose provider is
+  `llm.primaryProvider` (config echo, as before).
+- **Chain rank** — a quiet `Chain #N` / `链序 #N` tag per card from
+  `chainPosition` of `GET /llm/providers` (1-based; the head is 1). `position`
+  in the same payload stays the stored index, which is what the card order
+  encodes. The grid keeps the stored order — the marker, not a re-sort,
+  expresses the chain.
+- **What actually ran** — the Recent Usage card lists the newest reviews'
+  `reviews.llm_summary` `provider/model` pairs (via the existing
+  `GET /api/v1/reviews` list endpoint, 8 rows). A row whose usages contain
+  none of the chain head's provider is tagged `未使用首选` / Primary not used,
+  which is how a fallback that skipped the primary becomes visible instead of
+  looking like a normal run.
+
+Per-request counts, latency and sparkline stay out of scope (RENG-56/57) — the
+card metrics remain render-only placeholders.
 
 ## 3. Component Breakdown
 

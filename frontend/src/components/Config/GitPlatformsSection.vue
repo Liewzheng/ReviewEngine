@@ -25,13 +25,13 @@
         </el-button>
       </el-empty>
       <div v-else class="platforms-list">
-        <div v-for="(platform, index) in platforms" :key="platform.name" class="platform-item">
+        <div v-for="row in rows" :key="row.platform.name" class="platform-item">
           <div class="platform-item-header">
             <div class="platform-item-info">
-              <el-tag size="small">{{ platform.type }}</el-tag>
-              <span class="platform-item-name">{{ platform.name }}</span>
-              <span class="platform-item-base">{{ platform.baseUrl }}</span>
-              <span v-if="platform.token" class="platform-item-token is-set">••••••••</span>
+              <el-tag size="small">{{ row.platform.type }}</el-tag>
+              <span class="platform-item-name">{{ row.platform.name }}</span>
+              <span class="platform-item-base">{{ row.platform.baseUrl }}</span>
+              <span v-if="row.platform.token" class="platform-item-token is-set">••••••••</span>
               <span v-else class="platform-item-token">{{ $t('config.notSet') }}</span>
             </div>
             <div class="platform-item-actions">
@@ -40,19 +40,30 @@
               <el-button
                 size="small"
                 text
-                :loading="testingIndex === index"
-                @click="testPlatform(index)"
+                :loading="testingIndex === row.index"
+                @click="testPlatform(row.index)"
               >
                 {{ $t('config.gitPlatforms.test') }}
               </el-button>
-              <el-button size="small" text @click="openEditDialog(index)">
+              <el-button size="small" text @click="openEditDialog(row.index)">
                 {{ $t('common.edit') }}
               </el-button>
-              <el-button size="small" text type="danger" @click="confirmRemove(index)">
+              <el-button size="small" text type="danger" @click="confirmRemove(row.index)">
                 <el-icon><Delete /></el-icon>
               </el-button>
             </div>
           </div>
+          <!-- Last probe result (RENG-54): session state, so the page's 10s
+               poll — which replaces the whole `gitPlatforms` array — cannot
+               wipe the outcome the user just asked for. -->
+          <TestResultLine
+            v-if="row.test"
+            class="platform-item-test"
+            :type="row.test.type"
+            :text="row.test.text"
+            :at="row.test.at"
+            @dismiss="testResults.clear(row.platform.name)"
+          />
         </div>
       </div>
     </div>
@@ -208,7 +219,9 @@ import {
   type FormRules,
 } from 'element-plus';
 import type { GitPlatformConfig } from '../../types/config';
-import { testGitPlatform } from '../../services/config';
+import { testGitPlatform, type GitPlatformTestResult } from '../../services/config';
+import { useTransientResult } from '../../composables/useTransientResult';
+import TestResultLine from '../common/TestResultLine.vue';
 
 const props = defineProps<{
   /** Configured git platform entries (secrets masked as returned by GET /config). */
@@ -295,6 +308,41 @@ HelpTip.props = ['tip'];
 // --- Test state ---
 /** Row whose connectivity probe is in flight (null when idle). */
 const testingIndex = ref<number | null>(null);
+/**
+ * Last probe result per platform name (RENG-54). Session state held OUTSIDE
+ * the config model: the page polls `GET /config` every 10s and `applyConfig`
+ * replaces `gitPlatforms` wholesale, so a result stored on the row would be
+ * gone on the next tick. Written only by `testPlatform`; cleared by the row's
+ * dismiss control, by an edit, by removing the platform, or by leaving the page.
+ */
+const testResults = useTransientResult<GitPlatformTestResult>();
+
+/**
+ * Rows for the list: the platform plus the outcome of its last probe, so the
+ * template binds one object per row instead of re-deriving the result.
+ */
+const rows = computed(() =>
+  props.platforms.map((platform, index) => ({
+    platform,
+    index,
+    test: platformTestLine(platform.name),
+  }))
+);
+
+/** Presentation for a row's recorded probe (null when it was never tested). */
+function platformTestLine(name: string) {
+  const recorded = testResults.get(name);
+  if (!recorded) return null;
+  return {
+    type: recorded.value.ok ? ('success' as const) : ('danger' as const),
+    text: recorded.value.ok
+      ? t('config.gitPlatforms.testOk', { version: recorded.value.version ?? '?' })
+      : t('config.gitPlatforms.testFailed', {
+          error: recorded.value.error ?? t('errors.unknown'),
+        }),
+    at: recorded.at,
+  };
+}
 
 function blankDraft(): GitPlatformDraft {
   return {
@@ -413,6 +461,10 @@ async function confirmDialog() {
       if (!entry.webhookSecret) entry.webhookSecret = original.webhookSecret;
       if (!entry.webhookSigningSecret) entry.webhookSigningSecret = original.webhookSigningSecret;
       emit('edit', editingIndex.value, entry);
+      // The configuration that was probed just changed, so the recorded
+      // result no longer describes this platform (RENG-54).
+      testResults.clear(original.name);
+      testResults.clear(entry.name);
     } else {
       emit('add', entry);
     }
@@ -427,12 +479,17 @@ async function confirmDialog() {
  * (`***`) or blank token falls back server-side to the stored token of the
  * platform with the matching baseUrl. The endpoint always answers HTTP 200,
  * so probe failures arrive in the body; only network/HTTP errors hit catch.
+ *
+ * The outcome — either path — is recorded against the platform name as
+ * page-session state, next to the toast, so the row keeps showing the result
+ * of the probe instead of losing it on the next 10s poll (RENG-54).
  */
 async function testPlatform(index: number) {
   const platform = props.platforms[index];
   testingIndex.value = index;
   try {
     const result = await testGitPlatform({ baseUrl: platform.baseUrl, token: platform.token });
+    testResults.set(platform.name, result);
     if (result.ok) {
       ElMessage.success(t('config.gitPlatforms.testOk', { version: result.version ?? '?' }));
     } else {
@@ -441,9 +498,9 @@ async function testPlatform(index: number) {
       );
     }
   } catch (e) {
-    ElMessage.error(
-      t('config.gitPlatforms.testFailed', { error: e instanceof Error ? e.message : String(e) })
-    );
+    const message = e instanceof Error ? e.message : String(e);
+    testResults.set(platform.name, { ok: false, error: message });
+    ElMessage.error(t('config.gitPlatforms.testFailed', { error: message }));
   } finally {
     testingIndex.value = null;
   }
@@ -451,8 +508,9 @@ async function testPlatform(index: number) {
 
 /** Ask for confirmation, then stage the row for deletion on save. */
 function confirmRemove(index: number) {
+  const name = props.platforms[index].name;
   ElMessageBox.confirm(
-    t('config.gitPlatforms.removeConfirm', { name: props.platforms[index].name }),
+    t('config.gitPlatforms.removeConfirm', { name }),
     t('config.gitPlatforms.removeTitle'),
     {
       confirmButtonText: t('common.remove'),
@@ -460,7 +518,10 @@ function confirmRemove(index: number) {
       type: 'warning',
     }
   )
-    .then(() => emit('remove', index))
+    .then(() => {
+      testResults.clear(name);
+      emit('remove', index);
+    })
     .catch(() => {
       /* cancelled */
     });
@@ -523,6 +584,11 @@ function confirmRemove(index: number) {
   flex: 1;
   min-width: 0;
   overflow: hidden;
+}
+
+/* RENG-54: the last probe's outcome, one line under the row it belongs to. */
+.platform-item-test {
+  padding: 0 16px 12px;
 }
 
 .platform-item-name {

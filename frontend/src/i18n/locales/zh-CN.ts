@@ -27,7 +27,9 @@ export default {
     cancel: '取消',
     close: '关闭',
     save: '保存',
-    refresh: '刷新',
+    lastUpdated: '更新于 {time}',
+    updateFailed: '更新失败',
+    updateFailedAt: '更新失败 · {time}',
     reset: '重置',
     retry: '重试',
     remove: '移除',
@@ -104,8 +106,6 @@ export default {
   dashboard: {
     title: '仪表盘',
     subtitle: '系统概览与近期活动',
-    updatedAt: '更新于 {time}',
-    refreshAria: '刷新仪表盘',
     kpis: {
       reviewsThisWeek: '本周评审',
       activeQueue: '活跃队列',
@@ -124,7 +124,6 @@ export default {
     },
     health: {
       title: '系统健康',
-      refreshAria: '刷新健康数据',
       integrations: '集成状态',
       llmProviders: 'LLM 提供商',
       allOperational: '所有系统运行正常',
@@ -142,8 +141,6 @@ export default {
       hoursAgo: '{n} 小时前',
       daysAgo: '{n} 天前',
     },
-    refreshed: '仪表盘已刷新',
-    refreshFailed: '刷新仪表盘失败',
   },
   history: {
     title: '评审历史',
@@ -318,8 +315,6 @@ export default {
       failed: '保存失败 — 已保留更改，将在下次修改时重试',
     },
     saveFailed: '保存配置失败',
-    refreshedTitle: '已刷新',
-    refreshed: '配置已刷新',
     notSet: '（未设置）',
     llmNotConfiguredBanner:
       '尚未配置可用的 LLM — 审核需要 LLM 才能运行。请在下方「LLM 设置」填写 API 基础 URL 与密钥，或在「其他 LLM 提供商」中添加。',

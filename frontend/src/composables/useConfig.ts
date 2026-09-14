@@ -28,8 +28,11 @@ export function useConfig() {
    *   untouched (so the view keeps rendering the form instead of swapping in
    *   the skeleton) and a failed request keeps the last good config instead
    *   of swapping the page into its error state.
+   * @returns True when the server answered — the silent path swallows the
+   *   error (it writes neither `error` nor `config`), so callers that need to
+   *   report a failed background poll branch on the return value (RENG-52).
    */
-  async function fetch(silent: boolean = false) {
+  async function fetch(silent: boolean = false): Promise<boolean> {
     if (!silent) {
       loading.value = true;
       error.value = null;
@@ -40,11 +43,13 @@ export function useConfig() {
       if (silent) {
         error.value = null;
       }
+      return true;
     } catch (e) {
       if (!silent) {
         error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
         config.value = null;
       }
+      return false;
     } finally {
       if (!silent) {
         loading.value = false;

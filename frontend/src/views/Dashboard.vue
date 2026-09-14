@@ -10,7 +10,6 @@ import {
   FirstAidKit,
   InfoFilled,
   ArrowRight,
-  RefreshRight,
 } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
@@ -33,16 +32,19 @@ import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
 import PageHeader from '../components/common/PageHeader.vue'
+import LastUpdated from '../components/common/LastUpdated.vue'
 import type { KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
 
 const router = useRouter()
 const { t } = useI18n()
 const dashboard = useDashboard()
 
-// Loading & refresh state
+// Loading & refresh state. `lastUpdated` / `pollFailed` come from the
+// composable so the header marker advances on every successful 60s poll tick,
+// not only on the initial load (RENG-52).
 const loading = dashboard.loading
-const isRefreshing = ref(false)
-const lastUpdated = ref<string | null>(null)
+const lastUpdated = dashboard.lastUpdated
+const pollFailed = dashboard.pollFailed
 
 // Data refs (computed from composable)
 const kpis = computed<KpiData | null>(() => dashboard.data.value?.kpis ?? null)
@@ -93,36 +95,6 @@ watch(() => dashboard.error.value, (err) => {
     })
   }
 })
-
-// ─── Data Fetching ──────────────────────────────────
-
-async function refreshData() {
-  await dashboard.refresh()
-  lastUpdated.value = new Date().toISOString()
-}
-
-async function onRefresh() {
-  if (isRefreshing.value) return
-  isRefreshing.value = true
-  try {
-    await refreshData()
-    ElNotification({
-      title: t('common.success'),
-      message: t('dashboard.refreshed'),
-      type: 'success',
-      duration: 2000,
-    })
-  } catch (e) {
-    ElNotification({
-      title: t('common.error'),
-      message: t('dashboard.refreshFailed'),
-      type: 'error',
-      duration: 5000,
-    })
-  } finally {
-    isRefreshing.value = false
-  }
-}
 
 // ─── Formatters ─────────────────────────────────────
 
@@ -413,12 +385,12 @@ function onRowClick(row: RecentReview) {
 
 // ─── Lifecycle ──────────────────────────────────────
 // The single 60s background poll lives in `useDashboard` (silent — it never
-// flips `loading`, so no per-minute skeleton flash). The page only drives
-// the initial load and the manual Refresh button through `refreshData`, and
-// owns the chart lifecycle.
+// flips `loading`, so no per-minute skeleton flash) and feeds `lastUpdated` /
+// `pollFailed` for the header marker. The page only drives the initial load
+// through `dashboard.refresh`, and owns the chart lifecycle.
 
 onMounted(() => {
-  refreshData()
+  dashboard.refresh()
 })
 
 onUnmounted(() => {
@@ -437,18 +409,7 @@ onUnmounted(() => {
     <!-- Page Header -->
     <PageHeader :title="$t('dashboard.title')" :subtitle="$t('dashboard.subtitle')">
       <template #actions>
-        <span v-if="lastUpdated" class="last-updated">
-          {{ $t('dashboard.updatedAt', { time: formatTime(lastUpdated) }) }}
-        </span>
-        <el-button
-          :icon="Refresh"
-          :loading="isRefreshing"
-          size="small"
-          :aria-label="$t('dashboard.refreshAria')"
-          @click="onRefresh"
-        >
-          {{ $t('common.refresh') }}
-        </el-button>
+        <LastUpdated :updated-at="lastUpdated" :failed="pollFailed" />
       </template>
     </PageHeader>
 
@@ -553,13 +514,6 @@ onUnmounted(() => {
               <el-icon :size="18"><FirstAidKit /></el-icon>
               <span>{{ $t('dashboard.health.title') }}</span>
             </div>
-            <el-button
-              :icon="RefreshRight"
-              size="small"
-              text
-              :aria-label="$t('dashboard.health.refreshAria')"
-              @click="onRefresh"
-            />
           </div>
         </template>
         <div class="health-body">
@@ -705,12 +659,6 @@ onUnmounted(() => {
 .dashboard-page {
   max-width: 1400px;
   margin: 0 auto;
-}
-
-.last-updated {
-  font-size: 12px;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
 }
 
 /* KPI Cards */

@@ -37,7 +37,9 @@ export default {
     cancel: 'Cancel',
     close: 'Close',
     save: 'Save',
-    refresh: 'Refresh',
+    lastUpdated: 'Updated {time}',
+    updateFailed: 'Update failed',
+    updateFailedAt: 'Update failed · {time}',
     reset: 'Reset',
     retry: 'Retry',
     remove: 'Remove',
@@ -116,8 +118,6 @@ export default {
   dashboard: {
     title: 'Dashboard',
     subtitle: 'System overview and recent activity',
-    updatedAt: 'Updated {time}',
-    refreshAria: 'Refresh dashboard',
     kpis: {
       reviewsThisWeek: 'Reviews This Week',
       activeQueue: 'Active Queue',
@@ -136,7 +136,6 @@ export default {
     },
     health: {
       title: 'System Health',
-      refreshAria: 'Refresh health data',
       integrations: 'Integration Status',
       llmProviders: 'LLM Providers',
       allOperational: 'All Systems Operational',
@@ -154,8 +153,6 @@ export default {
       hoursAgo: '{n}h ago',
       daysAgo: '{n}d ago',
     },
-    refreshed: 'Dashboard refreshed',
-    refreshFailed: 'Failed to refresh dashboard',
   },
   history: {
     title: 'Review History',
@@ -333,8 +330,6 @@ export default {
       failed: 'Save failed — changes kept, retrying on next edit',
     },
     saveFailed: 'Failed to save configuration',
-    refreshedTitle: 'Refreshed',
-    refreshed: 'Configuration refreshed',
     notSet: '(not set)',
     llmNotConfiguredBanner:
       'No usable LLM configured yet — reviews need an LLM to run. Fill in the API Base URL and key under "LLM Settings" below, or add one under "Additional LLM Providers".',

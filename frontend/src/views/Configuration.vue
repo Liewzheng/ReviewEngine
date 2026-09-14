@@ -14,10 +14,9 @@
         <span v-if="saveStatus !== 'idle'" class="save-status" :data-status="saveStatus">
           {{ saveStatusText }}
         </span>
-        <el-button @click="refreshConfig">
-          <el-icon><Refresh /></el-icon>
-          <span>{{ $t('common.refresh') }}</span>
-        </el-button>
+        <!-- Liveness marker for the 10s poll (RENG-52): the only signal left
+             now that the manual Refresh button is gone. -->
+        <LastUpdated :updated-at="lastUpdated" :failed="pollFailed" />
       </div>
     </div>
 
@@ -234,7 +233,6 @@ import {
   ArrowUp,
   Collection,
   Plus,
-  Refresh,
   Tools,
 } from '@element-plus/icons-vue'
 import { ElNotification } from 'element-plus'
@@ -246,6 +244,7 @@ import { getSystemHealth } from '../services/health'
 import type { GitPlatformConfig } from '../types/config'
 import type { StorageBackendKind } from '../types/dashboard'
 import GitPlatformsSection from '../components/Config/GitPlatformsSection.vue'
+import LastUpdated from '../components/common/LastUpdated.vue'
 
 // --- Composables ---
 const { t } = useI18n()
@@ -263,13 +262,32 @@ const {
   discardPatternInput,
   removePattern,
   loadConfig,
-  refreshConfig,
 } = useConfigForm(cfg)
 
 // --- State ---
 const loading = cfg.loading
 const loadError = computed(() => !!cfg.error.value)
 const showAdvanced = ref(false)
+
+/* Liveness marker for the header (RENG-52): the timestamp advances on every
+ * successful poll tick, and `pollFailed` carries a failed tick — the silent
+ * poll writes neither `loading` nor `error`, so this is the page's only
+ * failure affordance now that the manual Refresh button is gone. */
+const lastUpdated = ref<string | null>(null)
+const pollFailed = ref(false)
+
+/**
+ * Fetch the config and record the outcome for the header marker.
+ * @param silent - Passed through to `loadConfig` (true for poll ticks).
+ */
+async function loadConfigTracked(silent: boolean) {
+  if (await loadConfig(silent)) {
+    lastUpdated.value = new Date().toISOString()
+    pollFailed.value = false
+  } else {
+    pollFailed.value = true
+  }
+}
 
 /* Header auto-save indicator text. The el-form `:rules` still render inline
  * validation (e.g. requiredExperts) as the user edits. */
@@ -343,17 +361,16 @@ function handleResize() {
  * `cfg.loading`, so the form's `v-if` gate keeps the whole subtree mounted
  * and open dialogs / input focus survive every poll (a non-silent fetch would
  * swap the skeleton in and unmount them). A failed poll keeps the last good
- * config and never swaps the page into the `el-empty` error state — only the
- * initial load and the manual Refresh button do a visible, error-surfacing
- * fetch. `loadConfig` also refuses to write fetched state over the form while
- * local edits are dirty or an auto-save is in flight, so polling can't clobber
- * in-progress edits. */
-const configAutoRefresh = useAutoRefresh(() => loadConfig(true), 10_000)
+ * config and never swaps the page into the `el-empty` error state — it shows
+ * up only in the header marker (`loadConfigTracked`). `loadConfig` also
+ * refuses to write fetched state over the form while local edits are dirty or
+ * an auto-save is in flight, so polling can't clobber in-progress edits. */
+const configAutoRefresh = useAutoRefresh(() => loadConfigTracked(true), 10_000)
 
 // --- Lifecycle ---
 onMounted(() => {
   window.addEventListener('resize', handleResize)
-  loadConfig()
+  loadConfigTracked(false)
   loadStorageBackend()
   configAutoRefresh.start()
 })
@@ -426,12 +443,6 @@ onUnmounted(() => {
   display: flex;
   gap: 10px;
   align-items: center;
-}
-
-.header-actions .el-button {
-  display: flex;
-  align-items: center;
-  gap: 6px;
 }
 
 /* Skeleton */
@@ -584,7 +595,10 @@ onUnmounted(() => {
 
 /* Responsive */
 @media (max-width: 767px) {
-  .header-actions {
+  /* The transient save-status is dropped on narrow screens; the
+     last-updated marker stays visible — it is the page's only liveness
+     signal now that the manual Refresh button is gone (RENG-52). */
+  .save-status {
     display: none;
   }
 
@@ -612,10 +626,6 @@ onUnmounted(() => {
   .config-page {
     max-width: 100%;
   }
-}
-
-.header-actions .el-button {
-  transition: all 0.15s ease;
 }
 
 /* Custom scrollbar for cards */

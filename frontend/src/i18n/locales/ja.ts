@@ -27,7 +27,9 @@ export default {
     cancel: 'キャンセル',
     close: '閉じる',
     save: '保存',
-    refresh: '再読み込み',
+    lastUpdated: '更新日時：{time}',
+    updateFailed: '更新に失敗しました',
+    updateFailedAt: '更新に失敗しました · {time}',
     reset: 'リセット',
     retry: '再試行',
     remove: '削除',
@@ -107,8 +109,6 @@ export default {
   dashboard: {
     title: 'ダッシュボード',
     subtitle: 'システム概要と最近のアクティビティ',
-    updatedAt: '更新日時：{time}',
-    refreshAria: 'ダッシュボードを再読み込み',
     kpis: {
       reviewsThisWeek: '今週のレビュー',
       activeQueue: 'アクティブキュー',
@@ -127,7 +127,6 @@ export default {
     },
     health: {
       title: 'システム状態',
-      refreshAria: '状態データを再読み込み',
       integrations: '統合ステータス',
       llmProviders: 'LLM プロバイダー',
       allOperational: '全システム稼働中',
@@ -145,8 +144,6 @@ export default {
       hoursAgo: '{n} 時間前',
       daysAgo: '{n} 日前',
     },
-    refreshed: 'ダッシュボードを再読み込みしました',
-    refreshFailed: 'ダッシュボードの再読み込みに失敗しました',
   },
   history: {
     title: 'レビュー履歴',
@@ -323,8 +320,6 @@ export default {
       failed: '保存に失敗しました — 変更は保持され、次の編集時に再試行されます',
     },
     saveFailed: '設定の保存に失敗しました',
-    refreshedTitle: '再読み込みしました',
-    refreshed: '設定を再読み込みしました',
     notSet: '（未設定）',
     llmNotConfiguredBanner:
       '利用可能な LLM がまだ設定されていません — レビューの実行には LLM が必要です。下の「LLM 設定」で API ベース URL とキーを入力するか、「追加の LLM プロバイダー」で追加してください。',

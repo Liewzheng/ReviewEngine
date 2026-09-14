@@ -14,6 +14,30 @@ pub struct LLMClient {
     provider_registry: Option<Arc<ProviderRegistry>>,
 }
 
+/// What the retry loop should do with a failed completion (RENG-35).
+///
+/// The provider layer is `anyhow`-based, so there is no typed status to match
+/// on — threading a new error type through `LLMProvider` (and every provider
+/// implementation) would be a far larger change than the behaviour it buys.
+/// The status therefore gets parsed out of the message the provider client
+/// writes, by rule, instead of being inferred from arbitrary substrings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryVerdict {
+    /// A status that can plausibly answer differently on a later attempt:
+    /// 408 (request timeout) and 429 (rate limit) of the 4xx class, plus every
+    /// 5xx.
+    Retryable { status: u16 },
+    /// A 4xx outside that set. The provider rejected this request itself —
+    /// bad or revoked credentials (401/403), unknown model (404), malformed
+    /// body (400) — and re-sending the identical request cannot change that.
+    Permanent { status: u16 },
+    /// No HTTP status anywhere in the error: the request never produced a
+    /// response (transport/DNS/TLS failure, timeout) or the response could not
+    /// be read. Retried — the class the pre-RENG-35 substring list was reaching
+    /// for with `"timeout"` / `"connection"`.
+    Unknown,
+}
+
 impl LLMClient {
     /// Create a new `LLMClient` with a default reqwest HTTP client (120s timeout).
     ///
@@ -83,6 +107,52 @@ impl LLMClient {
         let base_ms = 1000u64 * 2u64.pow(attempt);
         let jitter_ms = (attempt as u64 * 137) % 500; // pseudo-random jitter
         std::time::Duration::from_millis(base_ms.min(30_000) + jitter_ms.min(1000))
+    }
+
+    /// Classify a provider error to decide whether the request is worth
+    /// re-sending (RENG-35).
+    ///
+    /// The rule is the HTTP status, never free text: 408 / 429 / 5xx retry,
+    /// every other 4xx is permanent, and an error carrying no status at all —
+    /// the transport/DNS/TLS/serialization class — stays retryable, so the
+    /// pre-RENG-35 behaviour for those paths is unchanged. An unparsable error
+    /// is [`RetryVerdict::Unknown`], i.e. retried: a retry costs one attempt
+    /// while a wrongly-permanent verdict would silently give up on a provider
+    /// that was only briefly unreachable.
+    fn retry_verdict(err: &anyhow::Error) -> RetryVerdict {
+        match Self::http_status_code(err) {
+            Some(status) if status == 408 || status == 429 || (500..600).contains(&status) => {
+                RetryVerdict::Retryable { status }
+            }
+            Some(status) if (400..500).contains(&status) => RetryVerdict::Permanent { status },
+            // Anything outside 4xx/5xx is not a verdict about this request.
+            Some(_) | None => RetryVerdict::Unknown,
+        }
+    }
+
+    /// The HTTP status a provider error carries, if there is one.
+    ///
+    /// Every HTTP-failure message in this crate's LLM stack has the shape
+    /// `"<Provider> API returned <status> <reason>: <body>"`
+    /// (`complete_direct`, `OpenAIProvider`, `AnthropicProvider`), where
+    /// `<status>` is a `reqwest::StatusCode` rendered as `401 Unauthorized`.
+    /// The status is read from the first `" returned "` marker of the *first*
+    /// message in the chain that has one, which is what keeps a status-looking
+    /// number inside a response body from being mistaken for the real verdict.
+    /// [`anyhow::Error::chain`] is walked so the status survives the
+    /// `.context(...)` wrappers the provider layer adds.
+    fn http_status_code(err: &anyhow::Error) -> Option<u16> {
+        const MARKER: &str = " returned ";
+        err.chain().find_map(|cause| {
+            let message = cause.to_string();
+            let start = message.find(MARKER)? + MARKER.len();
+            let digits: String = message[start..].chars().take_while(char::is_ascii_digit).collect();
+            if digits.len() == 3 {
+                digits.parse().ok()
+            } else {
+                None
+            }
+        })
     }
 
     /// Attribute a successful completion to the hitting config's `provider`
@@ -233,8 +303,19 @@ impl LLMClient {
 
     /// Complete with fallback across multiple configs.
     ///
-    /// For each provider, retries up to 3 times with exponential backoff + jitter on
-    /// rate-limit (429) and server-error (5xx) responses. Other 4xx errors fail fast.
+    /// For each provider, retries up to 3 times with exponential backoff + jitter
+    /// when the failure is plausibly transient: a 408 / 429 / 5xx status, or an
+    /// error that carries no status at all (transport/DNS/TLS/timeout) — see
+    /// [`Self::retry_verdict`]. Any other 4xx is permanent: the request is
+    /// returned after a single attempt, with no further attempt and no backoff
+    /// sleep, and the provider's status and reason are preserved verbatim so a
+    /// credential problem reads as one.
+    ///
+    /// A permanent verdict is a verdict about *that config*, not about the
+    /// chain: the walk continues to the next entry, because the next entry is a
+    /// different provider with its own credentials — the very case the chain
+    /// exists for (the RENG-55 fallback logging covers it unchanged). The total
+    /// cost stays bounded by one attempt per config.
     pub async fn complete_with_fallback(
         &self,
         configs: &[LLMConfig],
@@ -293,15 +374,8 @@ impl LLMClient {
                         return Ok(Self::attribute_provider(r, config, fallback));
                     }
                     Err(e) => {
-                        let err_str = e.to_string();
-                        let is_retriable = err_str.contains("429")
-                            || err_str.contains("500")
-                            || err_str.contains("502")
-                            || err_str.contains("503")
-                            || err_str.contains("504")
-                            || err_str.contains("timeout")
-                            || err_str.contains("connection")
-                            || err_str.contains("spurious network");
+                        let verdict = Self::retry_verdict(&e);
+                        let is_retriable = matches!(verdict, RetryVerdict::Retryable { .. } | RetryVerdict::Unknown);
 
                         if is_retriable && attempt + 1 < max_retries {
                             let delay = Self::retry_delay(attempt);
@@ -317,6 +391,23 @@ impl LLMClient {
                             tokio::time::sleep(delay).await;
                             last_error = e;
                             continue;
+                        }
+
+                        // RENG-35: a permanent verdict gives up right here — no
+                        // second attempt and no backoff sleep — and names the
+                        // status so the log reads as "this is the credential /
+                        // request, not a flaky provider".
+                        if let RetryVerdict::Permanent { status } = verdict {
+                            tracing::warn!(
+                                provider = %config.provider,
+                                model = %config.model,
+                                status,
+                                attempt = attempt + 1,
+                                max_retries = max_retries,
+                                took = ?attempt_dur,
+                                error = %e,
+                                "LLM request failed permanently ({status}), not retrying"
+                            );
                         }
 
                         // RENG-55: structured INFO — the user-visible symptom was

@@ -1,4 +1,6 @@
 use super::*;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
 fn test_llm_client_new() {
@@ -261,7 +263,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct MockProvider {
     name: String,
-    call_count: AtomicUsize,
+    call_count: Arc<AtomicUsize>,
     fail_until: usize,
     error_msg: String,
 }
@@ -270,10 +272,17 @@ impl MockProvider {
     fn new(name: &str, fail_until: usize, error_msg: &str) -> Self {
         Self {
             name: name.to_string(),
-            call_count: AtomicUsize::new(0),
+            call_count: Arc::new(AtomicUsize::new(0)),
             fail_until,
             error_msg: error_msg.to_string(),
         }
+    }
+
+    /// Shared handle on the call counter. `Arc` so it outlives the provider
+    /// being boxed into a registry, letting a test assert the exact number of
+    /// attempts the retry loop made.
+    fn calls(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.call_count)
     }
 }
 
@@ -372,8 +381,14 @@ async fn test_complete_with_fallback_exhausts_all_retries() {
 async fn test_complete_with_fallback_fails_fast_on_non_retriable_error() {
     let client = LLMClient::new();
     let mut registry = ProviderRegistry::new();
-    // Fail with a 400 error (not retriable)
-    registry.register(Box::new(MockProvider::new("mock", 999, "400 Bad Request")));
+    // Fail with the message the provider layer actually writes on a 400.
+    let provider = MockProvider::new(
+        "mock",
+        999,
+        "OpenAI API returned 400 Bad Request: {\"error\":\"invalid model\"}",
+    );
+    let calls = provider.calls();
+    registry.register(Box::new(provider));
     let client = client.with_registry(Arc::new(registry));
 
     let configs = vec![LLMConfig {
@@ -390,6 +405,7 @@ async fn test_complete_with_fallback_fails_fast_on_non_retriable_error() {
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(err.contains("all LLM providers failed"));
+    assert_eq!(calls.load(Ordering::SeqCst), 1, "a 400 must not be retried");
 }
 
 #[tokio::test]
@@ -475,7 +491,11 @@ async fn test_fallback_result_is_flagged_and_uses_the_later_config() {
     let mut registry = ProviderRegistry::new();
     // Non-retriable failures (400) so the chain advances immediately without
     // backoff sleeps.
-    registry.register(Box::new(MockProvider::new("primary", 999, "400 Bad Request")));
+    registry.register(Box::new(MockProvider::new(
+        "primary",
+        999,
+        "OpenAI API returned 400 Bad Request: {\"error\":\"invalid model\"}",
+    )));
     registry.register(Box::new(MockProvider::new("secondary", 0, "unused")));
     let client = client.with_registry(Arc::new(registry));
 
@@ -506,4 +526,365 @@ async fn test_fallback_result_is_flagged_and_uses_the_later_config() {
         .unwrap();
     assert_eq!(hit.provider, "secondary");
     assert!(!hit.fallback, "a chain-head hit is not a fallback");
+}
+
+// ─── RENG-35: the retry decision comes from the HTTP status ──────────
+//
+// Before RENG-35 the loop searched the error text for "429"/"500"/"timeout"/
+// "connection", which is wrong in both directions: a 401 whose body mentions
+// "connection" or a 500-looking number burned the whole attempt budget plus
+// its backoff sleeps, while a real status that the text happened to spell
+// differently slipped through. The classification is now `retry_verdict`.
+
+/// The verdict table: 408 / 429 / 5xx are retryable, every other 4xx is
+/// permanent, and an error that carries no status at all keeps the historical
+/// retry.
+#[test]
+fn test_retry_verdict_by_http_status() {
+    /// Build a provider-shaped error without format-string interpretation
+    /// (response bodies carry literal braces).
+    fn verdict(message: &str) -> RetryVerdict {
+        LLMClient::retry_verdict(&anyhow::Error::msg(message.to_string()))
+    }
+
+    for status in [408u16, 429, 500, 502, 503, 504] {
+        assert_eq!(
+            verdict(&format!("OpenAI API returned {status} Whatever: {{}}")),
+            RetryVerdict::Retryable { status },
+            "HTTP {status} is transient and must be retried"
+        );
+    }
+
+    for status in [400u16, 401, 403, 404, 422] {
+        assert_eq!(
+            verdict(&format!("Anthropic API returned {status} Rejected: {{}}")),
+            RetryVerdict::Permanent { status },
+            "HTTP {status} is the provider rejecting the request and must fail fast"
+        );
+    }
+
+    // A transport error never reaches the status check: no response was read.
+    assert_eq!(
+        verdict(
+            "Failed to send OpenAI request: error sending request for url \
+             (http://127.0.0.1:1/v1/chat/completions): connection refused"
+        ),
+        RetryVerdict::Unknown,
+        "a connection failure carries no status and stays retryable"
+    );
+    assert_eq!(
+        verdict("Failed to parse OpenAI response: expected value at line 1 column 1"),
+        RetryVerdict::Unknown,
+        "an unparsable error must not be mistaken for a permanent verdict"
+    );
+}
+
+/// The status is read through the `.context(...)` wrappers the provider layer
+/// adds (and through `anyhow`'s `all LLM providers failed` tail).
+#[test]
+fn test_retry_verdict_reads_the_status_through_context_wrappers() {
+    let inner = anyhow::Error::msg("Anthropic API returned 403 Forbidden: {\"error\":\"revoked\"}");
+    let wrapped = inner
+        .context("Failed to send Anthropic request")
+        .context("all LLM providers failed");
+    assert_eq!(
+        LLMClient::retry_verdict(&wrapped),
+        RetryVerdict::Permanent { status: 403 }
+    );
+}
+
+/// The false-positive class RENG-35 exists for: a 401 whose *body* contains the
+/// words the old classifier searched for. It must stay permanent — the status
+/// comes from the first `returned <code>` marker, so body text cannot promote a
+/// credential error into a retry.
+#[test]
+fn test_retry_verdict_is_not_fooled_by_status_like_text() {
+    let err = anyhow::Error::msg(
+        "LLM API returned 401 Unauthorized: {\"error\":{\"message\":\"Invalid API key; upstream \
+         connection closed before message completed, please retry after 500 ms\"}}",
+    );
+    assert_eq!(LLMClient::retry_verdict(&err), RetryVerdict::Permanent { status: 401 });
+}
+
+/// Mount a `/chat/completions` POST answering `status` for every call, and
+/// record how many requests the client is expected to make.
+async fn mount_chat_completions(server: &MockServer, status: u16, body: &str, expected: u64) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(status).set_body_string(body.to_string()))
+        .expect(expected)
+        .mount(server)
+        .await;
+}
+
+/// A config pointing at a wiremock server. No provider registry is installed,
+/// so the client exercises its real HTTP path (`complete_direct`) and the
+/// status is classified from the error that path actually produces.
+fn real_config(base: &str) -> LLMConfig {
+    LLMConfig {
+        provider: "openai".to_string(),
+        model: "gpt-4".to_string(),
+        api_key: "sk-wrong-key".to_string(),
+        api_base: base.to_string(),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: None,
+    }
+}
+
+/// A config for a registry-installed mock provider of the given name.
+fn mock_config(provider: &str) -> LLMConfig {
+    LLMConfig {
+        provider: provider.to_string(),
+        model: format!("{provider}-model"),
+        api_key: "test".to_string(),
+        api_base: format!("https://api.{provider}.com/v1"),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: None,
+    }
+}
+
+async fn requests_seen(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .expect("request recording enabled")
+        .len()
+}
+
+/// RENG-35, the reported symptom: a wrong `api_key` answers 401, and the call
+/// must spend exactly one attempt on it — no second request, no backoff sleep —
+/// while the status and the provider's reason survive to the caller.
+#[tokio::test]
+async fn test_real_http_401_fails_fast_with_one_attempt() {
+    let server = MockServer::start().await;
+    mount_chat_completions(
+        &server,
+        401,
+        r#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}"#,
+        1,
+    )
+    .await;
+
+    let client = LLMClient::new();
+    let started = tokio::time::Instant::now();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a 401 must not be reported as success");
+    let elapsed = started.elapsed();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("401"), "the status must reach the caller: {message}");
+    assert!(
+        message.contains("Incorrect API key provided"),
+        "the provider's reason must reach the caller: {message}"
+    );
+    assert_eq!(requests_seen(&server).await, 1, "a 401 must be attempted once");
+    assert!(
+        elapsed < std::time::Duration::from_millis(900),
+        "no backoff sleep may run for a permanent error (the first one is 1000ms); took {elapsed:?}"
+    );
+    server.verify().await;
+}
+
+/// A revoked / insufficient-permission key answers 403: also permanent.
+#[tokio::test]
+async fn test_real_http_403_fails_fast_with_one_attempt() {
+    let server = MockServer::start().await;
+    mount_chat_completions(
+        &server,
+        403,
+        r#"{"error":{"message":"The API key does not have access to model gpt-4"}}"#,
+        1,
+    )
+    .await;
+
+    let client = LLMClient::new();
+    let started = tokio::time::Instant::now();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a 403 must not be reported as success");
+    let elapsed = started.elapsed();
+
+    assert!(format!("{err:#}").contains("403"));
+    assert_eq!(requests_seen(&server).await, 1, "a 403 must be attempted once");
+    assert!(
+        elapsed < std::time::Duration::from_millis(900),
+        "no backoff sleep for a 403"
+    );
+    server.verify().await;
+}
+
+/// Regression for the old classifier's false positive, driven through the real
+/// client: this 401 body contains "connection" and a "500"-looking number, the
+/// exact text that made the substring search retry a credential error.
+#[tokio::test]
+async fn test_real_http_401_with_connection_and_500_text_is_not_retried() {
+    let server = MockServer::start().await;
+    mount_chat_completions(
+        &server,
+        401,
+        r#"{"error":{"message":"Invalid API key (connection closed before message completed after 500 ms)","type":"authentication_error"}}"#,
+        1,
+    )
+    .await;
+
+    let client = LLMClient::new();
+    let started = tokio::time::Instant::now();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a 401 must not be reported as success");
+    let elapsed = started.elapsed();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("connection"),
+        "the body text still reaches the caller: {message}"
+    );
+    assert_eq!(
+        requests_seen(&server).await,
+        1,
+        "body text must not turn a 401 into a retry"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_millis(900),
+        "body text must not cause a retry delay"
+    );
+    server.verify().await;
+}
+
+/// 429 is the rate limit: the one 4xx that is worth waiting out, so it spends
+/// the whole budget (3 attempts, backoff 1s + 2s).
+#[tokio::test]
+async fn test_real_http_429_retries_up_to_the_attempt_budget() {
+    let server = MockServer::start().await;
+    mount_chat_completions(
+        &server,
+        429,
+        r#"{"error":{"message":"Rate limit reached for gpt-4"}}"#,
+        3,
+    )
+    .await;
+
+    let client = LLMClient::new();
+    let started = tokio::time::Instant::now();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a rate-limited call with no other config must fail");
+    let elapsed = started.elapsed();
+
+    assert!(format!("{err:#}").contains("429"));
+    assert_eq!(requests_seen(&server).await, 3, "429 must use the attempt budget");
+    assert!(
+        elapsed >= std::time::Duration::from_secs(3),
+        "the retries must be spaced by the backoff (1s + 2s); took {elapsed:?}"
+    );
+    server.verify().await;
+}
+
+/// 5xx is server-side, so it also spends the whole attempt budget. 503 is
+/// exercised over real HTTP; 500 — the same `(500..600)` branch — is pinned
+/// here so both are covered without paying the backoff wait twice.
+#[tokio::test(start_paused = true)]
+async fn test_500_retries_up_to_the_attempt_budget() {
+    let mut registry = ProviderRegistry::new();
+    let provider = MockProvider::new(
+        "mock",
+        999,
+        "OpenAI API returned 500 Internal Server Error: {\"error\":\"internal error\"}",
+    );
+    let calls = provider.calls();
+    registry.register(Box::new(provider));
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+
+    let err = client
+        .complete_with_fallback(&[mock_config("mock")], "system", "user")
+        .await
+        .expect_err("a failing server with no other config must fail");
+
+    assert!(format!("{err:#}").contains("500"));
+    assert_eq!(calls.load(Ordering::SeqCst), 3, "500 must use the attempt budget");
+}
+
+#[tokio::test]
+async fn test_real_http_503_retries_up_to_the_attempt_budget() {
+    let server = MockServer::start().await;
+    mount_chat_completions(
+        &server,
+        503,
+        r#"{"error":{"message":"upstream temporarily unavailable"}}"#,
+        3,
+    )
+    .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a failing server with no other config must fail");
+
+    assert!(format!("{err:#}").contains("503"));
+    assert_eq!(requests_seen(&server).await, 3, "503 must use the attempt budget");
+    server.verify().await;
+}
+
+/// Nothing is listening on port 1, so the request fails without any HTTP
+/// response (`reqwest` connection refused). It carries no status, so it keeps
+/// the historical retry: two backoffs (1s + 2s) run before giving up.
+#[tokio::test(start_paused = true)]
+async fn test_real_transport_failure_without_status_still_retries() {
+    let client = LLMClient::new();
+    let started = tokio::time::Instant::now();
+    let err = client
+        .complete_with_fallback(&[real_config("http://127.0.0.1:1/v1")], "system", "user")
+        .await
+        .expect_err("an unreachable endpoint must fail");
+    let elapsed = started.elapsed();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("all LLM providers failed"),
+        "the transport failure must be reported: {message}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(3),
+        "a status-less failure must still retry 3 times (1s + 2s); took {elapsed:?}"
+    );
+}
+
+/// A permanent verdict is a verdict about THAT config, so the chain still
+/// advances to the next entry (a different provider with its own credentials)
+/// and the hit is flagged as a fallback (RENG-55). The log lines that make the
+/// advance visible are asserted end-to-end in `tests/llm/main.rs`, whose own
+/// process can capture `tracing` output deterministically.
+#[tokio::test(start_paused = true)]
+async fn test_permanent_401_advances_the_chain_without_retrying() {
+    let mut registry = ProviderRegistry::new();
+    let primary = MockProvider::new(
+        "primary",
+        999,
+        "OpenAI API returned 401 Unauthorized: {\"error\":\"Incorrect API key provided\"}",
+    );
+    let primary_calls = primary.calls();
+    registry.register(Box::new(primary));
+    registry.register(Box::new(MockProvider::new("secondary", 0, "unused")));
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+
+    let result = client
+        .complete_with_fallback(&[mock_config("primary"), mock_config("secondary")], "system", "user")
+        .await
+        .expect("the secondary provider must still serve the call");
+
+    assert_eq!(result.provider, "secondary", "the chain must advance");
+    assert!(result.fallback, "a later-chain hit must be flagged");
+    assert_eq!(
+        primary_calls.load(Ordering::SeqCst),
+        1,
+        "the credential error must be attempted exactly once before the chain advances"
+    );
 }

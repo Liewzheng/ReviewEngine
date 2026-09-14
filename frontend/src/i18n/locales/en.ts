@@ -391,6 +391,7 @@ export default {
       add: 'Add Provider',
       empty: 'No LLM providers configured yet',
       primaryBadge: 'Primary',
+      chainPosition: 'Chain #{n}',
       setPrimary: 'Set as Primary',
       primarySet: '"{name}" is now the primary provider',
       addTitle: 'Add Provider',
@@ -503,6 +504,12 @@ export default {
     },
     usage: '{percent}% capacity',
     lastChecked: 'Last checked: {date}',
+    recentUsage: {
+      title: 'Recent Usage',
+      chainHint: 'Chain head: {name}',
+      empty: 'No completed review yet',
+      primaryUnused: 'Primary not used',
+    },
   },
   logs: {
     title: 'System Logs',

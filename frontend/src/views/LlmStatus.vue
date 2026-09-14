@@ -6,6 +6,7 @@ import { RefreshRight, Cpu, CircleCheck, Warning, CircleClose, Remove, Plus } fr
 import { useLlmStatus } from '../composables/useLlmStatus'
 import { useProviderCards } from '../composables/useProviderCards'
 import { useAutoRefresh } from '../composables/useAutoRefresh'
+import { useRecentLlmUsage } from '../composables/useRecentLlmUsage'
 import type { ProviderCardState } from '../composables/llmPayload'
 import { getSystemHealth } from '../services/health'
 import ProviderConfigCard from '../components/Config/ProviderConfigCard.vue'
@@ -81,6 +82,31 @@ const healthByName = computed(() => {
   }
   return map
 })
+
+/* ------------------------------------------------------------------ */
+/*  Recent usage (RENG-55): what the newest reviews actually ran on    */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The chain head per the runtime payload (`GET /llm/providers`), falling back
+ * to the config echo's primary so the marker works even before the health
+ * list arrives. `''` when nothing is configured.
+ */
+const chainHeadName = computed(
+  () => providers.value.find((p) => p.isPrimary)?.name ?? primaryName.value ?? ''
+)
+
+const {
+  entries: recentUsage,
+  loading: recentUsageLoading,
+  load: loadRecentUsage,
+} = useRecentLlmUsage()
+
+/** Local timestamp for a usage row (`—` for an unparsable value). */
+function formatUsageWhen(createdAt: string): string {
+  const d = new Date(createdAt)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString()
+}
 
 // --- Add/Edit dialog ---
 const dialogVisible = ref(false)
@@ -162,22 +188,26 @@ watch(() => cardsError.value, (err) => {
 /*  tick is silent — it never flips `loading` and a failed poll keeps   */
 /*  the last good provider list. The config echo is NOT polled — it     */
 /*  resyncs on mutations, and polling it would fight in-flight dialog   */
-/*  edits.                                                              */
+/*  edits. The recent-usage strip rides the same tick (8 reviews, one   */
+/*  list call) so a review served by a fallback provider shows up       */
+/*  without a manual refresh.                                           */
 /* ------------------------------------------------------------------ */
 
 const llmAutoRefresh = useAutoRefresh(async () => {
   await llm.fetch(true)
   checkLlmConfigured()
+  await loadRecentUsage(chainHeadName.value)
 }, 30_000)
 
 /* ------------------------------------------------------------------ */
 /*  Lifecycle                                                         */
 /* ------------------------------------------------------------------ */
 
-onMounted(() => {
-  llm.fetch()
+onMounted(async () => {
+  await llm.fetch()
   loadProviderCards()
   checkLlmConfigured()
+  await loadRecentUsage(chainHeadName.value)
   llmAutoRefresh.start()
 })
 
@@ -304,6 +334,7 @@ onUnmounted(() => {
         :card="card"
         :primary="card.provider === primaryName"
         :health="healthByName.get(card.provider)"
+        :chain-position="healthByName.get(card.provider)?.chainPosition"
         :testing="isCardTesting(card)"
         :saving="cardsSaving"
         @test="handleCardTest(card)"
@@ -312,6 +343,37 @@ onUnmounted(() => {
         @set-primary="setPrimary(card)"
       />
     </div>
+
+    <!-- Recent usage (RENG-55): the provider/model the newest reviews ran on
+         (`reviews.llm_summary`), so a review served by a fallback provider is
+         visible instead of looking like a normal run. -->
+    <el-card shadow="never" class="recent-usage-card">
+      <div class="recent-usage-header">
+        <span class="recent-usage-title">{{ $t('llm.recentUsage.title') }}</span>
+        <span v-if="chainHeadName" class="recent-usage-hint">
+          {{ $t('llm.recentUsage.chainHint', { name: chainHeadName }) }}
+        </span>
+      </div>
+      <div v-if="recentUsageLoading && recentUsage.length === 0" class="recent-usage-loading">
+        <el-skeleton :rows="2" animated />
+      </div>
+      <el-empty
+        v-else-if="recentUsage.length === 0"
+        :description="$t('llm.recentUsage.empty')"
+        :image-size="60"
+      />
+      <ul v-else class="recent-usage-list">
+        <li v-for="entry in recentUsage" :key="entry.id" class="recent-usage-item">
+          <span class="recent-usage-time">{{ formatUsageWhen(entry.createdAt) }}</span>
+          <span class="recent-usage-models">
+            {{ entry.usages.map((u) => `${u.provider}/${u.model}`).join(' · ') }}
+          </span>
+          <el-tag v-if="entry.primaryUnused" type="warning" effect="plain" size="small">
+            {{ $t('llm.recentUsage.primaryUnused') }}
+          </el-tag>
+        </li>
+      </ul>
+    </el-card>
 
     <ProviderEditDialog
       v-model:visible="dialogVisible"
@@ -424,6 +486,70 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   gap: 16px;
+}
+
+/* Recent usage (RENG-55) — same card chrome as the grid, quieter type. */
+.recent-usage-card {
+  margin-top: 24px;
+  background-color: var(--bg-card);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-card);
+}
+
+.recent-usage-header {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.recent-usage-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.recent-usage-hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.recent-usage-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.recent-usage-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-color);
+  font-size: 13px;
+}
+
+.recent-usage-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+.recent-usage-time {
+  font-size: 12px;
+  color: var(--text-secondary);
+  min-width: 150px;
+}
+
+.recent-usage-models {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--text-primary);
 }
 
 /* Responsive */

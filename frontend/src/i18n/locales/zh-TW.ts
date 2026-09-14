@@ -376,6 +376,7 @@ export default {
       add: '新增供應商',
       empty: '尚未設定任何 LLM 供應商',
       primaryBadge: '主',
+      chainPosition: '鏈序 #{n}',
       setPrimary: '設為主要供應商',
       primarySet: '已將「{name}」設為主要供應商',
       addTitle: '新增供應商',
@@ -487,6 +488,12 @@ export default {
     },
     usage: '容量 {percent}%',
     lastChecked: '上次檢查：{date}',
+    recentUsage: {
+      title: '最近使用',
+      chainHint: '鏈首：{name}',
+      empty: '暫無已完成的評審',
+      primaryUnused: '未使用首選',
+    },
   },
   logs: {
     title: '系統日誌',

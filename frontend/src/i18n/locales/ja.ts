@@ -381,6 +381,7 @@ export default {
       add: 'プロバイダーを追加',
       empty: 'LLM プロバイダーがまだ設定されていません',
       primaryBadge: 'プライマリ',
+      chainPosition: 'チェーン #{n}',
       setPrimary: 'プライマリに設定',
       primarySet: '「{name}」をプライマリプロバイダーに設定しました',
       addTitle: 'プロバイダーを追加',
@@ -493,6 +494,12 @@ export default {
     },
     usage: '容量 {percent}%',
     lastChecked: '最終チェック：{date}',
+    recentUsage: {
+      title: '最近の使用',
+      chainHint: 'チェーン先頭：{name}',
+      empty: '完了したレビューはまだありません',
+      primaryUnused: 'プライマリ未使用',
+    },
   },
   logs: {
     title: 'システムログ',

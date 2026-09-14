@@ -77,10 +77,31 @@ impl GitPlatformConfig {
     /// only fold is an explicitly written port equal to the URL scheme's
     /// default, so `https://gitlab.com` matches `https://gitlab.com:443/...`.
     pub fn matches_url(&self, url: &str) -> bool {
-        match (host_port(&self.base_url), host_port(url)) {
-            (Some(platform), Some(target)) => platform == target,
-            _ => false,
-        }
+        same_instance(&self.base_url, url)
+    }
+
+    /// True when `url` belongs to this instance for REVIEW routing (RENG-33):
+    /// the scheme-less `host[:port]` identity (see [`Self::matches_url`])
+    /// matches `base_url` — the address a payload or a pasted MR URL carries —
+    /// or, when configured, `internal_base_url`, the review-time address a
+    /// rewritten URL carries. Including the internal address keeps a rewritten
+    /// URL identified with its own platform: the discussion-context tap key,
+    /// credential routing and rerun replay all key on this check. Both
+    /// addresses come from this entry's own config, so matching the internal
+    /// one never widens where a configured token can flow.
+    pub fn matches_review_url(&self, url: &str) -> bool {
+        same_instance(&self.base_url, url)
+            || (!self.internal_base_url.is_empty() && same_instance(&self.internal_base_url, url))
+    }
+}
+
+/// Scheme-less `host[:port]` identity of two URLs (see [`host_port`]): equal
+/// hosts (case-insensitively) and equal explicit ports after the
+/// default-port fold. Either side failing to parse is `false`.
+fn same_instance(base_url: &str, url: &str) -> bool {
+    match (host_port(base_url), host_port(url)) {
+        (Some(platform), Some(target)) => platform == target,
+        _ => false,
     }
 }
 
@@ -128,6 +149,24 @@ pub fn find_git_platform_for_url_strict<'a>(
     url: &str,
 ) -> Option<&'a GitPlatformConfig> {
     platforms.iter().find(|p| p.matches_url(url))
+}
+
+/// Find the configured platform serving `url` for REVIEW routing (RENG-33):
+/// the first entry (config order) whose `base_url` OR configured
+/// `internal_base_url` matches it — see [`GitPlatformConfig::matches_review_url`].
+///
+/// Deliberately NOT [`find_git_platform_for_url`]: that is the INBOUND
+/// webhook matcher, whose host-only port fold and
+/// [`GitPlatformConfig::has_webhook_verification`] filter select which
+/// credentials may verify a payload. A token-only entry exists precisely to
+/// route REST `gitlab_mr` reviews, and a review URL is (re-)hosted onto the
+/// matched entry's own configured address, so neither the fold nor the
+/// verification filter applies here.
+pub fn find_git_platform_for_review_url<'a>(
+    platforms: &'a [GitPlatformConfig],
+    url: &str,
+) -> Option<&'a GitPlatformConfig> {
+    platforms.iter().find(|p| p.matches_review_url(url))
 }
 
 /// Normalise a URL to its scheme-less `(host, port)` identity.
@@ -222,6 +261,55 @@ mod tests {
         assert!(!p.matches_url(""));
         let unparseable = platform("not a url at all");
         assert!(!unparseable.matches_url("http://gitlab.internal:8929/x"));
+    }
+
+    /// RENG-33: the review-routing identity additionally accepts the entry's
+    /// own `internal_base_url` — a rewritten review URL must stay identified
+    /// with its platform.
+    #[test]
+    fn matches_review_url_includes_configured_internal_base_url() {
+        let mut p = platform("https://gitlab.islet.space:8443");
+        p.internal_base_url = "https://gitlab.islet.space".to_string();
+        // External (base_url) and internal addresses both identify the entry.
+        assert!(p.matches_review_url("https://gitlab.islet.space:8443/group/proj/-/merge_requests/1"));
+        assert!(p.matches_review_url("https://gitlab.islet.space/group/proj/-/merge_requests/1"));
+        assert!(!p.matches_review_url("https://gitlab.islet.space:9999/group/proj"));
+        assert!(!p.matches_review_url("https://other.internal/group/proj"));
+
+        // Empty internal → base_url only, exactly like `matches_url`.
+        let p = platform("http://gitlab.internal:8929");
+        assert!(p.matches_review_url("http://gitlab.internal:8929/group/proj"));
+        assert!(!p.matches_review_url("http://localhost:8929/group/proj"));
+    }
+
+    #[test]
+    fn find_platform_for_review_url_matches_base_or_internal_regardless_of_verification() {
+        // Token-only entries (no webhook credentials): exactly what routes REST
+        // reviews, and invisible to the inbound matcher's host-only fallback.
+        let mut token_only = platform("http://gitlab.internal:8929");
+        token_only.webhook_secret = String::new();
+        let mut with_internal = platform("https://gitlab.islet.space:8443");
+        with_internal.name = "nas".to_string();
+        with_internal.webhook_secret = String::new();
+        with_internal.internal_base_url = "https://gitlab.islet.space".to_string();
+        let platforms = vec![token_only, with_internal];
+
+        // The inbound matcher folds a uniquely-matched host only for entries
+        // that can verify a payload — here none can, so the internal-address
+        // URL matches nothing inbound while the review matcher owns it.
+        assert!(find_git_platform_for_url(&platforms, "https://gitlab.islet.space/g/p").is_none());
+        assert_eq!(
+            find_git_platform_for_review_url(&platforms, "http://gitlab.internal:8929/g/p").map(|p| p.name.as_str()),
+            Some("testbed")
+        );
+        assert_eq!(
+            find_git_platform_for_review_url(&platforms, "https://gitlab.islet.space/g/p").map(|p| p.name.as_str()),
+            Some("nas")
+        );
+        // Unknown host, unparseable URL, empty list → no platform (never guess).
+        assert!(find_git_platform_for_review_url(&platforms, "http://localhost:8929/g/p").is_none());
+        assert!(find_git_platform_for_review_url(&platforms, "not-a-url").is_none());
+        assert!(find_git_platform_for_review_url(&[], "http://gitlab.internal:8929/g/p").is_none());
     }
 
     #[test]

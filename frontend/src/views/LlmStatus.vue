@@ -137,10 +137,10 @@ async function handleDialogSave(form: ProviderCardState) {
   }
 }
 
-/** Dismiss the recorded test result of the named provider, if any. */
+/** Dismiss the recorded test result of the named provider, if any. Keyed by
+ *  the card's identity (`card.provider`), which is also `useLlmStatus`'s key. */
 function clearTestResultByName(providerName: string) {
-  const health = healthByName.value.get(providerName)
-  if (health) llm.testResults.clear(health.id)
+  llm.testResults.clear(providerName)
 }
 
 /** Card-level connectivity test rides the server-side probe (stored key),
@@ -162,11 +162,11 @@ async function handleCardTest(card: ProviderCardState) {
   }
 }
 
-/** Last manual test result for a card's provider, keyed by the runtime
- *  provider id (`useLlmStatus.testResults`). */
+/** Last manual test result for a card's provider. Keyed by the card's own
+ *  identity — the provider name — so reindexing the runtime provider list
+ *  (deleting or re-adding a sibling) cannot orphan it. */
 function cardTestResult(card: ProviderCardState) {
-  const health = healthByName.value.get(card.provider)
-  return health ? llm.testResults.get(health.id) : null
+  return llm.testResults.get(card.provider)
 }
 
 function isCardTesting(card: ProviderCardState): boolean {

@@ -21,7 +21,7 @@ export function useLlmStatus() {
   const testingId = ref<string | null>(null);
 
   /**
-   * Last connectivity-test result per provider id (RENG-54).
+   * Last connectivity-test result per provider identity (RENG-54).
    *
    * Session state, deliberately kept OUT of `providers`: the page polls
    * `GET /llm/providers` every 30 s and `reconcileProviders` writes the
@@ -31,8 +31,29 @@ export function useLlmStatus() {
    * reason the test exists. Written only by `test()`; cleared by the card's
    * dismiss control, by an edit that invalidates the tested configuration, or
    * by leaving the page (this composable instance is page-scoped).
+   *
+   * Keyed by `resultKey` — the provider's NAME, which is what the config echo
+   * carries as `providers[].provider` and what the page keys its cards by —
+   * never by the runtime id from `GET /llm/providers`: the backend composes
+   * that as `<provider>-<position>` (`src/server/api/llm.rs`), so removing
+   * any provider shifts the positions of the ones behind it and a result
+   * stored under the old id becomes unreachable — the line would disappear
+   * from a card whose provider the user had just tested.
    */
   const testResults = useTransientResult<TestResult>();
+
+  /**
+   * Stable identity of the provider behind a runtime id.
+   *
+   * `LlmProvider.name` and the config echo's `providers[].provider` are the
+   * same string — the page resolves a card's runtime entry with
+   * `name === card.provider` — so the name survives any reindexing of the
+   * runtime list. Falls back to the id when the provider is not in the list
+   * (the caller only ever passes ids taken from it).
+   */
+  function resultKey(id: string): string {
+    return providers.value.find((p) => p.id === id)?.name ?? id;
+  }
 
   /**
    * Fetch the full provider list from the server.
@@ -86,25 +107,26 @@ export function useLlmStatus() {
   /**
    * Test connectivity for a specific provider.
    *
-   * The outcome is recorded in `testResults` under the provider id and is NOT
-   * merged into the provider list: that list is the server's health payload
-   * (reconciled in place on every poll tick), so a value written there would
-   * survive only until the next refresh (RENG-54). A transport failure is
-   * recorded the same way — the test was run and it failed — before the error
-   * is rethrown for the page's error notification.
+   * The outcome is recorded in `testResults` under the provider's identity
+   * (`resultKey`) and is NOT merged into the provider list: that list is the
+   * server's health payload (reconciled in place on every poll tick), so a
+   * value written there would survive only until the next refresh (RENG-54).
+   * A transport failure is recorded the same way — the test was run and it
+   * failed — before the error is rethrown for the page's error notification.
    * @param id - Provider identifier to test.
    * @returns The test result with success status and latency.
    */
   async function test(id: string) {
+    const key = resultKey(id);
     testingId.value = id;
     error.value = null;
     try {
       const result = await testProvider(id);
-      testResults.set(id, result);
+      testResults.set(key, result);
       return result;
     } catch (e) {
       const message = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
-      testResults.set(id, { success: false, error: message });
+      testResults.set(key, { success: false, error: message });
       error.value = message;
       throw e;
     } finally {

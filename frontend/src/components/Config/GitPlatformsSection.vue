@@ -309,11 +309,21 @@ HelpTip.props = ['tip'];
 /** Row whose connectivity probe is in flight (null when idle). */
 const testingIndex = ref<number | null>(null);
 /**
- * Last probe result per platform name (RENG-54). Session state held OUTSIDE
+ * Last probe result per platform NAME (RENG-54). Session state held OUTSIDE
  * the config model: the page polls `GET /config` every 10s and `applyConfig`
  * replaces `gitPlatforms` wholesale, so a result stored on the row would be
- * gone on the next tick. Written only by `testPlatform`; cleared by the row's
- * dismiss control, by an edit, by removing the platform, or by leaving the page.
+ * gone on the next tick.
+ *
+ * The key is the platform's name — the row's identity in the config (`name`
+ * is the match key the backend itself uses for secrets) and the list's
+ * `v-for` key — so it is stable across polls, edits and removals. It is NOT
+ * an array index, which shifts as soon as a row above it is removed.
+ * A rename through the edit dialog changes the identity, so an edit clears
+ * the result under both the old and the new name rather than letting the
+ * renamed platform inherit the previous platform's probe.
+ *
+ * Written only by `testPlatform`; cleared by the row's dismiss control, by an
+ * edit, by removing the platform, or by leaving the page.
  */
 const testResults = useTransientResult<GitPlatformTestResult>();
 
@@ -462,7 +472,10 @@ async function confirmDialog() {
       if (!entry.webhookSigningSecret) entry.webhookSigningSecret = original.webhookSigningSecret;
       emit('edit', editingIndex.value, entry);
       // The configuration that was probed just changed, so the recorded
-      // result no longer describes this platform (RENG-54).
+      // result no longer describes this platform (RENG-54). The dialog can
+      // also RENAME the row — the result key is the name — so drop both: the
+      // old identity must not linger, and the renamed row must not inherit a
+      // probe it never ran.
       testResults.clear(original.name);
       testResults.clear(entry.name);
     } else {

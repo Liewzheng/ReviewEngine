@@ -70,7 +70,7 @@ export interface RecentReview {
 export interface DashboardState {
   kpis: KpiData | null;
   trend: TrendPoint[];
-  /** 0.10.9 / RENG-50: 30 calendar-day buckets (incl. today, partial). */
+  /** 0.10.9 / RENG-50: 14 calendar-day buckets (incl. today, partial). */
   trendDaily: TrendPoint[];
   health: SystemHealth | null;
   recentReviews: RecentReview[];

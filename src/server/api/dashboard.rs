@@ -1,6 +1,6 @@
 //! REST API endpoints for the dashboard overview page.
 //!
-//! Aggregates KPIs, 24h trend, 30-day daily trend, system health, and recent
+//! Aggregates KPIs, 24h trend, 14-day daily trend, system health, and recent
 //! reviews.
 //!
 //! RENG-32: every review-derived figure (KPIs / 24h trend / recentReviews)
@@ -28,7 +28,7 @@
 //! Cost: the frontend polls every 60 s. Counts are SQL `COUNT(*)` via
 //! `list_reviews`' total (per_page=1, nothing materialized); only the two
 //! duration averages, the trend bucketing (one shared window fetch feeds both
-//! the 24h and the 30-day daily series), and recentReviews materialize rows —
+//! the 24h and the 14-day daily series), and recentReviews materialize rows —
 //! each capped at [`WINDOW_ROW_CAP`] of the newest rows in its window (a few
 //! hundred rows per poll, indexed `created_at` range scans).
 
@@ -540,7 +540,8 @@ fn default_trend() -> Vec<serde_json::Value> {
 }
 
 /// No-store fallback for the daily series: same shape as `compute_trend_daily`
-/// on empty input (30 zero points on the local-midnight anchors).
+/// on empty input ([`TREND_DAILY_DAYS`] zero points on the local-midnight
+/// anchors).
 fn default_trend_daily() -> Vec<serde_json::Value> {
     compute_trend_daily(&[], Local::now())
 }

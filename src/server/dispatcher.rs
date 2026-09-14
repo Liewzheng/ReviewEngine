@@ -19,7 +19,7 @@ const DEFAULT_TIMEOUT_SECS: u64 = 15 * 60;
 const TIMEOUT_ENV: &str = "REVIEW_DISPATCH_TIMEOUT_SECS";
 
 /// Env var pointing at the JSON file used to persist dispatcher state.
-const STATE_PATH_ENV: &str = "REVIEW_DISPATCH_STATE";
+const STATE_PATH_ENV: &str = crate::paths::DISPATCH_STATE_ENV;
 
 /// MR 分发去重器。跨 webhook 共享的单例。
 ///
@@ -31,8 +31,8 @@ const STATE_PATH_ENV: &str = "REVIEW_DISPATCH_STATE";
 /// 允许重新发起 review —— 避免 panic 后 MR 永远卡在 running。
 ///
 /// [`MrDispatcher::persistent`] 额外把状态落到 JSON 文件（默认
-/// `~/.config/review-engine/dispatcher-state.json`，可用 `REVIEW_DISPATCH_STATE`
-/// 覆盖），进程重启后不再丢失已审核的 SHA。
+/// `~/.config/review-engine/dispatcher-state.json`，`serve --data-dir` 会把它移到
+/// 该目录下，也可用 `REVIEW_DISPATCH_STATE` 直接覆盖），进程重启后不再丢失已审核的 SHA。
 ///
 /// 去重同时看 **SHA** 与 **内容指纹**（[`content_fingerprint`]）：SHA 相同必然
 /// 跳过；SHA 变了但 diff 逐字节相同（amend / force-push 到同样内容）也跳过，
@@ -193,7 +193,8 @@ impl MrDispatcher {
     }
 
     /// Dispatcher used by the long-running server: persists state to
-    /// `REVIEW_DISPATCH_STATE` (default `~/.config/review-engine/dispatcher-state.json`)
+    /// `REVIEW_DISPATCH_STATE` (default `<state dir>/dispatcher-state.json` —
+    /// `~/.config/review-engine/` unless `serve --data-dir` moved the root)
     /// and honours `REVIEW_DISPATCH_TIMEOUT_SECS`.
     ///
     /// The resolved path is logged at startup so an operator can see where the
@@ -407,19 +408,13 @@ fn configured_timeout() -> Duration {
         .map_or(Duration::from_secs(DEFAULT_TIMEOUT_SECS), Duration::from_secs)
 }
 
-/// State file location: `REVIEW_DISPATCH_STATE` or the default config path.
-fn default_state_path() -> Option<PathBuf> {
-    state_path_from(std::env::var(STATE_PATH_ENV).ok().as_deref(), home::home_dir())
-}
-
-/// Resolve the state file location: a non-empty `env_value` wins verbatim;
-/// otherwise `<home>/.config/review-engine/dispatcher-state.json`; `None` (no
-/// persistence) when neither is available.
-fn state_path_from(env_value: Option<&str>, home: Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(path) = env_value.filter(|value| !value.is_empty()) {
-        return Some(PathBuf::from(path));
-    }
-    home.map(|dir| dir.join(".config").join("review-engine").join("dispatcher-state.json"))
+/// State file location: `REVIEW_DISPATCH_STATE` or `<state dir>/dispatcher-state.json`
+/// (see [`crate::paths`]).
+pub(crate) fn default_state_path() -> Option<PathBuf> {
+    crate::paths::resolve_artifact(
+        std::env::var(STATE_PATH_ENV).ok().as_deref(),
+        crate::paths::DISPATCH_STATE_FILE_NAME,
+    )
 }
 
 /// Load persisted state from disk, clearing expired `running` markers.
@@ -797,28 +792,32 @@ mod tests {
     // ─── RENG-62: mounted state path ────────────────────────────────
 
     /// `REVIEW_DISPATCH_STATE` wins verbatim; an empty value falls back to the
-    /// home-directory default; no env/host state at all disables persistence.
+    /// state dir; no env/root at all disables persistence. The root chain
+    /// (`--data-dir` → `REVIEW_ENGINE_CONFIG_DIR` → `~/.config/review-engine`)
+    /// lives in [`crate::paths`], which owns its own table tests; this pins the
+    /// dispatcher's wiring to it without touching process state.
     #[test]
-    fn state_path_from_prefers_the_env_override() {
+    fn state_path_prefers_the_env_override_and_falls_back_to_the_state_dir() {
+        let file_name = crate::paths::DISPATCH_STATE_FILE_NAME;
         assert_eq!(
-            state_path_from(Some("/app/config/dispatcher-state.json"), Some(PathBuf::from("/app"))),
+            crate::paths::resolve_artifact_at(Some("/app/config/dispatcher-state.json"), file_name, None),
             Some(PathBuf::from("/app/config/dispatcher-state.json")),
             "a non-empty REVIEW_DISPATCH_STATE must win verbatim"
         );
         assert_eq!(
-            state_path_from(Some(""), Some(PathBuf::from("/app"))),
+            crate::paths::resolve_artifact_at(Some(""), file_name, Some(PathBuf::from("/app/.config/review-engine"))),
             Some(PathBuf::from("/app/.config/review-engine/dispatcher-state.json")),
-            "an empty REVIEW_DISPATCH_STATE must fall back to the default"
+            "an empty REVIEW_DISPATCH_STATE must fall back to the state dir"
         );
         assert_eq!(
-            state_path_from(None, Some(PathBuf::from("/home/alice"))),
-            Some(PathBuf::from("/home/alice/.config/review-engine/dispatcher-state.json")),
+            crate::paths::state_dir_from(None, None, Some(PathBuf::from("/home/alice"))),
+            Some(PathBuf::from("/home/alice/.config/review-engine")),
             "the non-container default must stay unchanged"
         );
         assert_eq!(
-            state_path_from(None, None),
+            crate::paths::resolve_artifact_at(None, file_name, None),
             None,
-            "no env value and no home directory means no persistence"
+            "no env value and no state dir means no persistence"
         );
     }
 

@@ -205,10 +205,14 @@ docker compose up -d
 > to take **a few minutes** (network-bound), not tens of minutes.
 
 > **Logs:** app logs are written *inside the container* to
-> `$HOME/.config/review-engine/logs.ndjson` (not to docker stdout), so
-> `docker compose logs` only shows startup output. Follow the app log with:
+> `${REVIEW_ENGINE_CONFIG_DIR:-$HOME/.config/review-engine}/logs.ndjson` (not to
+> docker stdout), so `docker compose logs` only shows startup output. The file
+> lives in the state directory — the shipped compose files set
+> `REVIEW_ENGINE_CONFIG_DIR=/app/config`, so it lands on the mounted config
+> volume (`/app/config/logs.ndjson`, which survives container recreation); a
+> `serve --data-dir <path>` moves it under `<path>`. Follow the app log with:
 > ```bash
-> docker compose exec review-engine sh -c 'tail -f "$HOME/.config/review-engine/logs.ndjson"'
+> docker compose exec review-engine sh -c 'tail -f "${REVIEW_ENGINE_CONFIG_DIR:-$HOME/.config/review-engine}/logs.ndjson"'
 > ```
 > …or open the **Logs** page in the Web UI at `http://localhost:18080`.
 
@@ -369,7 +373,7 @@ curl -k https://localhost:8443/health
 ```bash
 # App logs are written inside the container (not to docker stdout), so grep the
 # log file directly — or use the Logs page in the Web UI:
-docker compose exec review-engine sh -c 'grep -i "webhook\|gitlab" "$HOME/.config/review-engine/logs.ndjson"'
+docker compose exec review-engine sh -c 'grep -i "webhook\|gitlab" "${REVIEW_ENGINE_CONFIG_DIR:-$HOME/.config/review-engine}/logs.ndjson"'
 
 # Verify GitLab can reach your server
 curl -v http://<your-server-ip>:18080/webhook/gitlab -X POST
@@ -381,7 +385,7 @@ If you configured `GITLAB_WEBHOOK_SIGNING_SECRET` but webhooks return 403:
 
 ```bash
 # Check that the signing secret matches GitLab's signing token
-docker compose exec review-engine sh -c 'grep -i "signing\|signature\|mismatch" "$HOME/.config/review-engine/logs.ndjson"'
+docker compose exec review-engine sh -c 'grep -i "signing\|signature\|mismatch" "${REVIEW_ENGINE_CONFIG_DIR:-$HOME/.config/review-engine}/logs.ndjson"'
 
 # Verify both headers are present (if using both methods).
 # Note: GitLab sends `webhook-signature` (no X- prefix), format "v1,<base64-hmac>".
@@ -401,7 +405,7 @@ curl -v http://<your-server-ip>:18080/webhook/gitlab \
 python3 -c "import json; json.loads('''$LLM_CONFIG''')"
 
 # Check logs for API errors
-docker compose exec review-engine sh -c 'grep -i "llm\|error" "$HOME/.config/review-engine/logs.ndjson"'
+docker compose exec review-engine sh -c 'grep -i "llm\|error" "${REVIEW_ENGINE_CONFIG_DIR:-$HOME/.config/review-engine}/logs.ndjson"'
 ```
 
 ### Out of memory
@@ -482,5 +486,5 @@ ReviewEngine/
 ## 🆘 Getting Help
 
 - **GitHub Issues**: https://github.com/Liewzheng/ReviewEngine/issues
-- **Webhook Events**: See the **Logs** page in the Web UI, or `docker compose exec review-engine sh -c 'tail -f "$HOME/.config/review-engine/logs.ndjson"'`
+- **Webhook Events**: See the **Logs** page in the Web UI, or `docker compose exec review-engine sh -c 'tail -f "${REVIEW_ENGINE_CONFIG_DIR:-$HOME/.config/review-engine}/logs.ndjson"'`
 - **GitLab Docs**: https://docs.gitlab.com/ee/user/project/integrations/webhooks.html

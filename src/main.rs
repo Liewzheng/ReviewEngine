@@ -13,6 +13,11 @@ mod cli;
 #[cfg(feature = "cli")]
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let cli = cli::parse_cli();
+    // Resolve the data dir (`serve --data-dir` / REVIEW_DATA_DIR) BEFORE the
+    // log collector below opens `logs.ndjson`, and before any other state path
+    // is resolved (RENG-37).
+    cli::apply_data_dir(&cli)?;
     let collector = review_engine::server::log_collector::init_global_collector();
     if std::env::var("REVIEW_LOG_FORMAT").as_deref() == Ok("json") {
         tracing_subscriber::fmt()
@@ -26,7 +31,7 @@ async fn main() -> anyhow::Result<()> {
             .with_writer(move || review_engine::server::log_collector::LogWriter::new(collector.clone()))
             .init();
     }
-    cli::run().await
+    cli::run(cli).await
 }
 
 #[cfg(not(feature = "cli"))]

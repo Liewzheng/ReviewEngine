@@ -16,7 +16,7 @@
 
 Back up the **entire config directory**, not just one file:
 
-- Plain binary / Homebrew install: `~/.config/review-engine/` (or `$REVIEW_ENGINE_CONFIG_DIR` if you override it).
+- Plain binary / Homebrew install: `~/.config/review-engine/` (or `$REVIEW_ENGINE_CONFIG_DIR` if you override it; `serve --data-dir <path>` moves the whole directory — see [Data directory](configuration.md#data-directory-serve---data-dir)).
 - Docker (standalone compose): the `./config` and `./auth` bind-mount directories next to your `docker-compose.yml` (`deploy/standalone-compose.yml` mounts them at `/app/config` and `/app/auth`).
 
 ```bash

@@ -36,7 +36,8 @@ pub struct AppConfig {
     /// Maximum number of concurrent LLM API calls.
     #[serde(default)]
     pub max_concurrent_llm_calls: Option<usize>,
-    /// Directory path for writing review report files.
+    /// Directory path for writing review report files; defaults to
+    /// `<state dir>/reports` (see [`crate::paths`]).
     #[serde(default = "default_output_dir")]
     pub output_dir: String,
     /// Diff processing parameters (token limits, chunking, compression).
@@ -431,15 +432,11 @@ impl Default for ReportConfig {
 
 // ─── Default value functions ────────────────
 
-fn default_output_dir() -> String {
-    home::home_dir()
-        .map(|p| {
-            p.join(".config")
-                .join("review-engine")
-                .join("reports")
-                .to_string_lossy()
-                .to_string()
-        })
+/// Timestamped reports land in `<state dir>/reports` (see [`crate::paths`]):
+/// `~/.config/review-engine/reports` by default, or under `serve --data-dir`.
+pub(crate) fn default_output_dir() -> String {
+    crate::paths::state_dir()
+        .map(|dir| dir.join(crate::paths::REPORTS_DIR_NAME).to_string_lossy().to_string())
         .unwrap_or_else(|| String::from(".config/review-engine/reports"))
 }
 

@@ -170,6 +170,25 @@ pub enum Commands {
         /// TLS (HTTPS) listen port; used only when --tls-cert/--tls-key are set
         #[arg(long, default_value = "8443")]
         tls_port: u16,
+
+        /// Root directory for every persisted artifact (RENG-37)
+        ///
+        /// The SQLite database (review.db), secrets.key, ui-state.toml,
+        /// auth.toml, dispatcher-state.json, feedback.json,
+        /// models-dev-cache.json, logs.ndjson, the reports/ output directory
+        /// and the user-level .code-audit-config.toml all resolve under this
+        /// path, which is created if missing. Two instances with different
+        /// values share no state; without the flag the defaults stay
+        /// ~/.config/review-engine (or REVIEW_ENGINE_CONFIG_DIR).
+        ///
+        /// Precedence: this flag > REVIEW_DATA_DIR > REVIEW_ENGINE_CONFIG_DIR >
+        /// ~/.config/review-engine. A per-artifact variable
+        /// (REVIEW_UI_STATE_FILE, REVIEW_AUTH_FILE, REVIEW_DISPATCH_STATE,
+        /// REVIEW_FEEDBACK_PATH, REVIEW_MODELS_DEV_CACHE, DATABASE_URL) still
+        /// wins for its own artifact — even against this flag — and is
+        /// reported as a warning at startup.
+        #[arg(long, value_name = "PATH")]
+        data_dir: Option<std::path::PathBuf>,
     },
 
     /// Generate a random API token
@@ -455,9 +474,11 @@ pub enum ConfigNoun {
 ///
 /// Scope semantics mirror `git config`: the default scope for `set`/`remove`
 /// is the project file `.code-audit-config.toml` in the current directory;
-/// `--global` targets the user-level file
-/// `~/.config/review-engine/.code-audit-config.toml`; `--project` selects the
-/// project file explicitly (useful in scripts) and conflicts with `--global`.
+/// `--global` targets the user-level file in the state dir
+/// (`~/.config/review-engine/.code-audit-config.toml` by default; the
+/// `review_engine::paths` module owns the root resolution); `--project`
+/// selects the project file explicitly (useful in scripts) and conflicts with
+/// `--global`.
 #[derive(Subcommand, Debug)]
 pub enum ProviderAction {
     /// List configured providers.

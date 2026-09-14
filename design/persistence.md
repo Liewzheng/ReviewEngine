@@ -7,7 +7,7 @@
 
 以下决策已拍板，本文不重新论证，只在既有约束内做落地设计：
 
-1. **部署形态**：PG 为主、SQLite 兜底。有 `DATABASE_URL` 走 PostgreSQL；无则内嵌 SQLite，默认路径 `~/.config/review-engine/review.db`。
+1. **部署形态**：PG 为主、SQLite 兜底。有 `DATABASE_URL` 走 PostgreSQL；无则内嵌 SQLite，默认路径 `<state dir>/review.db`（默认状态目录 `~/.config/review-engine/`，RENG-37 的 `serve --data-dir` 会整体移动状态目录）。
 2. **访问层**：sqlx 0.8，运行时 `Any` 池（features: `runtime-tokio`, `postgres`, `sqlite`, `migrate`, `chrono`, `uuid`, `json`）。
 3. **评论回流**：GitLab Note webhook 实时入库为主，评审前主动拉取 notes API 兜底。
 4. **配置入库**：git 平台 / LLM 实例配置从 `ui-state.toml` 搬进数据库，含一次性透明迁移。

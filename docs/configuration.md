@@ -250,16 +250,72 @@ Provider deletes deserve care: provider IDs are derived from list position (`{pr
 
 ---
 
+## Data directory (`serve --data-dir`)
+
+Everything the server persists lives in one directory — the **state dir**. `serve --data-dir <path>` (RENG-37) points that root somewhere else, so several isolated instances can run side by side without hacking `HOME`. The directory is created if it is missing, and the path is made absolute before it is used (it ends up in the SQLite URL and in log lines).
+
+| Artifact | What it is | Default | With `--data-dir /srv/reng-a` |
+|---|---|---|---|
+| `review.db` | Embedded SQLite database (history, config, discussions) | `<state dir>/review.db` | `/srv/reng-a/review.db` |
+| `secrets.key` | At-rest key for `ui-state.toml` secrets (32 bytes, `0600`) | `<state dir>/secrets.key` | `/srv/reng-a/secrets.key` |
+| `ui-state.toml` | Web-UI configuration + Git credentials | `<state dir>/ui-state.toml` | `/srv/reng-a/ui-state.toml` |
+| `auth.toml` | SHA-256 digest of the API token | `<state dir>/auth.toml` | `/srv/reng-a/auth.toml` |
+| `dispatcher-state.json` | Webhook dedup state (SHA + content fingerprint) | `<state dir>/dispatcher-state.json` | `/srv/reng-a/dispatcher-state.json` |
+| `feedback.json` | Finding feedback (`useful` / `false_positive`) | `<state dir>/feedback.json` | `/srv/reng-a/feedback.json` |
+| `models-dev-cache.json` | models.dev catalog disk cache | `<state dir>/models-dev-cache.json` | `/srv/reng-a/models-dev-cache.json` |
+| `logs.ndjson` | Structured log stream the Web UI reads | `<state dir>/logs.ndjson` | `/srv/reng-a/logs.ndjson` |
+| `reports/` | Timestamped review reports (`report.output_dir` default) | `<state dir>/reports` | `/srv/reng-a/reports` |
+| `.code-audit-config.toml` | User-level config / global `[[llm]]` fallback | `<state dir>/.code-audit-config.toml` | `/srv/reng-a/.code-audit-config.toml` |
+
+The state dir itself is resolved in this order (first match wins):
+
+1. `--data-dir <path>` / `REVIEW_DATA_DIR=<path>` — equivalent, the flag wins;
+2. `REVIEW_ENGINE_CONFIG_DIR` — the override that predates the flag (the shipped images set it to `/app/config`);
+3. `~/.config/review-engine`.
+
+**A per-artifact variable still wins for its own artifact**, even against `--data-dir`: `REVIEW_UI_STATE_FILE` (which also moves `review.db` and `secrets.key`, they are derived from its directory), `REVIEW_AUTH_FILE`, `REVIEW_DISPATCH_STATE`, `REVIEW_FEEDBACK_PATH`, `REVIEW_MODELS_DEV_CACHE`, and `DATABASE_URL` (a PostgreSQL server instead of the embedded database). They are absolute paths written by an operator, so existing deployments that point one file at a mount keep working. They are also process-wide, so an instance started with `--data-dir` *and* one of them set is not isolated for that artifact — `serve` logs one warning per hit at startup (`<VAR> is set — <artifact> stays outside the data dir (<path>)`). Two instances that each get their own `--data-dir` and a clean environment share nothing.
+
+Without the flag, nothing changes: the defaults are exactly the paths in the table above, and every existing env override keeps working.
+
+### Running two isolated instances
+
+The database, the dedup state and the log file are all per-instance, so two servers can run from one account:
+
+```bash
+# Instance A — port 8080, everything under /srv/reng-a
+review-engine serve --port 8080 --data-dir /srv/reng-a
+
+# Instance B — port 8081, a completely separate history and config
+review-engine serve --port 8081 --data-dir /srv/reng-b
+
+ls /srv/reng-a   # review.db  secrets.key  logs.ndjson  …
+ls /srv/reng-b   # review.db  secrets.key  logs.ndjson  …
+```
+
+Give each instance its own `--api-token` (or bootstrap key): they have separate `auth.toml` files, so a token set on one is unknown to the other. The same works in containers — mount one volume per instance and pass `--data-dir`:
+
+```yaml
+services:
+  reng-a:
+    command: ["serve", "--bind", "0.0.0.0", "--port", "8080", "--data-dir", "/app/data"]
+    volumes: ["./instance-a:/app/data"]
+  reng-b:
+    command: ["serve", "--bind", "0.0.0.0", "--port", "8080", "--data-dir", "/app/data"]
+    volumes: ["./instance-b:/app/data"]
+```
+
+---
+
 ## Webhook dispatch state
 
 Webhook-triggered reviews are deduplicated through a JSON state file the server loads at startup and rewrites atomically on every change. Per merge request / pull request it records the last reviewed **commit SHA** *and* a **fingerprint of the reviewed diff**, so an `action=update` event — or an amend / force-push, which changes the SHA while leaving the diff untouched — does not buy another full round (and does not re-post the same comments).
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `REVIEW_DISPATCH_STATE` | `~/.config/review-engine/dispatcher-state.json` | Path of the dispatch state file. An empty value falls back to the default. |
+| `REVIEW_DISPATCH_STATE` | `<state dir>/dispatcher-state.json` (`~/.config/review-engine/dispatcher-state.json`, or under `serve --data-dir`) | Path of the dispatch state file. An empty value falls back to the default. |
 | `REVIEW_DISPATCH_TIMEOUT_SECS` | `900` (15 min) | Age after which a `running` marker counts as stale (the review panicked, or the process restarted mid-review) and a new review may start for that MR. |
 
-Without a home directory and without `REVIEW_DISPATCH_STATE`, the server runs without persistence: it logs a warning at startup and forgets reviewed SHAs on restart (`MrDispatcher::persistent`).
+Without a state dir and without `REVIEW_DISPATCH_STATE`, the server runs without persistence: it logs a warning at startup and forgets reviewed SHAs on restart (`MrDispatcher::persistent`).
 
 **Point this at a mounted volume inside a container.** The default resolves to `/app/.config/…`, which lives in the image layer, so *any* container recreate — `docker compose up` after editing the compose file, an image update, a container recreated on boot — wipes it and silently disarms the dedup. Both shipped compose files (`docker-compose.yml`, `deploy/standalone-compose.yml`) therefore set
 
@@ -267,7 +323,7 @@ Without a home directory and without `REVIEW_DISPATCH_STATE`, the server runs wi
 REVIEW_DISPATCH_STATE: /app/config/dispatcher-state.json
 ```
 
-on the `./config` volume those files already mount for `REVIEW_ENGINE_CONFIG_DIR`. The failure mode this avoids is expensive and quiet: after one recreate, a burst of `action=update` webhooks re-reviewed seven MRs whose SHAs had not changed since days earlier, re-posting the same comments and re-billing the LLM for content already reviewed. The startup log line `Dispatcher: persisting dispatch state to <path>` names the path actually in use, which is the first thing to check when dedup appears to be off.
+on the `./config` volume those files already mount for `REVIEW_ENGINE_CONFIG_DIR` (a `serve --data-dir /app/config` mount achieves the same without the extra variable). The failure mode this avoids is expensive and quiet: after one recreate, a burst of `action=update` webhooks re-reviewed seven MRs whose SHAs had not changed since days earlier, re-posting the same comments and re-billing the LLM for content already reviewed. The startup log line `Dispatcher: persisting dispatch state to <path>` names the path actually in use, which is the first thing to check when dedup appears to be off.
 
 ---
 

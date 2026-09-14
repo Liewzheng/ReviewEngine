@@ -1,6 +1,6 @@
 # Configuration Schema Reference
 
-Configuration is done via `.code-audit-config.toml` in the project root or `~/.config/review-engine/.code-audit-config.toml` for user-level config.
+Configuration is done via `.code-audit-config.toml` in the project root or `.code-audit-config.toml` in the state directory for user-level config (`~/.config/review-engine/` by default — see [Data directory](configuration.md#data-directory-serve---data-dir)).
 
 ## File Format
 
@@ -10,7 +10,7 @@ The config file uses TOML format. Below is the complete schema with all availabl
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `output_dir` | string | `~/.config/review-engine/reports/` | Directory for auto-saved reports |
+| `output_dir` | string | `<state dir>/reports/` (`~/.config/review-engine/reports/` unless `serve --data-dir` moved the root) | Directory for auto-saved reports |
 | `max_team_size` | integer (optional) | `6` | Maximum number of experts per review |
 | `max_concurrent_llm_calls` | integer (optional) | `6` | Maximum concurrent LLM API calls |
 
@@ -235,7 +235,7 @@ window_seconds = 60
 
 ## `[[git_platforms]]` (Web UI, persisted to `ui-state.toml`)
 
-Git platform instances are **not** read from `.code-audit-config.toml`: they are managed in the Web UI (**Git 平台** card) and persisted to `ui-state.toml` in the config directory (default `~/.config/review-engine/ui-state.toml`, overridable via `REVIEW_UI_STATE_FILE` or `REVIEW_ENGINE_CONFIG_DIR`) as `[[git_platforms]]` entries. They are hot-effective and drive webhook verification, review-time GitLab API pulls, admin-level System Hook dispatch, and per-platform project filtering. Only `type = "gitlab"` is implemented today.
+Git platform instances are **not** read from `.code-audit-config.toml`: they are managed in the Web UI (**Git 平台** card) and persisted to `ui-state.toml` in the config directory (default `ui-state.toml` in the state directory — `~/.config/review-engine/ui-state.toml` unless `serve --data-dir` moved the root — overridable via `REVIEW_UI_STATE_FILE`, `REVIEW_ENGINE_CONFIG_DIR` or `--data-dir`) as `[[git_platforms]]` entries. They are hot-effective and drive webhook verification, review-time GitLab API pulls, admin-level System Hook dispatch, and per-platform project filtering. Only `type = "gitlab"` is implemented today.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -266,7 +266,7 @@ allowed_projects = ["group/project-a", "group/project-b"]   # empty = all projec
 ## Configuration Loading Order
 
 1. Built-in defaults (`docs/code-audit-default.toml`) with environment overrides
-2. User-level config (`~/.config/review-engine/.code-audit-config.toml`)
+2. User-level config (`.code-audit-config.toml` in the state directory, `~/.config/review-engine/` by default)
 3. Project-level config (`.code-audit-config.toml` in the project root)
 4. Environment variables (`LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.)
 5. CLI arguments (`--llm-config`, `--config`)

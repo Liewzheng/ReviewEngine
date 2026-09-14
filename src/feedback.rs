@@ -4,9 +4,11 @@
 //! Each finding is identified by a stable [`fingerprint`] derived from
 //! `(file, line, title, category)`, so the same issue can be recognised
 //! across repeated reviews. Verdicts are persisted as JSON to
-//! `~/.config/review-engine/feedback.json` (override with the
-//! `REVIEW_FEEDBACK_PATH` environment variable) using an atomic
-//! temp-file-then-rename write, and cached in-process behind a `Mutex`.
+//! `<state dir>/feedback.json` — `~/.config/review-engine/feedback.json` by
+//! default, or under the `serve --data-dir` root (see [`crate::paths`]) —
+//! overridable outright with the `REVIEW_FEEDBACK_PATH` environment variable,
+//! using an atomic temp-file-then-rename write, and cached in-process behind
+//! a `Mutex`.
 //!
 //! This module lives at the crate root so both the server (feedback API,
 //! re-exported as `server::feedback`) and the review pipeline share the
@@ -113,7 +115,7 @@ pub fn fingerprint(file: &str, line: Option<u32>, title: &str, category: &str) -
 
 /// Load the set of finding fingerprints the user marked `false_positive`
 /// from the default feedback file (`REVIEW_FEEDBACK_PATH` if set, otherwise
-/// `~/.config/review-engine/feedback.json`).
+/// `<state dir>/feedback.json`).
 ///
 /// Read-only and fail-open: a missing or corrupt file yields an empty set
 /// (with a warn log for the corrupt case), so the review pipeline is never
@@ -164,8 +166,7 @@ pub struct FeedbackStore {
 
 impl FeedbackStore {
     /// Store backed by the default feedback file:
-    /// `REVIEW_FEEDBACK_PATH` if set, otherwise
-    /// `~/.config/review-engine/feedback.json`.
+    /// `REVIEW_FEEDBACK_PATH` if set, otherwise `<state dir>/feedback.json`.
     pub fn persistent() -> Self {
         Self::with_path(default_path())
     }
@@ -245,14 +246,13 @@ fn rate(part: u64, total: u64) -> f64 {
     }
 }
 
-/// Feedback file location: `REVIEW_FEEDBACK_PATH` or the default config path.
-fn default_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var(FEEDBACK_PATH_ENV) {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    home::home_dir().map(|dir| dir.join(".config").join("review-engine").join("feedback.json"))
+/// Feedback file location: `REVIEW_FEEDBACK_PATH` or `<state dir>/feedback.json`
+/// (see [`crate::paths`]).
+pub(crate) fn default_path() -> Option<PathBuf> {
+    crate::paths::resolve_artifact(
+        std::env::var(FEEDBACK_PATH_ENV).ok().as_deref(),
+        crate::paths::FEEDBACK_FILE_NAME,
+    )
 }
 
 /// Load feedback records from disk. Missing files yield an empty log;

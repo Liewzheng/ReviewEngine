@@ -44,7 +44,7 @@ use super::put::AppliedConfig;
 use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, UiLlmProviderConfig, API_KEY_MASK};
 
 /// File name of the persisted UI state inside the config dir.
-pub const UI_STATE_FILE_NAME: &str = "ui-state.toml";
+pub const UI_STATE_FILE_NAME: &str = crate::paths::UI_STATE_FILE_NAME;
 
 /// On-disk schema of `ui-state.toml`.
 ///
@@ -210,21 +210,16 @@ fn sync_llm_projection(ui_llm: &mut super::types::UiLlmConfig, saved: &[LLMConfi
 }
 
 /// Where `ui-state.toml` lives: `REVIEW_UI_STATE_FILE` (full path override)
-/// wins, then `REVIEW_ENGINE_CONFIG_DIR`, then the default
-/// `~/.config/review-engine/` — the same config dir resolution the auth file
-/// uses. `None` when no base directory can be determined (persistence
+/// wins, then the state root — `--data-dir`, `REVIEW_ENGINE_CONFIG_DIR`, then
+/// `~/.config/review-engine/` (see [`crate::paths`]). The database and
+/// `secrets.key` are derived from this path's directory, so they follow the
+/// same root. `None` when no base directory can be determined (persistence
 /// disabled, e.g. no home dir).
 pub fn resolve_ui_state_path() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("REVIEW_UI_STATE_FILE") {
-        if !path.is_empty() {
-            return Some(PathBuf::from(path));
-        }
-    }
-    let dir = match std::env::var("REVIEW_ENGINE_CONFIG_DIR") {
-        Ok(dir) if !dir.is_empty() => PathBuf::from(dir),
-        _ => home::home_dir()?.join(".config").join("review-engine"),
-    };
-    Some(dir.join(UI_STATE_FILE_NAME))
+    crate::paths::resolve_artifact(
+        std::env::var(crate::paths::UI_STATE_FILE_ENV).ok().as_deref(),
+        UI_STATE_FILE_NAME,
+    )
 }
 
 /// At-rest form of a [`UiStateFile`]: git platform and legacy GitLab secrets

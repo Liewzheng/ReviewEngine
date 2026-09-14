@@ -31,6 +31,9 @@ pub mod llm;
 pub mod metrics;
 pub mod models;
 pub mod output;
+/// The process-wide data directory: the root every persisted state path
+/// resolves under (`serve --data-dir`, RENG-37).
+pub mod paths;
 pub mod progress;
 pub mod prompt;
 pub mod publisher;

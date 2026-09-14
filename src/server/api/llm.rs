@@ -25,8 +25,15 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     // Read the primary BEFORE taking the provider lock and never nest the two
     // guards (`PUT /config` holds `llm_configs` and `ui_config` in that order).
     let primary = state.ui_config.read().unwrap().llm.primary_provider.clone();
-    let llm_configs = state.llm_configs.read().unwrap();
-    Json(serde_json::json!({ "items": provider_items(&primary, &llm_configs) }))
+    // Clone out of the lock: the health report probes (`await`) and no std
+    // guard may be held across an await point.
+    let configs: Vec<crate::models::LLMConfig> = state.llm_configs.read().unwrap().clone();
+    // RENG-36: the status comes from the probe cache, so a provider whose
+    // credentials were just changed reports the probe of the NEW config (a
+    // missing entry is probed before this returns) instead of a stale
+    // "healthy" left over from the old key.
+    let health = state.llm_health.report(&configs).await;
+    Json(serde_json::json!({ "items": provider_items(&primary, &configs, &health) }))
 }
 
 /// The `GET /llm/providers` card payload for one stored provider list.
@@ -37,7 +44,15 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 /// chain ([`crate::llm::chain_positions`], the primary leading) and
 /// `isPrimary` marks its head — so the LLM page can show what a review will
 /// actually use (RENG-55).
-fn provider_items(primary: &str, configs: &[crate::models::LLMConfig]) -> Vec<serde_json::Value> {
+///
+/// `health` holds one report per config, in the same order
+/// ([`AppState::llm_health`](crate::server::AppState::llm_health)); `status`
+/// and `latencyMs` come from it, never from a guess about the config (RENG-36).
+fn provider_items(
+    primary: &str,
+    configs: &[crate::models::LLMConfig],
+    health: &[super::llm_health::ProviderHealth],
+) -> Vec<serde_json::Value> {
     let ranks = crate::llm::chain_positions(primary, configs);
     configs
         .iter()
@@ -45,11 +60,14 @@ fn provider_items(primary: &str, configs: &[crate::models::LLMConfig]) -> Vec<se
         .map(|(i, cfg)| {
             let id = format!("{}-{}", cfg.provider, i);
             let chain_position = ranks.get(i).copied().unwrap_or(i + 1);
+            let report = health.get(i);
             serde_json::json!({
                 "id": id,
                 "name": cfg.provider,
                 "logo": logo_for_provider(&cfg.provider),
-                "status": if !cfg.api_key.is_empty() { "healthy" } else { "offline" },
+                "status": report
+                    .map(|h| h.status.as_str())
+                    .unwrap_or_else(|| super::llm_health::ProviderStatus::Offline.as_str()),
                 "configured": !cfg.api_key.is_empty(),
                 // Echo the editable config back so the UI can prefill the edit
                 // form. The API key is intentionally never returned.
@@ -60,12 +78,16 @@ fn provider_items(primary: &str, configs: &[crate::models::LLMConfig]) -> Vec<se
                 "position": i,
                 "chainPosition": chain_position,
                 "isPrimary": chain_position == 1,
-                "latencyMs": 0,
+                // Round-trip time of the probe behind `status` (0 when the
+                // provider was not probed because it has no key).
+                "latencyMs": report.map(|h| h.latency_ms).unwrap_or(0),
                 "errorRate": 0.0,
                 "requestCount": 0,
                 "usagePercent": 0,
                 "sparkline": [],
-                "lastChecked": chrono::Utc::now().to_rfc3339(),
+                "lastChecked": report
+                    .map(|h| h.checked_at.to_rfc3339())
+                    .unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
             })
         })
         .collect()
@@ -150,6 +172,9 @@ async fn add_provider(
         let mut guard = state.llm_configs.write().unwrap();
         guard.push(new_cfg.clone());
     }
+    // RENG-36: the health cache follows the effective provider set — the new
+    // provider has no cached entry, so its first read probes it.
+    invalidate_removed_health(&state);
 
     // Sync with state.app_config if present
     {
@@ -223,6 +248,9 @@ async fn delete_provider(State(state): State<Arc<AppState>>, Path(id): Path<Stri
         // shift for subsequent entries, but that's acceptable).
         removed_cfg
     };
+    // RENG-36: the removed provider's cached health goes with it, so the list
+    // never reports a provider that is no longer configured.
+    invalidate_removed_health(&state);
 
     // Sync with state.app_config if present
     {
@@ -331,6 +359,9 @@ async fn update_provider(
         cfg.temperature = body.temperature;
         cfg.clone()
     };
+    // RENG-36: the edited config's cached health is dropped (its fingerprint is
+    // no longer in the set), so the next read probes the new credentials.
+    invalidate_removed_health(&state);
 
     // Sync with state.app_config if present
     {
@@ -403,6 +434,17 @@ async fn test_provider(State(state): State<Arc<AppState>>, Path(id): Path<String
         ),
     };
 
+    // The user just asked for this provider's connectivity — record it as the
+    // provider's health so `GET /llm/providers` (and the dashboard) report what
+    // the Test Connection button reported, instead of re-probing (RENG-36).
+    state.llm_health.record(
+        &cfg,
+        match &error {
+            None => super::llm_health::ProviderHealth::healthy(latency_ms),
+            Some(message) => super::llm_health::ProviderHealth::error(message.clone(), latency_ms),
+        },
+    );
+
     Json(serde_json::json!({
         "success": success,
         "latencyMs": latency_ms,
@@ -410,6 +452,17 @@ async fn test_provider(State(state): State<Arc<AppState>>, Path(id): Path<String
         "resolvedApiBase": resolved_base,
         "timestamp": chrono::Utc::now().to_rfc3339(),
     }))
+}
+
+/// Drop the cached health of every provider that is no longer in
+/// `state.llm_configs` (RENG-36). Called by the provider CRUD handlers after
+/// they mutate the list; `PUT /api/v1/config` does the same inside
+/// `apply_ui_config`, so every path that changes credentials or the provider
+/// set goes through one invalidation rule: an entry survives only while its
+/// exact config is still configured.
+fn invalidate_removed_health(state: &Arc<AppState>) {
+    let live = state.llm_configs.read().unwrap();
+    state.llm_health.retain_live(&live);
 }
 
 fn logo_for_provider(provider: &str) -> String {
@@ -434,6 +487,8 @@ fn round_temperature(t: f32) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::api::config::{put_config, UiConfig};
+    use crate::server::api::llm_health::{ProviderHealth, ProviderStatus};
 
     /// Unit 12: temperature serializes at 2-decimal precision, free of f32 noise.
     #[test]
@@ -458,13 +513,19 @@ mod tests {
         }
     }
 
+    /// Health reports matching `configs` (the shape `AppState::llm_health`
+    /// produces), used by the payload tests that are not about probing.
+    fn healthy(n: usize) -> Vec<ProviderHealth> {
+        (0..n).map(|_| ProviderHealth::healthy(7)).collect()
+    }
+
     /// RENG-55: the card payload exposes the chain, not just the stored list —
     /// `position` stays the stored index, `chainPosition`/`isPrimary` describe
     /// the runtime order the page renders.
     #[test]
     fn provider_items_expose_chain_position_and_primary() {
         let stored = vec![cfg("xiaomi"), cfg("deepseek")];
-        let items = provider_items("deepseek", &stored);
+        let items = provider_items("deepseek", &stored, &healthy(stored.len()));
 
         // Stored order (and the `{provider}-{index}` ids) is untouched.
         assert_eq!(items[0]["name"], "xiaomi");
@@ -484,13 +545,14 @@ mod tests {
     /// the head is the effective primary (never a blank card).
     #[test]
     fn provider_items_head_is_primary_without_a_primary_selection() {
-        let items = provider_items("", &[cfg("xiaomi"), cfg("deepseek")]);
+        let stored = vec![cfg("xiaomi"), cfg("deepseek")];
+        let items = provider_items("", &stored, &healthy(stored.len()));
         assert_eq!(items[0]["isPrimary"], true);
         assert_eq!(items[1]["isPrimary"], false);
         assert_eq!(items[1]["chainPosition"], 2);
         // A primary naming a provider the runtime no longer holds (stale
         // `primaryProvider` in the echo) degrades to the same rule.
-        let items = provider_items("ghost", &[cfg("xiaomi")]);
+        let items = provider_items("ghost", &[cfg("xiaomi")], &healthy(1));
         assert_eq!(items[0]["isPrimary"], true);
         assert_eq!(items[0]["chainPosition"], 1);
     }
@@ -498,6 +560,250 @@ mod tests {
     /// Empty provider set → empty payload, no panic.
     #[test]
     fn provider_items_empty_set() {
-        assert!(provider_items("deepseek", &[]).is_empty());
+        assert!(provider_items("deepseek", &[], &[]).is_empty());
+    }
+
+    /// RENG-36: the card's `status`/`latencyMs`/`lastChecked` come from the
+    /// probe report — never from a guess about the config's shape. A provider
+    /// with a key can therefore be `error`, which is the whole point: it used
+    /// to be reported `healthy` for no other reason than having a key.
+    #[test]
+    fn provider_items_report_probed_status_not_key_presence() {
+        let stored = vec![cfg("xiaomi"), cfg("deepseek")];
+        let items = provider_items(
+            "xiaomi",
+            &stored,
+            &[
+                ProviderHealth::error("HTTP 401 Unauthorized", 12),
+                ProviderHealth::healthy(34),
+            ],
+        );
+
+        assert_eq!(items[0]["status"], "error");
+        assert_eq!(items[0]["configured"], true, "a key is still stored");
+        assert_eq!(items[0]["latencyMs"], 12);
+        assert_eq!(items[1]["status"], "healthy");
+        assert_eq!(items[1]["latencyMs"], 34);
+        // `lastChecked` is the probe's timestamp, i.e. a real check time.
+        for item in &items {
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(item["lastChecked"].as_str().unwrap()).is_ok(),
+                "lastChecked must be RFC3339: {item}"
+            );
+        }
+        // A provider with no stored key is `offline` and never probed.
+        let mut blank = cfg("xiaomi");
+        blank.api_key = String::new();
+        let items = provider_items("xiaomi", &[blank], &[ProviderHealth::offline()]);
+        assert_eq!(items[0]["status"], "offline");
+        assert_eq!(items[0]["configured"], false);
+        assert_eq!(items[0]["latencyMs"], 0);
+        assert_eq!(ProviderStatus::Offline.dashboard_str(), "offline");
+        assert_eq!(ProviderStatus::Error.dashboard_str(), "error");
+        assert_eq!(ProviderStatus::Healthy.dashboard_str(), "success");
+    }
+
+    // ─── RENG-36: health follows the credentials ────────────────────
+
+    /// The reported sequence, end to end: a provider probed healthy, its key
+    /// broken through `PUT /api/v1/config`, the next read no longer `healthy`
+    /// (and not a stale leftover), then a good key again → `healthy` again.
+    ///
+    /// The probe is the REAL `probe_llm_connectivity` (the store's default), so
+    /// this pins the reported bug against an actual HTTP 401 rather than a
+    /// stubbed verdict: the wiremock `/models` route accepts only
+    /// `Bearer sk-good-key` and answers 401 to anything else.
+    #[tokio::test]
+    async fn credential_change_invalidates_cached_health() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let _rt_lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .and(header("Authorization", "Bearer sk-good-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&mock)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/models"))
+            .respond_with(ResponseTemplate::new(401).set_body_string("invalid api key"))
+            .mount(&mock)
+            .await;
+
+        let provider = crate::models::LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key: "sk-good-key".to_string(),
+            api_base: mock.uri(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+        };
+        let state = Arc::new(AppState::new(vec![provider.clone()]));
+        {
+            let app: crate::models::AppConfig = serde_json::from_value(serde_json::json!({
+                "llm": [{
+                    "provider": "openai",
+                    "model": "gpt-4o",
+                    "api_key": "sk-good-key",
+                    "api_base": mock.uri(),
+                    "max_tokens": 4096,
+                    "temperature": 0.7
+                }]
+            }))
+            .expect("minimal AppConfig must deserialize");
+            *state.app_config.write().unwrap() = Some(Arc::new(app.clone()));
+            *state.ui_config.write().unwrap() = UiConfig::from_app_config(&app);
+        }
+
+        // 1) A working key: the first read probes and reports `healthy`.
+        let items = get_providers(State(state.clone())).await.0;
+        assert_eq!(items["items"][0]["status"], "healthy", "got {items}");
+        assert_eq!(probe_requests(&mock).await, 1, "the first read probes the provider");
+
+        // 2) Break the key through the same path the UI uses.
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::json!({ "llm": { "openaiApiKey": "sk-broken-key" } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            state.llm_configs.read().unwrap()[0].api_key,
+            "sk-broken-key",
+            "the PUT must have stored the broken key"
+        );
+
+        // 3) The next read probes the NEW credentials: the provider is 401'd
+        //    and can no longer be reported healthy.
+        let items = get_providers(State(state.clone())).await.0;
+        assert_eq!(
+            items["items"][0]["status"], "error",
+            "a broken key must not keep its healthy badge: {items}"
+        );
+        assert_eq!(probe_requests(&mock).await, 2, "the changed key is probed, not reused");
+
+        // 4) Restoring a working key recovers the status on the next read —
+        //    via a fresh probe, because the config-change path dropped the
+        //    original `sk-good-key` entry instead of leaving it for the TTL.
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::json!({ "llm": { "openaiApiKey": "sk-good-key" } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let items = get_providers(State(state.clone())).await.0;
+        assert_eq!(
+            items["items"][0]["status"], "healthy",
+            "restoring the key must restore the status: {items}"
+        );
+        assert_eq!(
+            probe_requests(&mock).await,
+            3,
+            "each config change invalidates the entry, so every read re-probes"
+        );
+    }
+
+    /// RENG-36: the provider CRUD endpoints invalidate the cached health of the
+    /// config they change, so a provider edited (or removed and re-added) there
+    /// is re-probed rather than answered from the entry its old config left.
+    #[tokio::test]
+    async fn provider_crud_invalidates_the_changed_entry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let mut seeded = AppState::new(vec![cfg("openai")]);
+        seeded.llm_health = Arc::new(crate::server::api::llm_health::LlmHealthStore::with_probe(
+            Arc::new(move |_cfg| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    Ok(crate::llm::probe::ProbeOutcome {
+                        resolved_base: "stub".to_string(),
+                    })
+                })
+            }),
+            std::time::Duration::from_secs(60),
+        ));
+        let state = Arc::new(seeded);
+
+        // Prime the cache for the stored config: the next read costs no probe.
+        let stored = state.llm_configs.read().unwrap()[0].clone();
+        state.llm_health.record(&stored, ProviderHealth::healthy(3));
+        assert_eq!(
+            state.llm_health.report(std::slice::from_ref(&stored)).await[0].status,
+            ProviderStatus::Healthy
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+        // `PUT /llm/providers/openai-0` with a new key drops that entry.
+        let resp = update_provider(
+            State(state.clone()),
+            Path("openai-0".to_string()),
+            Ok(Json(UpdateProviderRequest {
+                model: String::new(),
+                api_key: "sk-new".to_string(),
+                api_base: String::new(),
+                max_tokens: 4096,
+                temperature: 0.3,
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let updated = state.llm_configs.read().unwrap()[0].clone();
+        assert_eq!(updated.api_key, "sk-new");
+        assert_eq!(
+            state.llm_health.report(&[updated]).await[0].status,
+            ProviderStatus::Healthy
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "the edited provider is re-probed");
+
+        // Deleting the provider drops its entry too: re-adding the identical
+        // config probes again instead of serving the deleted one's status.
+        let resp = delete_provider(State(state.clone()), Path("openai-0".to_string()))
+            .await
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.llm_configs.read().unwrap().is_empty());
+
+        let resp = add_provider(
+            State(state.clone()),
+            Ok(Json(AddProviderRequest {
+                provider: "openai".to_string(),
+                model: "openai-model".to_string(),
+                api_key: "sk-new".to_string(),
+                api_base: "https://api.openai.example/v1".to_string(),
+                max_tokens: 4096,
+                temperature: 0.3,
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let readded = state.llm_configs.read().unwrap()[0].clone();
+        assert_eq!(
+            state.llm_health.report(&[readded]).await[0].status,
+            ProviderStatus::Healthy
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "a re-added provider is probed, not answered from the deleted one's entry"
+        );
+    }
+
+    /// How many `GET /models` probes the fixture server received.
+    async fn probe_requests(mock: &wiremock::MockServer) -> usize {
+        mock.received_requests()
+            .await
+            .expect("wiremock records requests")
+            .iter()
+            .filter(|r| r.url.path() == "/models")
+            .count()
     }
 }

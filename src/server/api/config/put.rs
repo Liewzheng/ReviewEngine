@@ -431,6 +431,20 @@ pub(crate) fn apply_ui_config(
         *llm = new_llm_configs.clone();
     }
 
+    // RENG-36: a cached health entry is only valid for the exact config it was
+    // probed with, so drop every entry whose provider is no longer in the new
+    // effective set — edited credentials, a cleared key (which removes the
+    // provider), a renamed provider, an edited `apiBase`. The next read of
+    // `GET /llm/providers` / the dashboard probes the changed provider again
+    // instead of reporting the pre-change status.
+    {
+        let live = state.llm_configs.read().unwrap();
+        let dropped = state.llm_health.retain_live(&live);
+        if dropped > 0 {
+            tracing::debug!(dropped, "dropped cached LLM health for changed providers (RENG-36)");
+        }
+    }
+
     // Persist full UI config so GET /config returns exactly what was saved
     let mut ui = state.ui_config.write().unwrap();
     *ui = body;

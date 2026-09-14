@@ -24,6 +24,7 @@ pub mod dashboard;
 pub mod events;
 pub mod feedback;
 pub mod llm;
+pub mod llm_health;
 pub mod logs;
 pub mod queue;
 pub mod repo;

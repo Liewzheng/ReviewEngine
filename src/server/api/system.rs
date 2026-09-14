@@ -90,7 +90,9 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     let mut integrations = Vec::new();
     let mut llm_providers = Vec::new();
 
-    let llm_configs = state.llm_configs.read().unwrap();
+    // Clone out of the lock: the LLM rows below probe (`await`) and no std
+    // guard may be held across an await point.
+    let llm_configs: Vec<crate::models::LLMConfig> = state.llm_configs.read().unwrap().clone();
 
     // GitLab integration check
     let gitlab_configured = llm_configs
@@ -116,18 +118,37 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         "message": if github_configured { "Configured" } else { "Not configured" },
     }));
 
-    for llm in llm_configs.iter() {
-        let has_key = !llm.api_key.is_empty();
+    // LLM rows come from the shared probe cache (RENG-36), exactly like
+    // `GET /api/v1/llm/providers` and the dashboard's health section: a
+    // provider whose key was just broken must not be reported `success` here
+    // either. `latencyMs` stays 0 on this endpoint (the dashboard's rule,
+    // RENG-32) — the card payload carries the probe's own timing.
+    let health = state.llm_health.report(&llm_configs).await;
+    for (llm, report) in llm_configs.iter().zip(health.iter()) {
         llm_providers.push(serde_json::json!({
             "service": format!("{} {}", llm.provider, llm.model),
             "type": "llm",
-            "status": if has_key { "success" } else { "offline" },
+            "status": report.status.dashboard_str(),
             "latencyMs": 0,
-            "message": if has_key { "Configured" } else { "Missing API key" },
+            "message": report.message,
         }));
     }
 
-    let overall = if llm_providers.is_empty() { "offline" } else { "success" };
+    let overall = if llm_providers.is_empty() {
+        "offline"
+    } else if health
+        .iter()
+        .all(|h| h.status == crate::server::api::llm_health::ProviderStatus::Healthy)
+    {
+        "success"
+    } else if health
+        .iter()
+        .any(|h| h.status == crate::server::api::llm_health::ProviderStatus::Healthy)
+    {
+        "warning"
+    } else {
+        "error"
+    };
 
     // Top-level gate flag for the frontend: true iff at least one effective
     // LLM config is usable — a non-empty `api_base` (`api_key` may stay
@@ -620,6 +641,39 @@ mod tests {
             body["llmConfigured"], true,
             "an entry with api_base must report true: {body}"
         );
+    }
+
+    /// RENG-36: the LLM rows report the shared probe cache's verdict, never key
+    /// presence — a provider whose key was just broken must not read `success`
+    /// on this endpoint either (it is what the LLM page's not-configured banner
+    /// is built on, and it lists the same providers as the other two pages).
+    #[tokio::test]
+    async fn system_health_llm_rows_follow_probe_verdicts() {
+        let mut state = AppState::new(vec![crate::models::LLMConfig {
+            provider: "openai".to_string(),
+            model: "gpt-4o".to_string(),
+            api_key: "sk-broken".to_string(),
+            api_base: "https://api.openai.example/v1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+        }]);
+        state.llm_health = Arc::new(crate::server::api::llm_health::LlmHealthStore::with_probe(
+            Arc::new(|_cfg| Box::pin(async { Err("HTTP 401 Unauthorized".to_string()) })),
+            std::time::Duration::from_secs(60),
+        ));
+
+        let body = health_json(state).await;
+        let row = &body["llmProviders"][0];
+        assert_eq!(row["service"], "openai gpt-4o");
+        assert_eq!(
+            row["status"], "error",
+            "a stored key whose probe fails must not read success: {body}"
+        );
+        assert_eq!(row["message"], "HTTP 401 Unauthorized");
+        assert_eq!(body["overall"], "error");
+        // The gate flag is unchanged by this (config presence, not health).
+        assert_eq!(body["llmConfigured"], true);
     }
 
     /// `/system/health` exposes `storage_backend`: "disabled" when no DB is

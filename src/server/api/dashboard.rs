@@ -35,6 +35,7 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use std::sync::Arc;
 
+use crate::server::api::llm_health::ProviderStatus;
 use crate::server::task_queue::{TaskEntry, TaskState};
 use crate::server::AppState;
 use crate::store::traits::{ReviewListQuery, ReviewStore};
@@ -438,43 +439,61 @@ async fn compute_health(state: &AppState) -> serde_json::Value {
     // an LLM happened to be named after it. Only "gitlab" exists as a
     // platform type today; the "github" check is the same honest lookup,
     // ready for when that platform lands.
-    let platforms = state.git_platforms.read().unwrap();
-    let mut integrations = Vec::new();
-    for (service, platform_type, env_configured) in [
-        ("GitLab API", "gitlab", state.env_gitlab_configured),
-        ("GitHub API", "github", state.env_github_configured),
-    ] {
-        let configured = env_configured
-            || platforms
-                .iter()
-                .any(|p| p.platform_type.eq_ignore_ascii_case(platform_type));
-        integrations.push(serde_json::json!({
-            "service": service,
-            "type": "integration",
-            "status": if configured { "success" } else { "offline" },
-            "message": if configured { "Configured" } else { "Not configured" },
-        }));
-    }
-    drop(platforms);
+    // Scoped so the `git_platforms` guard is out of scope (not merely dropped)
+    // before the health probe below awaits: a std guard alive at an await point
+    // makes the handler future non-`Send` and axum silently refuses the route.
+    let integrations = {
+        let platforms = state.git_platforms.read().unwrap();
+        let mut integrations = Vec::new();
+        for (service, platform_type, env_configured) in [
+            ("GitLab API", "gitlab", state.env_gitlab_configured),
+            ("GitHub API", "github", state.env_github_configured),
+        ] {
+            let configured = env_configured
+                || platforms
+                    .iter()
+                    .any(|p| p.platform_type.eq_ignore_ascii_case(platform_type));
+            integrations.push(serde_json::json!({
+                "service": service,
+                "type": "integration",
+                "status": if configured { "success" } else { "offline" },
+                "message": if configured { "Configured" } else { "Not configured" },
+            }));
+        }
+        integrations
+    };
 
-    // LLM provider probes: presence of an API key only — the dashboard poll
-    // performs no network probes. The `latencyMs` field was dropped in
-    // RENG-32: it was hardcoded 0, i.e. a fabricated measurement; an honest
-    // value would require live probes on the 60s poll path (see
-    // `POST /api/v1/llm/providers/{id}/test` for on-demand latency).
-    let llm_configs = state.llm_configs.read().unwrap();
+    // LLM provider health: the probe cache (RENG-36) — one report per
+    // configured provider, sharing `GET /api/v1/llm/providers`' source so the
+    // dashboard and the LLM page cannot disagree. A provider whose credentials
+    // were just changed has no entry for its new config, so it is probed before
+    // this returns rather than reported from the pre-change status. The
+    // `latencyMs` field stays dropped (RENG-32: the dashboard poll shows no
+    // per-provider timing; `POST /api/v1/llm/providers/{id}/test` reports it).
+    // Never hold the `llm_configs` guard across the probe `await`.
+    let llm_configs: Vec<crate::models::LLMConfig> = state.llm_configs.read().unwrap().clone();
+    let health = state.llm_health.report(&llm_configs).await;
     let mut llm_providers = Vec::new();
-    for llm in llm_configs.iter() {
-        let has_key = !llm.api_key.is_empty();
+    for (llm, report) in llm_configs.iter().zip(health.iter()) {
         llm_providers.push(serde_json::json!({
             "service": format!("{} {}", llm.provider, llm.model),
             "type": "llm",
-            "status": if has_key { "success" } else { "offline" },
-            "message": if has_key { "Configured" } else { "Missing API key" },
+            "status": report.status.dashboard_str(),
+            "message": report.message,
         }));
     }
 
-    let overall = if llm_providers.is_empty() { "offline" } else { "success" };
+    // `overall` follows the probed statuses, not provider presence: a
+    // configured-but-failing provider is no longer "operational".
+    let overall = if llm_providers.is_empty() {
+        "offline"
+    } else if health.iter().all(|h| h.status == ProviderStatus::Healthy) {
+        "success"
+    } else if health.iter().any(|h| h.status == ProviderStatus::Healthy) {
+        "warning"
+    } else {
+        "error"
+    };
 
     serde_json::json!({
         "integrations": integrations,
@@ -549,9 +568,50 @@ fn default_trend_daily() -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::server::api::llm_health::LlmHealthStore;
     use crate::server::task_queue::{SourceMeta, TaskStore};
     use crate::store::SqlxStore;
     use chrono::TimeZone;
+
+    /// A store whose probe always succeeds (`ok`) or always fails — the seam
+    /// that keeps the dashboard's health tests off the network (RENG-36).
+    fn stub_health_store(ok: bool) -> LlmHealthStore {
+        LlmHealthStore::with_probe(
+            Arc::new(move |_cfg| {
+                Box::pin(async move {
+                    if ok {
+                        Ok(crate::llm::probe::ProbeOutcome {
+                            resolved_base: "stub".to_string(),
+                        })
+                    } else {
+                        Err("HTTP 401 Unauthorized".to_string())
+                    }
+                })
+            }),
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    /// A store whose verdict depends on the provider name (`openai` healthy,
+    /// anything else 401) — deterministic whatever order the concurrent probes
+    /// complete in.
+    fn per_provider_health_store() -> LlmHealthStore {
+        LlmHealthStore::with_probe(
+            Arc::new(|cfg| {
+                let ok = cfg.provider == "openai";
+                Box::pin(async move {
+                    if ok {
+                        Ok(crate::llm::probe::ProbeOutcome {
+                            resolved_base: "stub".to_string(),
+                        })
+                    } else {
+                        Err("HTTP 401 Unauthorized".to_string())
+                    }
+                })
+            }),
+            std::time::Duration::from_secs(60),
+        )
+    }
 
     fn entry(id: &str, state: TaskState) -> TaskEntry {
         TaskEntry {
@@ -1065,7 +1125,7 @@ mod tests {
         for item in integrations {
             assert!(item.get("latencyMs").is_none(), "latencyMs must be dropped: {item}");
         }
-        // LLM rows keep the key-presence probe and also carry no latencyMs.
+        // LLM rows are absent here (no provider configured) and carry no latencyMs.
         let llm = json["health"]["llmProviders"].as_array().unwrap();
         assert!(llm.is_empty(), "no LLM configured in this state");
         assert_eq!(json["health"]["overall"], "offline");
@@ -1113,7 +1173,7 @@ mod tests {
     /// The LLM provider health rows survive without latencyMs.
     #[tokio::test]
     async fn dashboard_health_llm_rows_have_no_latency() {
-        let state = AppState::new(vec![crate::models::LLMConfig {
+        let mut state = AppState::new(vec![crate::models::LLMConfig {
             provider: "openai".to_string(),
             model: "gpt-4".to_string(),
             api_key: "sk-test".to_string(),
@@ -1122,6 +1182,9 @@ mod tests {
             temperature: 0.7,
             disable_thinking: None,
         }]);
+        // RENG-36: the row's status is the probe's verdict, so pin it with a
+        // stub probe (a real one would hit api.openai.com from a unit test).
+        state.llm_health = Arc::new(stub_health_store(true));
         let (status, json) = dashboard_json(Arc::new(state)).await;
         assert_eq!(status, StatusCode::OK);
         let llm = &json["health"]["llmProviders"][0];
@@ -1130,6 +1193,46 @@ mod tests {
         assert_eq!(llm["message"], "Configured");
         assert!(llm.get("latencyMs").is_none());
         assert_eq!(json["health"]["overall"], "success");
+    }
+
+    /// RENG-36: the dashboard's LLM rows and `overall` follow the probe
+    /// verdicts, not key presence — a provider whose probe fails (the reported
+    /// symptom: a key broken in the Web UI while the service keeps running)
+    /// must not read as operational, and a mixed set is `warning`.
+    #[tokio::test]
+    async fn dashboard_health_follows_probe_verdicts() {
+        let llm = |provider: &str, key: &str| crate::models::LLMConfig {
+            provider: provider.to_string(),
+            model: format!("{provider}-model"),
+            api_key: key.to_string(),
+            api_base: format!("https://api.{provider}.example/v1"),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+        };
+
+        // One healthy provider + one failing + one without a key.
+        let mut state = AppState::new(vec![llm("openai", "sk-a"), llm("deepseek", "sk-b"), llm("ollama", "")]);
+        state.llm_health = Arc::new(per_provider_health_store());
+        let (status, json) = dashboard_json(Arc::new(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = json["health"]["llmProviders"].as_array().unwrap();
+        assert_eq!(rows[0]["status"], "success");
+        assert_eq!(rows[1]["status"], "error");
+        assert_eq!(rows[1]["message"], "HTTP 401 Unauthorized");
+        assert_eq!(rows[2]["status"], "offline");
+        assert_eq!(rows[2]["message"], "Missing API key");
+        assert_eq!(
+            json["health"]["overall"], "warning",
+            "one failed provider among healthy ones is degraded, not operational"
+        );
+
+        // Every provider failing → `error` (never `success`).
+        let mut state = AppState::new(vec![llm("openai", "sk-a")]);
+        state.llm_health = Arc::new(stub_health_store(false));
+        let (_, json) = dashboard_json(Arc::new(state)).await;
+        assert_eq!(json["health"]["llmProviders"][0]["status"], "error");
+        assert_eq!(json["health"]["overall"], "error");
     }
 
     /// `None` fallback: without ANY store the dashboard serves documented

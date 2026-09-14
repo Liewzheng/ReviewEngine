@@ -651,6 +651,8 @@ Response 200:
 }
 ```
 
+`llmProviders`（0.10.18 起，RENG-36）：与 `GET /api/v1/llm/providers`、Dashboard 的 `health` 段读同一份探测缓存，`status` 取最近一次真实探测结果（`success` / `error` / `offline`），`message` 为具体错误文本（如 `HTTP 401 Unauthorized`），`overall` 同样按探测结果得出（全正常 `success` / 部分 `warning` / 全失败 `error` / 无 provider `offline`）。本端点不返回探测延迟（`latencyMs` 恒为 0，按 RENG-32 的 Dashboard 规则；卡片接口才带真实耗时）。注意 `llmConfigured` 仍是**配置**判据（有非空 `api_base` 即可），与健康状态无关。
+
 顶层 `GET /health`（及 `/health/ready`）保留，用于存活检查，返回简单状态（见 §7 认证策略）。
 
 #### `GET /api/v1/system/upgrade/check`
@@ -782,7 +784,7 @@ Response 200:
       "position": 0,
       "chainPosition": 1,
       "isPrimary": true,
-      "latencyMs": 0,
+      "latencyMs": 320,
       "errorRate": 0.0,
       "requestCount": 0,
       "usagePercent": 0,
@@ -794,6 +796,14 @@ Response 200:
 ```
 
 API key 永远不会在响应中返回。
+
+`status` / `latencyMs` / `lastChecked` 来自**真实探测**（0.10.18 起，RENG-36）：服务端对每个已配置 provider 发一次 `GET {api_base}/models`（与 `POST …/{id}/test`、CLI `reng config provider test` 同一探测路径），并把结果按 provider 缓存 60s。取值：
+
+- `healthy` —— 最近一次探测成功（`message: Configured`），`latencyMs` 是该次探测的往返耗时，`lastChecked` 是探测时刻；
+- `error` —— 最近一次探测失败（key 被改坏 / 被吊销、地址不可达、401/403 等），`message` 是具体错误；
+- `offline` —— 没有存储 key，**不做探测**，`latencyMs` 为 0。
+
+改 key、改 `apiBase`、改 provider 名、删除 provider（`PUT /api/v1/config` 的 `llm` 段，或本节的 `POST` / `PUT` / `DELETE /providers`）都会**丢弃该 provider 缓存的健康状态**，下一次读取重新探测后才给出状态 —— 因此「在 WebUI 改坏 key、不重启服务」不会再显示成 `healthy`。失效粒度是**按 provider**（缓存键是 `provider + model + api_base + api_key` 的 SHA-256 指纹）：只动一个 provider 时，其他 provider 的状态与徽标不受影响，也不会被连带重新探测。缓存未命中时读取会等待该次探测（最长即探测自身的 10s 超时）；只是超过 TTL 的条目会立即返回并**在后台**刷新一次，所以正常轮询不会因为探测而变慢。
 
 0.10.11 起（RENG-55）每个 provider 额外返回链序信息：`position` 为它在**存储列表**中的下标（0 起，与 `llm_providers.raw.position` 及 UI 卡片顺序一致，不受“首选”选择影响），`chainPosition` 为它在**运行时链**中的 1 起名次（首选 provider 为 1，其后按存储顺序排列），`isPrimary` 标识链首（即评审实际首先使用的 provider）。运行时链的规则见 [configuration.md](configuration.md#chain-order-and-the-primary-provider)。
 
@@ -842,6 +852,8 @@ Response 200:
   "timestamp": "2026-07-18T02:00:00Z"
 }
 ```
+
+0.10.18 起（RENG-36）这次探测的结果同样写入该 provider 的健康缓存，所以紧接着的 `GET /llm/providers` 会直接给出「刚测过」的状态（与卡片上的 Test Connection 结论一致），而不是再探一次。
 
 ---
 
@@ -905,6 +917,8 @@ Response 200:
 `recentReviews`：最新 5 条（`created_at` DESC），不再按状态过滤（pending / running / completed / failed / cancelled 都会出现），`status` 使用与 `/reviews` 一致的真实状态词汇（不再输出 `"success"`）。
 
 `health.integrations`（0.10.8 起）：按**实际 git 集成配置**检测，两条配置通道任一满足即报 `success`——`git_platforms` 表（即 `PUT /api/v1/config` 的 Git 平台列表）中存在任一 `type=gitlab` / `type=github` 平台，**或**启动时经 env/CLI 配置了凭据（`GITLAB_TOKEN` / `--gitlab-token`、`GITHUB_TOKEN` / `--github-token`；该通道直接接入 webhook / MR 拉取客户端，不经过 `git_platforms`）；不再通过 LLM provider 名称猜测。`latencyMs` 字段已移除（原恒为 0 的占位值；真实连通性/延迟探测用 `POST /api/v1/llm/providers/{id}/test`）。
+
+`health.llmProviders`（0.10.18 起，RENG-36）：与 `GET /api/v1/llm/providers` 共用同一份健康缓存（`AppState::llm_health`），因此两页不会互相矛盾。每行 `status` 取该 provider 最近一次真实探测的结果（`success` / `error` / `offline`，`offline` = 未配置 key、不探测），`message` 为 `Configured` / `Missing API key` / 具体错误文本（如 `HTTP 401 Unauthorized`）。`overall` 同样按探测结果得出：无 provider 为 `offline`；**全部**正常为 `success`；部分正常为 `warning`（含「有一个 provider 未配置 key」的情形）；一个都不正常为 `error`——不再只看「有没有配 key」。改配置（`PUT /api/v1/config` 的 `llm` 段或 provider 增删改）会丢弃受影响 provider 的缓存并在下次读取时重新探测；读取路径上未被缓存的 provider 会等待该次探测（最长 10s），仅超 TTL 的条目在后台刷新。
 
 ---
 

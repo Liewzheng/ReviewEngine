@@ -100,6 +100,8 @@ card metrics remain render-only placeholders.
 | error | red | Not responding or auth failure |
 | offline | gray | Not configured or disabled |
 
+**Where the status comes from (0.10.18, RENG-36):** `healthy` / `error` are the verdict of a real `GET {apiBase}/models` probe, cached per provider for 60 s (`src/server/api/llm_health.rs`); they are never inferred from "a key is stored", which is what used to leave a card green after its key was broken. `offline` means no key is stored (nothing is probed). Editing a provider's credentials or endpoint — or deleting it — drops that provider's cached verdict, so the next read re-probes it; the dashboard's `health.llmProviders` section reads the same cache. `degraded` is not produced by the backend today (no latency/error-rate statistics yet), and `latencyMs` is the probe's own round-trip time.
+
 **Provider data interface**:
 ```typescript
 interface LlmProvider {

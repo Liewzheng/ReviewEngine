@@ -255,6 +255,12 @@ pub struct AppState {
     pub upgrade: UpgradeStore,
     /// In-memory models.dev catalog cache (24h TTL enforced by handlers).
     pub catalog: CatalogStore,
+    /// Cached per-provider LLM connectivity health (RENG-36): the single
+    /// source both `GET /api/v1/llm/providers` and the dashboard health
+    /// section report from, keyed by the exact provider config a probe ran
+    /// with so a credential change can never be answered by the previous
+    /// config's status.
+    pub llm_health: Arc<crate::server::api::llm_health::LlmHealthStore>,
 }
 
 impl AppState {
@@ -284,6 +290,7 @@ impl AppState {
             db: None,
             upgrade: UpgradeStore::new(),
             catalog: CatalogStore::new(),
+            llm_health: Arc::new(crate::server::api::llm_health::LlmHealthStore::new()),
         }
     }
 

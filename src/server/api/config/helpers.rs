@@ -14,6 +14,12 @@ pub struct TestConfigRequest {
 }
 
 pub async fn test_config(Json(body): Json<TestConfigRequest>) -> impl axum::response::IntoResponse {
+    // RENG-36: deliberately NOT recorded in the provider health cache. This
+    // endpoint probes a SUBMITTED config that may never be saved (and whose
+    // provider/model/apiBase the dialog may still edit), so its verdict says
+    // nothing about a stored provider. The stored-config test
+    // (`POST /api/v1/llm/providers/{id}/test`) is the one that records, and the
+    // next read of `/llm/providers` probes the saved config anyway.
     let cfg = crate::models::LLMConfig {
         provider: body.provider,
         model: body.model,

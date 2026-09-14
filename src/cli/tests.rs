@@ -97,6 +97,42 @@ fn serve_tls_requires_both_cert_and_key() {
     assert!(parse(&["serve", "--tls-cert", "/tmp/c.pem", "--tls-key", "/tmp/k.pem"]).is_ok());
 }
 
+/// RENG-37 (a): `serve --data-dir` parses, defaults to `None` (unchanged
+/// behaviour), and the parsed root repoints **every** artifact of the state
+/// layout — not just one.
+#[test]
+fn serve_data_dir_parses_and_repoints_the_whole_state_layout() {
+    match parse_ok(&["serve"]).command {
+        Some(Commands::Serve { data_dir, .. }) => assert_eq!(data_dir, None, "no flag means today's defaults"),
+        other => panic!("expected Serve, got {other:?}"),
+    }
+
+    let root = "/srv/reng-instance-a";
+    let cli = parse_ok(&["serve", "--data-dir", root]);
+    let Some(Commands::Serve {
+        data_dir: Some(data_dir),
+        ..
+    }) = cli.command
+    else {
+        panic!("serve --data-dir must capture the path");
+    };
+    let resolved_root = review_engine::paths::state_dir_from(
+        Some(data_dir),
+        Some("/app/config"),
+        Some(std::path::PathBuf::from("/home/alice")),
+    );
+    assert_eq!(resolved_root.as_deref(), Some(std::path::Path::new(root)));
+    for file in review_engine::paths::STATE_FILES {
+        let path = review_engine::paths::resolve_artifact_at(None, file.name, resolved_root.clone())
+            .unwrap_or_else(|| panic!("{} must resolve under the data dir", file.name));
+        assert_eq!(path, std::path::Path::new(root).join(file.name));
+    }
+
+    // The flag is `serve`-only: other subcommands must reject it.
+    assert!(parse(&["review", "--data-dir", root]).is_err());
+    assert!(parse(&["--data-dir", root, "serve"]).is_err());
+}
+
 #[test]
 fn validate_accepts_config_path() {
     let cli = parse_ok(&["validate", "--config", "/tmp/.code-audit-config.toml"]);

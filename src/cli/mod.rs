@@ -6,4 +6,4 @@ mod tests;
 #[cfg(feature = "cli")]
 pub mod handlers;
 
-pub use app::run;
+pub use app::{apply_data_dir, parse_cli, run};

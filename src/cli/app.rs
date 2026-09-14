@@ -26,18 +26,48 @@ pub fn cli_command() -> clap::Command {
 
 /// Parse CLI args from the environment, applying the argv[0]-derived program
 /// name. Equivalent to `Cli::parse()` except the displayed name is dynamic.
-fn parse_cli() -> Cli {
+pub fn parse_cli() -> Cli {
     let matches = cli_command().get_matches();
     Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
 }
 
-pub async fn run() -> Result<()> {
-    let cli = parse_cli();
+/// Apply the explicit data dir (`serve --data-dir`, or `REVIEW_DATA_DIR`) —
+/// RENG-37. Called by `main` before anything can resolve or write a state
+/// path, including the log collector's `logs.ndjson`.
+pub fn apply_data_dir(cli: &Cli) -> Result<()> {
+    let flag = match &cli.command {
+        Some(Commands::Serve { data_dir, .. }) => data_dir.clone(),
+        _ => None,
+    };
+    review_engine::paths::apply_data_dir(flag.as_deref())?;
+    Ok(())
+}
 
+/// Warn about every per-artifact env override that is set — each one is
+/// process-wide and wins over the data dir, so the artifact it names (and, for
+/// `REVIEW_UI_STATE_FILE`, the database and `secrets.key` derived from it) stays
+/// outside an instance started with `--data-dir`. Called from [`run`], after
+/// the tracing subscriber exists, so the warning reaches `logs.ndjson` and the
+/// Web UI Logs page instead of being dropped.
+fn warn_escaping_overrides() {
+    let Some(root) = review_engine::paths::data_dir() else {
+        return;
+    };
+    for (env, artifact) in review_engine::paths::escaping_overrides() {
+        tracing::warn!(
+            "{env} is set — {artifact} stays outside the data dir ({})",
+            root.display()
+        );
+    }
+}
+
+pub async fn run(cli: Cli) -> Result<()> {
     if cli.version {
         println!("Review Engine v{}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+
+    warn_escaping_overrides();
 
     let progress_map: ProgressMap = new_progress_map();
 
@@ -168,8 +198,7 @@ pub async fn run() -> Result<()> {
                 None => {
                     let candidates = [
                         std::env::current_dir().ok().map(|p| p.join(".code-audit-config.toml")),
-                        home::home_dir()
-                            .map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml")),
+                        review_engine::paths::user_config_path(),
                     ];
                     candidates
                         .into_iter()
@@ -203,6 +232,10 @@ pub async fn run() -> Result<()> {
             tls_cert,
             tls_key,
             tls_port,
+            // `data_dir` was already applied by `apply_data_dir` in `main`,
+            // before the log collector opened `logs.ndjson`; every
+            // `paths::state_dir()` consumer below resolves under it.
+            data_dir: _,
         } => {
             // clap's `requires` already enforces that --tls-cert and --tls-key
             // come as a pair; the fall-through arm is defense-in-depth in case
@@ -420,7 +453,7 @@ pub async fn run() -> Result<()> {
             // startup step above has already succeeded.
             let config_candidates = [
                 std::env::current_dir().ok().map(|p| p.join(".code-audit-config.toml")),
-                home::home_dir().map(|p| p.join(".config").join("review-engine").join(".code-audit-config.toml")),
+                review_engine::paths::user_config_path(),
             ];
             for candidate in config_candidates.into_iter().flatten() {
                 if candidate.exists() {

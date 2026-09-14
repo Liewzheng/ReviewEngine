@@ -193,7 +193,7 @@ A successful validation prints the number of defined experts:
 
 A running server (`review-engine serve`, default port 8080) also exposes a browser-based configuration page at `/#/config` (hash routing, so no server-side URL rewriting is needed). It edits the live server configuration through `GET`/`PUT /api/v1/config` — it does not write a TOML file. For the API token / bootstrap-key login flow, see [FAQ / Troubleshooting](faq.md).
 
-The page is read-only until you click **Edit**. It is organized into cards:
+The page has no edit mode — every field is editable and saves itself (see [Editing and saving](#editing-and-saving)). It is organized into cards:
 
 - **Git 平台 (Git Platforms)** — one entry per configured Git host: name, type, Base URL, internal URL (optional), access token, Secret token / Signing token (`whsec_...`, see [GitLab webhook](integrations/gitlab.md)), and the allowed-projects allowlist. Entries are hot-effective: they drive both webhook verification and review-time GitLab API pulls without a restart.
 - **Review rules** — minimum passing score (`minScore`), max review duration, block-on-critical, auto-comment-on-pass, comment template, excluded file patterns, and required experts.
@@ -203,7 +203,7 @@ LLM providers are managed on a separate **LLM page** (`/#/llm`): the primary pro
 
 ### Secret handling
 
-`GET /api/v1/config` never returns a live secret: a configured LLM API key, Git platform access token, or webhook secret comes back as the mask sentinel `***`. In read-only mode, secret fields display as dots; the reveal button only ever shows this mask, never the real value. On save:
+`GET /api/v1/config` never returns a live secret: a configured LLM API key, Git platform access token, or webhook secret comes back as the mask sentinel `***`. A secret field therefore shows either what you are typing or that mask — the reveal control only toggles the draft in the input, never a stored value. On save:
 
 - `***` (or leaving the field blank for LLM keys) means **keep the stored value**;
 - a real value replaces the stored secret;
@@ -225,7 +225,7 @@ Secrets saved through the Web UI (git platform tokens, webhook secrets, legacy G
 
 ### Editing and saving
 
-The page tracks unsaved changes against a snapshot taken when you entered edit mode; the **Save** button stays disabled while nothing is dirty, and leaving the page or closing the tab with pending changes prompts for confirmation. **Cancel** discards both form edits and unsaved provider add/edit/delete operations.
+There is no edit mode: every field is editable as soon as the page loads and each edit saves itself through a debounced (500 ms) `PUT /api/v1/config`. The header carries a transient save indicator (saving / saved / failed) instead of Save and Cancel buttons; a failed save keeps the edit in the form and the form dirty, so the next edit retries it. The page tracks changes against the last persisted snapshot and skips applying a polled config while the form is dirty or a save is in flight, so a background tick cannot clobber an in-progress edit.
 
 `PUT /api/v1/config` is a **partial update**: the request JSON is deep-merged over the stored config, so omitted fields keep their current values. Inline validation warnings do not block saving, because empty/unchanged secret fields are interpreted as "keep the stored value" server-side.
 

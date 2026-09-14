@@ -4,14 +4,14 @@
 
 - **Route**: `/llm`
 - **Purpose**: Monitor the health and performance of each LLM provider. Quick diagnostic view for troubleshooting review failures or latency spikes.
-- **Data**: Fetched on mount + refresh button. SSE `llm.status` updates individual provider cards in real time.
+- **Data**: Fetched on mount, then refreshed by the page's 30 s silent auto-refresh (no manual refresh button, RENG-52; there is no SSE feed for this page).
 
 ## 2. Page Layout
 
 ```
 PageHeader
 ├── Title: "LLM Status" + subtitle: "Provider health and performance"
-└── Right: Refresh All button (ElButton icon: Refresh)
+└── Right: Add provider button (ElButton icon: Plus) — the page auto-refreshes every 30 s, no manual refresh (RENG-52)
 
 Provider Grid
 ├── ProviderCard (OpenAI)   [Primary] [Chain #1]
@@ -118,19 +118,14 @@ interface LlmProvider {
 
 ### 3.2 Test Connection Flow
 
-**Per-card test:**
-- Click "Test Connection" → button enters loading state (`ElLoading` spinner).
-- `POST /api/v1/llm/{providerId}/test`
-- Result shown inline below the action row:
-  - Success: `ElAlert` type="success" title="Connected" description="Latency: 234ms" closable.
-  - Failure: `ElAlert` type="error" title="Connection failed" description="{error message}" closable.
-- Alert auto-dismisses after 5 seconds unless hovered.
+**Per-card test (shipped):**
+- Click "Test Connection" → the clicked card's button enters its loading state (`ElLoading` spinner; the page tracks the in-flight provider id, so sibling cards stay idle).
+- `POST /api/v1/llm/providers/{id}/test` — the server probes with the stored key, so no secret round-trips through the browser.
+- Result shown inline above the action row as the shared `TestResultLine` (RENG-54): an outcome tag — `Connected — 234ms` / `Failed — {error message}` — with the time the probe ran and a dismiss control.
+- The outcome is page-session state keyed by the provider name, deliberately outside the polled provider list, so the page's 30 s tick cannot wipe the number the user just asked for.
+- A toast (`ElMessage`) reports the same outcome.
 
-**Bulk test (Refresh All):**
-- Click "Refresh All" in PageHeader → all cards show skeleton state simultaneously.
-- `POST /api/v1/llm/test-all`
-- Results update all cards at once.
-- `ElNotification` summary: "All providers tested — {N} healthy, {M} issues".
+**No bulk test.** There is no "Test all providers" / "Refresh All" action, no `POST /llm/test-all` endpoint, and no card skeleton state driven by a test: the page header's only action is **Add provider**, and the cards refresh from the page's 30 s auto-refresh.
 
 ### 3.3 Historical Sparkline (Optional Enhancement)
 
@@ -151,13 +146,11 @@ interface LlmProvider {
 
 ## 4. Interactions & State Changes
 
-### 4.1 SSE Updates
+### 4.1 Health Refresh (polling, not SSE)
 
-- Listen to `llm.status` events.
-- Payload: `{ providerId: string; status: LlmProviderStatus; latencyMs?: number; }`
-- Update the matching `ProviderCard` in place.
-- If status changes (e.g., healthy → degraded), trigger `flash-border` animation on the card.
-- Update latency value with smooth number transition (count-up animation, 0.3s).
+- The page polls `GET /api/v1/llm/providers` every 30 s (silent — no skeleton, no error banner).
+- The whole list is reconciled in place; the health metrics are plain reactive values with no count-up animation and no status-change flash on these cards.
+- There is no `llm.status` SSE event: the server's SSE streams cover system/queue events and logs only.
 
 ### 4.2 Provider Configuration
 
@@ -183,12 +176,9 @@ interface LlmProvider {
 
 ## 6. Animation Details
 
-- Page enter: `page-enter` transition.
-- Card enter: staggered fade-in, delay = index * 50ms, `0.25s ease`.
-- Card status change: `flash-border` animation (0.6s).
-- Latency number update: `transition: color 0.2s ease` (flash green/amber/red).
-- Test result alert: slide down `0.2s ease`, auto-dismiss fade-out `0.3s ease`.
-- Sparkline: SVG path draws on mount using `stroke-dasharray` / `stroke-dashoffset` animation (1s ease).
+- Only CSS transitions shipped on these cards: `transition: border-color/box-shadow/transform 0.2s ease` on the card and `transition: color 0.2s ease` on the metric values.
+- Test result line (RENG-54): appears inline above the card's action row, no auto-dismiss — it stays until the user dismisses it.
+- Not implemented on these cards: a page-enter transition, a staggered card fade-in, a status-change `flash-border`, a latency count-up, and the sparkline below.
 
 ## 7. Data Structures
 
@@ -209,17 +199,12 @@ interface TestResult {
 }
 
 // API endpoints
-GET  /api/v1/llm/providers       → LlmProvider[]
-POST /api/v1/llm/{id}/test       → TestResult
-POST /api/v1/llm/test-all        → Record<string, TestResult>
-GET  /api/v1/llm/{id}/latency    → number[] (24h hourly averages)
+GET    /api/v1/llm/providers           → { items: LlmProvider[] }
+POST   /api/v1/llm/providers           → add a provider
+PUT    /api/v1/llm/providers/{id}      → update a provider
+DELETE /api/v1/llm/providers/{id}      → remove a provider
+POST   /api/v1/llm/providers/{id}/test → TestResult
 
-// SSE event: llm.status
-interface LlmStatusEvent {
-  providerId: string;
-  status: 'healthy' | 'degraded' | 'error' | 'offline';
-  latencyMs?: number;
-  errorRate?: number;
-  timestamp: string;
-}
+// No bulk-test, per-provider latency-history or llm.status SSE endpoint
+// exists; health comes from the 30 s poll of GET /llm/providers.
 ```

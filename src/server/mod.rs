@@ -237,11 +237,13 @@ pub(crate) async fn run_review_common(
     // Mark progress complete
     crate::progress::complete_progress(Some(&progress_map), &review_id);
 
-    // Publish results
+    // Publish results. The diff the review actually reviewed is passed along so
+    // inline notes are gated on its changed lines (no re-fetch, no anchors the
+    // provider would reject).
     let output = output
         .with_dropped_findings(dropped_findings)
         .with_consolidated(consolidated);
-    if let Err(e) = crate::publish_review(token, url, &output).await {
+    if let Err(e) = crate::publish_review_with_diff(token, url, &output, Some(&diff)).await {
         tracing::warn!("Publish failed: {:?}", e);
     }
 

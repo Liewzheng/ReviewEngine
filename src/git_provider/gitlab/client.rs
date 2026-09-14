@@ -1633,4 +1633,126 @@ mod tests {
         let err = client.search_code_paths("x", 20).await.unwrap_err();
         assert!(err.to_string().contains("401"), "error should mention 401, got: {err}");
     }
+
+    // ─── RENG-60: inline-note isolation against the real client errors ──────
+
+    /// The publisher's retry classification must hold for the errors this client
+    /// actually produces, not only for hand-written strings: a `400 line_code
+    /// can't be blank` verdict (corpus §4.6) is permanent — one attempt — and
+    /// the remaining findings of the batch are still posted.
+    #[tokio::test]
+    async fn test_inline_publish_isolates_blank_line_code_rejection() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 1, "name": "Alice"},
+                "diff_refs": {"base_sha": "b1", "start_sha": "s1", "head_sha": "h1"}
+            })))
+            .mount(&server)
+            .await;
+        // The anchor GitLab rejects, and a good one, split by body content.
+        Mock::given(method("POST"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/discussions"))
+            .and(wiremock::matchers::body_string_contains("bad.rs"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+                "message": {"line_code": ["can't be blank"]}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/discussions"))
+            .and(wiremock::matchers::body_string_contains("good.rs"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 7})))
+            .mount(&server)
+            .await;
+
+        let provider = crate::git_provider::gitlab::GitLabProvider {
+            client: make_test_client(&server),
+        };
+        let findings = vec![
+            inline_finding("ux", "bad.rs", 1, Severity::High),
+            inline_finding("lead", "good.rs", 2, Severity::Critical),
+        ];
+        let summary = crate::publisher::publish_inline_notes(&provider, &findings, None).await;
+
+        assert_eq!(summary.posted, 1);
+        assert_eq!(summary.failed, 1);
+        let posts = discussion_posts(&server).await;
+        assert_eq!(posts.len(), 2, "one POST per finding — a 4xx verdict is never retried");
+        assert_eq!(posts.iter().filter(|b| b.contains("good.rs")).count(), 1);
+    }
+
+    /// A transient verdict (503) is retried against the real client too, and the
+    /// retry stays bounded.
+    #[tokio::test]
+    async fn test_inline_publish_retries_transient_verdict_from_real_client() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 1, "name": "Alice"},
+                "diff_refs": {"base_sha": "b1", "start_sha": "s1", "head_sha": "h1"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/discussions"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+
+        let provider = crate::git_provider::gitlab::GitLabProvider {
+            client: make_test_client(&server),
+        };
+        let findings = vec![inline_finding("ux", "flaky.rs", 5, Severity::High)];
+        let summary = crate::publisher::publish_inline_notes(&provider, &findings, None).await;
+
+        assert_eq!(summary.posted, 0);
+        assert_eq!(summary.failed, 1);
+        assert_eq!(
+            discussion_posts(&server).await.len(),
+            3,
+            "three bounded attempts (initial + two retries)"
+        );
+    }
+
+    fn inline_finding(expert: &str, file: &str, line: u32, severity: Severity) -> Finding {
+        Finding {
+            file: file.to_string(),
+            line: Some(line),
+            line_end: None,
+            severity,
+            confidence: 9,
+            category: String::new(),
+            title: "Anchored finding".to_string(),
+            summary: String::new(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: "Fix it".to_string(),
+            effort: Effort::Small,
+            expert_name: expert.to_string(),
+            expert_role: String::new(),
+            agrees_with: Vec::new(),
+            references: Vec::new(),
+        }
+    }
+
+    /// Bodies of the POSTed inline discussions, in request order.
+    async fn discussion_posts(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method == wiremock::http::Method::POST)
+            .map(|r| String::from_utf8_lossy(&r.body).to_string())
+            .collect()
+    }
 }

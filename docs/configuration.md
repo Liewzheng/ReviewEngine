@@ -233,6 +233,27 @@ Provider deletes deserve care: provider IDs are derived from list position (`{pr
 
 ---
 
+## Webhook dispatch state
+
+Webhook-triggered reviews are deduplicated through a JSON state file the server loads at startup and rewrites atomically on every change. Per merge request / pull request it records the last reviewed **commit SHA** *and* a **fingerprint of the reviewed diff**, so an `action=update` event — or an amend / force-push, which changes the SHA while leaving the diff untouched — does not buy another full round (and does not re-post the same comments).
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `REVIEW_DISPATCH_STATE` | `~/.config/review-engine/dispatcher-state.json` | Path of the dispatch state file. An empty value falls back to the default. |
+| `REVIEW_DISPATCH_TIMEOUT_SECS` | `900` (15 min) | Age after which a `running` marker counts as stale (the review panicked, or the process restarted mid-review) and a new review may start for that MR. |
+
+Without a home directory and without `REVIEW_DISPATCH_STATE`, the server runs without persistence: it logs a warning at startup and forgets reviewed SHAs on restart (`MrDispatcher::persistent`).
+
+**Point this at a mounted volume inside a container.** The default resolves to `/app/.config/…`, which lives in the image layer, so *any* container recreate — `docker compose up` after editing the compose file, an image update, a container recreated on boot — wipes it and silently disarms the dedup. Both shipped compose files (`docker-compose.yml`, `deploy/standalone-compose.yml`) therefore set
+
+```yaml
+REVIEW_DISPATCH_STATE: /app/config/dispatcher-state.json
+```
+
+on the `./config` volume those files already mount for `REVIEW_ENGINE_CONFIG_DIR`. The failure mode this avoids is expensive and quiet: after one recreate, a burst of `action=update` webhooks re-reviewed seven MRs whose SHAs had not changed since days earlier, re-posting the same comments and re-billing the LLM for content already reviewed. The startup log line `Dispatcher: persisting dispatch state to <path>` names the path actually in use, which is the first thing to check when dedup appears to be off.
+
+---
+
 ## Full schema
 
 For every available field, see [`docs/config-schema.md`](config-schema.md).

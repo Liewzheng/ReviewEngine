@@ -142,7 +142,20 @@ When a review finishes, review-engine publishes the results back to the MR discu
 - It creates (or updates) a top-level discussion note titled `# CodeReview Board`.
 - It posts inline notes on specific files and lines for **Critical** and **High** severity findings. The inline set is the **consolidated** finding set — deduplicated across experts and filtered by the adjudication pass — and a note is only posted when its line is part of the reviewed diff, so rejected anchors (`line_code can't be blank`) no longer occur. Each note opens with its `` `path:line` `` anchor.
 - A single failing note no longer stops the batch: permanent rejections are logged and skipped, transient provider errors (transport failure, 408/429/5xx) are retried up to three attempts, and the run logs a `posted / skipped / failed` summary.
-- The dispatcher tracks the latest commit SHA to avoid running duplicate reviews for the same SHA.
+- The dispatcher suppresses duplicate rounds: it tracks, per MR, the last reviewed commit SHA **and** a fingerprint of the reviewed diff, so an event for an already-reviewed SHA — or one whose content is byte-identical to the last reviewed round — does not run (or re-post) another review. The state is persisted to a JSON file so it survives a server restart; in containers that file must be on a mounted volume (see [Webhook dispatch state](../configuration.md#webhook-dispatch-state)).
+
+## When a review is triggered
+
+| Event | Handler | What happens |
+|---|---|---|
+| Merge request `open` / `reopen` / `update` (project webhook or System Hook) | `handle_mr_hook` → `dispatch_mr_event` | Reviews the MR's **current head diff**. Skipped, with a log line, when that SHA was already reviewed (`Skipping MR !n: already reviewed at SHA …`) or when the diff is byte-identical to the last reviewed round (`skipping: content unchanged (sha …)`). |
+| Note on a merge request (`/review`, `/review/123`, `/describe`) | `handle_note_hook` | **Always** reviews, even when the content is unchanged — an explicit command is user intent. The note itself is also ingested into the MR history (unless it is our own published report). |
+| Any other note | `handle_note_hook` | Ingested into the MR history (discussion context); never starts a review. |
+| `Push Hook` / System Hook push event | `handle_push_hook` | **Acknowledged and logged only — a push does not start a review.** Rounds come from the merge-request events above (a push to an open MR also arrives as `action=update`) or from `/review`. |
+| Any other event type | `handler.rs` event routing | Ignored (acknowledged with `200`). |
+| REST `POST /api/v1/reviews` (`gitlab_mr` source) and rerun of a stored review | `src/server/api/review/` | Always runs. The REST path never consults the dispatcher, so an explicit submit or rerun is never deduplicated away. |
+
+"Unchanged content" means the **diff text** — what an expert team would actually read — is byte-identical to the diff of the last completed round for that MR. The MR's diff is the live head diff (`GET …/merge_requests/:iid/raw_diffs`), fetched once per dispatch and reused for both the fingerprint and the review (no extra API call).
 
 ## Next steps
 

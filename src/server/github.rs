@@ -4,7 +4,7 @@ use serde_json::Value;
 use sha2::Sha256;
 use std::sync::Arc;
 
-use super::dispatcher::MrDispatcher;
+use super::dispatcher::{ContentGate, MrDispatcher};
 use super::task_queue::{record_task_outcome, record_task_started, SourceMeta, TaskStore};
 use super::webhook::WebhookHandler;
 
@@ -262,6 +262,11 @@ pub(crate) fn source_meta_from_pr_payload(payload: &PrHookPayload) -> SourceMeta
 ///
 /// `server_llm_configs` is the handler's snapshot of the server's hot-applied
 /// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]).
+///
+/// `gate` controls the RENG-62 unchanged-content check: [`ContentGate::Enabled`]
+/// for PR push/update events, [`ContentGate::Bypassed`] for an explicit
+/// `/review` comment. A skipped dispatch returns before the task entry is
+/// created, so nothing is enqueued and no LLM is called.
 #[allow(clippy::too_many_arguments)]
 async fn run_webhook_pr_review(
     task_store: Option<Arc<TaskStore>>,
@@ -272,7 +277,31 @@ async fn run_webhook_pr_review(
     pr_number: u64,
     source_meta: SourceMeta,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    gate: ContentGate,
 ) {
+    // Resolve the PR metadata + diff up front: the diff doubles as the content
+    // fingerprint for the gate below, so the gate costs no second fetch.
+    let (info, diff) = match super::resolve_review_source(&pr_url, &github_token).await {
+        Ok((info, diff)) => {
+            if let Some(reason) = super::gate_unchanged_content(dispatcher, gate, &pr_url, &sha, &diff).await {
+                tracing::info!("Skipping review for PR #{pr_number} ({pr_url}): {reason}");
+                return;
+            }
+            (info, diff)
+        }
+        Err(e) => {
+            tracing::error!("Review failed for PR #{}: {:?}", pr_number, e);
+            dispatcher.reset(&pr_url).await;
+            // The task entry is created here so a failed fetch is still visible
+            // in the History panel (pre-RENG-62 the entry existed already).
+            if let Some(store) = task_store.as_ref() {
+                let id = record_task_started(store, source_meta).await;
+                record_task_outcome(store, id, &Err(e)).await;
+            }
+            return;
+        }
+    };
+
     let task_id = if let Some(store) = task_store.as_ref() {
         Some(record_task_started(store, source_meta).await)
     } else {
@@ -280,7 +309,6 @@ async fn run_webhook_pr_review(
     };
 
     let outcome = async {
-        let (info, diff) = super::resolve_review_source(&pr_url, &github_token).await?;
         if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
             store
                 .fill_source_meta(id, crate::server::task_queue::source_meta_from_mr_info(&info))
@@ -340,7 +368,18 @@ async fn handle_pull_request(
                 let ts = task_store.clone();
                 let note_iid = payload.pr_number;
                 tokio::spawn(async move {
-                    run_webhook_pr_review(ts, &d, u, s, token, note_iid, source_meta, server_llm_configs).await;
+                    run_webhook_pr_review(
+                        ts,
+                        &d,
+                        u,
+                        s,
+                        token,
+                        note_iid,
+                        source_meta,
+                        server_llm_configs,
+                        ContentGate::Enabled,
+                    )
+                    .await;
                 });
             }
             super::dispatcher::ShouldStart::AlreadyReviewed => {
@@ -362,7 +401,18 @@ async fn handle_pull_request(
                         let ts = task_store.clone();
                         let note_iid = payload.pr_number;
                         tokio::spawn(async move {
-                            run_webhook_pr_review(ts, &d, u, s, token, note_iid, source_meta, server_llm_configs).await;
+                            run_webhook_pr_review(
+                                ts,
+                                &d,
+                                u,
+                                s,
+                                token,
+                                note_iid,
+                                source_meta,
+                                server_llm_configs,
+                                ContentGate::Enabled,
+                            )
+                            .await;
                         });
                     }
                     _ => {
@@ -436,7 +486,21 @@ async fn handle_issue_comment(
                     let token = github_token;
                     let ts = task_store.clone();
                     tokio::spawn(async move {
-                        run_webhook_pr_review(ts, &d, u, s, token, pr_number, source_meta, server_llm_configs).await;
+                        run_webhook_pr_review(
+                            ts,
+                            &d,
+                            u,
+                            s,
+                            token,
+                            pr_number,
+                            source_meta,
+                            server_llm_configs,
+                            // An explicit `/review` / `/describe` command is
+                            // user intent: it always reviews, even when the
+                            // content is unchanged (RENG-62).
+                            ContentGate::Bypassed,
+                        )
+                        .await;
                     });
                 }
                 _ => {

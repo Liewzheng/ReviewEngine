@@ -27,7 +27,9 @@ export default {
     cancel: 'Annuler',
     close: 'Fermer',
     save: 'Enregistrer',
-    refresh: 'Actualiser',
+    lastUpdated: 'Mis à jour : {time}',
+    updateFailed: 'Échec de la mise à jour',
+    updateFailedAt: 'Échec de la mise à jour · {time}',
     reset: 'Réinitialiser',
     retry: 'Réessayer',
     remove: 'Supprimer',
@@ -108,8 +110,6 @@ export default {
   dashboard: {
     title: 'Tableau de bord',
     subtitle: "Vue d'ensemble du système et activité récente",
-    updatedAt: 'Mis à jour : {time}',
-    refreshAria: 'Actualiser le tableau de bord',
     kpis: {
       reviewsThisWeek: 'Revues cette semaine',
       activeQueue: "File d'attente active",
@@ -128,7 +128,6 @@ export default {
     },
     health: {
       title: 'État du système',
-      refreshAria: "Actualiser les données d'état",
       integrations: 'État des intégrations',
       llmProviders: 'Fournisseurs LLM',
       allOperational: 'Tous les systèmes opérationnels',
@@ -146,8 +145,6 @@ export default {
       hoursAgo: 'il y a {n} h',
       daysAgo: 'il y a {n} j',
     },
-    refreshed: 'Tableau de bord actualisé',
-    refreshFailed: "Échec de l'actualisation du tableau de bord",
   },
   history: {
     title: 'Historique des revues',
@@ -325,8 +322,6 @@ export default {
       failed: "Échec de l'enregistrement — modifications conservées, nouvelle tentative à la prochaine modification",
     },
     saveFailed: "Échec de l'enregistrement de la configuration",
-    refreshedTitle: 'Actualisé',
-    refreshed: 'Configuration actualisée',
     notSet: '(non défini)',
     llmNotConfiguredBanner:
       "Aucun LLM utilisable n'est encore configuré — les revues nécessitent un LLM pour s'exécuter. Renseignez l'URL de base de l'API et la clé dans « Paramètres LLM » ci-dessous, ou ajoutez-en un dans « Fournisseurs LLM supplémentaires ».",

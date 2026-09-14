@@ -27,7 +27,9 @@ export default {
     cancel: '取消',
     close: '關閉',
     save: '儲存',
-    refresh: '重新整理',
+    lastUpdated: '更新於 {time}',
+    updateFailed: '更新失敗',
+    updateFailedAt: '更新失敗 · {time}',
     reset: '重設',
     retry: '重試',
     remove: '移除',
@@ -104,8 +106,6 @@ export default {
   dashboard: {
     title: '儀表板',
     subtitle: '系統概覽與近期活動',
-    updatedAt: '更新於 {time}',
-    refreshAria: '重新整理儀表板',
     kpis: {
       reviewsThisWeek: '本週審查',
       activeQueue: '作用中佇列',
@@ -124,7 +124,6 @@ export default {
     },
     health: {
       title: '系統健康狀態',
-      refreshAria: '重新整理健康狀態資料',
       integrations: '整合狀態',
       llmProviders: 'LLM 提供者',
       allOperational: '所有系統運作正常',
@@ -142,8 +141,6 @@ export default {
       hoursAgo: '{n} 小時前',
       daysAgo: '{n} 天前',
     },
-    refreshed: '儀表板已重新整理',
-    refreshFailed: '重新整理儀表板失敗',
   },
   history: {
     title: '審查歷史',
@@ -318,8 +315,6 @@ export default {
       failed: '儲存失敗 — 已保留變更，將在下次修改時重試',
     },
     saveFailed: '儲存設定失敗',
-    refreshedTitle: '已重新整理',
-    refreshed: '設定已重新整理',
     notSet: '（未設定）',
     llmNotConfiguredBanner:
       '尚未設定可用的 LLM — 審查需要 LLM 才能執行。請在下方「LLM 設定」填寫 API 基礎 URL 與密鑰，或在「其他 LLM 提供者」中新增。',

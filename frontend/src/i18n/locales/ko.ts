@@ -27,7 +27,9 @@ export default {
     cancel: '취소',
     close: '닫기',
     save: '저장',
-    refresh: '새로고침',
+    lastUpdated: '업데이트됨: {time}',
+    updateFailed: '업데이트 실패',
+    updateFailedAt: '업데이트 실패 · {time}',
     reset: '초기화',
     retry: '다시 시도',
     remove: '제거',
@@ -106,8 +108,6 @@ export default {
   dashboard: {
     title: '대시보드',
     subtitle: '시스템 개요 및 최근 활동',
-    updatedAt: '업데이트됨: {time}',
-    refreshAria: '대시보드 새로고침',
     kpis: {
       reviewsThisWeek: '이번 주 리뷰',
       activeQueue: '활성 대기열',
@@ -126,7 +126,6 @@ export default {
     },
     health: {
       title: '시스템 상태',
-      refreshAria: '상태 데이터 새로고침',
       integrations: '통합 상태',
       llmProviders: 'LLM 제공자',
       allOperational: '모든 시스템 정상',
@@ -144,8 +143,6 @@ export default {
       hoursAgo: '{n}시간 전',
       daysAgo: '{n}일 전',
     },
-    refreshed: '대시보드를 새로고침했습니다',
-    refreshFailed: '대시보드 새로고침 실패',
   },
   history: {
     title: '리뷰 기록',
@@ -322,8 +319,6 @@ export default {
       failed: '저장 실패 — 변경 사항은 유지되며 다음 수정 시 다시 시도됩니다',
     },
     saveFailed: '설정 저장 실패',
-    refreshedTitle: '새로고침됨',
-    refreshed: '설정을 새로고침했습니다',
     notSet: '（설정되지 않음）',
     llmNotConfiguredBanner:
       '아직 사용 가능한 LLM이 구성되지 않았습니다 — 리뷰를 실행하려면 LLM이 필요합니다. 아래 "LLM 설정"에서 API 기본 URL과 키를 입력하거나 "추가 LLM 제공자"에서 추가하세요.',

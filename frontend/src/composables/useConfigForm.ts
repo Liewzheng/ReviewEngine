@@ -196,23 +196,17 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
    *   silent so they never flip the page-level `loading` that gates the
    *   form's `v-if` (which would unmount the whole subtree, destroying
    *   open dialogs and input focus).
+   * @returns True when the server answered, so the page can report a failed
+   *   background poll in its "last updated" marker (RENG-52). A skipped apply
+   *   (dirty form / in-flight save) still counts as a successful poll.
    */
-  async function loadConfig(silent: boolean = false) {
-    await cfg.fetch(silent);
-    if (!cfg.config.value) return;
-    if (configDirty.value || saveInFlight) return;
-    applyConfig(cfg.config.value);
-  }
-
-  /** Reload the config and notify the user. */
-  async function refreshConfig() {
-    await loadConfig();
-    ElNotification({
-      title: t('config.refreshedTitle'),
-      message: t('config.refreshed'),
-      type: 'info',
-      duration: 2000,
-    });
+  async function loadConfig(silent: boolean = false): Promise<boolean> {
+    const ok = await cfg.fetch(silent);
+    if (!ok || !cfg.config.value) return false;
+    if (!configDirty.value && !saveInFlight) {
+      applyConfig(cfg.config.value);
+    }
+    return true;
   }
 
   // --- Pattern tag input ---
@@ -249,6 +243,5 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
     discardPatternInput,
     removePattern,
     loadConfig,
-    refreshConfig,
   };
 }

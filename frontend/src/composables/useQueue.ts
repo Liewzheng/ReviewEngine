@@ -28,8 +28,10 @@ export function useQueue() {
    * @param silent - When true, refresh in the background: the loading counter
    *   is left untouched (no skeleton swap) and a failed request keeps the
    *   last good stats instead of clearing them.
+   * @returns True when the server answered. The silent path swallows the
+   *   error, so a caller tracking background-poll health branches on this.
    */
-  async function fetchStats(silent: boolean = false) {
+  async function fetchStats(silent: boolean = false): Promise<boolean> {
     if (!silent) {
       loadingCount.value++;
       error.value = null;
@@ -39,11 +41,13 @@ export function useQueue() {
       if (silent) {
         error.value = null;
       }
+      return true;
     } catch (e) {
       if (!silent) {
         error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
         stats.value = null;
       }
+      return false;
     } finally {
       if (!silent) {
         loadingCount.value--;
@@ -59,8 +63,9 @@ export function useQueue() {
    * @param silent - When true, refresh in the background: the loading counter
    *   is left untouched (no skeleton swap) and a failed request keeps the
    *   last good task list instead of clearing it.
+   * @returns True when the server answered (see `fetchStats`).
    */
-  async function fetchTasks(status?: string, page: number = 1, perPage: number = 50, silent: boolean = false) {
+  async function fetchTasks(status?: string, page: number = 1, perPage: number = 50, silent: boolean = false): Promise<boolean> {
     if (!silent) {
       loadingCount.value++;
       error.value = null;
@@ -70,11 +75,13 @@ export function useQueue() {
       if (silent) {
         error.value = null;
       }
+      return true;
     } catch (e) {
       if (!silent) {
         error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
         data.value = null;
       }
+      return false;
     } finally {
       if (!silent) {
         loadingCount.value--;

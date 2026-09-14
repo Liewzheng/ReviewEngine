@@ -8,7 +8,6 @@ import {
   VideoPlay,
   VideoPause,
   Delete,
-  Refresh,
   InfoFilled,
 } from '@element-plus/icons-vue'
 import { ElMessageBox, ElNotification } from 'element-plus'
@@ -16,6 +15,7 @@ import { useI18n } from 'vue-i18n'
 import type { QueueStats, QueueTask } from '../types/queue'
 import StatsCard from '../components/QueueMonitor/StatsCard.vue'
 import TaskCard from '../components/QueueMonitor/TaskCard.vue'
+import LastUpdated from '../components/common/LastUpdated.vue'
 import { useQueue } from '../composables/useQueue'
 import { useAutoRefresh } from '../composables/useAutoRefresh'
 
@@ -40,16 +40,39 @@ const loading = queue.loading
 const sseConnected = ref(false)
 const recentlyUpdated = ref<string[]>([])
 
+/* Liveness marker for the header (RENG-52): the timestamp advances on every
+ * successful poll tick, `pollFailed` carries a failed one — the silent poll
+ * writes neither `loading` nor `error`, so this is the page's only failure
+ * affordance now that the manual Refresh button is gone. */
+const lastUpdated = ref<string | null>(null)
+const pollFailed = ref(false)
+
+// --- Data loading ---
+/**
+ * Fetch stats + tasks and record the outcome for the header marker.
+ * @param silent - True for poll ticks (no skeleton swap, failures swallowed).
+ */
+async function fetchQueueData(silent: boolean) {
+  const [statsOk, tasksOk] = await Promise.all([
+    queue.fetchStats(silent),
+    queue.fetchTasks(undefined, 1, 50, silent),
+  ])
+  if (statsOk && tasksOk) {
+    lastUpdated.value = new Date().toISOString()
+    pollFailed.value = false
+  } else {
+    pollFailed.value = true
+  }
+}
+
 // --- Auto refresh ---
 // Shared polling composable (also pauses while the tab is hidden and fires
 // immediately on return). 3s cadence: the queue is a live operations view.
 // Ticks are silent: neither fetch touches the loading counter that gates the
 // page's `v-if` skeleton, so a poll can no longer unmount and remount the
 // stats row and all task grids every 3s; a failed poll keeps the last good
-// data. Only the initial load and the manual Refresh button fetch visibly.
-const queueAutoRefresh = useAutoRefresh(async () => {
-  await Promise.all([queue.fetchStats(true), queue.fetchTasks(undefined, 1, 50, true)])
-}, 3000)
+// data and surfaces only in the header marker.
+const queueAutoRefresh = useAutoRefresh(() => fetchQueueData(true), 3000)
 
 // --- Computed stats with fallback ---
 const stats = computed<QueueStats>(() => queue.stats.value ?? {
@@ -79,8 +102,7 @@ const hasAnyTasks = computed(() => queue.items.value.length > 0)
 
 // --- Load queue data ---
 const loadQueueData = async () => {
-  await queue.fetchStats()
-  await queue.fetchTasks()
+  await fetchQueueData(false)
   sseConnected.value = true
 }
 
@@ -301,10 +323,9 @@ onUnmounted(() => {
             </el-button>
           </span>
         </el-tooltip>
-        <el-button @click="loadQueueData">
-          <el-icon class="btn-icon"><Refresh /></el-icon>
-          <span>{{ $t('common.refresh') }}</span>
-        </el-button>
+        <!-- Liveness marker for the 3s poll (RENG-52), where the manual
+             Refresh button used to sit. -->
+        <LastUpdated :updated-at="lastUpdated" :failed="pollFailed" />
       </div>
     </div>
 

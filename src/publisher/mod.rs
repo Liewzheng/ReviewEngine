@@ -5,8 +5,24 @@
 //! publish review output. Platform-specific logic lives in the
 //! `git_provider` implementations; this module only contains generic helpers
 //! such as inline-note publishing and suggestion formatting.
+//!
+//! Since RENG-63 the decision *which* findings deserve an inline note is the
+//! [`PublishPolicy`]'s ([`policy`]): a severity floor, a confidence floor an
+//! actionability requirement, a per-round cap, and summary-only publishing for
+//! documentation/CI-only changes. [`plan_inline_notes`] turns the policy into
+//! an [`InlinePlan`] before anything is posted, so the board can describe the
+//! decision ([`board::render_board`]) and the poster only carries it out.
 
 use anyhow::Result;
+
+mod board;
+mod policy;
+
+pub use board::render_board;
+pub use policy::{
+    is_docs_or_ci_only, is_docs_or_ci_path, plan_inline_notes, rank_inline_candidates, InlinePlan, PublishPolicy,
+    ENV_INLINE_ON_DOCS_ONLY, ENV_MAX_INLINE_NOTES, ENV_MIN_CONFIDENCE, ENV_MIN_SEVERITY,
+};
 
 /// Fixed header of the review report this service posts to the MR
 /// (`publish_review`, lib.rs). The Note-hook ingestion path skips notes
@@ -36,21 +52,34 @@ const INLINE_POST_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from
 ///
 /// Returned instead of an error so a batch can finish: individual failures are
 /// counted here, logged, and reported by the caller — never propagated out of
-/// the per-finding loop.
+/// the per-finding loop. The counters are the accounting the publish path logs
+/// and the RENG-59/60 work was measured with; RENG-63 adds `policy_excluded`
+/// and `rolled_up` so "why was this finding not posted" has an answer distinct
+/// from "the provider refused it".
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PublishSummary {
     /// Findings inspected.
     pub considered: usize,
     /// Notes the provider accepted.
     pub posted: usize,
-    /// Findings that can never carry an inline note (severity below High, or
-    /// no line number).
+    /// Findings below a delivery threshold (severity, confidence,
+    /// actionability) — board only, never inline. See [`PublishPolicy`].
+    pub policy_excluded: usize,
+    /// Findings admitted by the policy that were withheld from inline delivery:
+    /// dropped behind the per-round cap, or withheld entirely because the round
+    /// is summary-only (documentation/CI-only change). Board only.
+    pub rolled_up: usize,
+    /// Findings that passed the policy but carry no line number, so they can
+    /// never carry an anchor.
     pub not_eligible: usize,
     /// Findings dropped by a gate: unsafe path, or a line that is not part of
     /// the reviewed diff.
     pub skipped: usize,
     /// Notes the provider rejected (permanent 4xx verdict, or retries spent).
     pub failed: usize,
+    /// True when the round was published summary-only (documentation/CI-only
+    /// change): the board was updated and no inline note was posted at all.
+    pub summary_only: bool,
 }
 
 /// The changed lines of the reviewed diff, keyed by file path.
@@ -62,16 +91,19 @@ pub struct PublishSummary {
 #[derive(Debug, Clone, Default)]
 pub struct DiffIndex {
     files: std::collections::HashMap<String, Vec<(u32, u32)>>,
+    changed_files: Vec<String>,
 }
 
 impl DiffIndex {
     /// Build the index from a unified diff.
     ///
-    /// Files whose hunks change nothing on the new side (pure deletions) are
-    /// absent: they have no valid anchor line.
+    /// Files whose hunks change nothing on the new side (pure deletions) carry
+    /// no anchor line but are still recorded in [`Self::changed_files`].
     pub fn from_diff(diff_text: &str) -> Self {
         let mut files = std::collections::HashMap::new();
+        let mut changed_files = std::collections::BTreeSet::new();
         for file in crate::diff::parser::parse_unified_diff(diff_text) {
+            changed_files.insert(file.path.clone());
             let ranges: Vec<(u32, u32)> = file
                 .hunks
                 .iter()
@@ -82,13 +114,25 @@ impl DiffIndex {
                 files.insert(file.path, ranges);
             }
         }
-        Self { files }
+        Self {
+            files,
+            changed_files: changed_files.into_iter().collect(),
+        }
     }
 
     /// True when nothing could be indexed (empty or oversized diff). Callers
     /// read that as "no index available", never as "nothing is in the diff".
     pub fn is_empty(&self) -> bool {
         self.files.is_empty()
+    }
+
+    /// Every file the diff touches, in path order — including pure deletions.
+    ///
+    /// Feeds the documentation/CI-only detection ([`is_docs_or_ci_only`]): a
+    /// round that only deletes lines from `AGENTS.md` is still a docs-only
+    /// round even though it has no anchorable line.
+    pub fn changed_files(&self) -> &[String] {
+        &self.changed_files
     }
 
     /// Whether `line` (1-based, new side) lies inside a changed hunk of `file`.
@@ -106,6 +150,15 @@ pub fn inline_anchor(finding: &crate::models::Finding) -> String {
         (Some(start), _) => format!("{}:{start}", finding.file),
         (None, _) => finding.file.clone(),
     }
+}
+
+/// Whether a finding's file path is safe to embed in a provider API call.
+///
+/// Defensive: a path outside the repository (`..`, absolute, home-relative) or
+/// one carrying a NUL byte is never a valid anchor and must not reach the
+/// provider.
+pub fn is_safe_inline_path(path: &str) -> bool {
+    !(path.contains("..") || path.starts_with('/') || path.starts_with('~') || path.contains('\0'))
 }
 
 /// Render the body of an inline note.
@@ -126,12 +179,6 @@ pub fn format_inline_body(finding: &crate::models::Finding) -> String {
     )
 }
 
-/// Whether a finding can carry an inline note at all (Critical/High + a line).
-fn is_inline_eligible(finding: &crate::models::Finding) -> bool {
-    use crate::models::Severity;
-    (finding.severity == Severity::Critical || finding.severity == Severity::High) && finding.line.is_some()
-}
-
 /// The finding set an inline publish pass draws from.
 ///
 /// The **consolidated** set (post-dedup, post-adjudication) is the source of
@@ -148,115 +195,95 @@ fn inline_publish_set(output: &crate::models::ReviewOutput) -> Vec<&crate::model
     }
 }
 
-/// Whether the output carries any finding that could become an inline note.
+/// Whether the output carries any finding the policy would admit inline.
 ///
 /// Lets the caller skip the diff fetch on a publish that has nothing to gate.
-pub fn has_inline_candidates(output: &crate::models::ReviewOutput) -> bool {
-    inline_publish_set(output).iter().any(|f| is_inline_eligible(f))
+pub fn has_inline_candidates(output: &crate::models::ReviewOutput, policy: &PublishPolicy) -> bool {
+    inline_publish_set(output)
+        .iter()
+        .any(|finding| policy.admits(finding) && finding.line.is_some())
 }
 
-/// Publish inline notes for the Critical/High findings in `findings`.
+/// Plan the inline notes of a review output.
 ///
-/// Lower-severity findings and findings without a line are included in the
-/// discussion board but never posted inline. Individual failures are isolated:
-/// a rejected anchor or a spent retry is logged and the batch continues, so one
-/// bad finding can no longer abort every later note of a review (corpus §4.6:
-/// 25 inline attempts produced 20 notes because the first rejection returned
-/// early). Pass `diff` to also require the anchor to be inside the reviewed
-/// diff.
-pub async fn publish_inline_notes(
-    provider: &dyn crate::git_provider::GitProvider,
-    findings: &[crate::models::Finding],
+/// Draws from [`inline_publish_set`] — the consolidated findings — and applies
+/// `docs_only` (see [`is_docs_or_ci_only`]) plus the policy's thresholds, cap
+/// and summary-only mode. Pure: no provider, no I/O, so the same
+/// output/diff/policy always yields the same plan.
+pub fn plan_inline_notes_for_output<'a>(
+    output: &'a crate::models::ReviewOutput,
     diff: Option<&DiffIndex>,
-) -> PublishSummary {
-    let mut summary = PublishSummary::default();
-    for finding in findings {
-        publish_one(provider, finding, diff, &mut summary).await;
-    }
-    summary
-}
-
-/// Publish the inline notes of a review output.
-///
-/// Draws from [`inline_publish_set`] — the consolidated findings.
-pub async fn publish_inline_notes_for_output(
-    provider: &dyn crate::git_provider::GitProvider,
-    output: &crate::models::ReviewOutput,
-    diff: Option<&DiffIndex>,
-) -> PublishSummary {
-    let mut summary = PublishSummary::default();
+    docs_only: bool,
+    policy: &PublishPolicy,
+) -> InlinePlan<'a> {
     if output.consolidated.is_none() {
         tracing::warn!(
             "No consolidated report for this output — publishing inline notes from the raw per-expert findings"
         );
     }
-    for finding in inline_publish_set(output) {
-        publish_one(provider, finding, diff, &mut summary).await;
+    plan_inline_notes(inline_publish_set(output), diff, docs_only, policy)
+}
+
+/// Post the inline notes of a plan, counting every outcome.
+///
+/// The plan has already applied the policy, the cap and the anchor gate, so
+/// this only renders and posts — one finding at a time, with the per-finding
+/// failure isolation RENG-60 introduced (a rejected anchor or a spent retry is
+/// logged and the batch continues) and bounded retries for transient failures.
+pub async fn publish_planned_inline_notes(
+    provider: &dyn crate::git_provider::GitProvider,
+    plan: &InlinePlan<'_>,
+) -> PublishSummary {
+    let mut summary = PublishSummary {
+        considered: plan.considered,
+        policy_excluded: plan.policy_excluded,
+        rolled_up: plan.rolled_up.len(),
+        not_eligible: plan.not_eligible,
+        skipped: plan.skipped,
+        summary_only: plan.docs_only,
+        ..Default::default()
+    };
+
+    for finding in &plan.selected {
+        // The plan only selects findings with a line; this guard is defensive
+        // (and keeps the accounting honest if that invariant ever breaks).
+        let Some(line) = finding.line else {
+            tracing::warn!(file = %finding.file, "Inline note selected without a line — skipping");
+            summary.not_eligible += 1;
+            continue;
+        };
+        let body = format_inline_body(finding);
+        match post_inline_with_retry(provider, &finding.file, line, &body).await {
+            Ok(()) => summary.posted += 1,
+            Err(err) => {
+                summary.failed += 1;
+                tracing::warn!(
+                    file = %finding.file,
+                    line,
+                    error = %err,
+                    "Inline note failed — continuing with the remaining findings"
+                );
+            }
+        }
     }
+
     tracing::info!(
-        "Inline notes: {} posted, {} skipped, {} failed, {} ineligible ({} findings considered){}",
+        "Inline notes: {} posted, {} rolled up (board only), {} policy-excluded, {} anchor-ineligible, \
+         {} skipped, {} failed ({} findings considered){}",
         summary.posted,
+        summary.rolled_up,
+        summary.policy_excluded,
+        summary.not_eligible,
         summary.skipped,
         summary.failed,
-        summary.not_eligible,
         summary.considered,
-        if diff.is_none() {
-            " — no diff anchor check (diff unavailable)"
+        if summary.summary_only {
+            " — documentation/CI-only change: summary only, no inline notes"
         } else {
             ""
         },
     );
     summary
-}
-
-/// Gate, render and post one finding; every outcome is recorded on `summary`.
-async fn publish_one(
-    provider: &dyn crate::git_provider::GitProvider,
-    finding: &crate::models::Finding,
-    diff: Option<&DiffIndex>,
-    summary: &mut PublishSummary,
-) {
-    use crate::models::Severity;
-
-    summary.considered += 1;
-    let eligible = finding.severity == Severity::Critical || finding.severity == Severity::High;
-    let Some(line) = finding.line.filter(|_| eligible) else {
-        summary.not_eligible += 1;
-        return;
-    };
-
-    // Defensive: validate file path before posting to prevent API abuse
-    let file = finding.file.as_str();
-    if file.contains("..") || file.starts_with('/') || file.starts_with('~') || file.contains('\0') {
-        tracing::warn!("Skipping inline note for unsafe file path: {}", file);
-        summary.skipped += 1;
-        return;
-    }
-    if let Some(diff) = diff {
-        if !diff.contains(file, line) {
-            tracing::info!(
-                file = %file,
-                line,
-                "Skipping inline note: the line is not part of the reviewed diff"
-            );
-            summary.skipped += 1;
-            return;
-        }
-    }
-
-    let body = format_inline_body(finding);
-    match post_inline_with_retry(provider, file, line, &body).await {
-        Ok(()) => summary.posted += 1,
-        Err(err) => {
-            summary.failed += 1;
-            tracing::warn!(
-                file = %file,
-                line,
-                error = %err,
-                "Inline note failed — continuing with the remaining findings"
-            );
-        }
-    }
 }
 
 /// POST one inline note, retrying transient failures with a bounded backoff.
@@ -367,7 +394,23 @@ pub fn format_suggestion_block(evidence: &str, recommendation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Effort, Finding, Severity};
+    use crate::models::{Effort, Finding, ReviewOutput, Severity};
+
+    /// A policy that posts every finding the thresholds admit — used by the
+    /// tests that cover gates other than the cap.
+    fn unlimited_policy() -> PublishPolicy {
+        PublishPolicy {
+            max_inline_notes_per_round: usize::MAX,
+            ..Default::default()
+        }
+    }
+
+    fn caps_policy(cap: usize) -> PublishPolicy {
+        PublishPolicy {
+            max_inline_notes_per_round: cap,
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_inline_note_struct() {
@@ -460,10 +503,13 @@ mod tests {
         let provider = MockGitProvider {
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        publish_inline_notes(&provider, &findings, None).await;
+        let policy = unlimited_policy();
+        let plan = plan_inline_notes(&findings, None, false, &policy);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
         let called_files = provider.calls.lock().unwrap().clone();
         assert_eq!(called_files.len(), 1);
         assert!(called_files.contains(&"critical.rs".to_string()));
+        assert_eq!(summary.policy_excluded, 1, "the Low finding is policy-excluded");
     }
 
     #[tokio::test]
@@ -562,10 +608,13 @@ mod tests {
         let provider = MockGitProvider {
             calls: std::sync::Mutex::new(Vec::new()),
         };
-        publish_inline_notes(&provider, &findings, None).await;
+        let policy = unlimited_policy();
+        let plan = plan_inline_notes(&findings, None, false, &policy);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
         let called_files = provider.calls.lock().unwrap().clone();
         assert_eq!(called_files.len(), 1);
         assert!(called_files.contains(&"safe.rs".to_string()));
+        assert_eq!(summary.skipped, 2, "both unsafe paths are gated");
     }
 
     // ── RENG-60: consolidated publish set, anchors, failure isolation ────────
@@ -674,6 +723,16 @@ mod tests {
         }
     }
 
+    /// Plan the findings under `policy`, post them, and log the summary.
+    async fn publish(
+        provider: &dyn crate::git_provider::GitProvider,
+        findings: &[Finding],
+        policy: &PublishPolicy,
+    ) -> PublishSummary {
+        let plan = plan_inline_notes(findings, None, false, policy);
+        publish_planned_inline_notes(provider, &plan).await
+    }
+
     /// The publish set is the consolidated set — same order, same count.
     ///
     /// The fixture reproduces the corpus' same-round multi-expert duplicate
@@ -706,7 +765,7 @@ mod tests {
         );
         assert_eq!(consolidated.findings.len(), 1);
 
-        let output = crate::models::ReviewOutput {
+        let output = ReviewOutput {
             reports,
             aggregated: None,
             dropped_findings: Vec::new(),
@@ -714,7 +773,9 @@ mod tests {
         };
 
         let provider = RecordingProvider::new(&[]);
-        let summary = publish_inline_notes_for_output(&provider, &output, None).await;
+        let policy = unlimited_policy();
+        let plan = plan_inline_notes_for_output(&output, None, false, &policy);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
 
         let expected: Vec<(String, u32, String)> = consolidated
             .findings
@@ -776,7 +837,7 @@ mod tests {
              {\"message\":\"400 Bad request - Note {:line_code=>[\\\"can't be blank\\\"]}\"}",
         )]);
 
-        let summary = publish_inline_notes(&provider, &findings, None).await;
+        let summary = publish(&provider, &findings, &unlimited_policy()).await;
 
         let posted_files: Vec<String> = provider.posted().into_iter().map(|(file, _, _)| file).collect();
         assert_eq!(posted_files, vec!["one.rs", "three.rs"]);
@@ -798,7 +859,7 @@ mod tests {
             "GitLab API returned 503 Service Unavailable for POST merge_requests/1/discussions: {}",
         )]);
 
-        let summary = publish_inline_notes(&provider, &findings, None).await;
+        let summary = publish(&provider, &findings, &unlimited_policy()).await;
 
         assert_eq!(summary.posted, 1);
         assert_eq!(summary.failed, 0);
@@ -819,7 +880,7 @@ mod tests {
             "error sending request for url (http://gitlab): connection refused",
         )]);
 
-        let summary = publish_inline_notes(&provider, &findings, None).await;
+        let summary = publish(&provider, &findings, &unlimited_policy()).await;
 
         assert_eq!(provider.attempts_for("down.rs"), INLINE_POST_MAX_ATTEMPTS as usize);
         assert_eq!(summary.failed, 1);
@@ -851,7 +912,9 @@ mod tests {
             make_finding("ux", "other.rs", 11, Severity::High),
         ];
         let provider = RecordingProvider::new(&[]);
-        let summary = publish_inline_notes(&provider, &findings, Some(&index)).await;
+        let policy = unlimited_policy();
+        let plan = plan_inline_notes(&findings, Some(&index), false, &policy);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
 
         assert_eq!(summary.posted, 1);
         assert_eq!(summary.skipped, 2);
@@ -864,10 +927,16 @@ mod tests {
         let diff = "diff --git a/x.rs b/x.rs\n--- a/x.rs\n+++ b/x.rs\n@@ -1,2 +1,0 @@\n-old\n-old\n";
         let index = DiffIndex::from_diff(diff);
         assert!(index.is_empty(), "a pure deletion has no line on the new side");
+        assert_eq!(
+            index.changed_files(),
+            ["x.rs"],
+            "a pure deletion is still a changed file (the docs-only check needs it)"
+        );
 
         // An unparsable/empty diff yields an empty index, which callers read as
         // "no index available" (never as "everything is outside the diff").
         assert!(DiffIndex::from_diff("").is_empty());
+        assert!(DiffIndex::from_diff("").changed_files().is_empty());
     }
 
     #[test]
@@ -894,5 +963,252 @@ mod tests {
         assert!(!is_transient_error(&err(
             "Invalid file path for inline comment: ../etc/passwd"
         )));
+    }
+
+    // ── RENG-63: policy floors, per-round cap, change-type adaptation ───────
+
+    /// A six-finding round: file `f{i}` at line `i`, all admitted by the
+    /// default policy (High, 9/10, with a recommendation).
+    fn six_admitted_findings() -> Vec<Finding> {
+        (1..=6)
+            .map(|i| make_finding("lead", &format!("src/f{i}.rs"), i, Severity::High))
+            .collect()
+    }
+
+    fn output_with(findings: Vec<Finding>) -> ReviewOutput {
+        let mut report = make_report("lead", findings);
+        // The board renders the pre-rendered expert markdown; give it the same
+        // per-finding lines a real report carries so a test can see what the
+        // board does and does not contain.
+        report.markdown = report
+            .findings
+            .iter()
+            .map(|f| format!("### {}\n", f.title))
+            .collect::<String>();
+        ReviewOutput::new(vec![report])
+    }
+
+    /// (a) The policy's floors keep low-value findings out of the inline
+    /// delivery — and they are still on the board.
+    #[tokio::test]
+    async fn test_policy_floors_exclude_low_value_findings_but_keep_them_on_the_board() {
+        let mut medium = make_finding("lead", "src/medium.rs", 1, Severity::Medium);
+        medium.title = "Medium-severity observation".to_string();
+        let mut unsure = make_finding("lead", "src/unsure.rs", 2, Severity::High);
+        unsure.title = "High severity, low confidence".to_string();
+        unsure.confidence = 7;
+        let mut no_recommendation = make_finding("lead", "src/vague.rs", 3, Severity::Critical);
+        no_recommendation.title = "Critical, but no actionable recommendation".to_string();
+        no_recommendation.recommendation = "  ".to_string();
+        let admitted = make_finding("lead", "src/real.rs", 4, Severity::High);
+        let all = vec![medium, unsure, no_recommendation, admitted.clone()];
+
+        let output = output_with(all);
+        let policy = PublishPolicy::default();
+        let plan = plan_inline_notes_for_output(&output, None, false, &policy);
+
+        assert_eq!(plan.considered, 4);
+        assert_eq!(plan.policy_excluded, 3, "medium / 7-of-10 / non-actionable");
+        assert_eq!(plan.selected.len(), 1);
+        assert_eq!(plan.selected[0].file, "src/real.rs");
+        assert!(plan.rolled_up.is_empty(), "no cap involved");
+
+        let provider = RecordingProvider::new(&[]);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
+        assert_eq!(summary.posted, 1);
+        assert_eq!(summary.policy_excluded, 3);
+
+        // The board keeps everything: it is rendered from `output.reports`,
+        // which the inline policy never touches.
+        let board = render_board(&output, &plan, &policy);
+        for title in [
+            "Medium-severity observation",
+            "High severity, low confidence",
+            "Critical, but no actionable recommendation",
+        ] {
+            assert!(board.contains(title), "the board must still carry {title:?}");
+        }
+    }
+
+    /// (b) The cap posts exactly N findings and reports the remainder.
+    #[tokio::test]
+    async fn test_per_round_cap_posts_exactly_n_and_reports_the_remainder() {
+        let findings = six_admitted_findings();
+        let policy = caps_policy(3);
+        let plan = plan_inline_notes(&findings[..], None, false, &policy);
+
+        assert_eq!(plan.selected.len(), 3);
+        assert_eq!(plan.rolled_up.len(), 3);
+        assert_eq!(
+            plan.rolled_up[0].file, "src/f4.rs",
+            "the ranking decides who is rolled up"
+        );
+
+        let provider = RecordingProvider::new(&[]);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
+        assert_eq!(summary.posted, 3);
+        assert_eq!(summary.rolled_up, 3);
+        assert_eq!(summary.considered, 6);
+        assert_eq!(provider.posted().len(), 3);
+
+        // A zero cap posts nothing at all and rolls everything up.
+        let plan = plan_inline_notes(&findings[..], None, false, &caps_policy(0));
+        assert!(plan.selected.is_empty());
+        assert_eq!(plan.rolled_up.len(), 6);
+    }
+
+    /// (c) A documentation/CI-only change set yields zero inline notes even
+    /// with Critical findings; a mixed change set does not.
+    #[tokio::test]
+    async fn test_docs_only_round_posts_no_inline_notes_but_a_summary() {
+        let docs_diff = "diff --git a/AGENTS.md b/AGENTS.md\n\
+                         --- a/AGENTS.md\n\
+                         +++ b/AGENTS.md\n\
+                         @@ -1,1 +1,2 @@\n\
+                         +# Workflow\n\
+                         diff --git a/docs/design.md b/docs/design.md\n\
+                         --- a/docs/design.md\n\
+                         +++ b/docs/design.md\n\
+                         @@ -1,1 +1,2 @@\n\
+                         +# Design\n";
+        let index = DiffIndex::from_diff(docs_diff);
+        assert!(is_docs_or_ci_only(index.changed_files()));
+
+        let findings = vec![
+            make_finding("lead", "AGENTS.md", 1, Severity::Critical),
+            make_finding("docs", "docs/design.md", 1, Severity::High),
+        ];
+        let output = output_with(findings);
+        let policy = PublishPolicy::default();
+
+        let plan = plan_inline_notes_for_output(&output, Some(&index), true, &policy);
+        assert!(plan.selected.is_empty(), "no inline note for a docs-only round");
+        assert_eq!(plan.rolled_up.len(), 2, "both findings stay on the board");
+        assert_eq!(
+            plan.skipped, 0,
+            "nothing was gated per finding — the round is summary-only"
+        );
+
+        let provider = RecordingProvider::new(&[]);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
+        assert_eq!(summary.posted, 0);
+        assert!(summary.summary_only);
+        assert!(provider.posted().is_empty(), "zero provider calls");
+
+        let board = render_board(&output, &plan, &policy);
+        assert!(board.contains("Documentation/CI-only change"));
+        assert!(board.contains("`AGENTS.md:1`"), "the withheld findings are named");
+
+        // The policy escape restores inline delivery for docs-only rounds.
+        let escaped = PublishPolicy {
+            inline_on_docs_only: true,
+            ..Default::default()
+        };
+        let plan = plan_inline_notes_for_output(&output, Some(&index), true, &escaped);
+        assert_eq!(plan.selected.len(), 2);
+    }
+
+    /// A change set that touches code as well is *not* docs-only.
+    #[test]
+    fn test_mixed_change_set_is_not_docs_only() {
+        let mixed = "diff --git a/README.md b/README.md\n\
+                     --- a/README.md\n\
+                     +++ b/README.md\n\
+                     @@ -1,1 +1,2 @@\n\
+                     +# Hi\n\
+                     diff --git a/src/lib.rs b/src/lib.rs\n\
+                     --- a/src/lib.rs\n\
+                     +++ b/src/lib.rs\n\
+                     @@ -1,1 +1,2 @@\n\
+                     +pub fn f() {}\n";
+        let index = DiffIndex::from_diff(mixed);
+        assert!(!is_docs_or_ci_only(index.changed_files()));
+
+        // And the round therefore posts inline notes as usual.
+        let findings = [make_finding("lead", "src/lib.rs", 1, Severity::High)];
+        let plan = plan_inline_notes(&findings[..], Some(&index), false, &PublishPolicy::default());
+        assert_eq!(plan.selected.len(), 1);
+    }
+
+    /// (d) The same input always selects the same notes — including when the
+    /// findings arrive in a different order.
+    #[test]
+    fn test_cap_selection_is_deterministic() {
+        let mut findings = six_admitted_findings();
+        // Make the ranking interesting: a Critical at the end, and a tie.
+        findings[5].severity = Severity::Critical;
+        let policy = PublishPolicy::default();
+
+        let plan = plan_inline_notes(findings.iter(), None, false, &policy);
+        assert!(
+            plan.selected.iter().any(|f| f.file == "src/f6.rs"),
+            "the Critical finding must survive the cap"
+        );
+
+        // Same input, same plan — the selection and the rolled-up list are
+        // byte-for-byte identical, not merely the same size.
+        let again = plan_inline_notes(findings.iter(), None, false, &policy);
+        let anchors = |plan: &InlinePlan<'_>| {
+            plan.selected
+                .iter()
+                .map(|f| (f.file.clone(), f.line))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(anchors(&plan), anchors(&again));
+        assert_eq!(
+            plan.rolled_up.iter().map(|f| f.file.clone()).collect::<Vec<_>>(),
+            again.rolled_up.iter().map(|f| f.file.clone()).collect::<Vec<_>>()
+        );
+
+        // A shuffled input selects the *same set* — the ranking decides, not
+        // the arrival order (the posting order follows the source order).
+        let reversed: Vec<Finding> = findings.iter().rev().cloned().collect();
+        let plan_reversed = plan_inline_notes(reversed.iter(), None, false, &policy);
+        let mut selected: Vec<String> = plan.selected.iter().map(|f| f.file.clone()).collect();
+        let mut selected_reversed: Vec<String> = plan_reversed.selected.iter().map(|f| f.file.clone()).collect();
+        selected.sort();
+        selected_reversed.sort();
+        assert_eq!(selected, selected_reversed);
+        assert_eq!(selected, vec!["src/f1.rs", "src/f6.rs"]);
+    }
+
+    /// (e) End to end on a fixture: six admitted findings → two inline notes and
+    /// four rolled into the board.
+    #[tokio::test]
+    async fn test_end_to_end_two_inline_four_rolled_into_the_board() {
+        let output = output_with(six_admitted_findings());
+        let policy = PublishPolicy::default();
+        let provider = RecordingProvider::new(&[]);
+
+        let plan = plan_inline_notes_for_output(&output, None, false, &policy);
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
+
+        assert_eq!(summary.considered, 6);
+        assert_eq!(summary.posted, 2, "the default cap is two notes per round");
+        assert_eq!(summary.rolled_up, 4);
+        assert_eq!(summary.policy_excluded, 0);
+        assert_eq!(summary.failed, 0);
+        assert!(!summary.summary_only);
+
+        let posted: Vec<String> = provider.posted().into_iter().map(|(file, _, _)| file).collect();
+        assert_eq!(posted, vec!["src/f1.rs", "src/f2.rs"]);
+
+        let board = render_board(&output, &plan, &policy);
+        assert!(board.contains("# CodeReview Board"));
+        assert!(
+            board.contains("`src/f3.rs:3`"),
+            "the four rolled-up findings are on the board"
+        );
+        assert!(board.contains("`src/f4.rs:4`"));
+        assert!(board.contains("`src/f5.rs:5`"));
+        assert!(board.contains("`src/f6.rs:6`"));
+        assert!(
+            board.contains("exceeded the 2-note per-round cap"),
+            "the board explains why they were not posted inline"
+        );
+        assert!(
+            !board.contains("`src/f1.rs:1`"),
+            "the two posted findings are not duplicated in the policy section"
+        );
     }
 }

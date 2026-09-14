@@ -176,6 +176,12 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
 /// hand); when it is `None` the diff is fetched from the provider so the anchor
 /// gate still applies. If the diff cannot be determined the gate is disabled —
 /// fail-open, because a missing index must never silently drop every note.
+///
+/// Which findings actually become inline notes is decided by
+/// [`crate::publisher::PublishPolicy`] (thresholds, a per-round cap, and
+/// summary-only publishing for a documentation/CI-only change); everything the
+/// policy withholds stays in the board, and a plan that rolled findings up is
+/// reported in the board's inline-notes section (RENG-63).
 pub async fn publish_review_with_diff(
     token: &str,
     mr_url: &str,
@@ -193,49 +199,18 @@ pub async fn publish_review_with_diff(
                 .context("Failed to create GitLabProvider")?
         };
 
-    let mut md = String::from(crate::publisher::REVIEW_REPORT_PREFIX);
-    for report in &output.reports {
-        // render_expert_section appends the parse-failure / raw-response
-        // annotations that the pre-rendered `markdown` does not carry, so a
-        // silent zero-finding run is never mistaken for a clean review.
-        md.push_str(&crate::output::team_renderer::render_expert_section(report));
-        md.push_str("\n\n---\n\n");
-    }
-    // Lead consolidation summary (score / TL;DR / conflicts), rendered after
-    // the per-expert reports and before the verification appendix.
-    if let Some(ref consolidated) = output.consolidated {
-        md.push_str(&crate::output::team_renderer::render_lead_summary(consolidated));
-        md.push_str("\n\n---\n\n");
-    }
-    // Aggregator expert's LLM-aggregated report: rendered after the lead
-    // summary (if any) so it can build on the same context, then before the
-    // verification appendix. The markdown is already pre-rendered by the
-    // aggregator; we emit it verbatim and skip empty fragments.
-    if let Some(ref aggregated) = output.aggregated {
-        if !aggregated.markdown.trim().is_empty() {
-            md.push_str(&aggregated.markdown);
-            md.push_str("\n\n---\n\n");
-        }
-    }
-    // `false` keeps the historical list-only rendering here; the run-summary
-    // lines are only added to the CLI Markdown report.
-    md.push_str(&crate::output::renderer::render_dropped_findings_appendix(
-        &output.dropped_findings,
-        false,
-        0,
-    ));
-
     let mut errors: Vec<anyhow::Error> = Vec::new();
 
-    if let Err(e) = provider.find_or_update_discussion(&md).await {
-        errors.push(e.context("discussion"));
-    }
+    // Inline notes are drawn from the consolidated finding set (dedup +
+    // adjudication applied) and pass the delivery policy before anything is
+    // posted: thresholds, a per-round cap, and summary-only publishing when
+    // every changed file is documentation or CI glue (RENG-63). The plan is
+    // computed first so the board can state what was withheld from inline
+    // delivery; resolve the diff only when the policy admits something.
+    let policy = crate::publisher::PublishPolicy::from_env();
+    tracing::info!("Inline-note delivery policy: {}", policy.describe());
 
-    // Inline notes are published from the consolidated finding set (dedup +
-    // adjudication applied) and gated on the reviewed diff's changed lines, so
-    // a finding whose anchor the provider would reject is skipped instead of
-    // earning a 400. Resolve the diff only when there is something to post.
-    let has_candidates = crate::publisher::has_inline_candidates(output);
+    let has_candidates = crate::publisher::has_inline_candidates(output, &policy);
     let diff_index = if has_candidates {
         match diff {
             Some(text) => Some(crate::publisher::DiffIndex::from_diff(text)),
@@ -256,16 +231,38 @@ pub async fn publish_review_with_diff(
     if has_candidates && diff_index.is_none() {
         tracing::warn!("Inline notes will be posted without a diff anchor check (diff unavailable)");
     }
+    // An unavailable diff means an unknown change set, which is never
+    // downgraded to summary-only (the detection fails open).
+    let docs_only = diff_index
+        .as_ref()
+        .is_some_and(|index| crate::publisher::is_docs_or_ci_only(index.changed_files()));
+    if docs_only {
+        tracing::info!(
+            "Documentation/CI-only change: publishing a summary only, no inline notes{}",
+            if policy.inline_on_docs_only {
+                " (overridden by REVIEW_PUBLISH_INLINE_ON_DOCS_ONLY)"
+            } else {
+                ""
+            }
+        );
+    }
+    let plan = crate::publisher::plan_inline_notes_for_output(output, diff_index.as_ref(), docs_only, &policy);
 
-    let summary = crate::publisher::publish_inline_notes_for_output(&*provider, output, diff_index.as_ref()).await;
+    let md = crate::publisher::render_board(output, &plan, &policy);
+    if let Err(e) = provider.find_or_update_discussion(&md).await {
+        errors.push(e.context("discussion"));
+    }
+
+    let summary = crate::publisher::publish_planned_inline_notes(&*provider, &plan).await;
     if summary.failed > 0 {
         // The batch is already finished; surface the partial failure instead of
         // hiding it in the log (the pre-0.10.13 code did the opposite: the
         // first failure ended the batch and the rest were lost silently).
         errors.push(anyhow::anyhow!(
-            "{} inline note(s) failed to publish ({} posted, {} skipped)",
+            "{} inline note(s) failed to publish ({} posted, {} rolled up, {} skipped)",
             summary.failed,
             summary.posted,
+            summary.rolled_up,
             summary.skipped
         ));
     }
@@ -277,5 +274,273 @@ pub async fn publish_review_with_diff(
             let first = errors.swap_remove(0);
             Err(errors.into_iter().fold(first, |acc, e| acc.context(e)))
         }
+    }
+}
+
+#[cfg(test)]
+mod publish_policy_e2e_tests {
+    //! End-to-end coverage of the RENG-63 delivery policy through the real
+    //! publish path: `publish_review_with_diff` against a mock GitLab, so the
+    //! board assembly, the policy plan and the inline POSTs are all production
+    //! code — only the provider's HTTP endpoint is faked.
+
+    use crate::models::{Effort, ExpertReport, Finding, ReviewOutput, Severity};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn finding(file: &str, line: u32, title: &str) -> Finding {
+        Finding {
+            file: file.to_string(),
+            line: Some(line),
+            line_end: None,
+            severity: Severity::High,
+            confidence: 9,
+            category: "security".to_string(),
+            title: title.to_string(),
+            summary: String::new(),
+            evidence: String::new(),
+            impact: String::new(),
+            recommendation: "Propagate the error instead of ignoring it".to_string(),
+            effort: Effort::Small,
+            expert_name: "security".to_string(),
+            expert_role: String::new(),
+            agrees_with: Vec::new(),
+            references: Vec::new(),
+        }
+    }
+
+    fn output_with(findings: Vec<Finding>) -> ReviewOutput {
+        ReviewOutput::new(vec![ExpertReport {
+            expert_name: "security".to_string(),
+            markdown: findings
+                .iter()
+                .map(|f| format!("### {}\n", f.title))
+                .collect::<String>(),
+            findings,
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: None,
+            llm_model: None,
+        }])
+    }
+
+    /// A one-hunk unified diff that changes line 1 of each named file — the
+    /// line every finding in these fixtures anchors to.
+    fn diff_for(files: &[&str]) -> String {
+        files
+            .iter()
+            .map(|file| {
+                format!(
+                    "diff --git a/{file} b/{file}\n\
+                     index 1111111..2222222 100644\n\
+                     --- a/{file}\n\
+                     +++ b/{file}\n\
+                     @@ -1,1 +1,2 @@\n\
+                     +changed\n"
+                )
+            })
+            .collect()
+    }
+
+    /// Mount the GitLab endpoints the publish path touches: the current user,
+    /// the discussion list (empty → the board is created), MR info (for the
+    /// inline anchor), note creation (the board) and discussion creation (an
+    /// inline note).
+    async fn mount_gitlab(server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path("/api/v4/user"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 1})))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/discussions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v4/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 1, "name": "Alice"},
+                "diff_refs": {"base_sha": "b1", "start_sha": "s1", "head_sha": "h1"}
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/notes"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 7})))
+            .mount(server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/discussions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 8})))
+            .mount(server)
+            .await;
+    }
+
+    /// Requests the provider received, as `(method, path, body)` triples.
+    async fn received(server: &MockServer) -> Vec<(String, String, String)> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|request| {
+                (
+                    request.method.as_str().to_string(),
+                    request.url.path().to_string(),
+                    String::from_utf8_lossy(&request.body).to_string(),
+                )
+            })
+            .collect()
+    }
+
+    async fn board_body(server: &MockServer) -> String {
+        received(server)
+            .await
+            .into_iter()
+            .find(|(method, path, _)| method == "POST" && path.ends_with("/notes"))
+            .expect("the board must be posted")
+            .2
+    }
+
+    fn inline_posts(server_requests: &[(String, String, String)]) -> Vec<String> {
+        server_requests
+            .iter()
+            .filter(|(method, path, _)| method == "POST" && path.ends_with("/discussions"))
+            .map(|(_, _, body)| body.clone())
+            .collect()
+    }
+
+    fn mr_url(server: &MockServer) -> String {
+        format!("{}/group/project/-/merge_requests/1", server.uri())
+    }
+
+    /// Six policy-passing findings, one per file, all inside the diff → two
+    /// inline notes and four rolled up into the board.
+    #[tokio::test]
+    async fn publish_review_caps_inline_notes_and_rolls_the_rest_into_the_board() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let files = [
+            "src/f1.rs",
+            "src/f2.rs",
+            "src/f3.rs",
+            "src/f4.rs",
+            "src/f5.rs",
+            "src/f6.rs",
+        ];
+        let output = output_with(
+            files
+                .iter()
+                .enumerate()
+                .map(|(index, file)| finding(file, 1, &format!("Issue {index}")))
+                .collect(),
+        );
+        let diff = diff_for(&files);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("publishing must succeed");
+
+        let requests = received(&server).await;
+        assert_eq!(
+            inline_posts(&requests).len(),
+            2,
+            "the default cap is two notes per round"
+        );
+        assert!(inline_posts(&requests)[0].contains("src/f1.rs"));
+        assert!(inline_posts(&requests)[1].contains("src/f2.rs"));
+
+        let board = board_body(&server).await;
+        assert!(board.contains("# CodeReview Board"));
+        assert!(
+            board.contains("exceeded the 2-note per-round cap"),
+            "the board states why the remaining findings were not posted inline"
+        );
+        for file in ["src/f3.rs", "src/f4.rs", "src/f5.rs", "src/f6.rs"] {
+            assert!(board.contains(&format!("`{file}:1`")), "{file} must be rolled up");
+        }
+        assert!(
+            !board.contains("`src/f1.rs:1` — "),
+            "the posted findings are not re-listed in the policy section"
+        );
+    }
+
+    /// A documentation-only change set publishes the board and nothing else,
+    /// even though the findings are Critical/High and inside the diff.
+    #[tokio::test]
+    async fn publish_review_publishes_a_docs_only_round_summary_only() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let files = ["AGENTS.md", "docs/design.md"];
+        let mut findings: Vec<Finding> = files
+            .iter()
+            .map(|file| finding(file, 1, "The document does not explain the workflow"))
+            .collect();
+        findings[0].severity = Severity::Critical;
+        let output = output_with(findings);
+        let diff = diff_for(&files);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("publishing must succeed");
+
+        let requests = received(&server).await;
+        assert!(
+            inline_posts(&requests).is_empty(),
+            "a docs-only round posts no inline note: {requests:?}"
+        );
+
+        let board = board_body(&server).await;
+        assert!(board.contains("Documentation/CI-only change"));
+        assert!(
+            board.contains("`AGENTS.md:1`"),
+            "the board names the findings it withheld from inline delivery"
+        );
+        assert!(board.contains("`docs/design.md:1`"));
+        assert_eq!(
+            board.matches("### The document does not explain the workflow").count(),
+            2,
+            "the per-expert sections keep every finding"
+        );
+    }
+
+    /// A mixed change set is not docs-only: the same findings are posted inline.
+    #[tokio::test]
+    async fn publish_review_posts_inline_notes_for_a_mixed_change_set() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let files = ["AGENTS.md", "src/lib.rs"];
+        let output = output_with(vec![
+            finding("AGENTS.md", 1, "Docs issue"),
+            finding("src/lib.rs", 1, "Code issue"),
+        ]);
+        let diff = diff_for(&files);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("publishing must succeed");
+
+        let posted = inline_posts(&received(&server).await);
+        assert_eq!(posted.len(), 2, "both findings are inside the diff and admitted");
+        assert!(posted.iter().any(|body| body.contains("src/lib.rs")));
+        assert!(posted.iter().any(|body| body.contains("AGENTS.md")));
+
+        let board = board_body(&server).await;
+        assert!(
+            !board.contains("Documentation/CI-only change"),
+            "a mixed change set is not summary-only"
+        );
+        assert!(
+            !board.contains("## Inline notes — delivery policy"),
+            "nothing was withheld, so the board gains no policy section"
+        );
     }
 }

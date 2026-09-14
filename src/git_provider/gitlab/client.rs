@@ -1677,7 +1677,11 @@ mod tests {
             inline_finding("ux", "bad.rs", 1, Severity::High),
             inline_finding("lead", "good.rs", 2, Severity::Critical),
         ];
-        let summary = crate::publisher::publish_inline_notes(&provider, &findings, None).await;
+        let summary = crate::publisher::publish_planned_inline_notes(
+            &provider,
+            &crate::publisher::plan_inline_notes(&findings, None, false, &crate::publisher::PublishPolicy::default()),
+        )
+        .await;
 
         assert_eq!(summary.posted, 1);
         assert_eq!(summary.failed, 1);
@@ -1712,7 +1716,11 @@ mod tests {
             client: make_test_client(&server),
         };
         let findings = vec![inline_finding("ux", "flaky.rs", 5, Severity::High)];
-        let summary = crate::publisher::publish_inline_notes(&provider, &findings, None).await;
+        let summary = crate::publisher::publish_planned_inline_notes(
+            &provider,
+            &crate::publisher::plan_inline_notes(&findings, None, false, &crate::publisher::PublishPolicy::default()),
+        )
+        .await;
 
         assert_eq!(summary.posted, 0);
         assert_eq!(summary.failed, 1);

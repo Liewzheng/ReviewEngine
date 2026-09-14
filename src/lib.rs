@@ -163,7 +163,25 @@ pub async fn run_review(
 ///
 /// On failure, only logs a warning — does not return an error,
 /// since the review itself has already completed successfully.
+///
+/// The reviewed diff is not in hand here; [`publish_review_with_diff`] looks it
+/// up best-effort so the inline anchor gate still applies.
 pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) -> Result<()> {
+    publish_review_with_diff(token, mr_url, output, None).await
+}
+
+/// Publish review results, gating inline notes by the diff the review ran on.
+///
+/// `diff` is the unified diff the review reviewed (the server path has it in
+/// hand); when it is `None` the diff is fetched from the provider so the anchor
+/// gate still applies. If the diff cannot be determined the gate is disabled —
+/// fail-open, because a missing index must never silently drop every note.
+pub async fn publish_review_with_diff(
+    token: &str,
+    mr_url: &str,
+    output: &ReviewOutput,
+    diff: Option<&str>,
+) -> Result<()> {
     let provider: Box<dyn crate::git_provider::GitProvider> =
         if mr_url.contains(".github.") || mr_url.contains("github.com") {
             crate::git_provider::github::GitHubProvider::new(token, mr_url)
@@ -213,10 +231,43 @@ pub async fn publish_review(token: &str, mr_url: &str, output: &ReviewOutput) ->
         errors.push(e.context("discussion"));
     }
 
-    for report in &output.reports {
-        if let Err(e) = crate::publisher::publish_inline_notes(&*provider, &report.findings).await {
-            errors.push(e.context("inline notes"));
+    // Inline notes are published from the consolidated finding set (dedup +
+    // adjudication applied) and gated on the reviewed diff's changed lines, so
+    // a finding whose anchor the provider would reject is skipped instead of
+    // earning a 400. Resolve the diff only when there is something to post.
+    let has_candidates = crate::publisher::has_inline_candidates(output);
+    let diff_index = if has_candidates {
+        match diff {
+            Some(text) => Some(crate::publisher::DiffIndex::from_diff(text)),
+            None => match provider.fetch_diff().await {
+                Ok(text) => Some(crate::publisher::DiffIndex::from_diff(&text)),
+                Err(e) => {
+                    tracing::warn!("Could not fetch the diff for the inline-note anchor check: {e}");
+                    None
+                }
+            },
         }
+        // An index that parsed nothing (empty or oversized diff) is treated as
+        // "unavailable" rather than as "nothing is in the diff".
+        .filter(|index| !index.is_empty())
+    } else {
+        None
+    };
+    if has_candidates && diff_index.is_none() {
+        tracing::warn!("Inline notes will be posted without a diff anchor check (diff unavailable)");
+    }
+
+    let summary = crate::publisher::publish_inline_notes_for_output(&*provider, output, diff_index.as_ref()).await;
+    if summary.failed > 0 {
+        // The batch is already finished; surface the partial failure instead of
+        // hiding it in the log (the pre-0.10.13 code did the opposite: the
+        // first failure ended the batch and the rest were lost silently).
+        errors.push(anyhow::anyhow!(
+            "{} inline note(s) failed to publish ({} posted, {} skipped)",
+            summary.failed,
+            summary.posted,
+            summary.skipped
+        ));
     }
 
     match errors.len() {

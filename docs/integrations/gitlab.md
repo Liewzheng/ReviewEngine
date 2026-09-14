@@ -129,7 +129,8 @@ Team members can trigger actions by commenting on an MR:
 When a review finishes, review-engine publishes the results back to the MR discussion:
 
 - It creates (or updates) a top-level discussion note titled `# CodeReview Board`.
-- It posts inline notes on specific files and lines for **Critical** and **High** severity findings.
+- It posts inline notes on specific files and lines for **Critical** and **High** severity findings. The inline set is the **consolidated** finding set — deduplicated across experts and filtered by the adjudication pass — and a note is only posted when its line is part of the reviewed diff, so rejected anchors (`line_code can't be blank`) no longer occur. Each note opens with its `` `path:line` `` anchor.
+- A single failing note no longer stops the batch: permanent rejections are logged and skipped, transient provider errors (transport failure, 408/429/5xx) are retried up to three attempts, and the run logs a `posted / skipped / failed` summary.
 - The dispatcher tracks the latest commit SHA to avoid running duplicate reviews for the same SHA.
 
 ## Next steps

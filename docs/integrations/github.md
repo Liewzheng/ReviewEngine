@@ -64,7 +64,8 @@ Anyone with access to comment on the PR can trigger review-engine:
 When a review finishes, review-engine publishes the results back to the PR:
 
 - It creates (or updates) a top-level review discussion titled `# CodeReview Board`.
-- It posts inline comments on specific files and lines for **Critical** and **High** severity findings.
+- It posts inline comments on specific files and lines for **Critical** and **High** severity findings. The inline set is the **consolidated** finding set — deduplicated across experts and filtered by the adjudication pass — and a comment is only posted when its line is part of the reviewed diff. Each comment opens with its `` `path:line` `` anchor.
+- A single failing comment no longer stops the batch: permanent rejections are logged and skipped, transient provider errors (transport failure, 408/429/5xx) are retried up to three attempts, and the run logs a `posted / skipped / failed` summary.
 - The dispatcher tracks the latest commit SHA to avoid duplicate reviews.
 
 ## Next steps

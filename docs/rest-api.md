@@ -79,7 +79,8 @@ related:
 > GitLab 上游凭证，与 §7 的 API 鉴权头 `Authorization: Bearer` / `X-API-Key` 相互独立，
 > 同一请求可同时携带两者（注意区分：`/webhook/gitlab` 入站回调上的同名头承载的是 webhook
 > secret，与此处含义不同，两者互不影响）。请求头缺失时，服务端回退使用服务器侧已配置的
-> GitLab token（优先 Web UI **Git 平台** 条目 / `ui-state.toml`；`--gitlab-token` /
+> GitLab token（优先 Web UI **Git 平台** 条目 / `ui-state.toml`，按 MR URL 的 `host[:port]`
+> 匹配该条目的 `base_url` 或已配置的 `internal_base_url`；`--gitlab-token` /
 > `GITLAB_TOKEN` 已降级为 fallback-only，仅在服务器侧无该值时生效并打 deprecation 警告）；都缺失时
 > 返回 `400`。token 永远不会在响应或日志中返回（遵循 `***` 掩码约定，见 §3）。
 > `llm_configs` 中的 `api_key` 同属敏感字段：只允许经 §7 已认证的 `/api/v1` 通道提交，
@@ -114,6 +115,29 @@ Response 202:
   }
 }
 ```
+
+#### `gitlab_mr` URL 的主机改写与不可达主机拒绝（RENG-33）
+
+手动提交的 `source.url` 通常是调用方浏览器能打开的地址（即 GitLab 的 `external_url`），而 review-engine 自己（常常跑在容器里）未必能访问它——容器内的 `localhost` 指向容器自身。webhook 路径早已按「匹配到的 Git 平台」把 payload URL 改写到可达地址（见 `docs/integrations/gitlab.md` 的 Internal URL 一节）；REST 提交路径自 0.10.15 起遵循同一套规则、复用同一个改写函数 `rewrite_url_to_platform`：
+
+1. **主机匹配**：把提交 URL 的 `host[:port]` 身份（scheme 不参与、host 大小写不敏感、显式写出的默认端口 80/443 折叠为「未写」、其余端口严格比对）与每个 Git 平台条目比对，命中其 `base_url` 或（已配置的）`internal_base_url` 即视为同一实例；按配置顺序取第一个命中项。URL 的路径、查询串、尾部 `/` 都不参与匹配。
+2. **改写**：命中后，提交 URL 的路径与查询串被重新挂到该平台的可达地址（`internal_base_url`，未配置则 `base_url`）。改写后的 URL 既是异步评审实际抓取的地址，也是任务记录里保存的 MR URL（`GET /api/v1/reviews/:task_id` 的 `gitlabMrUrl` 因此始终是「实际抓取的那个地址」）；调用方提交的原始 URL 不入库，仅在服务端日志中与命中的平台名一起记录一次。
+3. **未命中且为本地地址**：没有任何平台命中、且 URL 主机是众所周知的本地地址（`localhost`、`*.localhost`、任意 `127.0.0.0/8`、`0.0.0.0`、`::1`、`::`）时，**在入队之前**以 `400` 拒绝。这类地址在容器内指向容器自身，放行只会得到一个晚到的、含义不明的 `Failed to send GET`：
+
+```
+Response 400:
+{
+  "error": "gitlab_mr url host `localhost` is unreachable from the review server: a local address names the server itself (inside a container, the container), and no configured git platform matches it. Use the GitLab address this server can reach — in Docker that is usually `host.docker.internal` (e.g. `http://host.docker.internal:8929/group/project/-/merge_requests/1`) — or configure a git platform entry for this host with `baseUrl` = the address you browse to and `internalBaseUrl` (`internal_base_url`) = the address the server reaches, so MR URLs on this host are rewritten onto the reachable base automatically"
+}
+```
+
+   消息里直接给出两条出路：改用服务端真正能访问的地址（容器内通常是 `host.docker.internal`），或为该主机配置一个 Git 平台条目（`baseUrl` = 浏览器里的地址，`internalBaseUrl` = 服务端可达地址），让第 2 条改写自动生效。
+4. **未命中且非本地地址**：原样提交、原样抓取（如 `https://gitlab.com/...`）——服务端能否访问它不由本服务臆断。
+5. **命中即信任**：平台是部署方的显式配置，命中后其配置的可达地址总被采信（因此 GitLab 确实与 review-engine 同机、只在本地地址可达的部署仍然可用）。
+
+**错误码边界**：URL 解析失败仍是 `422 invalid gitlab_mr url: ...`（解析校验先于主机路由）；主机路由失败才是上面的 `400`。两者都发生在 `enqueue_review` 之前，因此都不会在评审历史里留下 `Untitled Review` 记录。`POST /api/v1/reviews/:task_id/rerun` 重放存储参数时应用同一套校验。
+
+**已入队后才失败的记录**：入队之前能判定的失败不建记录；入队之后才失败的评审（主机可达但认证失败、解析成功却抓取 diff 失败等）仍保留一条 `failed` 记录——那是调用方唯一能看到失败原因的地方，也是修好配置后 `rerun` 的入口，因此不做清理（清理会连带丢掉「可重跑」这一恢复路径）。
 
 #### `GET /api/v1/reviews/:task_id`
 

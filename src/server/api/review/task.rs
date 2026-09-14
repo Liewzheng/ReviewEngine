@@ -295,7 +295,12 @@ pub(crate) async fn enqueue_review(
             let tap = state.db.clone().map(|db| {
                 let platform = {
                     let platforms = state.git_platforms.read().unwrap();
-                    crate::models::find_git_platform_for_url_strict(&platforms, url).cloned()
+                    // Review-URL identity (RENG-33): the URL here is the one the
+                    // review will fetch, which a manual submission may already
+                    // have had rewritten onto the matched platform's
+                    // `internal_base_url` — so the lookup accepts both
+                    // configured addresses and the tap keeps its platform key.
+                    crate::models::find_git_platform_for_review_url(&platforms, url).cloned()
                 };
                 super::discussion::DiscussionTap::new(db, platform.as_ref(), url)
             });

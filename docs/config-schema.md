@@ -241,8 +241,8 @@ Git platform instances are **not** read from `.code-audit-config.toml`: they are
 |-------|------|---------|-------------|
 | `name` | string | `""` | Unique, user-chosen instance name; the merge key for `PUT /api/v1/config` |
 | `type` | string | `"gitlab"` | Platform kind; only `gitlab` is implemented |
-| `base_url` | string | `""` | Instance URL as it appears in GitLab payloads (`external_url`); used to **match** inbound webhooks (Web UI field `baseUrl`) |
-| `internal_base_url` | string (optional) | `""` | Container-reachable URL for review-time GitLab API pulls (Web UI field `internalBaseUrl`). Empty = fall back to `base_url`, then to the payload URL. Not part of webhook matching |
+| `base_url` | string | `""` | Instance URL as it appears in GitLab payloads and pasted MR URLs (`external_url`); used to **match** inbound webhooks and REST `gitlab_mr` submissions (Web UI field `baseUrl`) |
+| `internal_base_url` | string (optional) | `""` | Container-reachable URL for review-time GitLab API pulls (Web UI field `internalBaseUrl`). Empty = fall back to `base_url`, then to the payload/submitted URL. Not part of webhook matching; a REST `gitlab_mr` URL on this address also identifies the entry (RENG-33) |
 | `token` | string | `""` | GitLab API token. Encrypted at rest (`enc:` prefix) |
 | `webhook_secret` | string | `""` | Legacy webhook secret (`X-Gitlab-Token` header verification). Encrypted at rest |
 | `webhook_signing_secret` | string | `""` | GitLab 19+ signing token (`whsec_...`, Standard Webhooks). Encrypted at rest |

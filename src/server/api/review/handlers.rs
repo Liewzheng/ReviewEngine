@@ -12,6 +12,7 @@ use crate::server::AppState;
 use crate::store::traits::{ReviewListQuery, ReviewStore};
 
 use super::super::types::{ReviewRequest, ReviewSource};
+use super::mr_url::{self, MrUrlRoute};
 use super::resolve;
 use super::task::enqueue_review;
 use super::task::{build_review_detail, build_review_list_item, merge_camel_case_fields, task_to_status, ListParams};
@@ -60,10 +61,11 @@ fn require_usable_llm(state: &AppState, request: &ReviewRequest) -> Result<(), (
 
 /// Resolve the GitLab credential for a `gitlab_mr` review, per
 /// docs/rest-api.md §1: the `X-Gitlab-Token` request header wins, then a
-/// configured git platform whose `baseUrl` host[:port] matches the MR URL,
-/// then the legacy server-side token (CLI `--gitlab-token` / `GITLAB_TOKEN`
-/// / `PUT /config`). `None` when the source needs no credential. A
-/// `gitlab_mr` source with no resolvable credential is a `400`.
+/// configured git platform whose `baseUrl` — or configured `internalBaseUrl` —
+/// host[:port] matches the MR URL, then the legacy server-side token (CLI
+/// `--gitlab-token` / `GITLAB_TOKEN` / `PUT /config`). `None` when the source
+/// needs no credential. A `gitlab_mr` source with no resolvable credential is
+/// a `400`.
 fn resolve_gitlab_credential(
     state: &AppState,
     source: &ReviewSource,
@@ -95,6 +97,44 @@ fn validate_gitlab_mr_url(source: &ReviewSource) -> Result<(), (StatusCode, Stri
         }
     }
     Ok(())
+}
+
+/// Plan the RENG-33 route for a `gitlab_mr` submission (see
+/// [`mr_url`]): the URL is re-hosted onto the matched git platform's
+/// review-time base before the review runs, and a URL whose host names the
+/// server itself that no platform claims is rejected here — with a 400 naming
+/// the fix — rather than being accepted and failing inside the async task with
+/// an opaque "Failed to send GET". A rejected submission never reaches
+/// `enqueue_review`, so it leaves no record in the review history.
+///
+/// Planned (not applied) here because the credential is resolved from the URL
+/// the USER submitted: the platform that supplies the token is the one its
+/// host identifies, so the rewrite is applied only after that lookup.
+fn plan_gitlab_mr_url_route(state: &AppState, source: &ReviewSource) -> Result<MrUrlRoute, (StatusCode, String)> {
+    let ReviewSource::GitLabMr { url } = source else {
+        return Ok(MrUrlRoute::Unchanged);
+    };
+    let platforms = state.git_platforms.read().unwrap().clone();
+    mr_url::route_gitlab_mr_url(&platforms, url).map_err(|message| (StatusCode::BAD_REQUEST, message))
+}
+
+/// Apply a planned route: the rewritten URL is what the async review fetches
+/// (and, via `source_meta_from_request`, what the task record stores as its MR
+/// URL). The user-entered URL is not preserved in the record; it is logged
+/// here together with the platform that claimed it.
+fn apply_gitlab_mr_url_route(source: &mut ReviewSource, route: MrUrlRoute) {
+    let MrUrlRoute::Rewritten { url, platform } = route else {
+        return;
+    };
+    if let ReviewSource::GitLabMr { url: submitted } = source {
+        tracing::info!(
+            platform = %platform,
+            submitted = %submitted,
+            review_url = %url,
+            "gitlab_mr url rewritten onto the matched git platform's review base"
+        );
+        *submitted = url;
+    }
 }
 
 /// Validate the optional webhook callback URL (SSRF protection, async DNS).
@@ -147,7 +187,7 @@ pub(crate) async fn submit_review(
         return error_response(status, msg);
     }
 
-    let request: ReviewRequest = match serde_json::from_value(raw) {
+    let mut request: ReviewRequest = match serde_json::from_value(raw) {
         Ok(r) => r,
         Err(e) => return error_response(StatusCode::UNPROCESSABLE_ENTITY, format!("invalid review request: {e}")),
     };
@@ -158,6 +198,16 @@ pub(crate) async fn submit_review(
     if let Err((status, msg)) = validate_gitlab_mr_url(&request.source) {
         return error_response(status, msg);
     }
+
+    // RENG-33: the URL's routing decision (rewrite onto the matched platform's
+    // reachable base, or reject a host the server cannot reach) is part of URL
+    // validation and runs before every policy gate, so an unusable URL fails
+    // with an actionable 4xx and enqueues nothing. Applied below, once the
+    // credential has been resolved from the submitted URL.
+    let url_route = match plan_gitlab_mr_url_route(&state, &request.source) {
+        Ok(route) => route,
+        Err((status, msg)) => return error_response(status, msg),
+    };
 
     if let Err((status, msg)) = validate_webhook(request.webhook.as_deref()).await {
         return error_response(status, msg);
@@ -178,6 +228,11 @@ pub(crate) async fn submit_review(
     if let Err((status, msg)) = require_usable_llm(&state, &request) {
         return error_response_with_code(status, msg, "llmNotConfigured");
     }
+
+    // The plan applies here: the credential lookup above keyed on the URL the
+    // user submitted, everything below (the persisted request, the fetch) uses
+    // the reachable URL.
+    apply_gitlab_mr_url_route(&mut request.source, url_route);
 
     // The persisted request parameters are serialized from a struct that
     // never carries the GitLab token, so it can never land in the task store;
@@ -281,7 +336,7 @@ pub(crate) async fn rerun_review(
         }
     };
 
-    let request = match serde_json::from_value::<ReviewRequest>(request_json.clone()) {
+    let mut request = match serde_json::from_value::<ReviewRequest>(request_json.clone()) {
         Ok(r) => r,
         Err(_) => {
             return error_response(
@@ -299,6 +354,15 @@ pub(crate) async fn rerun_review(
     if let Err((status, msg)) = validate_gitlab_mr_url(&request.source) {
         return error_response(status, msg);
     }
+
+    // RENG-33: the URL routing decision re-applies too, on the URL the stored
+    // request carries — for a task submitted before the rewrite existed that
+    // is the user-entered `external_url`, and a stored local host that no
+    // platform claims is now rejected here instead of queuing a doomed task.
+    let url_route = match plan_gitlab_mr_url_route(&state, &request.source) {
+        Ok(route) => route,
+        Err((status, msg)) => return error_response(status, msg),
+    };
 
     // Re-validate the stored webhook URL: policy is enforced at enqueue time,
     // and a rerun is a fresh enqueue.
@@ -323,6 +387,18 @@ pub(crate) async fn rerun_review(
     if let Err((status, msg)) = require_usable_llm(&state, &request) {
         return error_response_with_code(status, msg, "llmNotConfigured");
     }
+
+    // Apply the route: a rewritten URL must be what the new task fetches AND
+    // stores, so the persisted request is re-serialized in that case — the
+    // stored JSON is replayed byte-identically otherwise (it preserves fields
+    // this build may not model).
+    let rewritten = matches!(url_route, MrUrlRoute::Rewritten { .. });
+    apply_gitlab_mr_url_route(&mut request.source, url_route);
+    let request_json = if rewritten {
+        serde_json::to_value(&request).unwrap_or(request_json)
+    } else {
+        request_json
+    };
 
     let new_task_id = enqueue_review(&state, &store, request, request_json, gitlab_token).await;
     (StatusCode::ACCEPTED, Json(serde_json::json!({"task_id": new_task_id}))).into_response()

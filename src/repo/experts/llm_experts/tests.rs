@@ -410,6 +410,7 @@ impl LLMProvider for ScriptedProvider {
             total_tokens: 1,
             model: "mock".to_string(),
             provider: "mock".to_string(),
+            fallback: false,
         })
     }
 }

@@ -277,9 +277,12 @@ pub(crate) async fn enqueue_review(
     let config_toml = request.config;
     let llm_configs = match request.llm_configs {
         // A rerun replays the persisted (masked) request: resolve the mask
-        // sentinel against the server-side configs before execution.
+        // sentinel against the server-side configs before execution. Request-
+        // level configs win and keep the caller's explicit order.
         Some(configs) if !configs.is_empty() => resolve_masked_api_keys(configs, &state.llm_configs.read().unwrap()),
-        _ => state.llm_configs.read().unwrap().clone(),
+        // Server-side configs run in the authoritative chain order: primary
+        // first, then the stored order (RENG-55).
+        _ => state.ordered_llm_configs(),
     };
     let webhook = request.webhook;
     let cfg = state.app_config.read().unwrap().clone();

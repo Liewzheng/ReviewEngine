@@ -27,6 +27,14 @@ pub struct CompletionResult {
     /// overwrites it with the hitting config's `provider` so fallback-chain
     /// hits are attributed to the configured entry (RENG-38).
     pub provider: String,
+    /// True when this completion was answered by a FALLBACK entry — the head
+    /// of the chain (the primary) did not produce it (RENG-55). `false` for a
+    /// direct [`LLMClient::complete`](super::client::LLMClient::complete) call
+    /// and for a chain hit on its first entry. Set by
+    /// `LLMClient::complete_with_fallback`, logged there at INFO, so a review
+    /// that silently ran on a secondary provider is distinguishable from a
+    /// normal run.
+    pub fallback: bool,
 }
 
 /// Parameters for LLM completion requests.
@@ -160,6 +168,7 @@ impl LLMProvider for OpenAIProvider {
             total_tokens,
             model,
             provider: self.name().to_string(),
+            fallback: false,
         })
     }
 }
@@ -307,6 +316,7 @@ impl LLMProvider for AnthropicProvider {
             total_tokens,
             model,
             provider: self.name().to_string(),
+            fallback: false,
         })
     }
 }

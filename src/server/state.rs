@@ -286,6 +286,20 @@ impl AppState {
             catalog: CatalogStore::new(),
         }
     }
+
+    /// The authoritative provider chain a review runs on: the persisted
+    /// primary selection first, then the remaining providers in their stored
+    /// order (RENG-55, [`crate::llm::ordered_llm_configs`]). Every
+    /// review-executing entry point (REST submit, repo review, GitLab/GitHub
+    /// webhooks) must take its configs from here — reading `llm_configs`
+    /// directly reintroduces the bug where the primary was ignored.
+    pub fn ordered_llm_configs(&self) -> Vec<LLMConfig> {
+        // Sequential reads (never nested) so a concurrent `PUT /config` — which
+        // writes `llm_configs` then `ui_config` — cannot deadlock against us.
+        let primary = self.ui_config.read().unwrap().llm.primary_provider.clone();
+        let configs = self.llm_configs.read().unwrap();
+        crate::llm::ordered_llm_configs(&primary, &configs)
+    }
 }
 
 #[cfg(test)]
@@ -413,5 +427,47 @@ mod tests {
         let store = UpgradeStore::with_install_method(InstallMethod::Docker);
         assert_eq!(store.install_method, InstallMethod::Docker);
         assert_eq!(store.job.read().unwrap().state, UpgradeJobState::Idle);
+    }
+
+    // ─── authoritative provider chain (RENG-55) ────────────────
+
+    fn llm(provider: &str) -> LLMConfig {
+        LLMConfig {
+            provider: provider.to_string(),
+            model: format!("{provider}-model"),
+            api_key: "k".to_string(),
+            api_base: format!("https://api.{provider}.example/v1"),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        }
+    }
+
+    /// `AppState::ordered_llm_configs` is the single producer of the runtime
+    /// chain: the persisted `llm.primaryProvider` leads, the rest keeps the
+    /// stored order.
+    #[test]
+    fn ordered_llm_configs_puts_the_persisted_primary_first() {
+        let state = AppState::new(vec![llm("xiaomi"), llm("deepseek")]);
+        // Default UI config carries no primary → stored order.
+        assert_eq!(
+            state
+                .ordered_llm_configs()
+                .iter()
+                .map(|c| c.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["xiaomi", "deepseek"]
+        );
+
+        state.ui_config.write().unwrap().llm.primary_provider = "deepseek".to_string();
+        assert_eq!(
+            state
+                .ordered_llm_configs()
+                .iter()
+                .map(|c| c.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deepseek", "xiaomi"],
+            "the persisted primary must lead the chain"
+        );
     }
 }

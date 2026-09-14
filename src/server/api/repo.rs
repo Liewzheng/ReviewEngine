@@ -82,7 +82,7 @@ async fn submit_repo_scan(State(state): State<Arc<AppState>>, Json(body): Json<R
     let task_id = store.create(Some(meta.clone())).await;
     let store_clone = store.clone();
     let path = body.path.clone();
-    let llm_configs = state.llm_configs.read().unwrap().clone();
+    let llm_configs = state.ordered_llm_configs();
     let config = state.app_config.read().unwrap().clone();
     let progress_map = state.progress_map.clone();
 

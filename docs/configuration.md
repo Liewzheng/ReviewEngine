@@ -63,6 +63,37 @@ temperature = 0.3
 
 > review-engine does not expand shell variables inside TOML values. Store keys directly in the file, or pass the whole provider block through the `LLM_CONFIG` environment variable for dynamic values.
 
+### Chain order and the primary provider
+
+The order the runtime walks is the **authoritative chain**:
+
+1. **The primary provider first.** In the Web UI (`/#/llm`) that is the card marked 主 / Primary — the persisted `llm.primaryProvider` selection. A review always starts there, whatever position that provider has in the provider list.
+2. **Then the remaining providers in their stored order** — the card order (`llm.providers[]` of `GET /api/v1/config`, persisted as each `llm_providers` row's `position`). Selecting a primary never reshuffles that order; it only moves the selected provider to the head of the chain.
+
+With the stored list `[xiaomi, deepseek]` and `deepseek` selected as primary, a review starts on **deepseek** and falls back to xiaomi. (Before 0.10.11 the selection was ignored at runtime and reviews always started on the first stored provider — xiaomi in this example.) The chain is produced in exactly one place, `ordered_llm_configs(primary, configs)` (`src/llm/mod.rs`), and every review-executing entry point takes its providers from it: the Web UI's review submit, repo reviews, and GitLab/GitHub webhook-triggered reviews (`AppState::ordered_llm_configs`).
+
+- **Custom expert model** (`[review_experts.<name>] model = "…"`): that expert runs **on the primary provider** with its model substituted (primary's endpoint and key, the expert's model id). This case has no fallback — the custom model is not assumed to exist on the other providers.
+- **No primary selected**, or a selection naming a provider that no longer exists: the first stored provider is the effective primary. The stored order *is* the chain, exactly like a `[[llm]]` list.
+- **Config file vs Web UI**: when the config file holds `[[llm]]` entries, CLI and webhook-triggered reviews use those in **file order** — the file is the explicit configuration for that run. The UI's primary applies to providers configured through the Web UI / database. Configure providers in one place to avoid ambiguity.
+- **Order is persisted, not recomputed**: `llm_providers` rows store their list index in `raw.position`, and the loader orders by it, so the order the UI shows survives a restart. Rows without a `position` (hand-written import) sort last, in `updated_at` order.
+
+### What happens on failure
+
+Each provider gets up to 3 attempts for retriable failures (429 rate limit, 5xx, timeouts, connection errors) with exponential backoff and jitter; other 4xx errors (bad key, bad request) fail fast and the chain advances immediately. The chain advance is logged at INFO with the failed provider/model, the reason, and the next provider; when a later entry answers, a second INFO line names both the primary that did not answer and the provider that served the call:
+
+```text
+LLM fallback engaged: the primary provider did not answer, this call was served by a later chain entry
+  primary_provider=deepseek used_provider=xiaomi used_model=mimo-v2.5 chain_position=2
+```
+
+Search the log stream for `LLM fallback engaged` to see whether reviews are actually running on the fallback chain — that is the signature of an unreachable or misconfigured primary.
+
+The provider that answered is recorded per review (`reviews.llm_summary`, RENG-38) and surfaced in the Web UI: the review history shows the `provider/model` pair, and the LLM page's 最近使用 / Recent Usage strip tags a review that used none of the chain head's provider with 未使用首选 / Primary not used. A run served by the fallback therefore never looks like a normal run.
+
+### Seeing the effective order in the Web UI
+
+Every provider card on the LLM page carries the primary badge and a quiet chain marker (链序 #1 / Chain #1). `GET /api/v1/llm/providers` returns, per provider, `position` (0-based index in the stored list), `chainPosition` (1-based rank in the runtime chain) and `isPrimary` (true for the chain head). 最近使用 / Recent Usage below the cards lists the newest reviews' `provider/model`, which is the ground truth for "what actually ran".
+
 ---
 
 ## Command enablement

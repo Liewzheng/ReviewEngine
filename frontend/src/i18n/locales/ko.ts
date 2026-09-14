@@ -380,6 +380,7 @@ export default {
       add: '공급자 추가',
       empty: '아직 구성된 LLM 공급자가 없습니다',
       primaryBadge: '기본',
+      chainPosition: '체인 #{n}',
       setPrimary: '기본 공급자로 설정',
       primarySet: '"{name}"이(가) 기본 공급자로 설정되었습니다',
       addTitle: '공급자 추가',
@@ -492,6 +493,12 @@ export default {
     },
     usage: '용량 {percent}%',
     lastChecked: '마지막 확인: {date}',
+    recentUsage: {
+      title: '최근 사용',
+      chainHint: '체인 선두: {name}',
+      empty: '완료된 리뷰가 없습니다',
+      primaryUnused: '기본 공급자 미사용',
+    },
   },
   logs: {
     title: '시스템 로그',

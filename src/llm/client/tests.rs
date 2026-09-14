@@ -293,6 +293,7 @@ impl super::super::provider::LLMProvider for MockProvider {
                 total_tokens: 10,
                 model: "mock".to_string(),
                 provider: self.name.clone(),
+                fallback: false,
             })
         }
     }
@@ -462,4 +463,47 @@ async fn test_fallback_result_is_attributed_to_the_hitting_provider() {
     let result = client.complete(&config("second"), "system", "user").await.unwrap();
     assert_eq!(result.provider, "second");
     assert_eq!(result.model, "mock", "mock provider's reported model is preserved");
+}
+
+/// RENG-55: a hit on a later chain entry is flagged (`fallback = true`) and
+/// carries THAT entry's provider, so a review served by a secondary provider
+/// is distinguishable from a normal primary run. The flag is set by the chain
+/// walker only — `configs[0]` hits and direct `complete` calls are `false`.
+#[tokio::test]
+async fn test_fallback_result_is_flagged_and_uses_the_later_config() {
+    let client = LLMClient::new();
+    let mut registry = ProviderRegistry::new();
+    // Non-retriable failures (400) so the chain advances immediately without
+    // backoff sleeps.
+    registry.register(Box::new(MockProvider::new("primary", 999, "400 Bad Request")));
+    registry.register(Box::new(MockProvider::new("secondary", 0, "unused")));
+    let client = client.with_registry(Arc::new(registry));
+
+    let config = |provider: &str| LLMConfig {
+        provider: provider.to_string(),
+        model: format!("{provider}-model"),
+        api_key: "test".to_string(),
+        api_base: format!("https://api.{provider}.com/v1"),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: None,
+    };
+
+    // Chain = [primary, secondary]: the primary answers nothing, so the used
+    // provider is the SECOND config and the completion is marked a fallback.
+    let chain = [config("primary"), config("secondary")];
+    let result = client.complete_with_fallback(&chain, "system", "user").await.unwrap();
+    assert_eq!(
+        result.provider, "secondary",
+        "the used provider must be the later chain entry"
+    );
+    assert!(result.fallback, "a non-primary hit must be flagged");
+
+    // The very same provider as the chain HEAD is not a fallback.
+    let hit = client
+        .complete_with_fallback(&[config("secondary")], "system", "user")
+        .await
+        .unwrap();
+    assert_eq!(hit.provider, "secondary");
+    assert!(!hit.fallback, "a chain-head hit is not a fallback");
 }

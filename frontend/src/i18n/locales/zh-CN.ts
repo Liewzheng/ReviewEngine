@@ -376,6 +376,7 @@ export default {
       add: '添加供应商',
       empty: '尚未配置任何 LLM 供应商',
       primaryBadge: '主',
+      chainPosition: '链序 #{n}',
       setPrimary: '设为主提供商',
       primarySet: '已将“{name}”设为主提供商',
       addTitle: '添加供应商',
@@ -487,6 +488,12 @@ export default {
     },
     usage: '容量 {percent}%',
     lastChecked: '上次检查：{date}',
+    recentUsage: {
+      title: '最近使用',
+      chainHint: '链首：{name}',
+      empty: '暂无已完成的评审',
+      primaryUnused: '未使用首选',
+    },
   },
   logs: {
     title: '系统日志',

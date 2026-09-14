@@ -114,13 +114,14 @@ impl WebhookHandler for GitHubWebhookHandler {
         // are snapshotted LAZILY inside the review-dispatching arms below —
         // the review path itself only reads the config file and `LLM_CONFIG`
         // (0.10.1 fix), and ping/push/unknown events must not pay for the
-        // RwLock read + Vec clone. `None` without an AppState →
-        // config-file/env only.
+        // RwLock read + Vec clone. The snapshot is
+        // `AppState::ordered_llm_configs` — the authoritative chain, primary
+        // first (RENG-55). `None` without an AppState → config-file/env only.
         let server_llm_configs = || {
             self.app_state
                 .as_ref()
                 .and_then(|w| w.upgrade())
-                .map(|s| s.llm_configs.read().unwrap().clone())
+                .map(|s| s.ordered_llm_configs())
         };
 
         let result = match event {

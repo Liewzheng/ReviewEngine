@@ -90,10 +90,15 @@ impl LLMClient {
     /// keyed by config.provider), but the config entry is the source of truth
     /// for history snapshots — e.g. an empty `config.provider` falls back to
     /// the registry name instead of recording an empty string.
-    fn attribute_provider(mut result: CompletionResult, config: &LLMConfig) -> CompletionResult {
+    ///
+    /// `fallback` (RENG-55) marks a hit that was NOT the head of the chain:
+    /// either a chain advance in [`Self::complete_with_fallback`] or — for
+    /// direct [`Self::complete`] calls — whatever the caller passes.
+    fn attribute_provider(mut result: CompletionResult, config: &LLMConfig, fallback: bool) -> CompletionResult {
         if !config.provider.is_empty() {
             result.provider = config.provider.clone();
         }
+        result.fallback = fallback;
         result
     }
 
@@ -117,14 +122,14 @@ impl LLMClient {
                 };
                 let result = provider.complete(&params).await;
                 Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
-                return result.map(|r| Self::attribute_provider(r, config));
+                return result.map(|r| Self::attribute_provider(r, config, false));
             }
         }
 
         // Fallback: use the direct OpenAI-compatible HTTP approach (original behavior)
         let result = self.complete_direct(config, system_prompt, user_prompt).await;
         Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
-        result.map(|r| Self::attribute_provider(r, config))
+        result.map(|r| Self::attribute_provider(r, config, false))
     }
 
     /// Direct HTTP-based completion (backward compat, OpenAI-compatible only).
@@ -222,6 +227,7 @@ impl LLMClient {
             total_tokens,
             model,
             provider: config.provider.clone(),
+            fallback: false,
         })
     }
 
@@ -239,6 +245,12 @@ impl LLMClient {
         let _cf_start = std::time::Instant::now();
         let max_retries = 3u32;
 
+        // Head of the chain = the primary provider (RENG-55). Everything past
+        // index 0 is a fallback; a hit there is logged at INFO so "the review
+        // ran on the secondary provider" is visible in the logs instead of
+        // being indistinguishable from a normal run.
+        let primary = configs.first().map(|c| c.provider.clone()).unwrap_or_default();
+
         tracing::debug!(
             "complete_with_fallback: {} config(s), system={}b user={}b",
             configs.len(),
@@ -254,6 +266,19 @@ impl LLMClient {
 
                 match result {
                     Ok(r) => {
+                        let fallback = i > 0;
+                        if fallback {
+                            tracing::info!(
+                                primary_provider = %primary,
+                                used_provider = %config.provider,
+                                used_model = %config.model,
+                                chain_position = i + 1,
+                                attempt = attempt + 1,
+                                took = ?attempt_dur,
+                                "LLM fallback engaged: the primary provider did not answer, \
+                                 this call was served by a later chain entry"
+                            );
+                        }
                         tracing::debug!(
                             "Fallback attempt {}/{} SUCCESS: model={} took={:?} total={:?}",
                             i + 1,
@@ -264,8 +289,8 @@ impl LLMClient {
                         );
                         // RENG-38: attribute the hit to THIS config's provider
                         // — the fallback chain may have succeeded on a later
-                        // entry than the caller's primary.
-                        return Ok(Self::attribute_provider(r, config));
+                        // entry than the caller's primary. RENG-55: flag it.
+                        return Ok(Self::attribute_provider(r, config, fallback));
                     }
                     Err(e) => {
                         let err_str = e.to_string();
@@ -294,14 +319,35 @@ impl LLMClient {
                             continue;
                         }
 
-                        tracing::warn!(
-                            provider = %config.provider,
-                            model = %config.model,
-                            attempt = attempt + 1,
-                            took = ?attempt_dur,
-                            error = %e,
-                            "LLM request failed, trying next fallback"
-                        );
+                        // RENG-55: structured INFO — the user-visible symptom was
+                        // "primary set to deepseek, every review ran on xiaomi"
+                        // with nothing in the logs naming the skip. `reason` is
+                        // the provider error verbatim; `next_*` names where the
+                        // chain goes. The terminal failure of the LAST entry
+                        // stays a WARN below this branch's tail.
+                        if i + 1 < configs.len() {
+                            tracing::info!(
+                                primary_provider = %primary,
+                                chain_position = i + 1,
+                                provider = %config.provider,
+                                model = %config.model,
+                                next_provider = %configs[i + 1].provider,
+                                next_model = %configs[i + 1].model,
+                                attempt = attempt + 1,
+                                took = ?attempt_dur,
+                                reason = %e,
+                                "LLM request failed, falling back to the next provider in the chain"
+                            );
+                        } else {
+                            tracing::warn!(
+                                provider = %config.provider,
+                                model = %config.model,
+                                attempt = attempt + 1,
+                                took = ?attempt_dur,
+                                reason = %e,
+                                "LLM request failed on the last provider in the chain"
+                            );
+                        }
                         last_error = e;
                         break; // try next config
                     }

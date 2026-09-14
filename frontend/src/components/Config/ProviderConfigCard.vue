@@ -13,6 +13,9 @@ const props = defineProps<{
   /** Runtime health entry (GET /llm/providers) matching this card, when the
    *  provider is active server-side. */
   health?: LlmProvider
+  /** RENG-55: 1-based rank of this provider in the runtime chain (the chain
+   *  head is 1); `undefined` when the runtime provider list is unavailable. */
+  chainPosition?: number
   /** True while this provider's connectivity test is running. */
   testing?: boolean
   /** True while a mutation save is in flight (actions disabled). */
@@ -119,6 +122,11 @@ const showUsage = computed(() => {
         <span class="provider-name" :title="card.provider">{{ displayName }}</span>
         <el-tag v-if="primary" type="warning" effect="dark" size="small" class="primary-badge">
           {{ $t('config.providerCards.primaryBadge') }}
+        </el-tag>
+        <!-- RENG-55: quiet chain-order marker — #1 is the provider a review
+             starts on, the rest are the fallback order behind it. -->
+        <el-tag v-if="chainPosition" type="info" effect="plain" size="small" class="chain-badge">
+          {{ $t('config.providerCards.chainPosition', { n: chainPosition }) }}
         </el-tag>
       </div>
       <el-tag
@@ -283,6 +291,14 @@ const showUsage = computed(() => {
 
 .primary-badge {
   flex-shrink: 0;
+}
+
+/* RENG-55: quiet chain marker so the header still reads as name-first. */
+.chain-badge {
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  opacity: 0.75;
 }
 
 .status-badge {

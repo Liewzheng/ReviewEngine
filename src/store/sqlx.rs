@@ -204,9 +204,18 @@ impl ConfigStore for SqlxStore {
     }
 
     async fn load_llm_providers(&self) -> Result<Vec<LLMConfig>> {
+        // Order rule (RENG-55): the stored list position is authoritative, so
+        // the DB list matches the UI array order — `position` in `raw` is
+        // written by `replace_llm_providers_in` as the array index and read
+        // back here. The SQL pre-order (`updated_at`, then `provider`) is the
+        // deterministic fallback for rows that carry no `position` (hand-
+        // written/legacy rows); the sort below is stable, so those rows keep
+        // that order at the tail. `ORDER BY provider` alone — the pre-0.10.11
+        // rule — put the alphabetically-first provider first and disagreed
+        // with the UI order.
         let sql = self.sql(
             "SELECT id, provider, model, api_base, api_key, max_tokens, temperature, raw, \
-             updated_at FROM llm_providers ORDER BY provider",
+             updated_at FROM llm_providers ORDER BY updated_at, provider",
         );
         let rows = ::sqlx::query_as::<_, (String, String, String, String, String, i64, f64, String, String)>(&sql)
             .fetch_all(self.pool())
@@ -230,8 +239,6 @@ impl ConfigStore for SqlxStore {
                 },
             )
             .collect();
-        // Stable sort by the recorded list position; rows without one keep
-        // their deterministic `provider` order at the tail.
         rows.sort_by_key(|r| rows::llm_row_position(r).unwrap_or(i64::MAX));
         rows.into_iter().map(|r| rows::llm_from_row(r, &self.key)).collect()
     }
@@ -802,6 +809,111 @@ mod tests {
             .unwrap();
         let loaded = store.load_llm_providers().await.unwrap();
         assert_eq!(loaded[0].api_key, "plain-legacy-key");
+    }
+
+    /// RENG-55: the save path records the STORED array index as
+    /// `raw.position` and the load path returns exactly that order — never the
+    /// alphabetical `provider` order (the pre-0.10.11 SQL), which put a
+    /// different provider first than the UI showed.
+    #[tokio::test]
+    async fn llm_providers_order_follows_the_saved_array_position() {
+        let store = fresh_store().await;
+        // Deliberately not alphabetical: anthropic < deepseek < xiaomi.
+        let providers: Vec<LLMConfig> = ["xiaomi", "deepseek", "anthropic"]
+            .iter()
+            .map(|p| LLMConfig {
+                provider: (*p).into(),
+                model: format!("{p}-model"),
+                api_key: "k".into(),
+                api_base: format!("https://api.{p}.example/v1"),
+                max_tokens: 4096,
+                temperature: 0.3,
+                disable_thinking: None,
+            })
+            .collect();
+        store.replace_llm_providers(&providers).await.unwrap();
+
+        for (index, provider) in ["xiaomi", "deepseek", "anthropic"].iter().enumerate() {
+            let raw: String = ::sqlx::query_scalar("SELECT raw FROM llm_providers WHERE provider = ?")
+                .bind(provider)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&raw).unwrap()["position"],
+                index as i64,
+                "the save path must record the array index for {provider}"
+            );
+        }
+
+        let loaded = store.load_llm_providers().await.unwrap();
+        assert_eq!(
+            loaded.iter().map(|c| c.provider.as_str()).collect::<Vec<_>>(),
+            vec!["xiaomi", "deepseek", "anthropic"],
+            "load must return the saved array order, not ORDER BY provider"
+        );
+    }
+
+    /// RENG-55: rows without a usable `position` (hand-written or legacy rows
+    /// predating the field) sort after the positioned ones, in `updated_at`
+    /// order — the deterministic tail of the same rule.
+    #[tokio::test]
+    async fn llm_providers_without_position_sort_last_by_updated_at() {
+        let store = fresh_store().await;
+        let providers: Vec<LLMConfig> = ["alpha", "beta", "gamma"]
+            .iter()
+            .map(|p| LLMConfig {
+                provider: (*p).into(),
+                model: format!("{p}-model"),
+                api_key: "k".into(),
+                api_base: format!("https://api.{p}.example/v1"),
+                max_tokens: 4096,
+                temperature: 0.3,
+                disable_thinking: None,
+            })
+            .collect();
+        store.replace_llm_providers(&providers).await.unwrap();
+
+        // Strip `position` from alpha and beta, giving them distinct
+        // timestamps in the opposite order of their stored index.
+        for (provider, updated_at) in [("alpha", "2020-01-01T00:00:00Z"), ("beta", "2021-01-01T00:00:00Z")] {
+            ::sqlx::query("UPDATE llm_providers SET raw = '{}', updated_at = ? WHERE provider = ?")
+                .bind(updated_at)
+                .bind(provider)
+                .execute(store.pool())
+                .await
+                .unwrap();
+        }
+
+        let loaded = store.load_llm_providers().await.unwrap();
+        assert_eq!(
+            loaded.iter().map(|c| c.provider.as_str()).collect::<Vec<_>>(),
+            vec!["gamma", "alpha", "beta"],
+            "positioned rows first, then the position-less tail in updated_at order"
+        );
+    }
+
+    /// `position` extraction tolerates every shape a hand-written row can
+    /// have: a missing key, a null, a non-integer and malformed JSON all mean
+    /// "no position" (the row takes the tail), never a load failure.
+    #[test]
+    fn llm_row_position_tolerates_missing_and_malformed_raw() {
+        let row = |raw: &str| rows::LlmProviderRow {
+            id: "id".into(),
+            provider: "p".into(),
+            model: "m".into(),
+            api_base: "https://api.p.example/v1".into(),
+            api_key: String::new(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            raw: raw.into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+        assert_eq!(rows::llm_row_position(&row(r#"{"position": 2}"#)), Some(2));
+        assert_eq!(rows::llm_row_position(&row("{}")), None);
+        assert_eq!(rows::llm_row_position(&row(r#"{"position": null}"#)), None);
+        assert_eq!(rows::llm_row_position(&row(r#"{"position": "x"}"#)), None);
+        assert_eq!(rows::llm_row_position(&row("not json")), None);
     }
 
     /// F1 regression gate on real PG: `temperature` is DOUBLE PRECISION

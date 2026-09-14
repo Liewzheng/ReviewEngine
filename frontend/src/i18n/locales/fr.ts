@@ -385,6 +385,7 @@ export default {
       add: 'Ajouter un fournisseur',
       empty: 'Aucun fournisseur LLM configuré pour le moment',
       primaryBadge: 'Principal',
+      chainPosition: 'Chaîne n° {n}',
       setPrimary: 'Définir comme principal',
       primarySet: '« {name} » est maintenant le fournisseur principal',
       addTitle: 'Ajouter un fournisseur',
@@ -498,6 +499,12 @@ export default {
     },
     usage: '{percent}% de capacité',
     lastChecked: 'Dernière vérification : {date}',
+    recentUsage: {
+      title: 'Utilisation récente',
+      chainHint: 'Tête de chaîne : {name}',
+      empty: 'Aucun examen terminé',
+      primaryUnused: 'Principal non utilisé',
+    },
   },
   logs: {
     title: 'Journaux système',

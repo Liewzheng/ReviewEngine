@@ -22,12 +22,29 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    // Read the primary BEFORE taking the provider lock and never nest the two
+    // guards (`PUT /config` holds `llm_configs` and `ui_config` in that order).
+    let primary = state.ui_config.read().unwrap().llm.primary_provider.clone();
     let llm_configs = state.llm_configs.read().unwrap();
-    let items: Vec<serde_json::Value> = llm_configs
+    Json(serde_json::json!({ "items": provider_items(&primary, &llm_configs) }))
+}
+
+/// The `GET /llm/providers` card payload for one stored provider list.
+///
+/// `position` is the index in the STORED list (the value
+/// `llm_providers.raw.position` persists, i.e. what the UI array order
+/// encodes); `chainPosition` is the 1-based rank in the authoritative runtime
+/// chain ([`crate::llm::chain_positions`], the primary leading) and
+/// `isPrimary` marks its head — so the LLM page can show what a review will
+/// actually use (RENG-55).
+fn provider_items(primary: &str, configs: &[crate::models::LLMConfig]) -> Vec<serde_json::Value> {
+    let ranks = crate::llm::chain_positions(primary, configs);
+    configs
         .iter()
         .enumerate()
         .map(|(i, cfg)| {
             let id = format!("{}-{}", cfg.provider, i);
+            let chain_position = ranks.get(i).copied().unwrap_or(i + 1);
             serde_json::json!({
                 "id": id,
                 "name": cfg.provider,
@@ -40,6 +57,9 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
                 "defaultModel": cfg.model,
                 "maxTokens": cfg.max_tokens,
                 "temperature": round_temperature(cfg.temperature),
+                "position": i,
+                "chainPosition": chain_position,
+                "isPrimary": chain_position == 1,
                 "latencyMs": 0,
                 "errorRate": 0.0,
                 "requestCount": 0,
@@ -48,9 +68,7 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
                 "lastChecked": chrono::Utc::now().to_rfc3339(),
             })
         })
-        .collect();
-
-    Json(serde_json::json!({ "items": items }))
+        .collect()
 }
 
 // ─── Add Provider ─────────────────────────────────────────────────
@@ -426,5 +444,60 @@ mod tests {
         assert_eq!(round_temperature(0.0), 0.0);
         // Not the raw f32 value 0.30000001192092896.
         assert_eq!(serde_json::to_string(&round_temperature(0.3)).unwrap(), "0.3");
+    }
+
+    fn cfg(provider: &str) -> crate::models::LLMConfig {
+        crate::models::LLMConfig {
+            provider: provider.to_string(),
+            model: format!("{provider}-model"),
+            api_key: "k".to_string(),
+            api_base: format!("https://api.{provider}.example/v1"),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+        }
+    }
+
+    /// RENG-55: the card payload exposes the chain, not just the stored list —
+    /// `position` stays the stored index, `chainPosition`/`isPrimary` describe
+    /// the runtime order the page renders.
+    #[test]
+    fn provider_items_expose_chain_position_and_primary() {
+        let stored = vec![cfg("xiaomi"), cfg("deepseek")];
+        let items = provider_items("deepseek", &stored);
+
+        // Stored order (and the `{provider}-{index}` ids) is untouched.
+        assert_eq!(items[0]["name"], "xiaomi");
+        assert_eq!(items[0]["id"], "xiaomi-0");
+        assert_eq!(items[0]["position"], 0);
+        assert_eq!(items[1]["name"], "deepseek");
+        assert_eq!(items[1]["position"], 1);
+
+        // Chain: deepseek leads.
+        assert_eq!(items[1]["chainPosition"], 1);
+        assert_eq!(items[1]["isPrimary"], true);
+        assert_eq!(items[0]["chainPosition"], 2);
+        assert_eq!(items[0]["isPrimary"], false);
+    }
+
+    /// Without a usable primary selection the stored order is authoritative:
+    /// the head is the effective primary (never a blank card).
+    #[test]
+    fn provider_items_head_is_primary_without_a_primary_selection() {
+        let items = provider_items("", &[cfg("xiaomi"), cfg("deepseek")]);
+        assert_eq!(items[0]["isPrimary"], true);
+        assert_eq!(items[1]["isPrimary"], false);
+        assert_eq!(items[1]["chainPosition"], 2);
+        // A primary naming a provider the runtime no longer holds (stale
+        // `primaryProvider` in the echo) degrades to the same rule.
+        let items = provider_items("ghost", &[cfg("xiaomi")]);
+        assert_eq!(items[0]["isPrimary"], true);
+        assert_eq!(items[0]["chainPosition"], 1);
+    }
+
+    /// Empty provider set → empty payload, no panic.
+    #[test]
+    fn provider_items_empty_set() {
+        assert!(provider_items("deepseek", &[]).is_empty());
     }
 }

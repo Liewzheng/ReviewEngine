@@ -486,8 +486,10 @@ impl WebhookHandler for GitLabWebhookHandler {
         // are snapshotted LAZILY inside each review-dispatching arm below —
         // the review path itself only reads the config file and `LLM_CONFIG`
         // (0.10.1 fix), and ping/push/unknown events must not pay for the
-        // RwLock read + Vec clone. `None` without an AppState →
-        // config-file/env only.
+        // RwLock read + Vec clone. The snapshot is `AppState::ordered_llm_configs`,
+        // i.e. the authoritative chain (persisted primary first), so a
+        // webhook-triggered review runs the provider the user selected
+        // (RENG-55). `None` without an AppState → config-file/env only.
         match event {
             "Merge Request Hook" => super::handle_mr_hook(
                 body,
@@ -496,7 +498,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 platform,
                 task_store.clone(),
                 db.clone(),
-                app_state.as_ref().map(|s| s.llm_configs.read().unwrap().clone()),
+                app_state.as_ref().map(|s| s.ordered_llm_configs()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -507,7 +509,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 platform,
                 task_store.clone(),
                 db.clone(),
-                app_state.as_ref().map(|s| s.llm_configs.read().unwrap().clone()),
+                app_state.as_ref().map(|s| s.ordered_llm_configs()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -517,7 +519,7 @@ impl WebhookHandler for GitLabWebhookHandler {
             "System Hook" => {
                 // Snapshot lazily here (not at handler entry): system hooks
                 // route to review dispatch only for merge_request/note events.
-                let server_llm_configs = app_state.as_ref().map(|s| s.llm_configs.read().unwrap().clone());
+                let server_llm_configs = app_state.as_ref().map(|s| s.ordered_llm_configs());
                 self.handle_system_hook(body, &token, platform, task_store, db, server_llm_configs)
                     .await
             }

@@ -43,9 +43,11 @@ pub(crate) struct LlmProviderRow {
     pub api_key: String,
     pub max_tokens: i64,
     pub temperature: f64,
-    /// JSON fallback bag: `disable_thinking`, plus `position` — the list
-    /// index, because provider order is semantically meaningful (first entry
-    /// is the fallback primary) and the table has no sequence column.
+    /// JSON fallback bag: `disable_thinking`, plus `position` — the index of
+    /// this provider in the STORED list. Order is semantically meaningful
+    /// (RENG-55: the list order is the fallback order behind the persisted
+    /// primary, which is recorded separately as `ui.llm.primaryProvider`) and
+    /// the table has no sequence column.
     pub raw: String,
     pub updated_at: String,
 }

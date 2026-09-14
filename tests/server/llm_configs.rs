@@ -197,6 +197,108 @@ async fn review_request_llm_configs_take_priority_over_server_state() {
     );
 }
 
+/// RENG-55 end-to-end: with two server-side providers whose stored order is
+/// `[xiaomi, deepseek]` and `deepseek` selected as primary, a review must call
+/// the PRIMARY's endpoint and never the first stored one. Before the fix the
+/// pipeline passed the raw stored list to `select_llm_config`, which used its
+/// first entry — the production symptom (primary deepseek, every review
+/// recorded as xiaomi).
+#[tokio::test]
+async fn review_runs_on_the_selected_primary_not_the_first_stored_provider() {
+    let primary_mock = MockServer::start().await;
+    mount_mock_llm(&primary_mock).await;
+    let fallback_mock = MockServer::start().await;
+    mount_mock_llm(&fallback_mock).await;
+
+    let named = |provider: &str, api_base: &str| {
+        serde_json::json!({
+            "provider": provider,
+            "model": "gpt-4o",
+            "api_key": "sk-test",
+            "api_base": api_base,
+            "max_tokens": 2048,
+            "temperature": 0.3
+        })
+    };
+    // Stored order: xiaomi first (alphabetically and positionally), deepseek second.
+    let llm_config_env = serde_json::json!([
+        named("xiaomi", &fallback_mock.uri()),
+        named("deepseek", &primary_mock.uri()),
+    ])
+    .to_string();
+
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(port, None, &[("LLM_CONFIG", &llm_config_env)]);
+    wait_for_server(port).await;
+
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{}", port);
+
+    // Select the SECOND stored provider as primary — exactly the UI action.
+    let resp = client
+        .put(format!("{}/api/v1/config", base))
+        .json(&serde_json::json!({ "llm": { "primaryProvider": "deepseek" } }))
+        .send()
+        .await
+        .expect("PUT /api/v1/config");
+    assert_eq!(resp.status(), reqwest::StatusCode::OK, "primary selection must save");
+
+    // The chain the page shows: deepseek #1, xiaomi #2 — while the stored
+    // order (and its 0-based `position`) stays [xiaomi, deepseek].
+    let providers: serde_json::Value = client
+        .get(format!("{}/api/v1/llm/providers", base))
+        .send()
+        .await
+        .expect("GET /api/v1/llm/providers")
+        .json()
+        .await
+        .expect("providers body is JSON");
+    let items = providers["items"].as_array().expect("providers.items is an array");
+    let by_name = |name: &str| {
+        items
+            .iter()
+            .find(|i| i["name"] == name)
+            .unwrap_or_else(|| panic!("provider {name} missing from {providers}"))
+            .clone()
+    };
+    assert_eq!(by_name("xiaomi")["position"], 0);
+    assert_eq!(by_name("xiaomi")["chainPosition"], 2);
+    assert_eq!(by_name("xiaomi")["isPrimary"], false);
+    assert_eq!(by_name("deepseek")["position"], 1);
+    assert_eq!(by_name("deepseek")["chainPosition"], 1);
+    assert_eq!(by_name("deepseek")["isPrimary"], true);
+
+    // No request-level llm_configs (the Web UI never sends them): the review
+    // must run the authoritative chain.
+    let final_body = post_review_and_poll(&base, &client, None).await;
+    assert_eq!(
+        final_body["status"].as_str(),
+        Some("completed"),
+        "review must complete on the primary provider, got {:?}",
+        final_body
+    );
+
+    let primary_hits = primary_mock
+        .received_requests()
+        .await
+        .expect("primary-mock requests")
+        .iter()
+        .filter(|r| r.url.path().ends_with("/chat/completions"))
+        .count();
+    let fallback_hits = fallback_mock
+        .received_requests()
+        .await
+        .expect("fallback-mock requests")
+        .iter()
+        .filter(|r| r.url.path().ends_with("/chat/completions"))
+        .count();
+    assert!(primary_hits >= 1, "the selected primary provider must serve the review");
+    assert_eq!(
+        fallback_hits, 0,
+        "the first stored provider must not be used when it is not the primary"
+    );
+}
+
 /// RENG-39: persistence-time masking must not bleed into execution. A review
 /// submitted with explicit `llm_configs` runs with the caller's LIVE key
 /// (the mock provider sees it in the Authorization header), while the

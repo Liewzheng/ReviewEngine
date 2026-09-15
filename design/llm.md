@@ -45,8 +45,20 @@ existing payloads (no new data source):
   which is how a fallback that skipped the primary becomes visible instead of
   looking like a normal run.
 
-Per-request counts, latency and sparkline stay out of scope (RENG-56/57) — the
-card metrics remain render-only placeholders.
+### 2.2 Recorded usage statistics (RENG-56)
+
+Each card's usage numbers are the reviews that provider actually served, not
+placeholders: `GET /api/v1/llm/providers` aggregates `reviews.llm_summary`
+over a rolling window (7 days; the payload carries `usageWindowDays` /
+`usageSince` and the UI labels the numbers with them). Four real values per
+card — `requestCount` (reviews that used the provider), `usageShare` (its
+slice of all usage in the window), `successRate` (over the reviews that used
+it and finished) and `lastUsedAt` — plus the live probe's latency.
+
+Anything without a basis is `null` on the wire and `—` on the page: there is
+no capacity concept (`usagePercent` is gone) and no call-level time series
+(`sparkline` is gone until RENG-57 records one). The card shows `0` only when
+the window was really read and really held no usage.
 
 ## 3. Component Breakdown
 
@@ -61,18 +73,20 @@ card metrics remain render-only placeholders.
 ┌────────────────────────────────────────┐
 │ [Logo]  Provider Name    [StatusBadge] │  → header row
 │                                        │
-│ Latency        Requests      Errors      │  → metrics row (3 columns)
-│ 234 ms         1,204         0.2%       │
+│ Latency    Usages (7d)   Success Rate  │  → metrics row (3 columns)
+│ 234 ms        12            91.7%      │
 │                                        │
-│ ██████████████████████████████░░░░░░░░   │  → usage bar (optional)
-│ 74% capacity                           │
+│ ██████████████████████░░░░░░░░░░░░░░░░  │  → usage-share bar (window)
+│ 75% of usage (last 7 days)             │
 │                                        │
-│ [Test Connection]  [Configure →]         │  → action row
+│                    Last used: 09-14…   │  → recorded-use timestamp
+│                    Last checked: …     │  → probe timestamp
+│ [Test Connection]  [Edit] […]          │  → action row
 └────────────────────────────────────────┘
 ```
 
 **Header row:**
-- Left: Provider logo (custom SVG, 32px) + provider name (16px, font-weight 600).
+- Left: provider avatar initial (32px) + provider name (16px, font-weight 600).
 - Right: `StatusBadge` with status text.
 
 **Metrics row:**
@@ -80,16 +94,22 @@ card metrics remain render-only placeholders.
 - Label: `font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;`.
 - Value: `font-family: JetBrains Mono; font-size: 18px; font-weight: 500; color: var(--text-primary);`.
 - Latency color: < 500ms = green, 500–1500ms = amber, > 1500ms = red.
-- Error rate color: < 1% = green, 1–5% = amber, > 5% = red.
+- Success-rate color: ≥ 99% = green, 95–99% = amber, < 95% = red (forced red
+  while the probe reports `error`).
+- Every value is `—` when the server has no number for it. The usage metrics
+  are independent of the probe: an `offline` provider that served last week's
+  reviews still shows them.
 
-**Usage bar (optional, if available):**
-- `ElProgress` `:percentage="usagePercent"` with `stroke-width: 6`.
-- Color: `var(--brand)`.
-- Label below: "{usagePercent}% capacity" (12px, secondary).
+**Usage-share bar:**
+- Rendered only when the payload reports an usage window (`usageAvailable`).
+- `ElProgress` `:percentage="usageShare * 100"` with `stroke-width: 6`,
+  color `var(--brand)`.
+- Label below: "{percent}% of usage (last {days} days)" (12px, secondary);
+  `—` when the window holds no usage at all.
 
 **Action row:**
 - Left: `ElButton` size="small" icon `ElIconConnection` text "Test Connection".
-- Right: `ElButton` size="small" text "Configure →" (links to `/config` with provider pre-selected, or opens inline config drawer).
+- Right: `ElButton` size="small" text "Edit", the set-primary star, delete.
 
 **Status mapping:**
 
@@ -100,7 +120,23 @@ card metrics remain render-only placeholders.
 | error | red | Not responding or auth failure |
 | offline | gray | Not configured or disabled |
 
-**Where the status comes from (0.10.18, RENG-36):** `healthy` / `error` are the verdict of a real `GET {apiBase}/models` probe, cached per provider for 60 s (`src/server/api/llm_health.rs`); they are never inferred from "a key is stored", which is what used to leave a card green after its key was broken. `offline` means no key is stored (nothing is probed). Editing a provider's credentials or endpoint — or deleting it — drops that provider's cached verdict, so the next read re-probes it; the dashboard's `health.llmProviders` section reads the same cache. `degraded` is not produced by the backend today (no latency/error-rate statistics yet), and `latencyMs` is the probe's own round-trip time.
+**Where the status comes from (0.10.18, RENG-36):** `healthy` / `error` are the verdict of a real `GET {apiBase}/models` probe, cached per provider for 60 s (`src/server/api/llm_health.rs`); they are never inferred from "a key is stored", which is what used to leave a card green after its key was broken. `offline` means no key is stored (nothing is probed) and its `lastChecked` is `null` — a probe that never ran has no time to show. Editing a provider's credentials or endpoint — or deleting it — drops that provider's cached verdict, so the next read re-probes it; the dashboard's `health.llmProviders` section reads the same cache. `degraded` is not produced by the backend today, and `latencyMs` is the probe's own round-trip time (not a recorded average — call-level latency is RENG-57).
+
+**Usage statistics (0.10.21, RENG-56):** every usage number is a read of
+`reviews.llm_summary` (§8.2 of `src/store/traits.rs`), aggregated over the
+window reported alongside them:
+
+| Field | Meaning | `null` when |
+|-------|---------|-------------|
+| `requestCount` | reviews that recorded this provider in the window | no store could be read |
+| `usageShare` | its share of all usage in the window (0–1) | the window holds no usage (0/0) |
+| `successRate` | `completed / (completed + failed)` over those reviews | none of them reached an outcome |
+| `lastUsedAt` | newest recorded use | it was not used in the window |
+
+Because `llm_summary` is written on the completion path, a review that failed
+before producing a report carries no snapshot: `successRate` therefore reads
+"of the reviews that used it and finished, how many completed", an upper bound
+on call-level success, and the page must not present it as more than that.
 
 **Provider data interface**:
 ```typescript
@@ -109,11 +145,12 @@ interface LlmProvider {
   name: string;
   logo: string; // SVG asset path
   status: 'healthy' | 'degraded' | 'error' | 'offline';
-  latencyMs: number;
-  requestCount: number;
-  errorRate: number; // 0.0 – 1.0
-  usagePercent?: number;
-  lastChecked: string; // ISO 8601
+  latencyMs: number;          // probe round-trip (RENG-36)
+  requestCount: number | null;  // RENG-56, window
+  usageShare: number | null;    // RENG-56, 0–1
+  successRate: number | null;   // RENG-56, 0–1
+  lastUsedAt: string | null;    // RENG-56, ISO 8601
+  lastChecked: string | null;   // probe time, null when never probed
   configured: boolean;
 }
 ```
@@ -129,22 +166,14 @@ interface LlmProvider {
 
 **No bulk test.** There is no "Test all providers" / "Refresh All" action, no `POST /llm/test-all` endpoint, and no card skeleton state driven by a test: the page header's only action is **Add provider**, and the cards refresh from the page's 30 s auto-refresh.
 
-### 3.3 Historical Sparkline (Optional Enhancement)
+### 3.3 Latency Sparkline — not shipped (RENG-57)
 
-**Inside each card, below metrics:**
-- A mini line chart (SVG or CSS) showing latency over last 24h.
-- `height: 40px; width: 100%;`
-- Line color: `var(--brand)` with `opacity: 0.6`.
-- No axes, no labels — pure visual trend.
-- Data: `number[]` of 24 hourly latency averages.
-
-**Implementation**: Pure SVG `<polyline>` or `<path>` inside the card. No external chart library.
-
-```svg
-<svg viewBox="0 0 100 40" preserveAspectRatio="none" style="width: 100%; height: 40px;">
-  <polyline points="0,30 10,25 20,28 ..." fill="none" stroke="var(--brand)" stroke-width="2" opacity="0.6"/>
-</svg>
-```
+There is no sparkline on these cards, and none may be faked: a per-provider
+latency series needs call-level history that nothing records yet (the
+`reviews.llm_summary` snapshot names the provider/model per review but carries
+no latency). The metric stays absent until RENG-57 records the series; the
+card's latency is the live probe's round-trip time (RENG-36) with `—` when
+nothing was probed.
 
 ## 4. Interactions & State Changes
 
@@ -180,7 +209,7 @@ interface LlmProvider {
 
 - Only CSS transitions shipped on these cards: `transition: border-color/box-shadow/transform 0.2s ease` on the card and `transition: color 0.2s ease` on the metric values.
 - Test result line (RENG-54): appears inline above the card's action row, no auto-dismiss — it stays until the user dismisses it.
-- Not implemented on these cards: a page-enter transition, a staggered card fade-in, a status-change `flash-border`, a latency count-up, and the sparkline below.
+- Not implemented on these cards: a page-enter transition, a staggered card fade-in, a status-change `flash-border`, a latency count-up, and the latency sparkline (§3.3, needs the call-level history of RENG-57).
 
 ## 7. Data Structures
 

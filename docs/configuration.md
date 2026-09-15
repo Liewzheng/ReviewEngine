@@ -103,7 +103,7 @@ A permanent verdict ends only that config's attempts, not the chain: the next en
 
 Search the log stream for `LLM fallback engaged` to see whether reviews are actually running on the fallback chain — that is the signature of an unreachable or misconfigured primary.
 
-The provider that answered is recorded per review (`reviews.llm_summary`, RENG-38) and surfaced in the Web UI: the review history shows the `provider/model` pair, and the LLM page's 最近使用 / Recent Usage strip tags a review that used none of the chain head's provider with 未使用首选 / Primary not used. A run served by the fallback therefore never looks like a normal run.
+The provider that answered is recorded per review (`reviews.llm_summary`, RENG-38) and surfaced in the Web UI: the review history shows the `provider/model` pair, the LLM page's provider cards report each provider's recorded usage over the last 7 days (使用次数 / Usages, 占比 / share of usage, 成功率 / success rate, 最近使用 / last used — RENG-56), and the 最近使用 / Recent Usage strip tags a review that used none of the chain head's provider with 未使用首选 / Primary not used. A run served by the fallback therefore never looks like a normal run, and a provider that is idle or broken shows a real, cross-checkable zero rather than a placeholder.
 
 ### Seeing the effective order in the Web UI
 

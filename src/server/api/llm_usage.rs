@@ -80,37 +80,57 @@ pub struct UsageSnapshot {
     pub since: DateTime<Utc>,
     /// All usages recorded in the window, across every provider name.
     pub total_usage: u64,
-    by_provider: HashMap<String, ProviderUsageStats>,
+    /// Buckets keyed by the `(provider, model, fp)` triple the reviews
+    /// recorded (RENG-75); `fp: None` is the unmarked pre-fingerprint bucket.
+    by_entry: HashMap<(String, String, Option<String>), ProviderUsageStats>,
 }
 
 impl UsageSnapshot {
-    /// Fold the store's per-provider rows into a lookup with the window total
+    /// Fold the store's per-entry rows into a lookup with the window total
     /// resolved (the denominator of every share).
     pub fn new(since: DateTime<Utc>, stats: Vec<ProviderUsageStats>) -> Self {
         let total_usage = stats.iter().map(|s| s.usage_count).sum();
-        let by_provider = stats.into_iter().map(|s| (s.provider.clone(), s)).collect();
+        let by_entry = stats
+            .into_iter()
+            .map(|s| ((s.provider.clone(), s.model.clone(), s.fp.clone()), s))
+            .collect();
         Self {
             since,
             total_usage,
-            by_provider,
+            by_entry,
         }
     }
 
-    /// The metrics of one configured provider. A provider the window never
-    /// saw yields zeroed counts and `None` for everything derived from them.
-    pub fn for_provider(&self, provider: &str) -> ProviderUsage {
-        let stats = self.by_provider.get(provider);
+    /// The metrics of one configured CARD (RENG-75): its exact fingerprint
+    /// bucket, plus — when `merge_unmarked` — the unmarked (pre-fingerprint)
+    /// bucket of the same `(provider, model)`. The API layer passes
+    /// `merge_unmarked` only for the unique ENABLED card of that pair, so old
+    /// data lands exactly where it can be attributed and nowhere else.
+    ///
+    /// A card the window never saw yields zeroed counts and `None` for
+    /// everything derived from them.
+    pub fn for_card(&self, provider: &str, model: &str, fp: &str, merge_unmarked: bool) -> ProviderUsage {
+        let key = |fp: Option<String>| (provider.to_string(), model.to_string(), fp);
+        let exact = self.by_entry.get(&key(Some(fp.to_string())));
+        let unmarked = merge_unmarked.then(|| self.by_entry.get(&key(None))).flatten();
+
+        let usage_count = exact.map_or(0, |s| s.usage_count) + unmarked.map_or(0, |s| s.usage_count);
+        let completed = exact.map_or(0, |s| s.completed_count) + unmarked.map_or(0, |s| s.completed_count);
+        let failed = exact.map_or(0, |s| s.failed_count) + unmarked.map_or(0, |s| s.failed_count);
+        let last_used_at = [exact, unmarked]
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.last_used_at)
+            .max();
+
         ProviderUsage {
-            request_count: Some(stats.map_or(0, |s| s.usage_count)),
-            usage_share: (self.total_usage > 0).then(|| {
-                let count = stats.map_or(0, |s| s.usage_count);
-                round4(count as f64 / self.total_usage as f64)
-            }),
-            success_rate: stats.and_then(|s| {
-                let decided = s.completed_count + s.failed_count;
-                (decided > 0).then(|| round4(s.completed_count as f64 / decided as f64))
-            }),
-            last_used_at: stats.and_then(|s| s.last_used_at),
+            request_count: Some(usage_count),
+            usage_share: (self.total_usage > 0).then(|| round4(usage_count as f64 / self.total_usage as f64)),
+            success_rate: {
+                let decided = completed + failed;
+                (decided > 0).then(|| round4(completed as f64 / decided as f64))
+            },
+            last_used_at,
         }
     }
 }
@@ -147,8 +167,30 @@ mod tests {
     use crate::store::traits::ProviderUsageStats;
 
     fn stats(provider: &str, usage: u64, completed: u64, failed: u64, last: Option<&str>) -> ProviderUsageStats {
+        entry_stats(
+            provider,
+            &format!("{provider}-model"),
+            Some(&format!("fp-{provider}")),
+            usage,
+            completed,
+            failed,
+            last,
+        )
+    }
+
+    fn entry_stats(
+        provider: &str,
+        model: &str,
+        fp: Option<&str>,
+        usage: u64,
+        completed: u64,
+        failed: u64,
+        last: Option<&str>,
+    ) -> ProviderUsageStats {
         ProviderUsageStats {
             provider: provider.to_string(),
+            model: model.to_string(),
+            fp: fp.map(str::to_string),
             usage_count: usage,
             completed_count: completed,
             failed_count: failed,
@@ -185,23 +227,88 @@ mod tests {
         );
         assert_eq!(snapshot.total_usage, 100);
 
-        let xiaomi = snapshot.for_provider("xiaomi-demo");
+        let xiaomi = snapshot.for_card("xiaomi-demo", "xiaomi-demo-model", "fp-xiaomi-demo", false);
         assert_eq!(xiaomi.request_count, Some(30));
         assert_eq!(xiaomi.usage_share, Some(0.3));
         assert_eq!(xiaomi.success_rate, Some(1.0));
         assert_eq!(xiaomi.last_used_at.unwrap().to_rfc3339(), "2026-09-14T10:00:00+00:00");
 
-        let deepseek = snapshot.for_provider("deepseek-demo");
+        let deepseek = snapshot.for_card("deepseek-demo", "deepseek-demo-model", "fp-deepseek-demo", false);
         assert_eq!(deepseek.usage_share, Some(0.1));
         assert_eq!(deepseek.success_rate, Some(0.9));
 
         // A configured provider the window never saw: measured zero usage,
         // but nothing to derive a share/rate/last-use from.
-        let untouched = snapshot.for_provider("brand-new");
+        let untouched = snapshot.for_card("brand-new", "m", "fp-n", false);
         assert_eq!(untouched.request_count, Some(0));
         assert_eq!(untouched.usage_share, Some(0.0));
         assert_eq!(untouched.success_rate, None, "no terminal outcome to divide by");
         assert_eq!(untouched.last_used_at, None);
+    }
+
+    /// RENG-75: two cards sharing `(provider, model)` but fingerprinted
+    /// differently are two buckets — each card reports only its own numbers.
+    #[test]
+    fn same_name_cards_fold_per_fingerprint() {
+        let snapshot = UsageSnapshot::new(
+            Utc::now(),
+            vec![
+                entry_stats("acme", "m1", Some("fp-a"), 3, 3, 0, Some("2026-09-14T10:00:00Z")),
+                entry_stats("acme", "m1", Some("fp-b"), 1, 0, 1, Some("2026-09-13T10:00:00Z")),
+            ],
+        );
+        assert_eq!(snapshot.total_usage, 4);
+
+        let a = snapshot.for_card("acme", "m1", "fp-a", false);
+        assert_eq!(a.request_count, Some(3));
+        assert_eq!(a.success_rate, Some(1.0));
+        assert_eq!(a.usage_share, Some(0.75));
+        let b = snapshot.for_card("acme", "m1", "fp-b", false);
+        assert_eq!(b.request_count, Some(1));
+        assert_eq!(b.success_rate, Some(0.0), "its own failure, not shared with A");
+        assert_eq!(b.usage_share, Some(0.25));
+    }
+
+    /// RENG-75 upgrade rule at the aggregate level: the unmarked bucket folds
+    /// into a card only when the API layer flags the merge; otherwise the
+    /// card reports just its own fingerprinted usage and the unmarked rows
+    /// stay invisible (but counted in `total_usage`).
+    #[test]
+    fn unmarked_bucket_merges_only_when_flagged() {
+        let snapshot = UsageSnapshot::new(
+            Utc::now(),
+            vec![
+                entry_stats("acme", "m1", Some("fp-a"), 2, 2, 0, Some("2026-09-14T10:00:00Z")),
+                entry_stats("acme", "m1", None, 5, 4, 1, Some("2026-09-13T10:00:00Z")),
+            ],
+        );
+        assert_eq!(
+            snapshot.total_usage, 7,
+            "the unmarked rows still count in the window total"
+        );
+
+        let merged = snapshot.for_card("acme", "m1", "fp-a", true);
+        assert_eq!(merged.request_count, Some(7), "2 own + 5 unmarked");
+        assert_eq!(merged.success_rate, Some(0.8571), "6 completed of 7 decided");
+        assert_eq!(merged.usage_share, Some(1.0));
+        assert_eq!(
+            merged.last_used_at.unwrap().to_rfc3339(),
+            "2026-09-14T10:00:00+00:00",
+            "newest across both buckets"
+        );
+
+        let own_only = snapshot.for_card("acme", "m1", "fp-a", false);
+        assert_eq!(own_only.request_count, Some(2), "unflagged: no merge");
+        assert_eq!(own_only.usage_share, Some(0.2857));
+
+        // A card of a DIFFERENT (provider, model) never sees this pair's
+        // unmarked bucket, even flagged; and an unflagged same-pair card gets
+        // only its own fingerprint bucket. The unique-enabled-card decision
+        // itself lives in the API layer (`may_merge_unmarked`).
+        let other_pair = snapshot.for_card("acme", "m2", "fp-b", true);
+        assert_eq!(other_pair.request_count, Some(0));
+        let same_pair_unflagged = snapshot.for_card("acme", "m1", "fp-b", false);
+        assert_eq!(same_pair_unflagged.request_count, Some(0));
     }
 
     /// No usage at all in the window (empty DB): counts are a measured zero,
@@ -210,7 +317,7 @@ mod tests {
     fn empty_window_reports_zero_counts_and_no_derived_metrics() {
         let snapshot = UsageSnapshot::new(Utc::now(), Vec::new());
         assert_eq!(snapshot.total_usage, 0);
-        let usage = snapshot.for_provider("xiaomi-demo");
+        let usage = snapshot.for_card("xiaomi-demo", "m", "fp", false);
         assert_eq!(usage.request_count, Some(0));
         assert_eq!(usage.usage_share, None, "0/0 has no share");
         assert_eq!(usage.success_rate, None);
@@ -222,10 +329,20 @@ mod tests {
     #[test]
     fn success_rate_needs_a_terminal_outcome() {
         let snapshot = UsageSnapshot::new(Utc::now(), vec![stats("xiaomi", 3, 0, 0, Some("2026-09-14T10:00:00Z"))]);
-        assert_eq!(snapshot.for_provider("xiaomi").success_rate, None);
+        assert_eq!(
+            snapshot
+                .for_card("xiaomi", "xiaomi-model", "fp-xiaomi", false)
+                .success_rate,
+            None
+        );
 
         let snapshot = UsageSnapshot::new(Utc::now(), vec![stats("xiaomi", 4, 3, 1, Some("2026-09-14T10:00:00Z"))]);
-        assert_eq!(snapshot.for_provider("xiaomi").success_rate, Some(0.75));
+        assert_eq!(
+            snapshot
+                .for_card("xiaomi", "xiaomi-model", "fp-xiaomi", false)
+                .success_rate,
+            Some(0.75)
+        );
     }
 
     /// Fractions are rounded for the wire (no `0.30000000000000004`).
@@ -239,7 +356,7 @@ mod tests {
                 stats("c", 1, 1, 0, None),
             ],
         );
-        let share = snapshot.for_provider("a").usage_share.unwrap();
+        let share = snapshot.for_card("a", "a-model", "fp-a", false).usage_share.unwrap();
         assert_eq!(share, 0.3333);
         assert_eq!(serde_json::to_string(&share).unwrap(), "0.3333");
     }

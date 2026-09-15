@@ -80,16 +80,20 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 /// and `lastProbeLatencyMs` come from it, never from a guess about the config
 /// (RENG-36).
 ///
-/// `usage` holds the recorded usage of the window (RENG-56). Every usage
-/// metric is `null` when the window cannot be read (`None`) or holds nothing
-/// to derive it from — the page renders `—`; only a count that was really
-/// measured may be `0`.
+/// `usage` holds the recorded usage of the window (RENG-56), matched per CARD
+/// by its entry fingerprint (RENG-75): each item folds only its own
+/// fingerprint's bucket, plus the unmarked pre-upgrade bucket when it is the
+/// unique enabled card of its `(provider, model)` — the fingerprint itself
+/// never enters the payload. Every usage metric is `null` when the window
+/// cannot be read (`None`) or holds nothing to derive it from — the page
+/// renders `—`; only a count that was really measured may be `0`.
 ///
-/// `latency` holds the recorded call latency of the window (RENG-57), read the
-/// same way. Its probe counterpart stays a separate field: `lastProbeLatencyMs`
-/// is the instantaneous connectivity probe (RENG-36), `avgLatencyMs` is the
-/// mean of the successful calls the reviews actually made — the RENG-53 finding
-/// was precisely that the two must not be confused on screen.
+/// `latency` holds the recorded call latency of the window (RENG-57), read
+/// and matched the same way. Its probe counterpart stays a separate field:
+/// `lastProbeLatencyMs` is the instantaneous connectivity probe (RENG-36),
+/// `avgLatencyMs` is the mean of the successful calls the reviews actually
+/// made on that card — the RENG-53 finding was precisely that the two must
+/// not be confused on screen.
 fn provider_items(
     primary: &str,
     configs: &[crate::models::LLMConfig],
@@ -106,8 +110,14 @@ fn provider_items(
             // `None` (a disabled entry — no chain rank) serializes as `null`.
             let chain_position = ranks.get(i).copied().flatten();
             let report = health.get(i);
-            let usage = usage.map(|snapshot| snapshot.for_provider(&cfg.provider));
-            let latency = latency.map(|snapshot| snapshot.for_provider(&cfg.provider));
+            // RENG-75: this card's own fingerprint bucket, plus the unmarked
+            // (pre-fingerprint) bucket when this is the unique ENABLED card
+            // of its (provider, model). The fingerprint itself is
+            // server-side only — the payload carries just the merged values.
+            let fp = cfg.entry_fp();
+            let merge_unmarked = may_merge_unmarked(configs, cfg);
+            let usage = usage.map(|snapshot| snapshot.for_card(&cfg.provider, &cfg.model, &fp, merge_unmarked));
+            let latency = latency.map(|snapshot| snapshot.for_card(&cfg.provider, &cfg.model, &fp, merge_unmarked));
             serde_json::json!({
                 "id": id,
                 "name": cfg.provider,
@@ -178,6 +188,20 @@ fn provider_items(
             })
         })
         .collect()
+}
+
+/// RENG-75 upgrade rule: the pre-fingerprint ("unmarked") statistics bucket
+/// of a `(provider, model)` pair is merged ONLY into the unique ENABLED card
+/// with that pair — the one attribution that cannot be wrong. With several
+/// enabled candidates, or none, the bucket is shown nowhere (the rows stay in
+/// the database; they still count toward the window totals).
+fn may_merge_unmarked(configs: &[crate::models::LLMConfig], cfg: &crate::models::LLMConfig) -> bool {
+    !cfg.disabled
+        && configs
+            .iter()
+            .filter(|c| !c.disabled && c.provider == cfg.provider && c.model == cfg.model)
+            .count()
+            == 1
 }
 
 // ─── Add Provider ─────────────────────────────────────────────────
@@ -609,6 +633,25 @@ mod tests {
         (0..n).map(|_| ProviderHealth::healthy(7)).collect()
     }
 
+    /// A usage bucket attributed to `c`'s own fingerprint (RENG-75).
+    fn usage_stats(
+        c: &crate::models::LLMConfig,
+        usage: u64,
+        completed: u64,
+        failed: u64,
+        last: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> ProviderUsageStats {
+        ProviderUsageStats {
+            provider: c.provider.clone(),
+            model: c.model.clone(),
+            fp: Some(c.entry_fp()),
+            usage_count: usage,
+            completed_count: completed,
+            failed_count: failed,
+            last_used_at: last,
+        }
+    }
+
     /// RENG-55: the card payload exposes the chain, not just the stored list —
     /// `position` stays the stored index, `chainPosition`/`isPrimary` describe
     /// the runtime order the page renders.
@@ -776,13 +819,7 @@ mod tests {
         let stored = vec![cfg("xiaomi")];
         let snapshot = UsageSnapshot::new(
             chrono::Utc::now(),
-            vec![ProviderUsageStats {
-                provider: "xiaomi".to_string(),
-                usage_count: 4,
-                completed_count: 4,
-                failed_count: 0,
-                last_used_at: Some(chrono::Utc::now()),
-            }],
+            vec![usage_stats(&stored[0], 4, 4, 0, Some(chrono::Utc::now()))],
         );
         let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot), None);
         let item = items[0].as_object().unwrap();
@@ -830,20 +867,8 @@ mod tests {
         let snapshot = UsageSnapshot::new(
             chrono::Utc::now(),
             vec![
-                ProviderUsageStats {
-                    provider: "xiaomi".to_string(),
-                    usage_count: 3,
-                    completed_count: 3,
-                    failed_count: 0,
-                    last_used_at: Some(last_used),
-                },
-                ProviderUsageStats {
-                    provider: "deepseek".to_string(),
-                    usage_count: 1,
-                    completed_count: 0,
-                    failed_count: 1,
-                    last_used_at: None,
-                },
+                usage_stats(&stored[0], 3, 3, 0, Some(last_used)),
+                usage_stats(&stored[1], 1, 0, 1, None),
             ],
         );
         let items = provider_items("xiaomi", &stored, &healthy(2), Some(&snapshot), None);
@@ -1213,11 +1238,183 @@ mod tests {
             .count()
     }
 
+    // ─── RENG-75: per-fingerprint card statistics ─────────────────
+
+    /// One of two same-named accounts: identical `(provider, api_base,
+    /// model)` triple, distinct key → distinct fingerprint.
+    fn account(key: &str) -> crate::models::LLMConfig {
+        crate::models::LLMConfig {
+            provider: "acme".to_string(),
+            model: "m1".to_string(),
+            api_key: key.to_string(),
+            api_base: "https://api.acme.example/v1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+            disabled: false,
+        }
+    }
+
+    /// An unmarked (pre-fingerprint) usage bucket for `(acme, m1)`.
+    fn unmarked_usage(usage: u64, completed: u64, failed: u64) -> ProviderUsageStats {
+        ProviderUsageStats {
+            provider: "acme".to_string(),
+            model: "m1".to_string(),
+            fp: None,
+            usage_count: usage,
+            completed_count: completed,
+            failed_count: failed,
+            last_used_at: None,
+        }
+    }
+
+    fn latency_row_for(
+        card: &crate::models::LLMConfig,
+        at: chrono::DateTime<chrono::Utc>,
+        ms: i64,
+    ) -> LlmCallSampleRow {
+        LlmCallSampleRow {
+            provider: card.provider.clone(),
+            model: card.model.clone(),
+            entry_fp: Some(card.entry_fp()),
+            created_at: at,
+            latency_ms: ms,
+            success: true,
+        }
+    }
+
+    fn unmarked_latency_row(at: chrono::DateTime<chrono::Utc>, ms: i64) -> LlmCallSampleRow {
+        LlmCallSampleRow {
+            provider: "acme".to_string(),
+            model: "m1".to_string(),
+            entry_fp: None,
+            created_at: at,
+            latency_ms: ms,
+            success: true,
+        }
+    }
+
+    /// The merge decision itself (RENG-75 升级规则): the unmarked bucket of a
+    /// `(provider, model)` pair goes ONLY to the unique ENABLED card of that
+    /// pair — never to a disabled card, never to either of two enabled
+    /// candidates.
+    #[test]
+    fn unmarked_merge_requires_a_unique_enabled_card() {
+        let a = account("sk-a");
+        let b = account("sk-b");
+
+        // A single card, and it is enabled → merge.
+        assert!(may_merge_unmarked(std::slice::from_ref(&a), &a), "single enabled card");
+        // The same card disabled → no merge (无启用卡不并入).
+        let mut off = a.clone();
+        off.disabled = true;
+        assert!(
+            !may_merge_unmarked(std::slice::from_ref(&off), &off),
+            "the only card is disabled"
+        );
+        // Two enabled same-pair cards → no merge for either (多卡不并入).
+        assert!(
+            !may_merge_unmarked(&[a.clone(), b.clone()], &a),
+            "two enabled candidates"
+        );
+        assert!(
+            !may_merge_unmarked(&[a.clone(), b.clone()], &b),
+            "two enabled candidates"
+        );
+        // One enabled + one disabled same-pair card → the enabled one is
+        // still the unique ENABLED card and merges; the disabled one doesn't.
+        let mut off_b = b.clone();
+        off_b.disabled = true;
+        let pair = [a.clone(), off_b.clone()];
+        assert!(may_merge_unmarked(&pair, &a), "unique enabled among a mixed pair");
+        assert!(!may_merge_unmarked(&pair, &off_b), "the disabled card never merges");
+    }
+
+    /// Two same-named cards on the page report only their own fingerprint's
+    /// numbers — usage AND latency — and the unmarked (pre-upgrade) buckets
+    /// merge into NEITHER when two enabled cards share the pair. The
+    /// fingerprint itself never appears in the payload.
+    #[test]
+    fn provider_items_same_named_cards_report_only_their_own_stats() {
+        let a = account("sk-a");
+        let b = account("sk-b");
+        let stored = vec![a.clone(), b.clone()];
+        assert_ne!(a.entry_fp(), b.entry_fp(), "two accounts, two fingerprints");
+
+        let usage = UsageSnapshot::new(
+            chrono::Utc::now(),
+            vec![
+                usage_stats(&a, 3, 3, 0, None),
+                usage_stats(&b, 1, 0, 1, None),
+                unmarked_usage(5, 5, 0),
+            ],
+        );
+        let now = chrono::Utc::now();
+        let latency = latency_snapshot(vec![
+            latency_row_for(&a, now - chrono::Duration::minutes(3), 100),
+            latency_row_for(&a, now - chrono::Duration::minutes(2), 300),
+            latency_row_for(&b, now - chrono::Duration::minutes(1), 900),
+            unmarked_latency_row(now - chrono::Duration::minutes(4), 50),
+        ]);
+        let items = provider_items("acme", &stored, &healthy(2), Some(&usage), Some(&latency));
+
+        // Card A: its own 3 usages / 2 samples at mean 200.
+        assert_eq!(items[0]["requestCount"], 3);
+        assert_eq!(items[0]["usageShare"], 0.3333, "3 of 9 total");
+        assert_eq!(items[0]["successRate"], 1.0);
+        assert_eq!(items[0]["avgLatencyMs"], 200);
+        assert_eq!(items[0]["latencySampleCount"], 2);
+        // Card B: its own 1 usage / 1 sample at 900 — never A's numbers.
+        assert_eq!(items[1]["requestCount"], 1);
+        assert_eq!(items[1]["usageShare"], 0.1111, "1 of 9 total");
+        assert_eq!(items[1]["successRate"], 0.0);
+        assert_eq!(items[1]["avgLatencyMs"], 900);
+        assert_eq!(items[1]["latencySampleCount"], 1);
+
+        // The unmarked rows went to neither card (two enabled candidates),
+        // but still count in the window totals the shares divide by.
+        let fp_of = |card: &crate::models::LLMConfig| card.entry_fp();
+        for item in &items {
+            let text = serde_json::to_string(item).unwrap();
+            assert!(!text.contains(&fp_of(&a)), "no fingerprint in the payload: {text}");
+            assert!(!text.contains(&fp_of(&b)), "no fingerprint in the payload: {text}");
+            assert!(!item.as_object().unwrap().contains_key("fp"));
+            assert!(!item.as_object().unwrap().contains_key("entryFp"));
+        }
+    }
+
+    /// The single-enabled-card case, end to end: the pre-upgrade (unmarked)
+    /// usage AND latency fold into that card's numbers.
+    #[test]
+    fn provider_items_merge_unmarked_stats_into_the_unique_enabled_card() {
+        let a = account("sk-a");
+        let stored = vec![a.clone()];
+        let usage = UsageSnapshot::new(
+            chrono::Utc::now(),
+            vec![usage_stats(&a, 2, 2, 0, None), unmarked_usage(5, 4, 1)],
+        );
+        let now = chrono::Utc::now();
+        let latency = latency_snapshot(vec![
+            latency_row_for(&a, now - chrono::Duration::minutes(3), 100),
+            unmarked_latency_row(now - chrono::Duration::minutes(2), 300),
+            unmarked_latency_row(now - chrono::Duration::minutes(1), 500),
+        ]);
+        let items = provider_items("acme", &stored, &healthy(1), Some(&usage), Some(&latency));
+
+        assert_eq!(items[0]["requestCount"], 7, "2 own + 5 unmarked");
+        assert_eq!(items[0]["successRate"], 0.8571, "6 completed of 7 decided");
+        assert_eq!(items[0]["avgLatencyMs"], 300, "(100+300+500)/3 — merged as raw sums");
+        assert_eq!(items[0]["latencySampleCount"], 3);
+    }
+
     // ─── RENG-57: recorded call latency ─────────────────────────────
 
     fn latency_row(provider: &str, at: chrono::DateTime<chrono::Utc>, ms: i64, success: bool) -> LlmCallSampleRow {
+        let c = cfg(provider);
         LlmCallSampleRow {
-            provider: provider.to_string(),
+            provider: c.provider.clone(),
+            model: c.model.clone(),
+            entry_fp: Some(c.entry_fp()),
             created_at: at,
             latency_ms: ms,
             success,
@@ -1330,6 +1527,7 @@ mod tests {
                 at: now - chrono::Duration::minutes(ago_minutes),
                 provider: provider.to_string(),
                 model: format!("{provider}-model"),
+                entry_fp: cfg(provider).entry_fp(),
                 latency_ms,
                 success,
                 error: (!success).then(|| "HTTP 500".to_string()),
@@ -1343,6 +1541,7 @@ mod tests {
             at: now - chrono::Duration::days(30),
             provider: "xiaomi".to_string(),
             model: "mimo".to_string(),
+            entry_fp: "fp-mimo".to_string(),
             latency_ms: 9999,
             success: true,
             error: None,

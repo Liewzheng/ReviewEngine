@@ -80,6 +80,7 @@ fn output_with(findings: Vec<Finding>) -> ReviewOutput {
         raw_dump_path: None,
         llm_provider: None,
         llm_model: None,
+        llm_fp: None,
     }])
 }
 

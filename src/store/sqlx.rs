@@ -590,14 +590,15 @@ impl ReviewStore for SqlxStore {
         // cannot be a PK because `review_id` is nullable.
         let sql = self.sql(
             "INSERT INTO llm_call_samples \
-             (id, review_id, provider, model, latency_ms, success, error, chain_position, attempt, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, review_id, provider, model, entry_fp, latency_ms, success, error, chain_position, attempt, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         ::sqlx::query(&sql)
             .bind(uuid::Uuid::new_v4().to_string())
             .bind(review_id)
             .bind(&sample.provider)
             .bind(&sample.model)
+            .bind(&sample.entry_fp)
             .bind(i64::try_from(sample.latency_ms).unwrap_or(i64::MAX))
             .bind(i64::from(sample.success))
             .bind(sample.error.as_deref())
@@ -614,19 +615,23 @@ impl ReviewStore for SqlxStore {
         // One index range scan over `llm_call_samples(created_at, provider)`.
         // `success` stays an INTEGER in SQL and is converted in Rust, matching
         // the dialect rule of 0001/0003 (booleans are 0/1, never BOOLEAN).
+        // `entry_fp` is NULL for every pre-0005 row (RENG-75: the aggregate
+        // folds those into the unmarked bucket).
         let sql = self.sql(
-            "SELECT provider, created_at, latency_ms, success FROM llm_call_samples \
+            "SELECT provider, model, entry_fp, created_at, latency_ms, success FROM llm_call_samples \
              WHERE created_at >= ? ORDER BY created_at",
         );
-        let rows = ::sqlx::query_as::<_, (String, String, i64, i64)>(&sql)
+        let rows = ::sqlx::query_as::<_, (String, String, Option<String>, String, i64, i64)>(&sql)
             .bind(encode_ts(&since))
             .fetch_all(self.pool())
             .await
             .context("list llm call samples")?;
         rows.into_iter()
-            .map(|(provider, created_at, latency_ms, success)| {
+            .map(|(provider, model, entry_fp, created_at, latency_ms, success)| {
                 Ok(LlmCallSampleRow {
                     provider,
+                    model,
+                    entry_fp,
                     created_at: super::decode_ts(&created_at)
                         .with_context(|| format!("llm_call_samples.created_at: {created_at:?}"))?,
                     latency_ms,
@@ -1359,6 +1364,7 @@ mod tests {
                 raw_dump_path: None,
                 llm_provider: Some(provider.to_string()),
                 llm_model: Some(model.to_string()),
+                llm_fp: None,
             }
         }
 
@@ -1393,6 +1399,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: Some("anthropic".to_string()),
             llm_model: Some("claude-4".to_string()),
+            llm_fp: None,
         });
         let mut completed = entry.clone();
         completed.state = TaskState::Completed;
@@ -1435,15 +1442,18 @@ mod tests {
             vec![
                 crate::models::LlmUsage {
                     provider: "xiaomi".into(),
-                    model: "mimo-v2.5-pro".into()
+                    model: "mimo-v2.5-pro".into(),
+                    fp: None,
                 },
                 crate::models::LlmUsage {
                     provider: "xiaomi".into(),
-                    model: "mimo-v2-pro".into()
+                    model: "mimo-v2-pro".into(),
+                    fp: None,
                 },
                 crate::models::LlmUsage {
                     provider: "anthropic".into(),
-                    model: "claude-4".into()
+                    model: "claude-4".into(),
+                    fp: None,
                 },
             ]
         );
@@ -1609,6 +1619,7 @@ mod tests {
             at,
             provider: provider.to_string(),
             model: format!("{provider}-model"),
+            entry_fp: format!("fp-{provider}"),
             latency_ms,
             success,
             error: (!success).then(|| "HTTP 401 Unauthorized".to_string()),

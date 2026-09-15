@@ -45,6 +45,8 @@ pub async fn run_single_expert(
     // RENG-38: snapshot the LLM that actually produced this report.
     report.llm_provider = Some(result.provider.clone());
     report.llm_model = Some(result.model.clone());
+    // RENG-75: and the exact card (in-memory only — feeds llm_summary's fp).
+    report.llm_fp = result.entry_fp.clone();
     Ok(report)
 }
 
@@ -73,6 +75,8 @@ pub async fn run_aggregator_expert(
         // RENG-38: snapshot the aggregator's actual LLM.
         agg.llm_provider = Some(result.provider.clone());
         agg.llm_model = Some(result.model.clone());
+        // RENG-75: and the exact card (in-memory only).
+        agg.llm_fp = result.entry_fp.clone();
         agg
     })
 }

@@ -81,6 +81,22 @@ With the stored list `[xiaomi, deepseek]` and `deepseek` selected as primary, a 
 - **The selection only moves when the user moves it**: setting a card as primary, adding the first provider to an empty page, and deleting the last provider are the only saves that carry `llm.primaryProvider`. An ordinary card add/edit omits it (the backend keeps the stored value), so saving from a page that is out of date — a second tab, a window opened before the change — cannot drag the selection back to the value that page last saw, and neither can deleting a *non-primary* card. Deleting the primary card itself is refused while another provider remains, naming the card and pointing at **Set as Primary**: the successor is the user's choice, never the array head picked on their behalf (RENG-72). Disabling the primary card is the one explicit action that moves the recorded selection — to the first enabled provider, since the head is always enabled.
 - **Config file vs Web UI**: when the config file holds `[[llm]]` entries, CLI and webhook-triggered reviews use those in **file order** — the file is the explicit configuration for that run. The UI's primary applies to providers configured through the Web UI / database. Configure providers in one place to avoid ambiguity.
 - **Order is persisted, not recomputed**: `llm_providers` rows store their list index in `raw.position`, and the loader orders by it, so the order the UI shows survives a restart. Rows without a `position` (hand-written import) sort last, in `updated_at` order. The `disabled` flag travels inside the same `raw` JSON bag, so no database migration is needed and rows written by older versions (no key) load as enabled.
+- **Duplicate names and the recorded primary**: two cards may share a provider name (two accounts of one service). The recorded `llm.primaryProvider` is matched by NAME, so it always resolves to the first same-named enabled entry — which is exactly what "the head is the first enabled card" means under stored-order-is-the-chain, so no index-based echo is needed.
+
+### Card identity: names are labels, fingerprints are identity (RENG-75)
+
+A provider **name is a display label, not an identity** — two cards may share it (two accounts of one service, one account with two models). What uniquely identifies a card is the tuple `(provider, api_base, model, api_key)`, carried as a fingerprint:
+
+```text
+entry_fp = sha256("{provider}\n{api_base}\n{model}\n{api_key}")  →  first 12 hex chars
+```
+
+One implementation for the whole codebase (`src/llm/identity.rs`, `LLMConfig::entry_fp()`); the `\n`-joined field order and the 12-char truncation are the contract.
+
+- **Statistics are per fingerprint.** Every recorded call (`llm_call_samples.entry_fp`, migration 0005) and every review snapshot (`reviews.llm_summary` entries carry `fp`) names the exact card; the LLM page's usage and latency numbers fold by it, so two same-named cards each report only their own history. Rotating a key or changing the URL re-fingerprints the card: its numbers start over, and the old fingerprint's rows stay in the database unattributed.
+- **The fingerprint never leaves the server.** It hashes the API key, and even a truncated hash of a weak key is offline-bruteforceable — so it appears in no API response, no log line and no UI. The server matches each card to its statistics buckets internally; responses carry only the aggregated values.
+- **Pre-upgrade data merges only when unambiguous.** Rows written before the fingerprint existed form an "unmarked" bucket per `(provider, model)`. The API merges that bucket into a card's numbers only when exactly **one enabled** card has that `(provider, model)`; with several enabled candidates — or none — the unmarked numbers are shown nowhere (the rows are kept in the database and still count toward the window totals).
+- **Editing follows the entry, not the name.** When `PUT /api/v1/config` resolves a masked/blank API key ("leave unchanged"), it keeps the stored key of the SAME entry: the stored entry at the same array index when its `(provider, api_base, model)` matches, else the unique stored entry with that triple (a plain reorder), else nothing — two same-triple accounts are indistinguishable in a masked payload, so neither gets the other's key. Consequence: changing a card's model or URL with a masked key clears the key (re-enter it), the same rule git platforms apply to a changed baseUrl. The `disabled` flag keeps by the same entry-following rule.
 
 ### What happens on failure
 

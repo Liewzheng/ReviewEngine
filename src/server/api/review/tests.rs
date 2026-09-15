@@ -210,6 +210,7 @@ fn make_report(name: &str, findings: Vec<crate::models::Finding>) -> crate::mode
         raw_dump_path: None,
         llm_provider: None,
         llm_model: None,
+        llm_fp: None,
     }
 }
 

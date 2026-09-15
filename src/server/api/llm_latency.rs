@@ -111,8 +111,8 @@ impl ProviderLatency {
     }
 }
 
-/// Accumulator for one provider while folding the window's rows.
-#[derive(Default)]
+/// Accumulator for one entry while folding the window's rows.
+#[derive(Debug, Default, Clone)]
 struct Fold {
     success_sum_ms: u64,
     success_count: u64,
@@ -122,27 +122,75 @@ struct Fold {
     buckets: Vec<(u64, u64)>,
 }
 
+impl Fold {
+    /// Add another fold's measurements (the unmarked-bucket merge, RENG-75):
+    /// sums and counts, never the rounded averages — the average of two
+    /// averages is not the average.
+    fn merge_from(&mut self, other: &Fold) {
+        self.success_sum_ms += other.success_sum_ms;
+        self.success_count += other.success_count;
+        self.failure_count += other.failure_count;
+        if self
+            .last_sample_at
+            .is_none_or(|prev| other.last_sample_at.is_some_and(|t| t > prev))
+        {
+            self.last_sample_at = other.last_sample_at;
+        }
+        for (dst, src) in self.buckets.iter_mut().zip(other.buckets.iter()) {
+            dst.0 += src.0;
+            dst.1 += src.1;
+        }
+    }
+
+    /// Round the fold into the wire shape.
+    fn finish(&self) -> ProviderLatency {
+        let avg_latency_ms = (self.success_count > 0).then(|| {
+            // Whole milliseconds: the page shows "234 ms", and the wire stays
+            // clean (`234`, not `234.0`).
+            (self.success_sum_ms as f64 / self.success_count as f64).round() as u64
+        });
+        let has_any = self.success_count + self.failure_count > 0;
+        let sparkline = has_any.then(|| {
+            self.buckets
+                .iter()
+                .map(|&(sum, count)| (count > 0).then(|| (sum as f64 / count as f64).round() as u64))
+                .collect()
+        });
+        ProviderLatency {
+            avg_latency_ms,
+            sample_count: self.success_count,
+            failure_count: self.failure_count,
+            last_sample_at: self.last_sample_at,
+            sparkline,
+        }
+    }
+}
+
 /// Latency aggregated once per `GET /llm/providers` request.
 #[derive(Debug, Clone)]
 pub struct LatencySnapshot {
     /// Window start the aggregate was computed for.
     pub since: DateTime<Utc>,
-    by_provider: HashMap<String, ProviderLatency>,
+    /// Folds keyed by the `(provider, model, entry_fp)` triple the samples
+    /// recorded (RENG-75); `entry_fp: None` is the unmarked pre-0005 bucket.
+    by_entry: HashMap<(String, String, Option<String>), Fold>,
 }
 
 impl LatencySnapshot {
-    /// Fold the window's rows into per-provider latency.
+    /// Fold the window's rows into per-entry latency.
     ///
     /// Rows of providers that are no longer configured are folded too (the
     /// samples are facts); the API layer only asks for the providers it
     /// displays.
     pub fn new(since: DateTime<Utc>, rows: impl IntoIterator<Item = LlmCallSampleRow>) -> Self {
-        let mut folds: HashMap<String, Fold> = HashMap::new();
+        let mut folds: HashMap<(String, String, Option<String>), Fold> = HashMap::new();
         for row in rows {
-            let fold = folds.entry(row.provider).or_insert_with(|| Fold {
-                buckets: vec![(0, 0); SPARKLINE_BUCKETS],
-                ..Fold::default()
-            });
+            let fold = folds
+                .entry((row.provider, row.model, row.entry_fp))
+                .or_insert_with(|| Fold {
+                    buckets: vec![(0, 0); SPARKLINE_BUCKETS],
+                    ..Fold::default()
+                });
             if fold.last_sample_at.is_none_or(|prev| row.created_at > prev) {
                 fold.last_sample_at = Some(row.created_at);
             }
@@ -161,44 +209,35 @@ impl LatencySnapshot {
             bucket.1 += 1;
         }
 
-        let by_provider = folds
-            .into_iter()
-            .map(|(provider, fold)| {
-                let avg_latency_ms = (fold.success_count > 0).then(|| {
-                    // Whole milliseconds: the page shows "234 ms", and the
-                    // wire stays clean (`234`, not `234.0`).
-                    (fold.success_sum_ms as f64 / fold.success_count as f64).round() as u64
-                });
-                let has_any = fold.success_count + fold.failure_count > 0;
-                let sparkline = has_any.then(|| {
-                    fold.buckets
-                        .iter()
-                        .map(|&(sum, count)| (count > 0).then(|| (sum as f64 / count as f64).round() as u64))
-                        .collect()
-                });
-                (
-                    provider,
-                    ProviderLatency {
-                        avg_latency_ms,
-                        sample_count: fold.success_count,
-                        failure_count: fold.failure_count,
-                        last_sample_at: fold.last_sample_at,
-                        sparkline,
-                    },
-                )
-            })
-            .collect();
-
-        Self { since, by_provider }
+        Self { since, by_entry: folds }
     }
 
-    /// The latency metrics of one configured provider. A provider the window
-    /// never called yields zero counts and `None` for everything derived.
-    pub fn for_provider(&self, provider: &str) -> ProviderLatency {
-        self.by_provider
-            .get(provider)
+    /// The latency metrics of one configured CARD (RENG-75): its exact
+    /// fingerprint fold, plus — when `merge_unmarked` — the unmarked
+    /// (pre-fingerprint) fold of the same `(provider, model)`, merged as raw
+    /// sums (the API layer passes `merge_unmarked` only for the unique
+    /// ENABLED card of that pair).
+    ///
+    /// A card the window never called yields zero counts and `None` for
+    /// everything derived.
+    pub fn for_card(&self, provider: &str, model: &str, entry_fp: &str, merge_unmarked: bool) -> ProviderLatency {
+        let key = |fp: Option<String>| (provider.to_string(), model.to_string(), fp);
+        let mut fold = self
+            .by_entry
+            .get(&key(Some(entry_fp.to_string())))
             .cloned()
-            .unwrap_or_else(ProviderLatency::untouched)
+            .unwrap_or_default();
+        if merge_unmarked {
+            if let Some(unmarked) = self.by_entry.get(&key(None)) {
+                fold.merge_from(unmarked);
+            }
+        }
+        if fold.buckets.is_empty() {
+            // No exact fold existed and nothing merged in: report the
+            // untouched shape (no series), not 28 zero buckets.
+            return ProviderLatency::untouched();
+        }
+        fold.finish()
     }
 }
 
@@ -231,8 +270,28 @@ mod tests {
     }
 
     fn row(provider: &str, at: DateTime<Utc>, latency_ms: i64, success: bool) -> LlmCallSampleRow {
+        entry_row(
+            provider,
+            &format!("{provider}-model"),
+            Some(&format!("fp-{provider}")),
+            at,
+            latency_ms,
+            success,
+        )
+    }
+
+    fn entry_row(
+        provider: &str,
+        model: &str,
+        entry_fp: Option<&str>,
+        at: DateTime<Utc>,
+        latency_ms: i64,
+        success: bool,
+    ) -> LlmCallSampleRow {
         LlmCallSampleRow {
             provider: provider.to_string(),
+            model: model.to_string(),
+            entry_fp: entry_fp.map(str::to_string),
             created_at: at,
             latency_ms,
             success,
@@ -267,7 +326,7 @@ mod tests {
             ],
         );
 
-        let xiaomi = snapshot.for_provider("xiaomi");
+        let xiaomi = snapshot.for_card("xiaomi", "xiaomi-model", "fp-xiaomi", false);
         assert_eq!(xiaomi.avg_latency_ms, Some(200), "mean of 100/200/300");
         assert_eq!(xiaomi.sample_count, 3);
         assert_eq!(xiaomi.failure_count, 1, "the failed call is counted, not averaged");
@@ -277,15 +336,20 @@ mod tests {
             "last sample includes failures"
         );
 
-        let deepseek = snapshot.for_provider("deepseek");
+        let deepseek = snapshot.for_card("deepseek", "deepseek-model", "fp-deepseek", false);
         assert_eq!(deepseek.avg_latency_ms, Some(50));
         assert_eq!(deepseek.sample_count, 1);
         assert_eq!(deepseek.failure_count, 0);
-        assert_eq!(snapshot.for_provider("retired").avg_latency_ms, Some(10));
+        assert_eq!(
+            snapshot
+                .for_card("retired", "retired-model", "fp-retired", false)
+                .avg_latency_ms,
+            Some(10)
+        );
 
         // A configured provider the window never called: measured zeros, no
         // derived number and no series.
-        let untouched = snapshot.for_provider("brand-new");
+        let untouched = snapshot.for_card("brand-new", "m", "fp-new", false);
         assert_eq!(untouched.avg_latency_ms, None, "0/0 is not an average");
         assert_eq!(untouched.sample_count, 0);
         assert_eq!(untouched.failure_count, 0);
@@ -298,7 +362,7 @@ mod tests {
     #[test]
     fn empty_window_reports_no_average() {
         let snapshot = LatencySnapshot::new(at("2026-09-08T12:00:00Z"), Vec::new());
-        let latency = snapshot.for_provider("xiaomi");
+        let latency = snapshot.for_card("xiaomi", "xiaomi-model", "fp-xiaomi", false);
         assert_eq!(latency.avg_latency_ms, None);
         assert_eq!(latency.sample_count, 0);
         assert_eq!(latency.failure_count, 0);
@@ -317,7 +381,7 @@ mod tests {
                 row("broken", at("2026-09-14T10:01:00Z"), 9, false),
             ],
         );
-        let latency = snapshot.for_provider("broken");
+        let latency = snapshot.for_card("broken", "broken-model", "fp-broken", false);
         assert_eq!(latency.avg_latency_ms, None);
         assert_eq!(latency.sample_count, 0);
         assert_eq!(latency.failure_count, 2);
@@ -350,7 +414,10 @@ mod tests {
                 row("xiaomi", at("2026-09-09T01:00:00Z"), 60_000, false),
             ],
         );
-        let series = snapshot.for_provider("xiaomi").sparkline.unwrap();
+        let series = snapshot
+            .for_card("xiaomi", "xiaomi-model", "fp-xiaomi", false)
+            .sparkline
+            .unwrap();
         assert_eq!(series.len(), SPARKLINE_BUCKETS, "one point per bucket");
         assert_eq!(series[0], Some(200), "mean of 100 and 300 in bucket 0");
         assert_eq!(series[1], None, "a bucket with no call is a gap");
@@ -388,9 +455,86 @@ mod tests {
                 row("xiaomi", at("2026-09-14T10:01:00Z"), 101, true),
             ],
         );
-        let avg = snapshot.for_provider("xiaomi").avg_latency_ms.unwrap();
+        let avg = snapshot
+            .for_card("xiaomi", "xiaomi-model", "fp-xiaomi", false)
+            .avg_latency_ms
+            .unwrap();
         assert_eq!(avg, 101, "100.5 rounds to 101");
         let json = serde_json::to_string(&serde_json::json!({ "avgLatencyMs": avg })).unwrap();
         assert_eq!(json, r#"{"avgLatencyMs":101}"#);
+    }
+
+    /// RENG-75: two same-named cards (same provider AND model, different
+    /// keys → different fingerprints) fold separately — each card's average,
+    /// counts and series are its own.
+    #[test]
+    fn same_name_cards_fold_per_fingerprint() {
+        let since = at("2026-09-08T12:00:00Z");
+        let snapshot = LatencySnapshot::new(
+            since,
+            vec![
+                entry_row("acme", "m1", Some("fp-a"), at("2026-09-14T10:00:00Z"), 100, true),
+                entry_row("acme", "m1", Some("fp-a"), at("2026-09-14T10:05:00Z"), 300, true),
+                entry_row("acme", "m1", Some("fp-b"), at("2026-09-14T10:00:00Z"), 900, true),
+                entry_row("acme", "m1", Some("fp-b"), at("2026-09-14T10:01:00Z"), 5, false),
+            ],
+        );
+
+        let a = snapshot.for_card("acme", "m1", "fp-a", false);
+        assert_eq!(a.avg_latency_ms, Some(200), "mean of its own 100/300");
+        assert_eq!(a.sample_count, 2);
+        assert_eq!(a.failure_count, 0, "B's failure is not A's");
+
+        let b = snapshot.for_card("acme", "m1", "fp-b", false);
+        assert_eq!(b.avg_latency_ms, Some(900));
+        assert_eq!(b.sample_count, 1);
+        assert_eq!(b.failure_count, 1);
+
+        // A fingerprint the window never saw: untouched.
+        let other = snapshot.for_card("acme", "m1", "fp-c", false);
+        assert_eq!(other.avg_latency_ms, None);
+        assert_eq!(other.sample_count, 0);
+    }
+
+    /// RENG-75 upgrade rule: the unmarked (pre-0005, `entry_fp` NULL) fold
+    /// merges as RAW SUMS when the API flags it — the merged average is the
+    /// true mean of both folds, not the average of two averages.
+    #[test]
+    fn unmarked_fold_merges_as_raw_sums_only_when_flagged() {
+        let since = at("2026-09-08T12:00:00Z");
+        let snapshot = LatencySnapshot::new(
+            since,
+            vec![
+                entry_row("acme", "m1", Some("fp-a"), at("2026-09-14T10:00:00Z"), 100, true),
+                entry_row("acme", "m1", None, at("2026-09-13T10:00:00Z"), 300, true),
+                entry_row("acme", "m1", None, at("2026-09-13T11:00:00Z"), 500, true),
+                entry_row("acme", "m1", None, at("2026-09-13T11:05:00Z"), 7, false),
+            ],
+        );
+
+        let merged = snapshot.for_card("acme", "m1", "fp-a", true);
+        assert_eq!(merged.avg_latency_ms, Some(300), "(100+300+500)/3, not (100+400)/2");
+        assert_eq!(merged.sample_count, 3);
+        assert_eq!(merged.failure_count, 1, "the unmarked failure comes along");
+        assert_eq!(
+            merged.last_sample_at.unwrap().to_rfc3339(),
+            "2026-09-14T10:00:00+00:00",
+            "newest across both folds"
+        );
+        // The sparkline draws both folds' buckets (the two unmarked successes
+        // share one 6-hour bucket).
+        let series = merged.sparkline.unwrap();
+        assert_eq!(series.iter().filter(|b| b.is_some()).count(), 2);
+
+        let own_only = snapshot.for_card("acme", "m1", "fp-a", false);
+        assert_eq!(own_only.avg_latency_ms, Some(100), "unflagged: no merge");
+        assert_eq!(own_only.failure_count, 0);
+
+        // A DIFFERENT (provider, model) pair never sees this unmarked fold,
+        // even flagged; the unique-enabled-card decision itself lives in the
+        // API layer (`may_merge_unmarked`).
+        let other = snapshot.for_card("acme", "m2", "fp-b", true);
+        assert_eq!(other.avg_latency_ms, None);
+        assert_eq!(other.sample_count, 0);
     }
 }

@@ -411,6 +411,7 @@ impl LLMProvider for ScriptedProvider {
             model: "mock".to_string(),
             provider: "mock".to_string(),
             fallback: false,
+            entry_fp: None,
         })
     }
 }

@@ -340,8 +340,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            applied, 4,
-            "0001_init + 0002_llm_snapshot + 0003_participant_meta + 0004_llm_call_samples should be recorded"
+            applied, 5,
+            "0001_init + 0002_llm_snapshot + 0003_participant_meta + 0004_llm_call_samples + 0005_llm_entry_fp should be recorded"
         );
 
         // 0002 (RENG-38): the snapshot columns exist on both history tables.
@@ -408,6 +408,104 @@ mod tests {
         assert!(
             s_idx.iter().any(|i| i == "idx_llm_call_samples_window"),
             "the window index is what keeps the aggregate a range scan: {s_idx:?}"
+        );
+    }
+
+    /// 0005 (RENG-75): the entry-fingerprint column exists and is NULL on rows
+    /// that predate it (the aggregate's unmarked bucket), and the migration is
+    /// idempotent — running it again keeps both the column and the old rows.
+    #[tokio::test]
+    async fn migrate_0005_adds_entry_fp_and_preserves_old_rows() {
+        let store = SqlxStore::new_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+
+        let s_cols: Vec<String> = ::sqlx::query_scalar("SELECT name FROM pragma_table_info('llm_call_samples')")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            s_cols.iter().any(|c| c == "entry_fp"),
+            "llm_call_samples missing entry_fp, got {s_cols:?}"
+        );
+        // No second window index: the aggregate folds by fp in Rust after the
+        // same (created_at, provider) range scan (see 0005's own comment).
+        let s_idx: Vec<String> = ::sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index'")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            !s_idx.iter().any(|i| i.contains("entry_fp")),
+            "no fp index — the window scan is already bounded: {s_idx:?}"
+        );
+
+        // A pre-0005-shaped row (no fp) survives with entry_fp NULL, across a
+        // repeated migrate.
+        ::sqlx::query(
+            "INSERT INTO llm_call_samples (id, provider, model, latency_ms, success, attempt, created_at) \
+             VALUES ('row-1', 'xiaomi', 'mimo', 120, 1, 1, '2026-09-14T10:00:00.000000Z')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        store.migrate().await.unwrap();
+        let (provider, entry_fp): (String, Option<String>) =
+            ::sqlx::query_as("SELECT provider, entry_fp FROM llm_call_samples WHERE id = 'row-1'")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(provider, "xiaomi", "the old row is preserved");
+        assert_eq!(entry_fp, None, "pre-0005 rows keep entry_fp NULL (the unmarked bucket)");
+    }
+
+    /// 0005 (RENG-75), the other half: the `llm_providers.provider` UNIQUE index
+    /// from 0001 (which made a second same-named card impossible to store) is
+    /// dropped, so the identity change can actually be persisted — two cards
+    /// sharing a name survive a `replace_llm_providers` round trip in order.
+    /// Without the drop this is a 500 on `PUT /config`
+    /// (`insert llm_provider "…"`), measured against the real server.
+    #[tokio::test]
+    async fn migrate_0005_drops_the_provider_name_unique_index() {
+        let store = SqlxStore::new_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+
+        let indexes: Vec<String> = ::sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index'")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            !indexes.iter().any(|i| i == "idx_llm_providers_provider"),
+            "the provider-name unique index must be gone: {indexes:?}"
+        );
+        // Idempotent: a repeated migrate (a restart of the upgraded binary)
+        // keeps the schema as it is.
+        store.migrate().await.unwrap();
+
+        let card = |key: &str, max_tokens: u32| crate::models::LLMConfig {
+            provider: "acme-pay".to_string(),
+            model: "m1".to_string(),
+            api_key: key.to_string(),
+            api_base: "https://api.acme.example/v1".to_string(),
+            max_tokens,
+            temperature: 0.7,
+            disable_thinking: None,
+            disabled: false,
+        };
+        let stored = vec![card("sk-acct-a", 4096), card("sk-acct-b", 2048)];
+        crate::store::traits::ConfigStore::replace_llm_providers(&store, &stored)
+            .await
+            .expect("two same-named cards must be storable (0005 drops the UNIQUE index)");
+
+        let loaded = crate::store::traits::ConfigStore::load_llm_providers(&store)
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 2, "both cards come back");
+        assert_eq!(loaded[0].provider, loaded[1].provider, "the shared display name");
+        assert_eq!(loaded[0].api_key, "sk-acct-a", "each card keeps its own key");
+        assert_eq!(loaded[1].api_key, "sk-acct-b");
+        assert_eq!(
+            loaded.iter().map(|c| c.max_tokens).collect::<Vec<_>>(),
+            vec![4096, 2048],
+            "stored order (raw.position), never re-sorted by name"
         );
     }
 

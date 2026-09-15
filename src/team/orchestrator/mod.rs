@@ -191,6 +191,8 @@ impl TeamOrchestrator for DefaultOrchestrator {
                 // RENG-38: snapshot the aggregator's actual LLM.
                 agg_report.llm_provider = Some(result.provider.clone());
                 agg_report.llm_model = Some(result.model.clone());
+                // RENG-75: and the exact card (in-memory only).
+                agg_report.llm_fp = result.entry_fp.clone();
                 Some(agg_report)
             } else {
                 None
@@ -365,6 +367,8 @@ pub async fn run_aggregator(
         // RENG-38: snapshot the aggregator's actual LLM.
         agg.llm_provider = Some(result.provider.clone());
         agg.llm_model = Some(result.model.clone());
+        // RENG-75: and the exact card (in-memory only).
+        agg.llm_fp = result.entry_fp.clone();
         agg
     })
 }

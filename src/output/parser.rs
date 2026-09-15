@@ -70,6 +70,7 @@ fn fallback_report(expert_name: &str, yaml_text: &str) -> ExpertReport {
         raw_dump_path: None,
         llm_provider: None,
         llm_model: None,
+        llm_fp: None,
     }
 }
 
@@ -94,6 +95,7 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         });
     }
 
@@ -114,6 +116,7 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                     raw_dump_path: None,
                     llm_provider: None,
                     llm_model: None,
+                    llm_fp: None,
                 });
             }
             v
@@ -140,6 +143,7 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                             raw_dump_path: None,
                             llm_provider: None,
                             llm_model: None,
+                            llm_fp: None,
                         });
                     }
                 }
@@ -153,6 +157,7 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                     raw_dump_path: None,
                     llm_provider: None,
                     llm_model: None,
+                    llm_fp: None,
                 });
             }
         }
@@ -169,6 +174,7 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
         raw_dump_path: None,
         llm_provider: None,
         llm_model: None,
+        llm_fp: None,
     })
 }
 
@@ -185,6 +191,7 @@ fn build_expert_report(expert_name: &str, raw_response: &str, value: &serde_yaml
         raw_dump_path: None,
         llm_provider: None,
         llm_model: None,
+        llm_fp: None,
     })
 }
 

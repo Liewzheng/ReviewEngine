@@ -189,7 +189,10 @@ async fn put_config_sparse_llm_patch_keeps_key_and_providers() {
 /// Seed an `AppState` with the two-provider shape the RENG-72 regression was
 /// measured on: two keyed providers, no `openai` among them — so the primary
 /// is expressed by `ui.llm.primaryProvider` alone, never by the legacy
-/// scalar path.
+/// scalar path. (RENG-75 identity batch: the stored model matches the card
+/// payload below, because a masked key now follows the
+/// `(provider, api_base, model)` triple — a model edit with a masked key
+/// clears the key by design, see `put_config_model_edit_with_masked_key_clears_the_key`.)
 fn state_with_two_providers() -> Arc<AppState> {
     let app: crate::models::AppConfig = serde_json::from_value(serde_json::json!({
         "llm": [
@@ -203,7 +206,7 @@ fn state_with_two_providers() -> Arc<AppState> {
             },
             {
                 "provider": "deepseek",
-                "model": "deepseek-flash",
+                "model": "deepseek-v4-flash",
                 "api_key": "sk-deepseek",
                 "api_base": "https://api.deepseek.com/v1",
                 "max_tokens": 4096,
@@ -456,6 +459,260 @@ async fn put_config_disabling_the_primary_moves_the_recorded_primary_to_the_firs
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(state.ui_config.read().unwrap().llm.primary_provider, "");
     assert!(state.ordered_llm_configs().is_empty(), "no enabled provider, no chain");
+}
+
+// ─── RENG-75 (identity batch): same-named cards & entry-following keep ───
+
+/// Seed an `AppState` with the DANGEROUS shape: two cards sharing the
+/// `(provider, api_base, model)` triple — two accounts of one service —
+/// differing in `api_key`, plus one non-identity field (`max_tokens`) so the
+/// two cards are distinguishable in a masked payload. A name- (or even
+/// triple-)based keep cannot tell them apart; only the index rule can, and
+/// only a payload that differs per card can prove the order survived.
+fn state_with_two_accounts() -> Arc<AppState> {
+    let account = |key: &str, max_tokens: u32| {
+        serde_json::json!({
+            "provider": "acme-pay",
+            "model": "m1",
+            "api_key": key,
+            "api_base": "https://api.acme.example/v1",
+            "max_tokens": max_tokens,
+            "temperature": 0.7
+        })
+    };
+    let app: crate::models::AppConfig = serde_json::from_value(serde_json::json!({
+        "llm": [account("sk-acct-a", 4096), account("sk-acct-b", 2048)]
+    }))
+    .expect("two-account AppConfig must deserialize");
+    let state = Arc::new(AppState::new(app.llm.clone()));
+    *state.app_config.write().unwrap() = Some(Arc::new(app.clone()));
+    *state.ui_config.write().unwrap() = UiConfig::from_app_config(&app);
+    state
+}
+
+/// A masked providers[] entry for one acme account (what the UI submits when
+/// the user edits a card without touching the key field).
+fn account_card(max_tokens: u32) -> serde_json::Value {
+    serde_json::json!({
+        "provider": "acme-pay",
+        "apiKey": API_KEY_MASK,
+        "apiBaseUrl": "https://api.acme.example/v1",
+        "defaultModel": "m1",
+        "maxTokens": max_tokens,
+        "temperature": 0.7,
+        "timeoutSeconds": 60,
+        "retryAttempts": 3
+    })
+}
+
+fn live_keys(state: &Arc<AppState>) -> Vec<String> {
+    state
+        .llm_configs
+        .read()
+        .unwrap()
+        .iter()
+        .map(|c| c.api_key.clone())
+        .collect()
+}
+
+/// THE dangerous case: editing the SECOND of two same-triple accounts with a
+/// masked key must keep the second account's OWN key — the pre-fix,
+/// name-based keep would have re-stamped it with the FIRST account's key.
+#[tokio::test]
+async fn put_config_masked_edit_keeps_each_accounts_own_key() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_accounts();
+    assert_eq!(live_keys(&state), vec!["sk-acct-a", "sk-acct-b"]);
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "llm": { "providers": [account_card(4096), account_card(1024)] } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        live_keys(&state),
+        vec!["sk-acct-a", "sk-acct-b"],
+        "each account keeps its own key — never the sibling's"
+    );
+    assert_eq!(
+        state.llm_configs.read().unwrap()[1].max_tokens,
+        1024,
+        "the edit applies"
+    );
+    // The masked echo is per-entry too: both cards show configured.
+    let ui = state.ui_config.read().unwrap();
+    assert!(ui.llm.providers.iter().all(|p| p.api_key == API_KEY_MASK));
+}
+
+/// The same two accounts reordered and saved with masked keys: both keys
+/// survive, exactly once each. Identical-triple cards are byte-identical in a
+/// masked payload, so identity follows POSITION (RENG-75 追加确认 3: card
+/// identity = storage index) — the one outcome that can never duplicate or
+/// drop an account's secret.
+#[tokio::test]
+async fn put_config_swapping_two_accounts_preserves_both_keys() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_accounts();
+
+    let mut swapped = account_card(2048);
+    swapped["disabled"] = serde_json::json!(true); // make the swap visible
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "llm": { "providers": [swapped, account_card(4096)] } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let mut keys = live_keys(&state);
+    keys.sort();
+    assert_eq!(
+        keys,
+        vec!["sk-acct-a", "sk-acct-b"],
+        "both accounts survive — no key duplicated, none dropped"
+    );
+}
+
+/// A reorder of cards with DIFFERENT triples moves each key with its card
+/// (the unique-triple fallback of the keep rule): after swapping xiaomi and
+/// deepseek, xiaomi's key sits with xiaomi's card and deepseek's with
+/// deepseek's.
+#[tokio::test]
+async fn put_config_reorder_different_triples_moves_keys_with_their_cards() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_providers();
+
+    let mut payload = card_edit_payload(4096);
+    let providers = payload["llm"]["providers"].as_array_mut().unwrap();
+    providers.swap(0, 1);
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let live = state.llm_configs.read().unwrap();
+    assert_eq!(live[0].provider, "deepseek", "the new order is stored");
+    assert_eq!(live[0].api_key, "sk-deepseek", "deepseek's key followed its card");
+    assert_eq!(live[1].provider, "xiaomi-token-plan-cn");
+    assert_eq!(live[1].api_key, "sk-xiaomi", "xiaomi's key followed its card");
+}
+
+/// The full same-name round trip through the real endpoints: `GET /config`
+/// echoes both same-named cards, and re-submitting that exact array through
+/// `PUT /config` (twice) keeps the order and each entry's own key — no
+/// name-based merge collapses or reorders the cards.
+#[tokio::test]
+async fn put_config_same_name_cards_round_trip_without_name_merging() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_accounts();
+
+    // `maxTokens` is the only field the masked payload shows differently per
+    // card, so it is what proves the ORDER survived (the keys are masked).
+    let order = |providers: &[serde_json::Value]| -> Vec<Option<u64>> {
+        providers.iter().map(|p| p["maxTokens"].as_u64()).collect()
+    };
+    let providers = config_response_body(get_config(State(state.clone())).await.into_response()).await["llm"]
+        ["providers"]
+        .as_array()
+        .expect("llm.providers array")
+        .clone();
+    assert_eq!(providers.len(), 2, "GET /config echoes both same-named cards");
+    assert_eq!(
+        order(&providers),
+        vec![Some(4096), Some(2048)],
+        "stored order, no reordering"
+    );
+    assert!(
+        providers.iter().all(|p| p["apiKey"] == API_KEY_MASK),
+        "both cards show the mask, never a live key: {providers:?}"
+    );
+
+    for round in 1..=2 {
+        let resp = put_config(
+            State(state.clone()),
+            Json(serde_json::json!({ "llm": { "providers": providers.clone() } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "PUT /config round {round}");
+
+        let after = config_response_body(get_config(State(state.clone())).await.into_response()).await["llm"]
+            ["providers"]
+            .as_array()
+            .expect("llm.providers array")
+            .clone();
+        assert_eq!(after.len(), 2, "round {round}: no name-based merge collapsed the cards");
+        assert_eq!(
+            order(&after),
+            vec![Some(4096), Some(2048)],
+            "round {round}: order is untouched"
+        );
+        assert!(
+            after.iter().all(|p| p["apiKey"] == API_KEY_MASK),
+            "round {round}: both cards stay configured"
+        );
+        assert_eq!(
+            live_keys(&state),
+            vec!["sk-acct-a", "sk-acct-b"],
+            "round {round}: each key stays with its own card"
+        );
+        let names: Vec<String> = state
+            .llm_configs
+            .read()
+            .unwrap()
+            .iter()
+            .map(|c| c.provider.clone())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["acme-pay", "acme-pay"],
+            "round {round}: the shared name stays"
+        );
+    }
+}
+
+/// The strict edge of the identity rule (RENG-75): the key is part of the
+/// card's identity, so editing a card's MODEL (or URL) with a masked key
+/// keeps nothing — the entry resolves to empty and needs a re-entered key,
+/// exactly like a git platform whose baseUrl changed. The sibling card is
+/// untouched.
+#[tokio::test]
+async fn put_config_model_edit_with_masked_key_clears_the_key() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_accounts();
+
+    let mut edited = account_card(2048);
+    edited["defaultModel"] = serde_json::json!("m2"); // model change, key untouched
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "llm": { "providers": [account_card(4096), edited] } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    {
+        let live = state.llm_configs.read().unwrap();
+        assert_eq!(live.len(), 1, "the keyless edited card cannot stay in the live set");
+        assert_eq!(live[0].api_key, "sk-acct-a", "the untouched card keeps its key");
+    }
+
+    // Re-entering the key on the edited card restores it as its own card.
+    let mut rekeyed = account_card(2048);
+    rekeyed["defaultModel"] = serde_json::json!("m2");
+    rekeyed["apiKey"] = serde_json::json!("sk-acct-b2");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "llm": { "providers": [account_card(4096), rekeyed] } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let live = state.llm_configs.read().unwrap();
+    assert_eq!(live.len(), 2);
+    assert_eq!(live[1].model, "m2");
+    assert_eq!(live[1].api_key, "sk-acct-b2", "the new key is stored, not the old one");
 }
 
 /// An empty object `{}` is the degenerate sparse case: a no-op save that

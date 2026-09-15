@@ -304,6 +304,8 @@ fn create_expert_task(
         // fallback-chain hit), so history can show provider/model per expert.
         report.llm_provider = Some(result.provider.clone());
         report.llm_model = Some(result.model.clone());
+        // RENG-75: and the exact card (in-memory only — feeds llm_summary's fp).
+        report.llm_fp = result.entry_fp.clone();
         // `--verbose`: persist the raw LLM prompt + response to the dump dir so
         // a zero-finding or mis-parsed run can be debugged from the actual LLM
         // exchange, and reference the file path on the report (the renderer

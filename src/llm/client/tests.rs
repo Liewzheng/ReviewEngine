@@ -314,6 +314,7 @@ impl super::super::provider::LLMProvider for MockProvider {
                 model: "mock".to_string(),
                 provider: self.name.clone(),
                 fallback: false,
+                entry_fp: None,
             })
         }
     }

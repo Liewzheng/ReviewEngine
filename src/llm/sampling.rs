@@ -49,6 +49,10 @@ pub struct LlmCallSample {
     pub provider: String,
     /// `LLMConfig.model` of the config the attempt used.
     pub model: String,
+    /// RENG-75: `LLMConfig::entry_fp` of the config the attempt used — which
+    /// CARD served the call when several share a provider name. Server-side
+    /// only (it hashes the key): never logged or returned by an API.
+    pub entry_fp: String,
     /// Round-trip time of this attempt, in milliseconds.
     pub latency_ms: u64,
     /// `true` when the attempt produced a completion.
@@ -106,6 +110,7 @@ mod tests {
             at: Utc::now(),
             provider: "xiaomi".to_string(),
             model: "mimo".to_string(),
+            entry_fp: "fp-xiaomi".to_string(),
             latency_ms: 120,
             success: true,
             error: None,

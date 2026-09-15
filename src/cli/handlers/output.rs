@@ -238,6 +238,7 @@ mod tests {
                 parse_error: None,
                 raw_dump_path: None,
                 llm_model: None,
+                llm_fp: None,
                 llm_provider: None,
             }],
             aggregated: None,

@@ -16,9 +16,12 @@
 //!   off, not a failure) and is never probed either. There is no "assume
 //!   healthy" fallback.
 //! - **An entry belongs to the exact config it was probed with.** The cache key
-//!   is a SHA-256 fingerprint over `(provider, model, api_base, api_key)`, so a
-//!   credential or endpoint change cannot be answered by the previous config's
-//!   result even if an invalidation call were missed.
+//!   is the card's canonical entry fingerprint
+//!   ([`crate::llm::identity::entry_fp`], RENG-75: SHA-256 over
+//!   `(provider, api_base, model, api_key)`, truncated), so a credential or
+//!   endpoint change cannot be answered by the previous config's result even if
+//!   an invalidation call were missed — and two same-named cards never share a
+//!   status.
 //! - **Changed providers are dropped explicitly.** [`LlmHealthStore::retain_live`]
 //!   drops every entry whose config is no longer in the effective provider set
 //!   (edited credentials, removed provider, cleared key); the next read then
@@ -37,7 +40,6 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
 
 use crate::models::LLMConfig;
 
@@ -329,16 +331,17 @@ impl LlmHealthStore {
         lock
     }
 
-    /// SHA-256 over every field that can change what a probe does. The key is
-    /// hashed rather than stored so the cache never holds a second copy of a
-    /// secret.
+    /// The card's canonical identity fingerprint
+    /// ([`crate::llm::identity::entry_fp`], RENG-75): SHA-256 over
+    /// `(provider, api_base, model, api_key)` — every field that can change
+    /// what a probe does — truncated to 12 hex chars. The key is hashed rather
+    /// than stored so the cache never holds a second copy of a secret, and it
+    /// is the SAME fingerprint the usage/latency aggregates bucket by, so one
+    /// definition of "which card is this" serves the whole server. Server-side
+    /// only: never serialized into a response (see the module docs of
+    /// `llm::identity`).
     fn fingerprint(cfg: &LLMConfig) -> String {
-        let mut hasher = Sha256::new();
-        for field in [&cfg.provider, &cfg.model, &cfg.api_base, &cfg.api_key] {
-            hasher.update(field.as_bytes());
-            hasher.update([0x1f]);
-        }
-        hex::encode(hasher.finalize())
+        crate::llm::identity::entry_fp(&cfg.provider, &cfg.api_base, &cfg.model, &cfg.api_key)
     }
 }
 
@@ -400,6 +403,8 @@ mod tests {
     /// The fingerprint is stable for identical configs and changes with every
     /// field that can change what a probe does — including the key, which is
     /// why the cache can never answer a changed credential with a leftover.
+    /// RENG-75: it IS the card's canonical entry fingerprint, so this test
+    /// also pins the field order against `llm::identity::entry_fp`.
     #[test]
     fn fingerprint_tracks_every_probe_relevant_field() {
         let base = cfg("openai", "sk-a", "https://api.openai.com/v1");
@@ -408,7 +413,21 @@ mod tests {
             LlmHealthStore::fingerprint(&base.clone()),
             "same config → same key"
         );
-        assert_eq!(LlmHealthStore::fingerprint(&base).len(), 64, "hex SHA-256");
+        assert_eq!(
+            LlmHealthStore::fingerprint(&base),
+            crate::llm::identity::entry_fp("openai", "https://api.openai.com/v1", "openai-model", "sk-a"),
+            "one canonical fingerprint: the health cache key and the statistics bucket key agree"
+        );
+        assert_eq!(
+            LlmHealthStore::fingerprint(&base),
+            base.entry_fp(),
+            "and it is what the config itself reports"
+        );
+        assert_eq!(
+            LlmHealthStore::fingerprint(&base).len(),
+            crate::llm::identity::ENTRY_FP_HEX_LEN,
+            "hex, truncated"
+        );
         for changed in [
             cfg("anthropic", "sk-a", "https://api.openai.com/v1"),
             cfg("openai", "sk-b", "https://api.openai.com/v1"),

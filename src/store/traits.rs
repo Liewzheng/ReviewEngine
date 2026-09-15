@@ -200,6 +200,12 @@ pub trait ReviewStore: Send + Sync {
 pub struct LlmCallSampleRow {
     /// Provider the attempt was made against (`llm_call_samples.provider`).
     pub provider: String,
+    /// Model the attempt ran (`llm_call_samples.model`).
+    pub model: String,
+    /// RENG-75: the serving card's entry fingerprint
+    /// (`llm_call_samples.entry_fp`); `None` for rows written before 0005 —
+    /// the latency aggregate folds those into the unmarked bucket.
+    pub entry_fp: Option<String>,
     /// When the attempt ran (UTC).
     pub created_at: DateTime<Utc>,
     /// Round-trip time of the attempt, in milliseconds.
@@ -217,6 +223,12 @@ pub struct LlmCallSampleRow {
 pub struct ProviderUsageStats {
     /// Provider name exactly as recorded in `llm_summary` at review time.
     pub provider: String,
+    /// Model exactly as recorded in `llm_summary` at review time.
+    pub model: String,
+    /// RENG-75: the entry fingerprint recorded in `llm_summary` (`None` for
+    /// pre-RENG-75 rows — the unmarked bucket the API layer merges only into
+    /// a unique enabled card of the same `(provider, model)`).
+    pub fp: Option<String>,
     /// Reviews that recorded this provider in the window.
     pub usage_count: u64,
     /// Of those, the ones that ended `completed`.

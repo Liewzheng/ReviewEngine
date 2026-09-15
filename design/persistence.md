@@ -167,6 +167,10 @@ CREATE TABLE llm_providers (
     updated_at   TEXT NOT NULL
 );
 CREATE UNIQUE INDEX idx_llm_providers_provider ON llm_providers (provider);
+-- 0005（RENG-75）已 DROP 掉上面这条索引：provider 名只是展示标签、可重复
+-- （同服务的两个账户 / 一个账户两个模型 = 两张卡），卡片身份是
+-- hash(provider, api_base, model, api_key) 四元组指纹；行身份是 id(UUID v4)，
+-- 列表顺序是 raw.position。此处保留 0001 的原句，只为如实记录它建过的 schema。
 
 -- ── 应用设置（ui 投影 / legacy gitlab 字段 / rules / advanced 等）──
 CREATE TABLE app_settings (

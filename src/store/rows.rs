@@ -231,14 +231,28 @@ fn opt_json(value: &Option<Value>, what: &str) -> Result<Option<String>> {
 /// llm snapshots (pre-0.10.2 records, all-experts-failed runs) — a
 /// non-ReviewOutput result is a legitimate shape (`complete` only warns and
 /// skips the expert_reports split), never a store error.
+///
+/// RENG-75: each entry also carries `fp`, the serving card's entry
+/// fingerprint. `LlmUsage::fp` is `skip_serializing` (the API can never leak
+/// it), so the column writer emits it EXPLICITLY here — this function is the
+/// only place a fingerprint is ever serialized.
 pub(crate) fn llm_summary_json(result: &Value) -> Option<String> {
     let output: crate::models::ReviewOutput = serde_json::from_value(result.clone()).ok()?;
     let usages = output.llm_usages();
     if usages.is_empty() {
-        None
-    } else {
-        serde_json::to_string(&usages).ok()
+        return None;
     }
+    let entries: Vec<Value> = usages
+        .iter()
+        .map(|u| {
+            let mut entry = json!({ "provider": u.provider, "model": u.model });
+            if let Some(fp) = &u.fp {
+                entry["fp"] = json!(fp);
+            }
+            entry
+        })
+        .collect();
+    serde_json::to_string(&entries).ok()
 }
 
 /// `TaskState` → the `reviews.state` string. Single source of truth is the
@@ -256,18 +270,24 @@ pub(crate) type LlmUsageRowTuple = (String, String, String, Option<String>);
 /// RENG-56: fold `(task_id, state, created_at, llm_summary)` rows into
 /// per-provider usage, ordered by provider name.
 ///
-/// Review-level granularity: a provider is counted once per review that
-/// recorded it, regardless of how many models that review used it for (the
-/// model dimension lives in `expert_reports`, not in the history contract the
-/// page is cross-checked against). `cancelled` / `pending` / `running` rows
-/// count as usage but land in neither outcome bucket — a user-cancelled
-/// review is not a provider failure.
+/// RENG-75 revision: the fold key is the `(provider, model, fp)` triple —
+/// the entry fingerprint the snapshot recorded (`None` for pre-RENG-75 rows,
+/// the unmarked bucket the API layer attributes by its own rule) — so two
+/// same-named cards each get their own numbers. One review still contributes
+/// at most one usage per triple, and the buckets come back in
+/// `(provider, model, fp)` order (the `BTreeMap` key order, `None` first).
+///
+/// Review-level granularity: a triple is counted once per review that
+/// recorded it (the report dimension lives in `expert_reports`, not in the
+/// history contract the page is cross-checked against). `cancelled` /
+/// `pending` / `running` rows count as usage but land in neither outcome
+/// bucket — a user-cancelled review is not a provider failure.
 ///
 /// Rows without a summary, with a blank provider, or with unparsable JSON are
 /// skipped (the latter logged): a single unreadable row must not take the
 /// whole LLM page down, and the write path guarantees the JSON shape.
 pub(crate) fn aggregate_llm_usage(rows: impl IntoIterator<Item = LlmUsageRowTuple>) -> Vec<ProviderUsageStats> {
-    let mut by_provider: BTreeMap<String, ProviderUsageStats> = BTreeMap::new();
+    let mut by_entry: BTreeMap<(String, String, Option<String>), ProviderUsageStats> = BTreeMap::new();
     for (task_id, state, created_at, summary) in rows {
         let Some(summary) = summary else { continue };
         let usages: Vec<crate::models::LlmUsage> = match serde_json::from_str(&summary) {
@@ -277,22 +297,25 @@ pub(crate) fn aggregate_llm_usage(rows: impl IntoIterator<Item = LlmUsageRowTupl
                 continue;
             }
         };
-        // One review contributes at most one usage per provider.
-        let mut providers: Vec<&str> = Vec::new();
+        // One review contributes at most one usage per (provider, model, fp).
+        let mut triples: Vec<(String, String, Option<String>)> = Vec::new();
         for usage in &usages {
             if usage.provider.is_empty() {
                 continue;
             }
-            if !providers.contains(&usage.provider.as_str()) {
-                providers.push(usage.provider.as_str());
+            let triple = (usage.provider.clone(), usage.model.clone(), usage.fp.clone());
+            if !triples.contains(&triple) {
+                triples.push(triple);
             }
         }
         let used_at = super::decode_ts(&created_at).ok();
-        for provider in providers {
-            let entry = by_provider
-                .entry(provider.to_string())
+        for (provider, model, fp) in triples {
+            let entry = by_entry
+                .entry((provider.clone(), model.clone(), fp.clone()))
                 .or_insert_with(|| ProviderUsageStats {
-                    provider: provider.to_string(),
+                    provider,
+                    model,
+                    fp,
                     usage_count: 0,
                     completed_count: 0,
                     failed_count: 0,
@@ -311,7 +334,7 @@ pub(crate) fn aggregate_llm_usage(rows: impl IntoIterator<Item = LlmUsageRowTupl
             }
         }
     }
-    by_provider.into_values().collect()
+    by_entry.into_values().collect()
 }
 
 pub(crate) fn task_state_from_str(s: &str) -> Result<TaskState> {
@@ -649,31 +672,33 @@ mod tests {
         )
     }
 
-    /// Several providers/models and mixed states aggregate into per-provider
-    /// counts, outcome buckets and the newest timestamp each provider was used.
+    /// Several entries and mixed states aggregate into per-TRIPLE buckets
+    /// (RENG-75: `(provider, model, fp)`, `None` fp first): outcome splits
+    /// and the newest timestamp each entry was used.
     #[test]
-    fn aggregate_llm_usage_counts_reviews_per_provider() {
+    fn aggregate_llm_usage_counts_reviews_per_entry() {
         let stats = aggregate_llm_usage(vec![
             usage_row(
                 "t1",
                 "completed",
                 "2026-09-08T10:00:00.000000Z",
-                Some(r#"[{"provider":"xiaomi","model":"mimo-v2.5"}]"#),
+                Some(r#"[{"provider":"xiaomi","model":"mimo-v2.5","fp":"fp-x1"}]"#),
             ),
             usage_row(
                 "t2",
                 "completed",
                 "2026-09-09T10:00:00.000000Z",
-                // Same provider twice with different models: ONE usage.
+                // Two models on one provider plus a second card: three
+                // triples, one usage each (same pair twice would be ONE).
                 Some(
-                    r#"[{"provider":"xiaomi","model":"mimo-v2.5"},{"provider":"deepseek","model":"deepseek-v4"},{"provider":"xiaomi","model":"mimo-v2-pro"}]"#,
+                    r#"[{"provider":"xiaomi","model":"mimo-v2.5","fp":"fp-x1"},{"provider":"deepseek","model":"deepseek-v4","fp":"fp-d1"},{"provider":"xiaomi","model":"mimo-v2-pro","fp":"fp-x1"}]"#,
                 ),
             ),
             usage_row(
                 "t3",
                 "failed",
                 "2026-09-10T10:00:00.000000Z",
-                Some(r#"[{"provider":"deepseek","model":"deepseek-v4"}]"#),
+                Some(r#"[{"provider":"deepseek","model":"deepseek-v4","fp":"fp-d1"}]"#),
             ),
             // No summary (failed before any report) — invisible, by design.
             usage_row("t4", "failed", "2026-09-11T10:00:00.000000Z", None),
@@ -682,17 +707,24 @@ mod tests {
                 "t5",
                 "cancelled",
                 "2026-09-12T10:00:00.000000Z",
-                Some(r#"[{"provider":"deepseek","model":"deepseek-v4"}]"#),
+                Some(r#"[{"provider":"deepseek","model":"deepseek-v4","fp":"fp-d1"}]"#),
             ),
         ]);
 
         assert_eq!(
-            stats.iter().map(|s| s.provider.as_str()).collect::<Vec<_>>(),
-            vec!["deepseek", "xiaomi"],
-            "providers come back in name order"
+            stats
+                .iter()
+                .map(|s| (s.provider.as_str(), s.model.as_str(), s.fp.as_deref()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("deepseek", "deepseek-v4", Some("fp-d1")),
+                ("xiaomi", "mimo-v2-pro", Some("fp-x1")),
+                ("xiaomi", "mimo-v2.5", Some("fp-x1")),
+            ],
+            "buckets come back in (provider, model, fp) order"
         );
         let deepseek = &stats[0];
-        assert_eq!(deepseek.usage_count, 3, "one usage per review, not per model");
+        assert_eq!(deepseek.usage_count, 3, "one usage per review per triple");
         assert_eq!(deepseek.completed_count, 1);
         assert_eq!(deepseek.failed_count, 1);
         assert_eq!(
@@ -701,11 +733,54 @@ mod tests {
             "the newest usage wins, cancelled reviews included"
         );
 
-        let xiaomi = &stats[1];
+        let pro = &stats[1];
+        assert_eq!(pro.usage_count, 1, "a second model is its own bucket");
+        let xiaomi = &stats[2];
         assert_eq!(xiaomi.usage_count, 2);
         assert_eq!(xiaomi.completed_count, 2);
         assert_eq!(xiaomi.failed_count, 0);
         assert_eq!(xiaomi.last_used_at.unwrap().to_rfc3339(), "2026-09-09T10:00:00+00:00");
+    }
+
+    /// RENG-75: two same-(provider, model) cards with different fingerprints
+    /// are two buckets; pre-fingerprint rows (`fp` absent) form the unmarked
+    /// `None` bucket alongside them.
+    #[test]
+    fn aggregate_llm_usage_separates_fingerprints_and_the_unmarked_bucket() {
+        let stats = aggregate_llm_usage(vec![
+            usage_row(
+                "t1",
+                "completed",
+                "2026-09-08T10:00:00.000000Z",
+                Some(r#"[{"provider":"acme","model":"m1","fp":"fp-a"}]"#),
+            ),
+            usage_row(
+                "t2",
+                "completed",
+                "2026-09-09T10:00:00.000000Z",
+                Some(r#"[{"provider":"acme","model":"m1","fp":"fp-b"}]"#),
+            ),
+            // Pre-RENG-75 row: no fp key → the unmarked bucket.
+            usage_row(
+                "t3",
+                "completed",
+                "2026-09-10T10:00:00.000000Z",
+                Some(r#"[{"provider":"acme","model":"m1"}]"#),
+            ),
+        ]);
+
+        assert_eq!(
+            stats
+                .iter()
+                .map(|s| (s.provider.as_str(), s.model.as_str(), s.fp.as_deref(), s.usage_count))
+                .collect::<Vec<_>>(),
+            vec![
+                ("acme", "m1", None, 1),
+                ("acme", "m1", Some("fp-a"), 1),
+                ("acme", "m1", Some("fp-b"), 1),
+            ],
+            "one bucket per fingerprint plus the unmarked one (None sorts first)"
+        );
     }
 
     /// Rows the aggregate must not invent usage from: no summary, empty

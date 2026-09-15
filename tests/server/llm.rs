@@ -492,3 +492,150 @@ async fn get_config_masks_keys_and_round_trip_preserves_them() {
     let config: serde_json::Value = resp.json().await.expect("GET /config body is not JSON");
     assert_eq!(config["llm"]["openaiApiKey"], "***");
 }
+
+/// RENG-75 (identity batch), end to end over HTTP: two providers sharing a
+/// NAME — two accounts of one service, identical `(provider, url, model)`,
+/// different keys — are two cards. `PUT /config` parses the array purely
+/// positionally, `GET /config` echoes both in stored order with masked keys,
+/// re-submitting that exact array (the no-op save of an unchanged page, from
+/// a second tab) keeps both cards and their order, and `GET /llm/providers`
+/// lists two items carrying no trace of the fingerprints that identity them.
+#[tokio::test]
+async fn same_name_providers_round_trip_and_list_without_a_fingerprint() {
+    // `api_base` is the loopback discard port: non-empty (so the config is
+    // usable) and refused instantly, so the provider probe never waits on a
+    // real network round trip.
+    let api_base = "http://127.0.0.1:9/v1";
+    let account = |key: &str, max_tokens: u32| {
+        serde_json::json!({
+            "provider": "acme-pay",
+            "apiKey": key,
+            "apiBaseUrl": api_base,
+            "defaultModel": "m1",
+            "maxTokens": max_tokens,
+            "temperature": 0.7,
+        })
+    };
+
+    let port = find_free_port();
+    let _guard = spawn_server(port);
+    wait_for_server(port).await;
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{port}");
+
+    let resp = client
+        .put(format!("{base}/api/v1/config"))
+        .json(&serde_json::json!({ "llm": { "providers": [account("sk-acct-a", 4096), account("sk-acct-b", 2048)] } }))
+        .send()
+        .await
+        .expect("failed to PUT /api/v1/config");
+    assert!(resp.status().is_success(), "PUT /config returned {}", resp.status());
+
+    // The masked payload distinguishes the cards only by `maxTokens`, which
+    // is therefore what proves the ORDER survived the round trip.
+    let order = |providers: &[serde_json::Value]| -> Vec<Option<u64>> {
+        providers.iter().map(|p| p["maxTokens"].as_u64()).collect()
+    };
+    let fetch_providers = |body: &serde_json::Value| -> Vec<serde_json::Value> {
+        body["llm"]["providers"]
+            .as_array()
+            .expect("llm.providers is not an array")
+            .clone()
+    };
+
+    let resp = client
+        .get(format!("{base}/api/v1/config"))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/config");
+    let config: serde_json::Value = resp.json().await.expect("GET /config body is not JSON");
+    let providers = fetch_providers(&config);
+    assert_eq!(providers.len(), 2, "GET /config must echo both same-named cards");
+    assert_eq!(order(&providers), vec![Some(4096), Some(2048)], "stored order");
+    assert!(
+        providers.iter().all(|p| p["apiKey"] == "***"),
+        "both cards come back masked: {providers:?}"
+    );
+    assert!(
+        !serde_json::to_string(&config).unwrap().contains("sk-acct"),
+        "GET /config leaked a live key"
+    );
+
+    // Round-trip the whole array twice; each save must keep two cards, in
+    // order. A name-based merge would collapse them into one.
+    for round in 1..=2 {
+        let resp = client
+            .put(format!("{base}/api/v1/config"))
+            .json(&config)
+            .send()
+            .await
+            .expect("failed to PUT /api/v1/config");
+        assert!(
+            resp.status().is_success(),
+            "PUT /config round {round} returned {}",
+            resp.status()
+        );
+
+        let resp = client
+            .get(format!("{base}/api/v1/config"))
+            .send()
+            .await
+            .expect("failed to GET /api/v1/config");
+        let after: serde_json::Value = resp.json().await.expect("GET /config body is not JSON");
+        let providers = fetch_providers(&after);
+        assert_eq!(
+            providers.len(),
+            2,
+            "round {round} collapsed the same-named cards: {providers:?}"
+        );
+        assert_eq!(order(&providers), vec![Some(4096), Some(2048)], "round {round}: order");
+    }
+
+    // The runtime list: two cards, per-index ids, and no fingerprint anywhere.
+    let resp = client
+        .get(format!("{base}/api/v1/llm/providers"))
+        .send()
+        .await
+        .expect("failed to GET /api/v1/llm/providers");
+    assert!(
+        resp.status().is_success(),
+        "GET /llm/providers returned {}",
+        resp.status()
+    );
+    let body: serde_json::Value = resp.json().await.expect("GET providers body is not JSON");
+    let items: Vec<serde_json::Value> = body["items"]
+        .as_array()
+        .expect("items is not an array")
+        .iter()
+        .filter(|item| item["name"] == "acme-pay")
+        .cloned()
+        .collect();
+    assert_eq!(items.len(), 2, "both same-named cards must be listed: {items:?}");
+    assert_eq!(items[0]["id"], "acme-pay-0");
+    assert_eq!(items[1]["id"], "acme-pay-1");
+    assert_eq!(items[0]["position"], 0);
+    assert_eq!(items[1]["position"], 1);
+    assert_eq!(items[0]["defaultModel"], "m1");
+    assert_eq!(items[1]["defaultModel"], "m1");
+
+    // Neither the key nor the fingerprint that hashes it may appear. The
+    // expected values are computed with the same public function the server
+    // uses, so this fails if a fingerprint ever reaches the wire.
+    let fp_a = review_engine::llm::identity::entry_fp("acme-pay", api_base, "m1", "sk-acct-a");
+    let fp_b = review_engine::llm::identity::entry_fp("acme-pay", api_base, "m1", "sk-acct-b");
+    assert_ne!(fp_a, fp_b, "the two accounts must not share a fingerprint");
+    let serialized = serde_json::to_string(&body).unwrap();
+    for leaked in [fp_a.as_str(), fp_b.as_str(), "sk-acct-a", "sk-acct-b"] {
+        assert!(
+            !serialized.contains(leaked),
+            "GET /llm/providers leaked {leaked}: {serialized}"
+        );
+    }
+    for item in &items {
+        assert!(item.get("fp").is_none(), "a fingerprint key reached the wire: {item}");
+        assert!(
+            item.get("entryFp").is_none(),
+            "a fingerprint key reached the wire: {item}"
+        );
+    }
+}

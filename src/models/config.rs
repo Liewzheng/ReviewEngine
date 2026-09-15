@@ -371,6 +371,18 @@ impl std::fmt::Debug for LLMConfig {
     }
 }
 
+impl LLMConfig {
+    /// This entry's identity fingerprint (RENG-75,
+    /// [`crate::llm::identity::entry_fp`]): the truncated SHA-256 of
+    /// `(provider, api_base, model, api_key)`. Used to match this config
+    /// against its recorded usage/latency buckets — SERVER-SIDE ONLY: the
+    /// fingerprint hashes the API key, so it must never appear in an API
+    /// response, a log line, or the UI.
+    pub fn entry_fp(&self) -> String {
+        crate::llm::identity::entry_fp(&self.provider, &self.api_base, &self.model, &self.api_key)
+    }
+}
+
 // ─── 配置来源 ──────────────────────────────
 
 /// The origin of the application configuration.

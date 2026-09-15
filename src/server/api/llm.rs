@@ -12,6 +12,7 @@ use axum::{
 };
 use std::sync::Arc;
 
+use super::llm_latency::{LatencySnapshot, LATENCY_WINDOW_DAYS};
 use super::llm_usage::{UsageSnapshot, USAGE_WINDOW_DAYS};
 use crate::server::AppState;
 
@@ -39,6 +40,10 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     // every usage metric `null` rather than a fabricated zero.
     let usage_now = chrono::Utc::now();
     let usage = super::llm_usage::snapshot(&state, usage_now).await;
+    // RENG-57: how long those calls took, from the per-call samples the
+    // review path recorded. Same contract: one read, `None` means every
+    // latency metric is `null`.
+    let latency = super::llm_latency::snapshot(&state, usage_now).await;
     Json(serde_json::json!({
         // The numbers below are meaningless without their window, so the
         // window travels with them (rolling `USAGE_WINDOW_DAYS` days).
@@ -50,7 +55,12 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         // exceed the sum of the cards. It is the denominator of every
         // `usageShare`, so the page can state it instead of guessing.
         "usageTotal": usage.as_ref().map(|snapshot| snapshot.total_usage),
-        "items": provider_items(&primary, &configs, &health, usage.as_ref()),
+        // RENG-57: the latency window (same length as the usage window,
+        // reported separately so the client never assumes the two agree).
+        "latencyWindowDays": LATENCY_WINDOW_DAYS,
+        "latencySince": super::llm_latency::window_start(usage_now).to_rfc3339(),
+        "latencyAvailable": latency.is_some(),
+        "items": provider_items(&primary, &configs, &health, usage.as_ref(), latency.as_ref()),
     }))
 }
 
@@ -65,17 +75,25 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 ///
 /// `health` holds one report per config, in the same order
 /// ([`AppState::llm_health`](crate::server::AppState::llm_health)); `status`
-/// and `latencyMs` come from it, never from a guess about the config (RENG-36).
+/// and `lastProbeLatencyMs` come from it, never from a guess about the config
+/// (RENG-36).
 ///
 /// `usage` holds the recorded usage of the window (RENG-56). Every usage
 /// metric is `null` when the window cannot be read (`None`) or holds nothing
 /// to derive it from — the page renders `—`; only a count that was really
 /// measured may be `0`.
+///
+/// `latency` holds the recorded call latency of the window (RENG-57), read the
+/// same way. Its probe counterpart stays a separate field: `lastProbeLatencyMs`
+/// is the instantaneous connectivity probe (RENG-36), `avgLatencyMs` is the
+/// mean of the successful calls the reviews actually made — the RENG-53 finding
+/// was precisely that the two must not be confused on screen.
 fn provider_items(
     primary: &str,
     configs: &[crate::models::LLMConfig],
     health: &[super::llm_health::ProviderHealth],
     usage: Option<&UsageSnapshot>,
+    latency: Option<&LatencySnapshot>,
 ) -> Vec<serde_json::Value> {
     let ranks = crate::llm::chain_positions(primary, configs);
     configs
@@ -86,6 +104,7 @@ fn provider_items(
             let chain_position = ranks.get(i).copied().unwrap_or(i + 1);
             let report = health.get(i);
             let usage = usage.map(|snapshot| snapshot.for_provider(&cfg.provider));
+            let latency = latency.map(|snapshot| snapshot.for_provider(&cfg.provider));
             serde_json::json!({
                 "id": id,
                 "name": cfg.provider,
@@ -104,8 +123,10 @@ fn provider_items(
                 "chainPosition": chain_position,
                 "isPrimary": chain_position == 1,
                 // Round-trip time of the probe behind `status` (0 when the
-                // provider was not probed because it has no key).
-                "latencyMs": report.map(|h| h.latency_ms).unwrap_or(0),
+                // provider was not probed because it has no key). Named
+                // `lastProbeLatencyMs` (RENG-57) so it can never be mistaken
+                // for `avgLatencyMs` below.
+                "lastProbeLatencyMs": report.map(|h| h.latency_ms).unwrap_or(0),
                 // RENG-56: recorded usage of the window (see the module docs of
                 // `llm_usage`). `requestCount` counts REVIEWS that used the
                 // provider (review-level granularity, cross-checkable against
@@ -119,6 +140,21 @@ fn provider_items(
                     .as_ref()
                     .and_then(|u| u.last_used_at)
                     .map(|t| t.to_rfc3339()),
+                // RENG-57: recorded call latency of the window. `avgLatencyMs`
+                // is the mean of the SUCCESSFUL calls (null when the window
+                // holds none); `latencySampleCount` is that mean's denominator
+                // and `latencyFailureCount` the failed attempts it excludes
+                // (call-level failure data RENG-56 could not see); the
+                // sparkline is one point per 6-hour bucket, `null` when there
+                // is no series to draw.
+                "avgLatencyMs": latency.as_ref().and_then(|l| l.avg_latency_ms),
+                "latencySampleCount": latency.as_ref().map(|l| l.sample_count),
+                "latencyFailureCount": latency.as_ref().map(|l| l.failure_count),
+                "latencyLastSampleAt": latency
+                    .as_ref()
+                    .and_then(|l| l.last_sample_at)
+                    .map(|t| t.to_rfc3339()),
+                "latencySparkline": latency.as_ref().and_then(|l| l.sparkline.clone()),
                 // Timestamp of the probe behind `status`; `null` when no probe
                 // happened — for an `offline` provider (no key, never probed)
                 // as much as for a config with no report at all. Never "now",
@@ -527,7 +563,7 @@ mod tests {
     use super::*;
     use crate::server::api::config::{put_config, UiConfig};
     use crate::server::api::llm_health::{ProviderHealth, ProviderStatus};
-    use crate::store::traits::ProviderUsageStats;
+    use crate::store::traits::{LlmCallSampleRow, ProviderUsageStats};
 
     /// Unit 12: temperature serializes at 2-decimal precision, free of f32 noise.
     #[test]
@@ -564,7 +600,7 @@ mod tests {
     #[test]
     fn provider_items_expose_chain_position_and_primary() {
         let stored = vec![cfg("xiaomi"), cfg("deepseek")];
-        let items = provider_items("deepseek", &stored, &healthy(stored.len()), None);
+        let items = provider_items("deepseek", &stored, &healthy(stored.len()), None, None);
 
         // Stored order (and the `{provider}-{index}` ids) is untouched.
         assert_eq!(items[0]["name"], "xiaomi");
@@ -585,13 +621,13 @@ mod tests {
     #[test]
     fn provider_items_head_is_primary_without_a_primary_selection() {
         let stored = vec![cfg("xiaomi"), cfg("deepseek")];
-        let items = provider_items("", &stored, &healthy(stored.len()), None);
+        let items = provider_items("", &stored, &healthy(stored.len()), None, None);
         assert_eq!(items[0]["isPrimary"], true);
         assert_eq!(items[1]["isPrimary"], false);
         assert_eq!(items[1]["chainPosition"], 2);
         // A primary naming a provider the runtime no longer holds (stale
         // `primaryProvider` in the echo) degrades to the same rule.
-        let items = provider_items("ghost", &[cfg("xiaomi")], &healthy(1), None);
+        let items = provider_items("ghost", &[cfg("xiaomi")], &healthy(1), None, None);
         assert_eq!(items[0]["isPrimary"], true);
         assert_eq!(items[0]["chainPosition"], 1);
     }
@@ -599,13 +635,16 @@ mod tests {
     /// Empty provider set → empty payload, no panic.
     #[test]
     fn provider_items_empty_set() {
-        assert!(provider_items("deepseek", &[], &[], None).is_empty());
+        assert!(provider_items("deepseek", &[], &[], None, None).is_empty());
     }
 
-    /// RENG-36: the card's `status`/`latencyMs`/`lastChecked` come from the
-    /// probe report — never from a guess about the config's shape. A provider
-    /// with a key can therefore be `error`, which is the whole point: it used
-    /// to be reported `healthy` for no other reason than having a key.
+    /// RENG-36: the card's `status`/`lastProbeLatencyMs`/`lastChecked` come
+    /// from the probe report — never from a guess about the config's shape. A
+    /// provider with a key can therefore be `error`, which is the whole point:
+    /// it used to be reported `healthy` for no other reason than having a key.
+    ///
+    /// RENG-57 renamed the probe's field to `lastProbeLatencyMs` so the
+    /// instantaneous probe and the recorded `avgLatencyMs` cannot be confused.
     #[test]
     fn provider_items_report_probed_status_not_key_presence() {
         let stored = vec![cfg("xiaomi"), cfg("deepseek")];
@@ -617,13 +656,14 @@ mod tests {
                 ProviderHealth::healthy(34),
             ],
             None,
+            None,
         );
 
         assert_eq!(items[0]["status"], "error");
         assert_eq!(items[0]["configured"], true, "a key is still stored");
-        assert_eq!(items[0]["latencyMs"], 12);
+        assert_eq!(items[0]["lastProbeLatencyMs"], 12);
         assert_eq!(items[1]["status"], "healthy");
-        assert_eq!(items[1]["latencyMs"], 34);
+        assert_eq!(items[1]["lastProbeLatencyMs"], 34);
         // `lastChecked` is the probe's timestamp, i.e. a real check time.
         for item in &items {
             assert!(
@@ -634,15 +674,15 @@ mod tests {
         // A provider with no stored key is `offline` and never probed.
         let mut blank = cfg("xiaomi");
         blank.api_key = String::new();
-        let items = provider_items("xiaomi", &[blank], &[ProviderHealth::offline()], None);
+        let items = provider_items("xiaomi", &[blank], &[ProviderHealth::offline()], None, None);
         assert_eq!(items[0]["status"], "offline");
         assert_eq!(items[0]["configured"], false);
-        assert_eq!(items[0]["latencyMs"], 0);
+        assert_eq!(items[0]["lastProbeLatencyMs"], 0);
         // RENG-56: a provider that was never probed has no check time — the
         // payload says `null` instead of stamping the current time.
         assert_eq!(items[0]["lastChecked"], serde_json::Value::Null);
         // A config with no report at all (misaligned health list) is the same.
-        let items = provider_items("xiaomi", &stored, &[], None);
+        let items = provider_items("xiaomi", &stored, &[], None, None);
         assert_eq!(items[0]["lastChecked"], serde_json::Value::Null);
         assert_eq!(ProviderStatus::Offline.dashboard_str(), "offline");
         assert_eq!(ProviderStatus::Error.dashboard_str(), "error");
@@ -667,7 +707,7 @@ mod tests {
                 last_used_at: Some(chrono::Utc::now()),
             }],
         );
-        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot));
+        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot), None);
         let item = items[0].as_object().unwrap();
 
         for gone in ["usagePercent", "sparkline", "errorRate"] {
@@ -683,7 +723,7 @@ mod tests {
     #[test]
     fn provider_items_without_a_store_report_null_usage() {
         let stored = vec![cfg("xiaomi")];
-        let items = provider_items("xiaomi", &stored, &healthy(1), None);
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, None);
         for field in ["requestCount", "usageShare", "successRate", "lastUsedAt"] {
             assert_eq!(items[0][field], serde_json::Value::Null, "{field} must be null");
         }
@@ -695,7 +735,7 @@ mod tests {
     fn provider_items_empty_window_reports_zero_count_and_null_derivations() {
         let stored = vec![cfg("xiaomi")];
         let snapshot = UsageSnapshot::new(chrono::Utc::now(), Vec::new());
-        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot));
+        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot), None);
 
         assert_eq!(items[0]["requestCount"], 0);
         assert_eq!(items[0]["usageShare"], serde_json::Value::Null);
@@ -729,7 +769,7 @@ mod tests {
                 },
             ],
         );
-        let items = provider_items("xiaomi", &stored, &healthy(2), Some(&snapshot));
+        let items = provider_items("xiaomi", &stored, &healthy(2), Some(&snapshot), None);
 
         assert_eq!(items[0]["requestCount"], 3);
         assert_eq!(items[0]["usageShare"], 0.75);
@@ -1093,5 +1133,202 @@ mod tests {
             .iter()
             .filter(|r| r.url.path() == "/models")
             .count()
+    }
+
+    // ─── RENG-57: recorded call latency ─────────────────────────────
+
+    fn latency_row(provider: &str, at: chrono::DateTime<chrono::Utc>, ms: i64, success: bool) -> LlmCallSampleRow {
+        LlmCallSampleRow {
+            provider: provider.to_string(),
+            created_at: at,
+            latency_ms: ms,
+            success,
+        }
+    }
+
+    fn latency_snapshot(rows: Vec<LlmCallSampleRow>) -> LatencySnapshot {
+        LatencySnapshot::new(
+            chrono::Utc::now() - chrono::Duration::days(super::super::llm_latency::LATENCY_WINDOW_DAYS),
+            rows,
+        )
+    }
+
+    /// The card carries BOTH measurements, under names that cannot be
+    /// confused: `lastProbeLatencyMs` (RENG-36's instantaneous probe) and
+    /// `avgLatencyMs` (RENG-57's recorded window average) — the RENG-53
+    /// finding was exactly this conflation.
+    #[test]
+    fn provider_items_report_recorded_latency_next_to_the_probe() {
+        let stored = vec![cfg("xiaomi")];
+        let now = chrono::Utc::now();
+        let snapshot = latency_snapshot(vec![
+            latency_row("xiaomi", now - chrono::Duration::minutes(3), 100, true),
+            latency_row("xiaomi", now - chrono::Duration::minutes(2), 200, true),
+            // A failure: counted, kept out of the average.
+            latency_row("xiaomi", now - chrono::Duration::minutes(1), 90_000, false),
+        ]);
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot));
+        let item = items[0].as_object().unwrap();
+
+        assert_eq!(item["lastProbeLatencyMs"], 7, "the probe's own round trip");
+        assert_eq!(item["avgLatencyMs"], 150, "mean of the two successful calls");
+        assert_eq!(item["latencySampleCount"], 2);
+        assert_eq!(item["latencyFailureCount"], 1);
+        assert!(item["latencyLastSampleAt"].is_string());
+        assert!(
+            !item.contains_key("latencyMs"),
+            "the ambiguous name is gone for good: {item:?}"
+        );
+        let series = item["latencySparkline"].as_array().unwrap();
+        assert_eq!(series.len(), super::super::llm_latency::SPARKLINE_BUCKETS);
+        assert_eq!(
+            series.iter().filter(|v| !v.is_null()).count(),
+            1,
+            "all three calls fall in the newest bucket"
+        );
+    }
+
+    /// Without a readable sample table (no store, failed query) every latency
+    /// metric is `null` — the page's `—`, never a fabricated `0 ms`.
+    #[test]
+    fn provider_items_without_samples_report_null_latency() {
+        let stored = vec![cfg("xiaomi")];
+        // No snapshot at all (no store attached / query failed).
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, None);
+        for field in [
+            "avgLatencyMs",
+            "latencySampleCount",
+            "latencyFailureCount",
+            "latencyLastSampleAt",
+            "latencySparkline",
+        ] {
+            assert_eq!(items[0][field], serde_json::Value::Null, "{field} must be null");
+        }
+
+        // A snapshot that holds nothing for this provider: measured zero
+        // counts, `null` for everything derived (including the series — there
+        // is nothing to draw).
+        let items = provider_items(
+            "xiaomi",
+            &stored,
+            &healthy(1),
+            None,
+            Some(&latency_snapshot(Vec::new())),
+        );
+        assert_eq!(items[0]["latencySampleCount"], 0);
+        assert_eq!(items[0]["latencyFailureCount"], 0);
+        assert_eq!(
+            items[0]["avgLatencyMs"],
+            serde_json::Value::Null,
+            "0/0 is not a latency"
+        );
+        assert_eq!(items[0]["latencySparkline"], serde_json::Value::Null);
+    }
+
+    /// The whole path the page reads: samples recorded through the sink become
+    /// the card's average, and that average matches an independent
+    /// computation over the rows the store holds.
+    #[tokio::test]
+    async fn get_providers_reports_the_recorded_latency_average_from_the_store() {
+        use crate::store::llm_samples::StoreLlmCallSink;
+
+        let store = Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap());
+        store.migrate().await.unwrap();
+        let now = chrono::Utc::now();
+
+        // Two reviews' worth of calls, written through the real sink (the
+        // only writer in production): 4 successful xiaomi calls and one
+        // failed one, plus a deepseek call outside the window.
+        let sink = StoreLlmCallSink::shared(store.clone(), Some("review-1".to_string()));
+        for (provider, ago_minutes, latency_ms, success) in [
+            ("xiaomi", 5, 100u64, true),
+            ("xiaomi", 4, 200, true),
+            ("xiaomi", 3, 300, true),
+            ("xiaomi", 2, 400, true),
+            ("xiaomi", 1, 30_000, false),
+            ("deepseek", 1, 50, true),
+        ] {
+            sink.record(&crate::llm::sampling::LlmCallSample {
+                at: now - chrono::Duration::minutes(ago_minutes),
+                provider: provider.to_string(),
+                model: format!("{provider}-model"),
+                latency_ms,
+                success,
+                error: (!success).then(|| "HTTP 500".to_string()),
+                chain_position: 1,
+                attempt: 1,
+            })
+            .await;
+        }
+        // Outside the window: never aggregated.
+        sink.record(&crate::llm::sampling::LlmCallSample {
+            at: now - chrono::Duration::days(30),
+            provider: "xiaomi".to_string(),
+            model: "mimo".to_string(),
+            latency_ms: 9999,
+            success: true,
+            error: None,
+            chain_position: 1,
+            attempt: 1,
+        })
+        .await;
+
+        let mut state = stub_state(vec![cfg("xiaomi"), cfg("deepseek")]);
+        Arc::get_mut(&mut state).unwrap().db = Some(store.clone());
+        let payload = get_providers(State(state)).await.0;
+
+        assert_eq!(payload["latencyWindowDays"], 7);
+        assert_eq!(payload["latencyAvailable"], true);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(payload["latencySince"].as_str().unwrap()).is_ok(),
+            "the window start travels as RFC3339: {payload}"
+        );
+
+        let xiaomi = &payload["items"][0];
+        assert_eq!(xiaomi["avgLatencyMs"], 250, "mean of 100/200/300/400");
+        assert_eq!(xiaomi["latencySampleCount"], 4);
+        assert_eq!(xiaomi["latencyFailureCount"], 1);
+        // Independent computation over the raw rows, for the record.
+        let rows = crate::store::traits::ReviewStore::llm_samples_since(
+            store.as_ref(),
+            super::super::llm_latency::window_start(chrono::Utc::now()),
+        )
+        .await
+        .unwrap();
+        let (sum, count) = rows
+            .iter()
+            .filter(|r| r.provider == "xiaomi" && r.success)
+            .fold((0i64, 0i64), |(s, c), r| (s + r.latency_ms, c + 1));
+        assert_eq!(
+            sum / count,
+            xiaomi["avgLatencyMs"].as_i64().unwrap(),
+            "the payload's average must equal the mean of the stored rows"
+        );
+
+        let deepseek = &payload["items"][1];
+        assert_eq!(deepseek["avgLatencyMs"], 50);
+        assert_eq!(deepseek["latencySampleCount"], 1);
+        assert_eq!(deepseek["latencyFailureCount"], 0);
+    }
+
+    /// With no store the latency metrics are `null` and nothing else about the
+    /// card changes: the page must keep working with `REVIEW_DISABLE_DB=1`.
+    #[tokio::test]
+    async fn get_providers_without_a_store_reports_unknown_latency() {
+        let state = stub_state(vec![cfg("xiaomi")]);
+        let payload = get_providers(State(state)).await.0;
+
+        assert_eq!(payload["latencyAvailable"], false);
+        let item = &payload["items"][0];
+        assert_eq!(item["name"], "xiaomi");
+        assert_eq!(item["status"], "healthy");
+        assert_eq!(item["avgLatencyMs"], serde_json::Value::Null);
+        assert_eq!(item["latencySampleCount"], serde_json::Value::Null);
+        assert_eq!(item["latencySparkline"], serde_json::Value::Null);
+        // The probe's own field is still there and still the probe's value
+        // (the stubbed probe in this test measures 0 ms): the two numbers
+        // never share a field.
+        assert_eq!(item["lastProbeLatencyMs"], 0);
+        assert!(!item.as_object().unwrap().contains_key("latencyMs"));
     }
 }

@@ -25,6 +25,7 @@ pub mod events;
 pub mod feedback;
 pub mod llm;
 pub mod llm_health;
+pub mod llm_latency;
 pub mod llm_usage;
 pub mod logs;
 pub mod queue;

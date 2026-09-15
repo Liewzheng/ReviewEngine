@@ -110,6 +110,36 @@ pub(crate) fn resolve_webhook_llm_configs(
     }
 }
 
+/// Apply the server's persisted WebUI expert overrides to a freshly resolved
+/// review config (RENG-69), in place — the experts counterpart of
+/// [`resolve_webhook_llm_configs`].
+///
+/// The webhook review path resolves its config from the config file and never
+/// reads `AppState::app_config`, so the overrides have to be replayed here:
+/// **DB over file**, the config file staying the base/default (an override
+/// patches an entry that exists, never adds one; unmentioned fields keep the
+/// file value).
+///
+/// `None` (CLI/legacy paths without an `AppState`, tests) applies nothing —
+/// pre-0.10.24 behaviour, where only the config file defined the team.
+/// Returns the number of experts patched.
+pub(crate) fn apply_server_expert_overrides(
+    config: &mut crate::models::AppConfig,
+    overrides: Option<&crate::config::ExpertOverrides>,
+) -> usize {
+    let Some(overrides) = overrides else {
+        return 0;
+    };
+    let applied = overrides.apply_to(config);
+    if applied > 0 {
+        tracing::debug!(
+            applied,
+            "applied persisted expert overrides to the webhook review config"
+        );
+    }
+    applied
+}
+
 /// Apply the unchanged-content gate (RENG-62) to a dispatch that already passed
 /// [`MrDispatcher::try_start`].
 ///
@@ -167,6 +197,12 @@ pub(crate) async fn gate_unchanged_content(
 /// review makes. The webhook handlers build it from the task store
 /// ([`crate::server::task_queue::TaskStore::llm_sample_sink`]) once they have
 /// created the task; a caller without a store passes `None`.
+///
+/// `server_expert_overrides` (RENG-69) is the matching snapshot of the
+/// WebUI-managed expert edits: this function resolves its config from the
+/// config file, so the overrides are re-applied over `[review_experts]` here.
+/// `None` = no server state (CLI/tests) → the file values stand, exactly as
+/// before 0.10.24.
 pub(crate) async fn run_review_common(
     url: &str,
     token: &str,
@@ -177,11 +213,13 @@ pub(crate) async fn run_review_common(
     diff: String,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
 ) -> anyhow::Result<crate::models::ReviewOutput> {
     use crate::config;
     use crate::team::orchestrator;
 
-    let config = config::resolve_config(None).await?;
+    let mut config = config::resolve_config(None).await?;
+    apply_server_expert_overrides(&mut config, server_expert_overrides.as_deref());
 
     if diff.is_empty() {
         tracing::info!("No diff changes, skipping review");
@@ -373,6 +411,72 @@ mod tests {
             providers, env_providers,
             "None (CLI/legacy path) must keep the pre-fix config-file → env behavior"
         );
+    }
+
+    // ─── apply_server_expert_overrides (RENG-69) ──────────
+
+    /// A config with two experts at their "config file" values.
+    fn config_with_experts() -> crate::models::AppConfig {
+        let mut cfg: crate::models::AppConfig =
+            serde_json::from_value(serde_json::json!({})).expect("empty AppConfig must deserialize");
+        for (name, enabled, weight) in [("security", true, 60u8), ("quality", true, 40u8)] {
+            cfg.review_experts.insert(
+                name.to_string(),
+                ExpertTomlDef {
+                    enabled,
+                    weight,
+                    // A non-empty role: `validate` rejects an enabled expert
+                    // without one, and `build_expert_defs` skips the invalid.
+                    role: format!("{name} lead"),
+                    ..Default::default()
+                },
+            );
+        }
+        cfg
+    }
+
+    /// The webhook path's rule: the persisted override wins over the file
+    /// value, an untouched field keeps the file value, and an unedited expert
+    /// is left completely alone.
+    #[test]
+    fn server_expert_overrides_win_over_the_file_values() {
+        let mut overrides = crate::config::ExpertOverrides::default();
+        overrides.record(
+            "security",
+            crate::config::ExpertOverride {
+                enabled: Some(false),
+                weight: Some(15),
+            },
+        );
+
+        let mut config = config_with_experts();
+        assert_eq!(apply_server_expert_overrides(&mut config, Some(&overrides)), 1);
+
+        assert!(!config.review_experts["security"].enabled, "disabled by the Web UI");
+        assert_eq!(
+            config.review_experts["security"].weight, 15,
+            "re-weighted by the Web UI"
+        );
+        assert!(
+            config.review_experts["quality"].enabled,
+            "unedited expert keeps the file value"
+        );
+        assert_eq!(config.review_experts["quality"].weight, 40);
+
+        // …and the expert set a review runs follows the override.
+        let names: Vec<String> = config.build_expert_defs().into_iter().map(|e| e.name).collect();
+        assert_eq!(names, vec!["quality".to_string()], "only the edited expert is dropped");
+    }
+
+    /// `None` = no server state (CLI/legacy/tests): nothing is applied, so the
+    /// config file's team stands exactly as before 0.10.24.
+    #[test]
+    fn no_server_state_leaves_the_file_values_untouched() {
+        let mut config = config_with_experts();
+        assert_eq!(apply_server_expert_overrides(&mut config, None), 0);
+        assert!(config.review_experts["security"].enabled);
+        assert_eq!(config.review_experts["security"].weight, 60);
+        assert_eq!(config.build_expert_defs().len(), 2);
     }
 
     // ─── select_aggregator_expert ─────────────

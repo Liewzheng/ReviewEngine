@@ -128,7 +128,10 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
 /// and release the dispatcher's dedup on failure.
 ///
 /// `server_llm_configs` is the handler's snapshot of the server's hot-applied
-/// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]).
+/// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]);
+/// `server_expert_overrides` its RENG-69 counterpart — the WebUI-managed
+/// expert overrides, re-applied over the config file's `[review_experts]`
+/// because this path resolves its own config.
 ///
 /// `gate` controls the RENG-62 unchanged-content check: [`ContentGate::Enabled`]
 /// for webhook push/update events, [`ContentGate::Bypassed`] for an explicit
@@ -146,6 +149,7 @@ async fn run_webhook_review(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
     gate: ContentGate,
 ) {
     // Resolve the MR metadata + diff up front: the diff doubles as the content
@@ -220,6 +224,7 @@ async fn run_webhook_review(
             diff,
             server_llm_configs,
             llm_sink,
+            server_expert_overrides,
         )
         .await
     }
@@ -251,6 +256,7 @@ pub fn spawn_mr_review_task(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
     gate: ContentGate,
 ) {
     let d = dispatcher.clone();
@@ -265,6 +271,7 @@ pub fn spawn_mr_review_task(
             source_meta,
             tap,
             server_llm_configs,
+            server_expert_overrides,
             gate,
         )
         .await;
@@ -283,6 +290,7 @@ pub async fn handle_mr_in_progress(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
     gate: ContentGate,
 ) {
     tracing::info!("MR !{} review in progress, waiting...", mr_iid);
@@ -300,6 +308,7 @@ pub async fn handle_mr_in_progress(
                 source_meta,
                 tap,
                 server_llm_configs,
+                server_expert_overrides,
                 gate,
             );
         }
@@ -326,6 +335,7 @@ pub async fn dispatch_mr_event(
     source_meta: SourceMeta,
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
     gate: ContentGate,
 ) {
     match dispatcher.try_start(mr_url, sha).await {
@@ -340,6 +350,7 @@ pub async fn dispatch_mr_event(
                 source_meta,
                 tap,
                 server_llm_configs,
+                server_expert_overrides,
                 gate,
             );
         }
@@ -357,6 +368,7 @@ pub async fn dispatch_mr_event(
                 source_meta,
                 tap,
                 server_llm_configs,
+                server_expert_overrides,
                 gate,
             )
             .await;
@@ -448,6 +460,7 @@ pub async fn handle_mr_hook(
     task_store: Option<Arc<TaskStore>>,
     db: Option<Arc<SqlxStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_mr_hook_payload(body, gitlab_token)?;
 
@@ -517,6 +530,7 @@ pub async fn handle_mr_hook(
             source_meta,
             tap,
             server_llm_configs,
+            server_expert_overrides,
             ContentGate::Enabled,
         )
         .await;
@@ -763,6 +777,7 @@ pub async fn handle_note_hook(
     task_store: Option<Arc<TaskStore>>,
     db: Option<Arc<SqlxStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse Note hook: {}", e);
@@ -861,6 +876,7 @@ pub async fn handle_note_hook(
                             source_meta,
                             tap,
                             server_llm_configs,
+                            server_expert_overrides,
                             // An explicit `/review` / `/describe` command is
                             // user intent: it always reviews, even when the
                             // content is unchanged (RENG-62).
@@ -1159,7 +1175,7 @@ mod tests {
         platform: Option<crate::models::GitPlatformConfig>,
         db: &Arc<SqlxStore>,
     ) {
-        let _ = handle_note_hook(payload, dispatcher, token, platform, None, Some(db.clone()), None)
+        let _ = handle_note_hook(payload, dispatcher, token, platform, None, Some(db.clone()), None, None)
             .await
             .unwrap();
     }
@@ -1178,6 +1194,7 @@ mod tests {
             None,
             None,
             Some(db.clone()),
+            None,
             None,
         )
         .await
@@ -1224,6 +1241,7 @@ mod tests {
             None,
             None,
             Some(db.clone()),
+            None,
             None,
         )
         .await
@@ -1410,6 +1428,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("hook must succeed without a DB");
@@ -1494,6 +1513,7 @@ mod tests {
             hook_source_meta(&mr_url, "sha2"),
             None,
             None,
+            None,
             ContentGate::Enabled,
         )
         .await;
@@ -1541,6 +1561,7 @@ mod tests {
             "glpat-test".to_string(),
             7,
             hook_source_meta(&mr_url, note_sha),
+            None,
             None,
             None,
             ContentGate::Bypassed,

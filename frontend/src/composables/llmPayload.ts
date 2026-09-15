@@ -25,7 +25,7 @@ import { PROVIDER_TYPES } from '../types/llm';
  *  `llm.providers[]` echo so a load→save round-trip with zero edits re-emits
  *  exactly what GET /config returned. */
 export interface ProviderCardState {
-  /** Provider type id (e.g. `openai`, `deepseek`); the card's identity. */
+  /** Provider type id (e.g. `openai`, `deepseek`); part of the card's identity. */
   provider: string;
   /** Masked (`***`)/empty echo, or a newly typed key pending its first save. */
   apiKey: string;
@@ -35,6 +35,12 @@ export interface ProviderCardState {
   temperature: number;
   timeoutSeconds: number;
   retryAttempts: number;
+  /**
+   * RENG-75 administrative off switch. Always sent as a concrete bool: the
+   * backend keeps the stored flag only when the key is ABSENT, and a card the
+   * UI loaded carries the state the user last saw.
+   */
+  disabled?: boolean;
 }
 
 /** A sparse `llm` section of a PUT /config payload: `providers` is always
@@ -74,6 +80,7 @@ export function createEmptyProviderCard(): ProviderCardState {
     apiBaseUrl: '',
     defaultModel: '',
     ...PROVIDER_FIELD_DEFAULTS,
+    disabled: false,
   };
 }
 
@@ -104,6 +111,7 @@ export function cardsFromLlmConfig(llm: LLMConfig | null | undefined): {
     temperature: p.temperature ?? PROVIDER_FIELD_DEFAULTS.temperature,
     timeoutSeconds: p.timeoutSeconds ?? PROVIDER_FIELD_DEFAULTS.timeoutSeconds,
     retryAttempts: p.retryAttempts ?? PROVIDER_FIELD_DEFAULTS.retryAttempts,
+    disabled: p.disabled ?? false,
   }));
   if (cards.length === 0 && scalarsLookConfigured(llm)) {
     // Legacy projection without providers[]: reconstruct the primary card
@@ -149,6 +157,7 @@ export function buildLlmPayload(
     temperature: c.temperature,
     timeoutSeconds: c.timeoutSeconds,
     retryAttempts: c.retryAttempts,
+    disabled: c.disabled ?? false,
   }));
   const primary = cards.find((c) => c.provider === primaryProvider) ?? cards[0];
   if (!primary) {
@@ -189,4 +198,66 @@ export function buildLlmPayload(
     patch.retryAttempts = primary.retryAttempts;
   }
   return { llm: patch };
+}
+
+/**
+ * Identity of a card's CONFIGURATION — the `(provider, apiBaseUrl,
+ * defaultModel)` triple the UI can see. RENG-75 made the provider name a
+ * free-form display label (two cards may share it: two accounts, or one
+ * account × two models), so nothing in the UI may key a card by its name.
+ * The server-side identity is the same triple plus the API key, hashed into
+ * a fingerprint that never leaves the backend — the key-less triple is the
+ * closest the client can get, and it is what `PUT /config`'s masked-keep
+ * resolution matches on too.
+ */
+export function cardKey(card: ProviderCardState): string {
+  return [card.provider, card.apiBaseUrl, card.defaultModel].join('\u0000');
+}
+
+/** Whether two cards describe the same configuration (see {@link cardKey}). */
+export function sameCard(a: ProviderCardState, b: ProviderCardState): boolean {
+  return cardKey(a) === cardKey(b);
+}
+
+/**
+ * Move `fromIndex` to `toIndex`, returning a new array — the order the grid
+ * renders and the order `PUT /config` persists (`llm_providers.raw.position`
+ * follows the array). Out-of-range indices are a no-op copy, so a stray drop
+ * event can never corrupt the list.
+ */
+export function reorderCards(
+  cards: ProviderCardState[],
+  fromIndex: number,
+  toIndex: number,
+): ProviderCardState[] {
+  const next = cards.slice();
+  if (fromIndex < 0 || fromIndex >= next.length || toIndex < 0 || toIndex >= next.length) {
+    return next;
+  }
+  const [moved] = next.splice(fromIndex, 1);
+  next.splice(toIndex, 0, moved);
+  return next;
+}
+
+/**
+ * The chain head a given card order implies: the first ENABLED card, or `''`
+ * when every card is disabled (the runtime then has no provider to run on).
+ * RENG-75 made stored order the priority rule, so this is the single source
+ * of the "primary" marker after a reorder — `isPrimary` in the health payload
+ * echoes it back.
+ */
+export function chainHeadName(cards: ProviderCardState[]): string {
+  return cards.find((c) => !c.disabled)?.provider ?? '';
+}
+
+/**
+ * The card a "duplicate" action starts from: the same fields, `apiKey`
+ * included. The echo carries the `***` sentinel rather than the secret (the
+ * key never leaves the server), and the masked-keep rule resolves that
+ * sentinel to the ORIGINAL entry's stored key when the new card's triple
+ * still matches it — so the copy starts life as a real sibling holding the
+ * same credential, and only a field edit makes it distinct.
+ */
+export function duplicateCard(card: ProviderCardState): ProviderCardState {
+  return { ...card };
 }

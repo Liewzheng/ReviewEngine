@@ -185,6 +185,13 @@ fn strip_env_value(resolved: &str, env: Option<&String>) -> String {
 /// set. The legacy scalar fields (`defaultModel`, `apiBaseUrl`, …) describe
 /// the primary provider for old consumers; after an env-seeded entry is
 /// skipped they would otherwise still describe that env entry.
+///
+/// The recorded primary (RENG-75): kept when it names an ENABLED saved
+/// provider — a save that does not speak for the primary must never change
+/// it (RENG-72), and the runtime chain honours it as the head. When it is
+/// empty, names no saved provider, or names a DISABLED one, it is normalised
+/// to the first ENABLED saved provider (the effective head is always an
+/// enabled entry), or to empty when nothing is enabled.
 fn sync_llm_projection(ui_llm: &mut super::types::UiLlmConfig, saved: &[LLMConfig]) {
     if saved.is_empty() {
         // Nothing persisted (e.g. everything resolved was env-derived): the
@@ -196,13 +203,29 @@ fn sync_llm_projection(ui_llm: &mut super::types::UiLlmConfig, saved: &[LLMConfi
     }
     let primary = saved
         .iter()
-        .find(|c| c.provider == ui_llm.primary_provider)
-        .unwrap_or(&saved[0]);
-    ui_llm.primary_provider = primary.provider.clone();
-    ui_llm.default_model = primary.model.clone();
-    ui_llm.api_base_url = primary.api_base.clone();
-    ui_llm.max_tokens = primary.max_tokens;
-    ui_llm.temperature = primary.temperature;
+        .find(|c| !c.disabled && c.provider == ui_llm.primary_provider)
+        .or_else(|| saved.iter().find(|c| !c.disabled));
+    match primary {
+        Some(primary) => {
+            ui_llm.primary_provider = primary.provider.clone();
+            ui_llm.default_model = primary.model.clone();
+            ui_llm.api_base_url = primary.api_base.clone();
+            ui_llm.max_tokens = primary.max_tokens;
+            ui_llm.temperature = primary.temperature;
+        }
+        None => {
+            // Every saved provider is disabled: there is no effective head.
+            // The scalar echo empties (order stays authoritative for when an
+            // entry is re-enabled); the legacy fields keep describing the
+            // first saved entry, whose configuration is fully retained.
+            ui_llm.primary_provider = String::new();
+            let first = &saved[0];
+            ui_llm.default_model = first.model.clone();
+            ui_llm.api_base_url = first.api_base.clone();
+            ui_llm.max_tokens = first.max_tokens;
+            ui_llm.temperature = first.temperature;
+        }
+    }
     ui_llm.openai_api_key = if saved.iter().any(|c| c.provider == "openai" && !c.api_key.is_empty()) {
         API_KEY_MASK.to_string()
     } else {
@@ -650,6 +673,7 @@ fn replay_payload(file: &UiStateFile, overrides: &UiStateEnvOverrides) -> serde_
                 temperature: c.temperature,
                 timeout_seconds: super::types::default_timeout_seconds(),
                 retry_attempts: super::types::default_retry_attempts(),
+                disabled: Some(c.disabled),
             })
             .collect();
         if let Ok(v) = serde_json::to_value(&section) {
@@ -720,6 +744,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.7,
                 disable_thinking: None,
+                disabled: false,
             }],
             git_platforms: vec![GitPlatformConfig {
                 name: "testbed".to_string(),
@@ -1058,6 +1083,7 @@ webhook_secret = "legacy-wh-plain"
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }];
 
         let dir = tempfile::tempdir().unwrap();
@@ -1160,6 +1186,7 @@ webhook_secret = "legacy-wh-plain"
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }
     }
 
@@ -1420,6 +1447,7 @@ webhook_secret = "legacy-wh-plain"
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }
     }
 
@@ -1560,6 +1588,7 @@ webhook_secret = "legacy-wh-plain"
                 max_tokens: 4096,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             }],
             git_platforms: vec![],
             gitlab_token: String::new(),
@@ -1720,6 +1749,7 @@ webhook_secret = "legacy-wh-plain"
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         };
 
         // Row 1: llm_from_env — DB llm entries must not touch the runtime.
@@ -1733,6 +1763,7 @@ webhook_secret = "legacy-wh-plain"
                 max_tokens: 4096,
                 temperature: 0.7,
                 disable_thinking: None,
+                disabled: false,
             }])
             .await
             .unwrap();

@@ -12,11 +12,16 @@
 //! - **A report is always a real probe.** `healthy` is only ever produced by a
 //!   successful `GET {api_base}/models`; a failed probe is `error` carrying the
 //!   transport/HTTP failure; a provider with no `api_key` is `offline` and is
-//!   never probed. There is no "assume healthy" fallback.
+//!   never probed; a DISABLED provider is `disabled` (RENG-75: deliberately
+//!   off, not a failure) and is never probed either. There is no "assume
+//!   healthy" fallback.
 //! - **An entry belongs to the exact config it was probed with.** The cache key
-//!   is a SHA-256 fingerprint over `(provider, model, api_base, api_key)`, so a
-//!   credential or endpoint change cannot be answered by the previous config's
-//!   result even if an invalidation call were missed.
+//!   is the card's canonical entry fingerprint
+//!   ([`crate::llm::identity::entry_fp`], RENG-75: SHA-256 over
+//!   `(provider, api_base, model, api_key)`, truncated), so a credential or
+//!   endpoint change cannot be answered by the previous config's result even if
+//!   an invalidation call were missed — and two same-named cards never share a
+//!   status.
 //! - **Changed providers are dropped explicitly.** [`LlmHealthStore::retain_live`]
 //!   drops every entry whose config is no longer in the effective provider set
 //!   (edited credentials, removed provider, cleared key); the next read then
@@ -35,7 +40,6 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use sha2::{Digest, Sha256};
 
 use crate::models::LLMConfig;
 
@@ -69,6 +73,10 @@ pub enum ProviderStatus {
     Error,
     /// No `api_key` is stored, so no probe was made.
     Offline,
+    /// The provider is administratively disabled (RENG-75): deliberately off,
+    /// never probed — distinct from `Offline` so the UI can tell "turned off
+    /// on purpose" from "unreachable / unconfigured".
+    Disabled,
 }
 
 impl ProviderStatus {
@@ -78,16 +86,18 @@ impl ProviderStatus {
             Self::Healthy => "healthy",
             Self::Error => "error",
             Self::Offline => "offline",
+            Self::Disabled => "disabled",
         }
     }
 
     /// Dashboard `health.llmProviders` vocabulary (RENG-32: `success` /
-    /// `error` / `offline`).
+    /// `error` / `offline`; RENG-75 adds `disabled`).
     pub fn dashboard_str(self) -> &'static str {
         match self {
             Self::Healthy => "success",
             Self::Error => "error",
             Self::Offline => "offline",
+            Self::Disabled => "disabled",
         }
     }
 }
@@ -98,6 +108,17 @@ impl ProviderHealth {
         Self {
             status: ProviderStatus::Offline,
             message: "Missing API key".to_string(),
+            latency_ms: 0,
+            checked_at: Utc::now(),
+        }
+    }
+
+    /// A disabled provider (RENG-75): reported as deliberately off, never
+    /// probed — the message must not read like a failure.
+    pub fn disabled() -> Self {
+        Self {
+            status: ProviderStatus::Disabled,
+            message: "Disabled".to_string(),
             latency_ms: 0,
             checked_at: Utc::now(),
         }
@@ -187,6 +208,13 @@ impl LlmHealthStore {
         let mut cold: Vec<(usize, String, LLMConfig)> = Vec::new();
 
         for (i, cfg) in cfgs.iter().enumerate() {
+            // RENG-75: a disabled provider is deliberately off — reported as
+            // such, never probed (its cached entry, if any, is left untouched
+            // so re-enabling serves the still-fresh probe).
+            if cfg.disabled {
+                out[i] = Some(ProviderHealth::disabled());
+                continue;
+            }
             if cfg.api_key.is_empty() {
                 out[i] = Some(ProviderHealth::offline());
                 continue;
@@ -303,16 +331,17 @@ impl LlmHealthStore {
         lock
     }
 
-    /// SHA-256 over every field that can change what a probe does. The key is
-    /// hashed rather than stored so the cache never holds a second copy of a
-    /// secret.
+    /// The card's canonical identity fingerprint
+    /// ([`crate::llm::identity::entry_fp`], RENG-75): SHA-256 over
+    /// `(provider, api_base, model, api_key)` — every field that can change
+    /// what a probe does — truncated to 12 hex chars. The key is hashed rather
+    /// than stored so the cache never holds a second copy of a secret, and it
+    /// is the SAME fingerprint the usage/latency aggregates bucket by, so one
+    /// definition of "which card is this" serves the whole server. Server-side
+    /// only: never serialized into a response (see the module docs of
+    /// `llm::identity`).
     fn fingerprint(cfg: &LLMConfig) -> String {
-        let mut hasher = Sha256::new();
-        for field in [&cfg.provider, &cfg.model, &cfg.api_base, &cfg.api_key] {
-            hasher.update(field.as_bytes());
-            hasher.update([0x1f]);
-        }
-        hex::encode(hasher.finalize())
+        crate::llm::identity::entry_fp(&cfg.provider, &cfg.api_base, &cfg.model, &cfg.api_key)
     }
 }
 
@@ -335,6 +364,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }
     }
 
@@ -362,15 +392,19 @@ mod tests {
         assert_eq!(ProviderStatus::Healthy.as_str(), "healthy");
         assert_eq!(ProviderStatus::Error.as_str(), "error");
         assert_eq!(ProviderStatus::Offline.as_str(), "offline");
+        assert_eq!(ProviderStatus::Disabled.as_str(), "disabled");
         // Dashboard rows (RENG-32) keep their own `success` spelling.
         assert_eq!(ProviderStatus::Healthy.dashboard_str(), "success");
         assert_eq!(ProviderStatus::Error.dashboard_str(), "error");
         assert_eq!(ProviderStatus::Offline.dashboard_str(), "offline");
+        assert_eq!(ProviderStatus::Disabled.dashboard_str(), "disabled");
     }
 
     /// The fingerprint is stable for identical configs and changes with every
     /// field that can change what a probe does — including the key, which is
     /// why the cache can never answer a changed credential with a leftover.
+    /// RENG-75: it IS the card's canonical entry fingerprint, so this test
+    /// also pins the field order against `llm::identity::entry_fp`.
     #[test]
     fn fingerprint_tracks_every_probe_relevant_field() {
         let base = cfg("openai", "sk-a", "https://api.openai.com/v1");
@@ -379,7 +413,21 @@ mod tests {
             LlmHealthStore::fingerprint(&base.clone()),
             "same config → same key"
         );
-        assert_eq!(LlmHealthStore::fingerprint(&base).len(), 64, "hex SHA-256");
+        assert_eq!(
+            LlmHealthStore::fingerprint(&base),
+            crate::llm::identity::entry_fp("openai", "https://api.openai.com/v1", "openai-model", "sk-a"),
+            "one canonical fingerprint: the health cache key and the statistics bucket key agree"
+        );
+        assert_eq!(
+            LlmHealthStore::fingerprint(&base),
+            base.entry_fp(),
+            "and it is what the config itself reports"
+        );
+        assert_eq!(
+            LlmHealthStore::fingerprint(&base).len(),
+            crate::llm::identity::ENTRY_FP_HEX_LEN,
+            "hex, truncated"
+        );
         for changed in [
             cfg("anthropic", "sk-a", "https://api.openai.com/v1"),
             cfg("openai", "sk-b", "https://api.openai.com/v1"),
@@ -412,6 +460,42 @@ mod tests {
         assert_eq!(reports[0].message, "Missing API key");
         assert_eq!(reports[0].latency_ms, 0);
         assert_eq!(calls.load(Ordering::SeqCst), 0, "no probe for an unconfigured provider");
+    }
+
+    /// RENG-75: a disabled provider is reported `disabled` — deliberately
+    /// off, never probed, not a failure — while the enabled entries around it
+    /// probe exactly as before.
+    #[tokio::test]
+    async fn disabled_provider_is_reported_disabled_and_not_probed() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(LlmHealthStore::with_probe(
+            counting_probe(calls.clone(), true),
+            DEFAULT_TTL,
+        ));
+        let mut off = cfg("deepseek", "sk-b", "https://api.deepseek.com/v1");
+        off.disabled = true;
+        let configs = vec![cfg("openai", "sk-a", "https://api.openai.com/v1"), off];
+
+        let reports = store.report(&configs).await;
+        assert_eq!(
+            reports[0].status,
+            ProviderStatus::Healthy,
+            "the enabled entry probes as today"
+        );
+        assert_eq!(reports[1].status, ProviderStatus::Disabled);
+        assert_eq!(reports[1].message, "Disabled", "must not read like a failure");
+        assert_eq!(reports[1].latency_ms, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "only the enabled provider is probed");
+
+        // A cached probe of the now-disabled config is never served either:
+        // the disabled report wins over the cache.
+        store.record(&configs[0], ProviderHealth::healthy(3));
+        let mut off_cached = configs[1].clone();
+        off_cached.disabled = false;
+        store.record(&off_cached, ProviderHealth::healthy(3));
+        let reports = store.report(&configs).await;
+        assert_eq!(reports[1].status, ProviderStatus::Disabled);
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "still no probe for the disabled entry");
     }
 
     /// A fresh entry is served from the cache — the poll path does not re-probe

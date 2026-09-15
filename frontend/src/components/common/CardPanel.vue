@@ -14,10 +14,9 @@ interface Props {
   bodyStyle?: StyleValue
 }
 
-const props = withDefaults(defineProps<Props>(), {
+withDefaults(defineProps<Props>(), {
   bodyStyle: () => ({ padding: '20px' }),
-})
-</script>
+})</script>
 
 <style scoped>
 .card-panel {

@@ -80,10 +80,10 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
   // --- Tag input state ---
   const patternInputVisible = ref(false);
   const patternInputValue = ref('');
-  const patternInputRef = ref<any>();
+  const patternInputRef = ref<{ focus: () => void } | null>();
 
   /** Function ref for the pattern input (string refs aren't visible to TS). */
-  function setPatternInputRef(el: any) {
+  function setPatternInputRef(el: { focus: () => void } | null) {
     patternInputRef.value = el;
   }
 
@@ -99,8 +99,8 @@ export function useConfigForm(cfg: ReturnType<typeof useConfig>) {
   const rules = computed<FormRules>(() => ({
     'rules.requiredExperts': [
       {
-        validator: (_rule: any, value: any, callback: any) => {
-          if (!value || value.length === 0) {
+        validator: (_rule: unknown, value: unknown, callback: (error?: Error) => void) => {
+          if (!Array.isArray(value) || value.length === 0) {
             callback(new Error(t('config.validation.expertRequired')));
           } else {
             callback();

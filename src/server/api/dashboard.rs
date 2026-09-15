@@ -35,7 +35,7 @@
 use axum::{extract::State, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
 use std::sync::Arc;
 
-use crate::server::api::llm_health::ProviderStatus;
+use crate::server::api::llm_health::{ProviderHealth, ProviderStatus};
 use crate::server::task_queue::{TaskEntry, TaskState};
 use crate::server::AppState;
 use crate::store::traits::{ReviewListQuery, ReviewStore};
@@ -483,13 +483,18 @@ async fn compute_health(state: &AppState) -> serde_json::Value {
         }));
     }
 
-    // `overall` follows the probed statuses, not provider presence: a
-    // configured-but-failing provider is no longer "operational".
-    let overall = if llm_providers.is_empty() {
+    // `overall` follows the probed statuses of the ENABLED providers, not
+    // provider presence: a configured-but-failing provider is no longer
+    // "operational", while a disabled one (RENG-75) is deliberately off and
+    // must not drag the panel to `warning`/`error`. With nothing enabled
+    // (none configured, or every one switched off) the LLM subsystem is
+    // simply not serving: `offline`, like the empty case.
+    let enabled: Vec<&ProviderHealth> = health.iter().filter(|h| h.status != ProviderStatus::Disabled).collect();
+    let overall = if enabled.is_empty() {
         "offline"
-    } else if health.iter().all(|h| h.status == ProviderStatus::Healthy) {
+    } else if enabled.iter().all(|h| h.status == ProviderStatus::Healthy) {
         "success"
-    } else if health.iter().any(|h| h.status == ProviderStatus::Healthy) {
+    } else if enabled.iter().any(|h| h.status == ProviderStatus::Healthy) {
         "warning"
     } else {
         "error"
@@ -1181,6 +1186,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }]);
         // RENG-36: the row's status is the probe's verdict, so pin it with a
         // stub probe (a real one would hit api.openai.com from a unit test).
@@ -1209,6 +1215,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         };
 
         // One healthy provider + one failing + one without a key.
@@ -1233,6 +1240,45 @@ mod tests {
         let (_, json) = dashboard_json(Arc::new(state)).await;
         assert_eq!(json["health"]["llmProviders"][0]["status"], "error");
         assert_eq!(json["health"]["overall"], "error");
+    }
+
+    /// RENG-75: a disabled provider's dashboard row reads `disabled` —
+    /// deliberately off, not a failure — and it casts no vote on `overall`:
+    /// a healthy enabled provider keeps the panel `success`, and with every
+    /// provider disabled the subsystem is simply not serving (`offline`,
+    /// never `error`).
+    #[tokio::test]
+    async fn dashboard_health_marks_disabled_providers_without_failing_overall() {
+        let llm = |provider: &str, disabled: bool| crate::models::LLMConfig {
+            provider: provider.to_string(),
+            model: format!("{provider}-model"),
+            api_key: "sk-a".to_string(),
+            api_base: format!("https://api.{provider}.example/v1"),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+            disabled,
+        };
+
+        let mut state = AppState::new(vec![llm("openai", false), llm("deepseek", true)]);
+        state.llm_health = Arc::new(stub_health_store(true));
+        let (status, json) = dashboard_json(Arc::new(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        let rows = json["health"]["llmProviders"].as_array().unwrap();
+        assert_eq!(rows[0]["status"], "success");
+        assert_eq!(rows[1]["status"], "disabled", "deliberately off ≠ offline/error");
+        assert_eq!(rows[1]["message"], "Disabled");
+        assert_eq!(
+            json["health"]["overall"], "success",
+            "the disabled provider must not drag the panel to warning/error"
+        );
+
+        // All disabled → nothing serving, but nothing failing either.
+        let mut state = AppState::new(vec![llm("openai", true)]);
+        state.llm_health = Arc::new(stub_health_store(true));
+        let (_, json) = dashboard_json(Arc::new(state)).await;
+        assert_eq!(json["health"]["llmProviders"][0]["status"], "disabled");
+        assert_eq!(json["health"]["overall"], "offline");
     }
 
     /// `None` fallback: without ANY store the dashboard serves documented

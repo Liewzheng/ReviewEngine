@@ -35,6 +35,12 @@ pub struct CompletionResult {
     /// that silently ran on a secondary provider is distinguishable from a
     /// normal run.
     pub fallback: bool,
+    /// RENG-75: entry fingerprint of the serving config, set by
+    /// `LLMClient`'s attribution so the review's usage snapshot
+    /// (`reviews.llm_summary`) can name the exact CARD. Runtime-only: it
+    /// hashes the API key and must never be serialized into an API response
+    /// or a log line.
+    pub entry_fp: Option<String>,
 }
 
 /// Parameters for LLM completion requests.
@@ -169,6 +175,7 @@ impl LLMProvider for OpenAIProvider {
             model,
             provider: self.name().to_string(),
             fallback: false,
+            entry_fp: None,
         })
     }
 }
@@ -317,6 +324,7 @@ impl LLMProvider for AnthropicProvider {
             model,
             provider: self.name().to_string(),
             fallback: false,
+            entry_fp: None,
         })
     }
 }
@@ -424,6 +432,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert!(registry.get("openai").is_some());
@@ -440,6 +449,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert!(registry.get("anthropic").is_some());
@@ -490,6 +500,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         // Unknown providers fall back to OpenAI-compatible
@@ -526,6 +537,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             },
             LLMConfig {
                 provider: "anthropic".to_string(),
@@ -535,6 +547,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             },
         ];
         let (registry, order) = ProviderRegistry::from_configs(&configs);

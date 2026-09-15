@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import type { Component } from 'vue'
 import {
   Lock,
   Lightning,
@@ -40,7 +41,7 @@ const iconStyle = computed(() => ({
 const categoryColor = computed(() => categoryColorMap[props.expert.category])
 const categoryLabel = computed(() => categoryLabelMap[props.expert.category])
 
-const iconComponents: Record<string, any> = {
+const iconComponents: Record<string, Component> = {
   Lock,
   Lightning,
   CircleCheck,
@@ -154,6 +155,7 @@ const handleViewDetails = () => {
   box-shadow: var(--shadow-card);
   transition: opacity 0.2s ease, filter 0.2s ease, border-color 0.2s ease, transform 0.2s ease;
   max-width: 360px;
+  height: 100%;
   display: flex;
   flex-direction: column;
   gap: 16px;

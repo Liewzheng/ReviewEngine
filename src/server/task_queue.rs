@@ -1118,6 +1118,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         };
         crate::models::ReviewOutput {
             reports: vec![report("security"), report("performance")],

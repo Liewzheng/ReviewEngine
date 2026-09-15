@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from 'vitest/config'
 import vue from '@vitejs/plugin-vue'
 import Components from 'unplugin-vue-components/vite'
 import { ElementPlusResolver } from 'unplugin-vue-components/resolvers'
@@ -6,6 +6,20 @@ import path from 'path'
 
 // https://vite.dev/config/
 export default defineConfig({
+  // Vitest runs in the node environment (no jsdom/happy-dom in this project):
+  // components are rendered through `@vue/server-renderer`. Element Plus is
+  // inlined so its theme-chalk CSS side-effect imports are transformed by
+  // Vite instead of being loaded raw by node.
+  test: {
+    // Stylesheet sources are asserted as text (`?raw` imports), which needs
+    // Vite to process CSS rather than stub it out.
+    css: true,
+    server: {
+      deps: {
+        inline: [/element-plus/, /@element-plus/],
+      },
+    },
+  },
   plugins: [
     vue(),
     // On-demand Element Plus: resolves <el-*> components and v-loading

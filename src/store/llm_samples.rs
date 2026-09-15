@@ -129,6 +129,7 @@ mod tests {
             at,
             provider: provider.to_string(),
             model: format!("{provider}-model"),
+            entry_fp: format!("fp-{provider}"),
             latency_ms: 250,
             success,
             error: (!success).then(|| "HTTP 500 Internal Server Error".to_string()),

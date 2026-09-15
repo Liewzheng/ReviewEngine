@@ -418,6 +418,7 @@ pub async fn run_local_path(
             parse_error: None,
             raw_dump_path: None,
             llm_model: None,
+            llm_fp: None,
             llm_provider: None,
         });
     }
@@ -492,6 +493,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }
     }
 

@@ -11,7 +11,6 @@ import {
   DocumentCopy,
   Clock,
   User as UserIcon,
-  Share,
   Document,
   Folder,
 } from '@element-plus/icons-vue'
@@ -23,6 +22,7 @@ import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 import MarkdownView from '../components/common/MarkdownView.vue'
+import PageHeader from '../components/common/PageHeader.vue'
 
 /* Dev-only flag: raw expert responses are hidden in release builds */
 const isDev = import.meta.env.DEV
@@ -503,8 +503,8 @@ watch(() => route.query, () => {
 <template>
   <div class="history-page">
     <!-- Header -->
-    <div class="page-header">
-      <h2 class="page-title">{{ $t('history.title') }}</h2>
+    <PageHeader :title="$t('history.title')">
+      <template #actions>
       <!-- Wrapper span: a disabled button swallows pointer events, so the
            tooltip needs a hoverable parent (same pattern as the config page
            save button). -->
@@ -523,7 +523,8 @@ watch(() => route.query, () => {
           </el-button>
         </span>
       </el-tooltip>
-    </div>
+      </template>
+    </PageHeader>
 
     <!-- Filter Bar -->
     <div class="filter-bar">
@@ -620,10 +621,7 @@ watch(() => route.query, () => {
               <div class="title-cell">
                 <div class="title-text">
                   <div class="mr-title">{{ row.mrTitle }}</div>
-                  <div class="branch-name">
-                    <el-icon><Share /></el-icon>
-                    {{ row.branch }} &rarr; {{ row.targetBranch }}
-                  </div>
+                  <div class="branch-chip">{{ row.targetBranch }}</div>
                 </div>
               </div>
             </template>
@@ -840,7 +838,9 @@ watch(() => route.query, () => {
             <el-icon><Link /></el-icon>
             <div>
               <div class="meta-label">{{ $t('history.drawer.branch') }}</div>
-              <div class="meta-value">{{ selectedReview.branch }}</div>
+              <div class="meta-value">
+                {{ selectedReview.branch }} &rarr; {{ selectedReview.targetBranch }}
+              </div>
             </div>
           </div>
           <div class="meta-item">
@@ -966,13 +966,16 @@ watch(() => route.query, () => {
   align-items: center;
 }
 
-.page-title {
-  font-size: 24px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-  color: var(--text-primary);
-  margin: 0;
+/* R0.5: one row height (48px) for every row, cells centred in it, so the
+   table reads as a grid instead of a stack of differently-sized bands. */
+.history-table :deep(.el-table__row) {
+  height: 48px;
+}
+
+.history-table :deep(.el-table__cell) {
+  height: 48px;
+  padding: 0 12px;
+  vertical-align: middle;
 }
 
 /* Filter Bar */
@@ -1044,14 +1047,17 @@ watch(() => route.query, () => {
 
 .title-cell {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
+  height: 100%;
 }
 
 .title-text {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .mr-title {
@@ -1059,19 +1065,28 @@ watch(() => route.query, () => {
   color: var(--text-primary);
   font-weight: 500;
   line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
-.branch-name {
+/* R0.5: the list view keeps a single muted branch chip — the full
+   source→target pair is the detail drawer's job, where it reads as context
+   next to the review it belongs to instead of as a micro-diagram inside a
+   scanning row. The chip therefore carries the target (where the change
+   lands). */
+.branch-chip {
   font-size: 11px;
   color: var(--text-secondary);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 1px 8px;
   font-family: var(--font-mono);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.branch-name .el-icon {
-  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .author-cell {

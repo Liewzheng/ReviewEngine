@@ -363,6 +363,7 @@ mod tests {
             max_tokens: 1024,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }
     }
 
@@ -539,6 +540,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         }];
         let agg = Some(AggregatedReport {
             findings: vec![],
@@ -548,6 +550,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         });
         let output = build_review_output_from_reports(reports, agg);
         assert!(
@@ -567,6 +570,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(
@@ -608,6 +612,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         };
         let reports = vec![ExpertReport {
             expert_name: "security".to_string(),
@@ -618,6 +623,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         }];
 
         let output = build_review_output_from_reports(reports, Some(agg_report));
@@ -639,6 +645,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(output.aggregated.is_none());
@@ -661,6 +668,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         }];
         let output = build_review_output_from_reports(reports, None);
         assert!(output.aggregated.is_none());

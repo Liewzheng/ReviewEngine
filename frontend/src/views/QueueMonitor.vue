@@ -16,6 +16,7 @@ import type { QueueStats, QueueTask } from '../types/queue'
 import StatsCard from '../components/QueueMonitor/StatsCard.vue'
 import TaskCard from '../components/QueueMonitor/TaskCard.vue'
 import LastUpdated from '../components/common/LastUpdated.vue'
+import PageHeader from '../components/common/PageHeader.vue'
 import { useQueue } from '../composables/useQueue'
 import { useAutoRefresh } from '../composables/useAutoRefresh'
 
@@ -291,13 +292,8 @@ onUnmounted(() => {
 
 <template>
   <div class="queue-page">
-    <!-- Page Header -->
-    <div class="page-header">
-      <div class="page-header-left">
-        <h2 class="page-title">{{ $t('queue.title') }}</h2>
-        <p class="page-subtitle">{{ $t('queue.subtitle') }}</p>
-      </div>
-      <div class="page-header-right">
+    <PageHeader :title="$t('queue.title')" :subtitle="$t('queue.subtitle')">
+      <template #actions>
         <el-button
           :type="isPaused ? 'success' : 'warning'"
           @click="togglePause"
@@ -332,8 +328,8 @@ onUnmounted(() => {
         <!-- Liveness marker for the 3s poll (RENG-52), where the manual
              Refresh button used to sit. -->
         <LastUpdated :updated-at="lastUpdated" :failed="pollFailed" />
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <!-- Loading Skeleton -->
     <template v-if="loading">
@@ -528,41 +524,6 @@ onUnmounted(() => {
   margin: 0 auto;
 }
 
-/* Page Header */
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-}
-
-.page-header-left {
-  flex: 1;
-  min-width: 0;
-}
-
-.page-title {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 4px 0;
-}
-
-.page-subtitle {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.page-header-right {
-  display: flex;
-  gap: 8px;
-  flex-wrap: wrap;
-  align-items: center;
-}
-
 .toolbar-label {
   font-size: 14px;
   color: var(--text-secondary);
@@ -697,15 +658,16 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .page-header {
+  :deep(.page-header) {
     flex-direction: column;
+    align-items: stretch;
   }
 
-  .page-header-right {
+  :deep(.page-header__right) {
     width: 100%;
   }
 
-  .page-header-right .el-button {
+  :deep(.page-header__right .el-button) {
     flex: 1;
   }
 }
@@ -716,11 +678,11 @@ onUnmounted(() => {
     grid-template-columns: 1fr;
   }
 
-  .page-header-right {
+  :deep(.page-header__right) {
     flex-direction: column;
   }
 
-  .page-header-right .el-button {
+  :deep(.page-header__right .el-button) {
     width: 100%;
     justify-content: center;
   }

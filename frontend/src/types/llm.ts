@@ -1,5 +1,9 @@
-/** Health status of an LLM provider. */
-export type LlmProviderStatus = 'healthy' | 'degraded' | 'error' | 'offline'
+/**
+ * Health status of an LLM provider. `disabled` (RENG-75) is the
+ * administrative off switch, deliberately distinct from `offline`: a
+ * disabled card was never probed and its state is not a failure.
+ */
+export type LlmProviderStatus = 'healthy' | 'degraded' | 'error' | 'offline' | 'disabled'
 
 /** Result of an LLM provider connectivity test. */
 export interface TestResult {
@@ -23,6 +27,12 @@ export interface LlmProvider {
   logo: string
   /** Current health status. */
   status: LlmProviderStatus
+  /**
+   * RENG-75: the administrative off switch. A disabled provider keeps its
+   * config and history but sits outside the review chain and is never probed,
+   * so it also carries `chainPosition: null` and `isPrimary: false`.
+   */
+  disabled: boolean
   /** Whether API credentials are configured. */
   configured: boolean
   /**
@@ -107,10 +117,12 @@ export interface LlmProvider {
    */
   position?: number
   /**
-   * RENG-55: 1-based rank in the authoritative runtime chain (primary first,
-   * then the stored order) — what the cards render as the chain marker.
+   * RENG-55: 1-based rank in the authoritative runtime chain (the first
+   * ENABLED card leads, the rest follow in stored order) — what the cards
+   * render as the chain marker. RENG-75: `null` for a disabled provider,
+   * which is not in the chain at all.
    */
-  chainPosition?: number
+  chainPosition?: number | null
   /** RENG-55: true for the chain head, i.e. the provider reviews run on first. */
   isPrimary?: boolean
 }

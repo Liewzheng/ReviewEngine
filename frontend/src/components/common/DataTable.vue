@@ -19,14 +19,16 @@
 <script setup lang="ts">
 import type { CSSProperties } from 'vue'
 
+type TableRow = Record<string, unknown>
+
 interface Props {
-  data: any[]
+  data: TableRow[]
 }
 
 defineProps<Props>()
 
 defineEmits<{
-  (e: 'row-click', row: any): void
+  (e: 'row-click', row: TableRow): void
 }>()
 
 const headerCellStyle = (): CSSProperties => ({

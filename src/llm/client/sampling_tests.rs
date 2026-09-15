@@ -39,6 +39,7 @@ fn config(provider: &str, api_base: &str) -> LLMConfig {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }
 }
 
@@ -200,4 +201,75 @@ async fn a_client_without_a_sink_still_works() {
         .await
         .expect("the call is unaffected by the absence of a sink");
     assert_eq!(result.provider, "xiaomi");
+}
+
+/// RENG-75: a sample names the CARD that served the attempt — the config's
+/// own `entry_fp()` — so two same-named cards aggregate separately. A direct
+/// hit carries its config's fingerprint; a fallback walk records each
+/// attempt with the fingerprint of the entry it happened on.
+#[tokio::test]
+async fn samples_carry_the_serving_cards_fingerprint() {
+    // Direct hit: the sample's fp is exactly `config.entry_fp()`.
+    let mock = MockServer::start().await;
+    mount_success(&mock).await;
+    let sink = Arc::new(CaptureSink::default());
+    let client = LLMClient::new().with_sink(Some(sink.clone()));
+    let only = config("xiaomi", &mock.uri());
+    client
+        .complete_with_fallback(std::slice::from_ref(&only), "sys", "user")
+        .await
+        .expect("the mock answers 200");
+    let samples = sink.samples();
+    assert_eq!(samples.len(), 1);
+    assert_eq!(
+        samples[0].entry_fp,
+        only.entry_fp(),
+        "the sample names the serving card"
+    );
+
+    // Fallback: the failed head attempt and the fallback hit each carry
+    // THEIR OWN entry's fingerprint (two same-named accounts must not share
+    // a bucket).
+    let failing = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("invalid api key"))
+        .mount(&failing)
+        .await;
+    let healthy = MockServer::start().await;
+    mount_success(&healthy).await;
+
+    let mut head = config("acme", &failing.uri());
+    head.api_key = "sk-acct-a".to_string();
+    let mut second = config("acme", &healthy.uri());
+    second.api_key = "sk-acct-b".to_string();
+    assert_ne!(
+        head.entry_fp(),
+        second.entry_fp(),
+        "same name, different key → different fp"
+    );
+
+    let sink = Arc::new(CaptureSink::default());
+    let client = LLMClient::new().with_sink(Some(sink.clone()));
+    let result = client
+        .complete_with_fallback(&[head.clone(), second.clone()], "sys", "user")
+        .await
+        .expect("the second account serves the call");
+
+    let samples = sink.samples();
+    assert_eq!(samples.len(), 2);
+    assert_eq!(
+        samples[0].entry_fp,
+        head.entry_fp(),
+        "the failed attempt is the head's card"
+    );
+    assert!(!samples[0].success);
+    assert_eq!(samples[1].entry_fp, second.entry_fp(), "the hit is the fallback card");
+    assert!(samples[1].success);
+    assert_ne!(
+        samples[0].entry_fp, samples[1].entry_fp,
+        "each attempt is attributed to its own entry"
+    );
+    // The completion is fingerprint-attributed too (for llm_summary's fp).
+    assert_eq!(result.entry_fp.as_deref(), Some(second.entry_fp().as_str()));
 }

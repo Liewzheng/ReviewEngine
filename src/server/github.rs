@@ -692,6 +692,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
+            llm_fp: None,
         };
         let outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(crate::models::ReviewOutput::new(vec![report]));
 

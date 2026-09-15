@@ -28,6 +28,7 @@ pub async fn test_config(Json(body): Json<TestConfigRequest>) -> impl axum::resp
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     };
 
     let start = std::time::Instant::now();

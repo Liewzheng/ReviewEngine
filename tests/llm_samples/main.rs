@@ -26,6 +26,7 @@ fn config(provider: &str, api_base: &str) -> LLMConfig {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }
 }
 
@@ -86,9 +87,19 @@ async fn a_review_run_records_one_sample_per_attempt_against_its_task_id() {
     }
 
     // The rows the LLM Status page's latency aggregate reads.
-    type SampleRow = (Option<String>, String, String, i64, i64, Option<String>, i64, i64);
+    type SampleRow = (
+        Option<String>,
+        String,
+        String,
+        Option<String>,
+        i64,
+        i64,
+        Option<String>,
+        i64,
+        i64,
+    );
     let rows: Vec<SampleRow> = sqlx::query_as(
-        "SELECT review_id, provider, model, latency_ms, success, error, chain_position, attempt \
+        "SELECT review_id, provider, model, entry_fp, latency_ms, success, error, chain_position, attempt \
          FROM llm_call_samples ORDER BY created_at, provider",
     )
     .fetch_all(db.pool())
@@ -110,7 +121,14 @@ async fn a_review_run_records_one_sample_per_attempt_against_its_task_id() {
     assert_eq!(failures.len(), 2, "one rejected attempt per call");
     assert_eq!(successes.len(), 2, "one fallback hit per call");
 
-    for (review_id, provider, model, latency_ms, success, error, chain_position, attempt) in &rows {
+    // RENG-75: each row names the CARD that served it — the primary's
+    // rejected attempts carry the primary entry's fingerprint, the fallback
+    // hits carry the secondary entry's.
+    let primary_fp = configs[0].entry_fp();
+    let secondary_fp = configs[1].entry_fp();
+    assert_ne!(primary_fp, secondary_fp);
+
+    for (review_id, provider, model, entry_fp, latency_ms, success, error, chain_position, attempt) in &rows {
         assert_eq!(
             review_id.as_deref(),
             Some(task.as_str()),
@@ -122,12 +140,14 @@ async fn a_review_run_records_one_sample_per_attempt_against_its_task_id() {
             assert_eq!(*success, 0);
             assert_eq!(*chain_position, 1);
             assert_eq!(model, "primary-model");
+            assert_eq!(entry_fp.as_deref(), Some(primary_fp.as_str()), "the head's card");
             let error = error.as_deref().expect("a failed attempt records why");
             assert!(error.contains("401"), "got {error}");
         } else {
             assert_eq!(*success, 1);
             assert_eq!(*chain_position, 2, "the fallback hit names its chain position");
             assert_eq!(model, "secondary-model");
+            assert_eq!(entry_fp.as_deref(), Some(secondary_fp.as_str()), "the fallback card");
             assert_eq!(*error, None);
         }
     }
@@ -202,6 +222,7 @@ async fn sample_columns_round_trip_through_the_driver() {
         at,
         provider: "xiaomi".to_string(),
         model: "mimo-v2.5-pro".to_string(),
+        entry_fp: "fp-xiaomi-mimo".to_string(),
         latency_ms: 1234,
         success: false,
         error: Some("HTTP 500 Internal Server Error".to_string()),
@@ -210,8 +231,8 @@ async fn sample_columns_round_trip_through_the_driver() {
     })
     .await;
 
-    let row: (String, String, String, i64, i64, String, i64, i64) = sqlx::query_as(
-        "SELECT id, review_id, provider, latency_ms, success, error, chain_position, attempt FROM llm_call_samples",
+    let row: (String, String, String, Option<String>, i64, i64, String, i64, i64) = sqlx::query_as(
+        "SELECT id, review_id, provider, entry_fp, latency_ms, success, error, chain_position, attempt FROM llm_call_samples",
     )
     .fetch_one(db.pool())
     .await
@@ -219,11 +240,16 @@ async fn sample_columns_round_trip_through_the_driver() {
     assert!(!row.0.is_empty(), "the row has a Rust-side surrogate key");
     assert_eq!(row.1, "review-round-trip");
     assert_eq!(row.2, "xiaomi");
-    assert_eq!(row.3, 1234);
-    assert_eq!(row.4, 0, "booleans are INTEGER 0/1 (0001 dialect rule)");
-    assert_eq!(row.5, "HTTP 500 Internal Server Error");
-    assert_eq!(row.6, 3);
-    assert_eq!(row.7, 2);
+    assert_eq!(
+        row.3.as_deref(),
+        Some("fp-xiaomi-mimo"),
+        "RENG-75: the card fingerprint round-trips"
+    );
+    assert_eq!(row.4, 1234);
+    assert_eq!(row.5, 0, "booleans are INTEGER 0/1 (0001 dialect rule)");
+    assert_eq!(row.6, "HTTP 500 Internal Server Error");
+    assert_eq!(row.7, 3);
+    assert_eq!(row.8, 2);
     assert_eq!(row_len(db.pool()).await, 1);
 }
 

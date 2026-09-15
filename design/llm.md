@@ -26,18 +26,33 @@ Recent Usage card (RENG-55)
 ### 2.1 Chain order and effective-provider visibility (RENG-55)
 
 The cards are the *configuration*; the runtime order they are tried in is the
-**authoritative chain** — the persisted primary first, then the remaining
-providers in their stored order (`ordered_llm_configs` in `src/llm/mod.rs`).
-The page must therefore make three things visible, all of them derived from
-existing payloads (no new data source):
+**authoritative chain** — the stored order IS the chain: the persisted primary
+first when it names an enabled provider, then the remaining providers in
+their stored order, with disabled providers skipped entirely (RENG-75;
+`ordered_llm_configs` in `src/llm/mod.rs`). The first ENABLED entry is the
+head. The page must therefore make these things visible, all of them derived
+from existing payloads (no new data source):
 
-- **Primary** — `primaryBadge` on the card whose provider is
-  `llm.primaryProvider` (config echo, as before).
+- **Primary** — `primaryBadge` on the chain head (`isPrimary` of
+  `GET /llm/providers`; the recorded `llm.primaryProvider` is a compatibility
+  echo of it, normalised to the first enabled provider on save when it is
+  empty, unmatched, or names a disabled entry).
 - **Chain rank** — a quiet `Chain #N` / `链序 #N` tag per card from
   `chainPosition` of `GET /llm/providers` (1-based; the head is 1). `position`
   in the same payload stays the stored index, which is what the card order
   encodes. The grid keeps the stored order — the marker, not a re-sort,
-  expresses the chain.
+  expresses the chain. A disabled card has no rank (`chainPosition: null`)
+  and shows no marker.
+- **Disabled (RENG-75)** — a card switched off keeps its configuration and
+  its recorded usage/latency history, but leaves the chain and is never
+  probed: its `status` reads `disabled` (deliberately off, NOT `offline` —
+  the UI must render it as a deliberate state, not a failure) and its
+  `chainPosition` is `null`. Disabling the recorded primary moves the head —
+  and the recorded selection — to the first enabled provider; disabling
+  EVERY provider makes review submission fail fast with 422
+  `llmAllDisabled`. The `disabled` flag round-trips through
+  `PUT /api/v1/config`'s `llm.providers[]` with masked-keep semantics: a
+  save that omits the key keeps the stored value.
 - **Who may move the primary (RENG-72)** — only a save that carries the
   user's choice: **Set as Primary**, the first card of an empty page, or the
   deletion of the last provider. An add/edit omits `llm.primaryProvider`
@@ -45,7 +60,8 @@ existing payloads (no new data source):
   primary card cannot be deleted while another provider remains (the
   successor would be the array head, not a choice) — the alert says so and
   the card stays. The chain head the runtime uses is therefore always a
-  selection someone made.
+  selection someone made (or the first enabled provider once that selection
+  is gone or disabled).
 - **What actually ran** — the Recent Usage card lists the newest reviews'
   `reviews.llm_summary` `provider/model` pairs (via the existing
   `GET /api/v1/reviews` list endpoint, 8 rows). A row whose usages contain
@@ -53,15 +69,56 @@ existing payloads (no new data source):
   which is how a fallback that skipped the primary becomes visible instead of
   looking like a normal run.
 
+### 2.1a Card identity: the four-tuple fingerprint (RENG-75, identity batch)
+
+A provider NAME is a display label, not an identity: two cards may share it
+(two accounts of one service, one account with two models — the
+复制卡片 / Duplicate flow produces exactly these). A card's unique identity
+is the tuple `(provider, api_base, model, api_key)`, carried as a fingerprint:
+`entry_fp = sha256("{provider}\n{api_base}\n{model}\n{api_key}")[..12 hex]`
+(`src/llm/identity.rs`, the repo-wide single implementation;
+`LLMConfig::entry_fp()`).
+
+Rules that follow:
+
+- **Statistics fold per fingerprint.** `llm_call_samples.entry_fp` (0005) and
+  the `fp` field of `reviews.llm_summary` entries record which card served
+  each call/review; usage (§2.2) and latency (§2.3) group by it, so two
+  same-named cards each show only their own numbers. Rotating a key or
+  changing the URL re-fingerprints the card — its stats start over, the old
+  fingerprint's rows stay in the database unattributed.
+- **The fingerprint never leaves the server.** It hashes the API key (a
+  truncated hash of a weak key is still bruteforceable), so it appears in no
+  API response, no log line and no UI. `LlmUsage.fp` /
+  `ExpertReport.llm_fp` are `skip_serializing`; the single place a
+  fingerprint is ever serialized is the `llm_summary` column writer. The
+  `GET /llm/providers` handler matches each card to its buckets internally
+  and returns only the aggregated values.
+- **Pre-upgrade rows merge only when unambiguous.** Rows written before the
+  fingerprint existed form the "unmarked" (`NULL`) bucket per
+  `(provider, model)`. The API merges that bucket into a card's numbers only
+  when exactly ONE ENABLED card has that `(provider, model)`; with several
+  enabled candidates, or none, it is shown nowhere (the rows are kept).
+- **Provider-identity operations follow the entry, not the name.** The masked
+  key keep on `PUT /config` resolves payload entry `i` against the stored
+  entry at index `i` (triple match), else a UNIQUE triple match (a plain
+  reorder), else nothing (two same-triple accounts are indistinguishable in
+  a masked payload — and a model/URL edit with a masked key clears the key,
+  the git-platform rule). Chain-head resolution with duplicate names keeps
+  the first same-named ENABLED entry — identical to "the head is the first
+  enabled card" under stored-order-is-the-chain.
+
 ### 2.2 Recorded usage statistics (RENG-56)
 
-Each card's usage numbers are the reviews that provider actually served, not
+Each card's usage numbers are the reviews THAT CARD actually served, not
 placeholders: `GET /api/v1/llm/providers` aggregates `reviews.llm_summary`
 over a rolling window (7 days; the payload carries `usageWindowDays` /
-`usageSince` and the UI labels the numbers with them). Four real values per
-card — `requestCount` (reviews that used the provider), `usageShare` (its
-slice of all usage in the window), `successRate` (over the reviews that used
-it and finished) and `lastUsedAt` — plus the recorded call latency of §2.3.
+`usageSince` and the UI labels the numbers with them), folded per
+`(provider, model, fp)` triple (RENG-75; pre-upgrade rows form the unmarked
+bucket of §2.1a). Four real values per card — `requestCount` (reviews that
+used the card), `usageShare` (its slice of all usage in the window),
+`successRate` (over the reviews that used it and finished) and `lastUsedAt` —
+plus the recorded call latency of §2.3.
 
 Anything without a basis is `null` on the wire and `—` on the page: there is
 no capacity concept (`usagePercent` is gone) and no fabricated series. The card
@@ -70,10 +127,11 @@ shows `0` only when the window was really read and really held no usage.
 ### 2.3 Recorded call latency (RENG-57)
 
 The card's latency number is the mean round-trip time of the **calls the
-reviews actually made**, not the probe's instantaneous value: every LLM call
-attempt on the review path records a row in `llm_call_samples` (timestamp,
-provider, model, `latency_ms`, success/failure + error, chain position,
-attempt, review id), and `GET /api/v1/llm/providers` folds the window's rows
+reviews actually made ON THAT CARD**, not the probe's instantaneous value:
+every LLM call attempt on the review path records a row in `llm_call_samples`
+(timestamp, provider, model, `entry_fp` (RENG-75), `latency_ms`,
+success/failure + error, chain position, attempt, review id), and
+`GET /api/v1/llm/providers` folds the window's rows per entry fingerprint
 into `avgLatencyMs` / `latencySampleCount` / `latencyFailureCount` /
 `latencyLastSampleAt` / `latencySparkline` over the reported
 `latencyWindowDays` (7, same length as the usage window but reported

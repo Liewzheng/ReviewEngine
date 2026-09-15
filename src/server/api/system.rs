@@ -120,14 +120,21 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         }));
     }
 
-    let overall = if llm_providers.is_empty() {
+    // `overall` counts only ENABLED providers (RENG-75): a disabled one is
+    // deliberately off — never a `warning`/`error` vote — and with nothing
+    // enabled the subsystem is not serving (`offline`, as when unconfigured).
+    let enabled: Vec<&crate::server::api::llm_health::ProviderHealth> = health
+        .iter()
+        .filter(|h| h.status != crate::server::api::llm_health::ProviderStatus::Disabled)
+        .collect();
+    let overall = if enabled.is_empty() {
         "offline"
-    } else if health
+    } else if enabled
         .iter()
         .all(|h| h.status == crate::server::api::llm_health::ProviderStatus::Healthy)
     {
         "success"
-    } else if health
+    } else if enabled
         .iter()
         .any(|h| h.status == crate::server::api::llm_health::ProviderStatus::Healthy)
     {
@@ -137,10 +144,10 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
     };
 
     // Top-level gate flag for the frontend: true iff at least one effective
-    // LLM config is usable — a non-empty `api_base` (`api_key` may stay
-    // empty for local providers). Mirrors the enqueue-time gate on
-    // POST /api/v1/reviews.
-    let llm_configured = llm_configs.iter().any(|c| !c.api_base.trim().is_empty());
+    // LLM config is usable — ENABLED (RENG-75) and with a non-empty
+    // `api_base` (`api_key` may stay empty for local providers). Mirrors the
+    // enqueue-time gate on POST /api/v1/reviews.
+    let llm_configured = llm_configs.iter().any(|c| !c.disabled && !c.api_base.trim().is_empty());
 
     // Persistence backend actually in use (0.10.0): "postgresql" / "sqlite"
     // from the store's connect-time URL discrimination; "disabled" when no
@@ -1015,6 +1022,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }
     }
 
@@ -1067,6 +1075,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }]);
         state.llm_health = Arc::new(crate::server::api::llm_health::LlmHealthStore::with_probe(
             Arc::new(|_cfg| Box::pin(async { Err("HTTP 401 Unauthorized".to_string()) })),

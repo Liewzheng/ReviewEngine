@@ -347,6 +347,13 @@ pub struct LLMConfig {
     /// existing configs are unaffected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disable_thinking: Option<bool>,
+    /// Administratively disabled (RENG-75): the entry keeps its full
+    /// configuration but is excluded from the review chain
+    /// ([`crate::llm::ordered_llm_configs`] skips it entirely) and is never
+    /// connectivity-probed — re-enabling restores it exactly as it was.
+    /// Defaults to `false` so previously persisted rows/JSON load unchanged.
+    #[serde(default)]
+    pub disabled: bool,
 }
 
 impl std::fmt::Debug for LLMConfig {
@@ -359,7 +366,20 @@ impl std::fmt::Debug for LLMConfig {
             .field("max_tokens", &self.max_tokens)
             .field("temperature", &self.temperature)
             .field("disable_thinking", &self.disable_thinking)
+            .field("disabled", &self.disabled)
             .finish()
+    }
+}
+
+impl LLMConfig {
+    /// This entry's identity fingerprint (RENG-75,
+    /// [`crate::llm::identity::entry_fp`]): the truncated SHA-256 of
+    /// `(provider, api_base, model, api_key)`. Used to match this config
+    /// against its recorded usage/latency buckets — SERVER-SIDE ONLY: the
+    /// fingerprint hashes the API key, so it must never appear in an API
+    /// response, a log line, or the UI.
+    pub fn entry_fp(&self) -> String {
+        crate::llm::identity::entry_fp(&self.provider, &self.api_base, &self.model, &self.api_key)
     }
 }
 

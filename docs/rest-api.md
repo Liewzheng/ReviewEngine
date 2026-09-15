@@ -116,6 +116,8 @@ Response 202:
 }
 ```
 
+**入队时的 LLM 可用性门禁（422）**：请求体与服务器两侧都没有可用 LLM 时，提交在入队之前被拒（不产生评审记录、不发起任何 LLM 调用）。响应带机器可读的 `code`：`llmNotConfigured` = 没有任何可用配置；`llmAllDisabled`（RENG-75）= **配置了 provider 但全部被停用**，错误文本直接点名原因（"all LLM providers are disabled: re-enable one …"），不会以「所有 provider 调用失败」的形式出现在任务失败里。请求级 `llm_configs` 非空时是调用方的显式选择，不受服务端停用状态影响。`POST /api/v1/reviews/:task_id/rerun` 走同一门禁。
+
 #### `gitlab_mr` URL 的主机改写与不可达主机拒绝（RENG-33）
 
 手动提交的 `source.url` 通常是调用方浏览器能打开的地址（即 GitLab 的 `external_url`），而 review-engine 自己（常常跑在容器里）未必能访问它——容器内的 `localhost` 指向容器自身。webhook 路径早已按「匹配到的 Git 平台」把 payload URL 改写到可达地址（见 `docs/integrations/gitlab.md` 的 Internal URL 一节）；REST 提交路径自 0.10.15 起遵循同一套规则、复用同一个改写函数 `rewrite_url_to_platform`：
@@ -396,6 +398,10 @@ Response 200:
   "status": "saved"
 }
 ```
+
+`llm.providers[]` 每个条目带 `disabled`（bool，RENG-75）：`true` 表示**停用**该 provider —— 配置与历史完整保留，但评审链不再使用它、健康探测也不再检查它（`GET /llm/providers` 报 `status: "disabled"`、`chainPosition: null`）。保存语义与掩码 key 相同：条目里**不带** `disabled` 键 = 「不表态」，保留该同名 provider 的已存值（旧客户端的保存不会意外把停用的 provider 重新启用）；显式传 `true` / `false` 才改变它。存储顺序就是评审链：第一个**启用中**的 provider 是链首；当被记录的 `primaryProvider` 为空、找不到对应 provider、或对应的是被停用项时，保存管道会把它归一到第一个启用中的 provider（全部停用时置空）。
+
+provider 名只是展示标签、**可以重复**（RENG-75 身份批）：`providers[]` 的解析全程按下标，不做任何「按名合并」。掩码/空 key 的「保持不变」解析跟随条目而不是名字：payload 第 `i` 条若与库中第 `i` 条的 `(provider, apiBaseUrl, defaultModel)` 三元组一致 → 用库中第 `i` 条的 key；否则若库中**恰好一条**匹配该三元组 → 用它的 key（纯顺序调整时 key 跟随卡片）；否则置空（两个同三元组不同 key 的账户在掩码 payload 里不可区分，绝不会把甲的 key 错放给乙；改 model / 改 URL 且 key 留空 = key 被清除，需重新输入 —— 与 git 平台改 baseUrl 的规则一致）。`disabled` 的 keep 用同一条目跟随规则。被记录的 `primaryProvider` 按名解析到第一个同名启用条目 —— 与「链首 = 第一张启用卡」同义（同名时不需要索引回声）。
 
 #### `POST /api/v1/config/test`
 
@@ -694,7 +700,7 @@ Response 200:
 }
 ```
 
-`llmProviders`（0.10.18 起，RENG-36）：与 `GET /api/v1/llm/providers`、Dashboard 的 `health` 段读同一份探测缓存，`status` 取最近一次真实探测结果（`success` / `error` / `offline`），`message` 为具体错误文本（如 `HTTP 401 Unauthorized`），`overall` 同样按探测结果得出（全正常 `success` / 部分 `warning` / 全失败 `error` / 无 provider `offline`）。本端点不返回探测延迟（`latencyMs` 恒为 0，按 RENG-32 的 Dashboard 规则；卡片接口才带真实耗时）。注意 `llmConfigured` 仍是**配置**判据（有非空 `api_base` 即可），与健康状态无关。
+`llmProviders`（0.10.18 起，RENG-36）：与 `GET /api/v1/llm/providers`、Dashboard 的 `health` 段读同一份探测缓存，`status` 取最近一次真实探测结果（`success` / `error` / `offline` / `disabled`，`disabled` = 被主动停用、不探测，RENG-75 起），`message` 为具体错误文本（如 `HTTP 401 Unauthorized`），`overall` 按**启用中** provider 的探测结果得出（全正常 `success` / 部分 `warning` / 全失败 `error` / 无启用 provider `offline`；被停用的 provider 不参与评定，也不算故障）。本端点不返回探测延迟（`latencyMs` 恒为 0，按 RENG-32 的 Dashboard 规则；卡片接口才带真实耗时）。注意 `llmConfigured` 仍是**配置**判据（存在启用中且 `api_base` 非空的 provider 即可，RENG-75 起不计入被停用项），与健康状态无关。
 
 顶层 `GET /health`（及 `/health/ready`）保留，用于存活检查，返回简单状态（见 §7 认证策略）。
 
@@ -827,6 +833,7 @@ Response 200:
       "logo": "OpenAI",
       "status": "healthy",
       "configured": true,
+      "disabled": false,
       "apiBaseUrl": "https://api.openai.com/v1",
       "defaultModel": "gpt-4o",
       "maxTokens": 4096,
@@ -856,22 +863,25 @@ API key 永远不会在响应中返回。
 
 - `healthy` —— 最近一次探测成功（`message: Configured`），`lastProbeLatencyMs` 是该次探测的往返耗时，`lastChecked` 是探测时刻；
 - `error` —— 最近一次探测失败（key 被改坏 / 被吊销、地址不可达、401/403 等），`message` 是具体错误；
-- `offline` —— 没有存储 key，**不做探测**，`lastProbeLatencyMs` 为 0；`lastChecked` 为 `null`（没有任何一次探测发生过，不再回填当前时间）。
+- `offline` —— 没有存储 key，**不做探测**，`lastProbeLatencyMs` 为 0；`lastChecked` 为 `null`（没有任何一次探测发生过，不再回填当前时间）；
+- `disabled` —— 该 provider 被**主动停用**（RENG-75，条目级 `disabled` 字段为 `true`）：不是故障，**不做探测**，`lastProbeLatencyMs` 为 0，`lastChecked` 为 `null`。配置与历史统计完整保留（`requestCount` 等使用/延迟指标照常返回），重新启用即恢复。UI 必须能把它与 `offline`（不可达 / 未配置）区分开。
 
 改 key、改 `apiBase`、改 provider 名、删除 provider（`PUT /api/v1/config` 的 `llm` 段，或本节的 `POST` / `PUT` / `DELETE /providers`）都会**丢弃该 provider 缓存的健康状态**，下一次读取重新探测后才给出状态 —— 因此「在 WebUI 改坏 key、不重启服务」不会再显示成 `healthy`。失效粒度是**按 provider**（缓存键是 `provider + model + api_base + api_key` 的 SHA-256 指纹）：只动一个 provider 时，其他 provider 的状态与徽标不受影响，也不会被连带重新探测。缓存未命中时读取会等待该次探测（最长即探测自身的 10s 超时）；只是超过 TTL 的条目会立即返回并**在后台**刷新一次，所以正常轮询不会因为探测而变慢。
 
 `POST /api/v1/llm/providers/{id}/test` 的响应仍然叫 `latencyMs`：那是**用户刚发起的那一次**手工测试自己的往返耗时（RENG-54 的会话内结果行），与列表里的探测缓存是两个不同的测量，不共用字段名。
 
-0.10.11 起（RENG-55）每个 provider 额外返回链序信息：`position` 为它在**存储列表**中的下标（0 起，与 `llm_providers.raw.position` 及 UI 卡片顺序一致，不受“首选”选择影响），`chainPosition` 为它在**运行时链**中的 1 起名次（首选 provider 为 1，其后按存储顺序排列），`isPrimary` 标识链首（即评审实际首先使用的 provider）。运行时链的规则见 [configuration.md](configuration.md#chain-order-and-the-primary-provider)。
+0.10.11 起（RENG-55）每个 provider 额外返回链序信息：`position` 为它在**存储列表**中的下标（0 起，与 `llm_providers.raw.position` 及 UI 卡片顺序一致，不受“首选”选择影响），`chainPosition` 为它在**运行时链**中的 1 起名次（首选 provider 为 1，其后按存储顺序排列），`isPrimary` 标识链首（即评审实际首先使用的 provider）。运行时链的规则见 [configuration.md](configuration.md#chain-order-and-the-primary-provider)。**存储顺序就是链**：链首是第一个**启用中**的 provider；被停用的 provider（`disabled: true`）完全不在链上，其 `chainPosition` 为 `null`、`isPrimary` 恒为 `false`（RENG-75）。
 
 0.10.21 起（RENG-56）每个 provider 额外返回**真实使用统计**，数据源是评审记录本身（`reviews.llm_summary`，RENG-38 起每次评审写入的 `[{provider, model}]` 快照）而不是任何估算值：
 
 - 窗口：`usageWindowDays`（当前恒为 7）与 `usageSince`（滚动窗口起点，含端点）随列表一起返回 —— UI 用它标注「过去 7 天」，不自行假设窗口。
 - `usageTotal`：窗口内**全部**已记录使用数（所有 provider 名，含已不再配置的），即每个 `usageShare` 的分母。因此它可以大于各卡片 `requestCount` 之和：卡片只统计当前配置里的 provider。`null` 表示读不到历史。
-- `requestCount`：该 provider 在窗口内被记录到的**评审数**（评审级粒度：一次评审无论用几个模型，都只给该 provider 记一次）。可直接用 `GET /api/v1/reviews` 的 `llmSummary` 逐条核对。
-- `usageShare`：该 provider 占窗口内**全部**已记录使用（含已不再配置的 provider 名）的比例，0–1。
-- `successRate`：使用过该 provider 且已终态的评审中 `completed / (completed + failed)`，0–1。
-- `lastUsedAt`：窗口内最近一次使用该 provider 的时刻。
+- `requestCount`：该卡片在窗口内被记录到的**评审数**（评审级粒度：一次评审对每个 `(provider, model, fp)` 三元组各记一次，RENG-75 起）。可直接用 `GET /api/v1/reviews` 的 `llmSummary` 逐条核对。
+- `usageShare`：该卡片占窗口内**全部**已记录使用（含已不再配置的 provider 名与未归因的旧数据）的比例，0–1。
+- `successRate`：使用过该卡片且已终态的评审中 `completed / (completed + failed)`，0–1。
+- `lastUsedAt`：窗口内最近一次使用该卡片的时刻。
+
+**按四元组指纹聚合（RENG-75）**：provider 名只是展示标签（可重复），一张卡片的统计身份是 `(provider, api_base, model, api_key)` 的截断 SHA-256 指纹（定义与字段顺序见 [configuration.md](configuration.md#card-identity-names-are-labels-fingerprints-identity-reng-75)）。`reviews.llm_summary` 的每个条目自本版起带 `fp`；`GET /llm/providers` 的每个条目在服务端内部用自己的指纹匹配统计桶 —— **指纹本身绝不出现在任何 API 响应里**（它对 key 做了哈希，截断后弱口令仍可被离线爆破；响应只带聚合值）。换 key / 换 URL = 新指纹 = 该卡统计重新起算（旧指纹的行留在库里、不再归因）。**旧数据并入规则**：升级前写入的行没有 `fp`，构成 `(provider, model)` 的「未标记」桶；当且仅当该 `(provider, model)` **恰好有一张启用中的卡片**时并入该卡（单卡并入）；同名同 model 有多张启用卡、或没有启用卡时**不并入任何卡**（无法归因，行保留在库中，仍计入 `usageTotal`）。
 
 **不知道就是 `null`，绝不填 0**：窗口内没有任何记录的 provider，`requestCount` 是实测的 `0`，而 `usageShare` / `successRate` / `lastUsedAt` 为 `null`（没有分母 / 没有终态 / 从未使用）。`usageAvailable` 为 `false`（`REVIEW_DISABLE_DB=1`、聚合查询失败）时四项全为 `null`。`successRate` 的固有局限：`llm_summary` 只在评审完成写回时落库，因此「还没产出任何报告就失败的评审」不带快照、也无法归因到某个 provider —— 该比率是「用过它并且跑完的评审里有多少成功」，是 provider 自身调用成功率的**上界**；逐次调用的成功率/延迟见下面 RENG-57 的 `llm_call_samples`。
 
@@ -879,10 +889,10 @@ API key 永远不会在响应中返回。
 
 成本：每次读取一次聚合查询，走 `reviews(created_at)` 索引的范围扫描，代价与窗口内评审数成正比（窗口外与 `llm_summary IS NULL` 的行在同一次扫描中被过滤），JSON 快照在 Rust 侧解析（SQLite / PostgreSQL 两端无需 JSON 方言分叉）。
 
-0.10.23 起（RENG-57）额外返回**逐次调用的真实延迟统计**，数据源是评审路径每次 LLM 调用落库的采样表 `llm_call_samples`（迁移 `0004_llm_call_samples.sql`）。此前页面的「平均延迟」只有探测的瞬时值可用（RENG-53 的困惑点正是这两种测量被混为一谈）：
+0.10.23 起（RENG-57）额外返回**逐次调用的真实延迟统计**，数据源是评审路径每次 LLM 调用落库的采样表 `llm_call_samples`（迁移 `0004_llm_call_samples.sql`；RENG-75 起每行还带 `entry_fp` 指纹列，迁移 `0005_llm_entry_fp.sql`，聚合同样按指纹分桶、旧行 NULL 归入未标记桶并适用上述并入规则）。此前页面的「平均延迟」只有探测的瞬时值可用（RENG-53 的困惑点正是这两种测量被混为一谈）：
 
 - 窗口：`latencyWindowDays`（当前恒为 7）与 `latencySince`（滚动窗口起点，含端点）**独立于 usage 窗口单独返回**，客户端不假设两者一致（当前实现两者同为 7 天）。
-- `avgLatencyMs`：窗口内该 provider **成功调用**的平均往返耗时（整数毫秒）。失败调用**不计入**均值（一次 401 可能 5ms 返回、一次超时可能 120s，混入会让均值反映错误分布而非 provider 速度），失败次数单独给出。
+- `avgLatencyMs`：窗口内该卡片**成功调用**的平均往返耗时（整数毫秒）。失败调用**不计入**均值（一次 401 可能 5ms 返回、一次超时可能 120s，混入会让均值反映错误分布而非 provider 速度），失败次数单独给出。
 - `latencySampleCount` / `latencyFailureCount`：窗口内的成功 / 失败调用次数（采样表的行数口径，逐次尝试计数：重试与 fallback 的每一次失败尝试都各占一行）。`latencySampleCount` 是均值的分母。
 - `latencyLastSampleAt`：窗口内最近一次调用（成功或失败）的时刻。
 - `latencySparkline`：窗口按 6 小时切成 28 桶、每桶成功调用的平均耗时（整数毫秒），最旧桶在前；桶内无调用为 `null`（折线断开，不画假值）。**没有采样就是 `null`**（没有可画的序列，也不会画一条零线）。
@@ -893,7 +903,7 @@ API key 永远不会在响应中返回。
 
 写入路径（best-effort，绝不影响评审）：`LLMClient` 每次调用尝试结束后把一行交给 `StoreLlmCallSink`，它写 `llm_call_samples` 并在**每个 sink 的第一次写入**时顺带做一次保留期清理（删除 30 天前的行，`src/store/llm_samples.rs` 的 `RETENTION_DAYS = 30`）。写失败只记 WARN（与 `llm_summary` 写穿一致）；无 DB 时不挂 sink，什么都不写。Repo 扫描类评审（`/api/v1/repo/*`）不在覆盖范围内：它的报告不带 provider 归因（`llm_provider: None`），RENG-56 的 usage 统计同样看不到它。
 
-成本：每次读取一次 `llm_call_samples(created_at, provider)` 索引的窗口范围扫描，行数按窗口内实际调用数计（典型规模见 `docs/configuration.md`），在 Rust 侧折叠为每 provider 的均值与分桶（同 RENG-56 的理由：不做 SQLite / PostgreSQL 的日期分桶方言分叉）。
+成本：每次读取一次 `llm_call_samples(created_at, provider)` 索引的窗口范围扫描，行数按窗口内实际调用数计（典型规模见 `docs/configuration.md`），在 Rust 侧按指纹折叠为每卡片的均值与分桶（同 RENG-56 的理由：不做 SQLite / PostgreSQL 的日期分桶方言分叉；0005 未新增索引 —— 指纹是折叠维度而非过滤条件，既有窗口索引已界定扫描范围）。
 
 #### `POST /api/v1/llm/providers`
 
@@ -1006,7 +1016,7 @@ Response 200:
 
 `health.integrations`（0.10.8 起）：按**实际 git 集成配置**检测，两条配置通道任一满足即报 `success`——`git_platforms` 表（即 `PUT /api/v1/config` 的 Git 平台列表）中存在任一 `type=gitlab` / `type=github` 平台，**或**启动时经 env/CLI 配置了凭据（`GITLAB_TOKEN` / `--gitlab-token`、`GITHUB_TOKEN` / `--github-token`；该通道直接接入 webhook / MR 拉取客户端，不经过 `git_platforms`）；不再通过 LLM provider 名称猜测。`latencyMs` 字段已移除（原恒为 0 的占位值；真实连通性/延迟探测用 `POST /api/v1/llm/providers/{id}/test`）。
 
-`health.llmProviders`（0.10.18 起，RENG-36）：与 `GET /api/v1/llm/providers` 共用同一份健康缓存（`AppState::llm_health`），因此两页不会互相矛盾。每行 `status` 取该 provider 最近一次真实探测的结果（`success` / `error` / `offline`，`offline` = 未配置 key、不探测），`message` 为 `Configured` / `Missing API key` / 具体错误文本（如 `HTTP 401 Unauthorized`）。`overall` 同样按探测结果得出：无 provider 为 `offline`；**全部**正常为 `success`；部分正常为 `warning`（含「有一个 provider 未配置 key」的情形）；一个都不正常为 `error`——不再只看「有没有配 key」。改配置（`PUT /api/v1/config` 的 `llm` 段或 provider 增删改）会丢弃受影响 provider 的缓存并在下次读取时重新探测；读取路径上未被缓存的 provider 会等待该次探测（最长 10s），仅超 TTL 的条目在后台刷新。
+`health.llmProviders`（0.10.18 起，RENG-36）：与 `GET /api/v1/llm/providers` 共用同一份健康缓存（`AppState::llm_health`），因此两页不会互相矛盾。每行 `status` 取该 provider 最近一次真实探测的结果（`success` / `error` / `offline` / `disabled`；`offline` = 未配置 key、不探测，`disabled` = 被主动停用、不探测，RENG-75 起），`message` 为 `Configured` / `Missing API key` / `Disabled` / 具体错误文本（如 `HTTP 401 Unauthorized`）。`overall` 按**启用中** provider 的探测结果得出：无启用 provider（未配置，或全部被停用）为 `offline`；**全部**正常为 `success`；部分正常为 `warning`（含「有一个 provider 未配置 key」的情形）；一个都不正常为 `error`——被停用的 provider 是「有意关闭」，不把面板拖成 `warning`/`error`，也不再只看「有没有配 key」。改配置（`PUT /api/v1/config` 的 `llm` 段或 provider 增删改）会丢弃受影响 provider 的缓存并在下次读取时重新探测；读取路径上未被缓存的 provider 会等待该次探测（最长 10s），仅超 TTL 的条目在后台刷新。
 
 ---
 

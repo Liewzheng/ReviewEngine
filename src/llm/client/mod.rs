@@ -190,6 +190,8 @@ impl LLMClient {
             result.provider = config.provider.clone();
         }
         result.fallback = fallback;
+        // RENG-75: attribute the exact card, for the usage snapshot's `fp`.
+        result.entry_fp = Some(config.entry_fp());
         result
     }
 
@@ -277,6 +279,9 @@ impl LLMClient {
             at: Utc::now(),
             provider: config.provider.clone(),
             model: config.model.clone(),
+            // RENG-75: which CARD served the attempt, so same-named cards
+            // aggregate separately. Never logged (it hashes the key).
+            entry_fp: config.entry_fp(),
             latency_ms: elapsed.as_millis() as u64,
             success: result.is_ok(),
             error: result.as_ref().err().map(|e| truncate_error(&format!("{e:#}"))),
@@ -382,6 +387,8 @@ impl LLMClient {
             model,
             provider: config.provider.clone(),
             fallback: false,
+            // Filled by `attribute_provider` on the way out.
+            entry_fp: None,
         })
     }
 

@@ -17,7 +17,9 @@ const props = withDefaults(defineProps<Props>(), {
 
 const { t } = useI18n()
 
-const statusMap: Record<string, { type: any; textKey: string; effect?: string; customClass?: string }> = {
+type TagType = 'primary' | 'success' | 'info' | 'warning' | 'danger'
+
+const statusMap: Record<string, { type: TagType; textKey: string; effect?: string; customClass?: string }> = {
   queued: { type: 'info', textKey: 'common.status.queued' },
   running: { type: 'success', textKey: 'common.status.inProgress', effect: 'plain' },
   completed: { type: 'success', textKey: 'common.status.completed' },

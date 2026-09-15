@@ -34,6 +34,13 @@ pub struct ExpertReport {
     /// Model identifier snapshot paired with [`Self::llm_provider`].
     #[serde(default)]
     pub llm_model: Option<String>,
+    /// RENG-75: entry fingerprint of the serving card, paired with
+    /// [`Self::llm_provider`]. IN-MEMORY ONLY — it hashes the API key, so it
+    /// is never serialized into `reviews.result` or any API response; it
+    /// travels only as far as [`ReviewOutput::llm_usages`], which hands it to
+    /// the persistence layer's `llm_summary` writer.
+    #[serde(default, skip_serializing)]
+    pub llm_fp: Option<String>,
 }
 
 /// One LLM `(provider, model)` pair observed during a review (RENG-38).
@@ -46,6 +53,13 @@ pub struct LlmUsage {
     pub provider: String,
     /// Model identifier snapshot (e.g. `"mimo-v2.5-pro"`).
     pub model: String,
+    /// RENG-75: entry fingerprint of the serving card; `None` in rows written
+    /// before the field existed. NEVER SERIALIZED (it hashes the API key):
+    /// the `llm_summary` column writer emits it explicitly
+    /// (`crate::store::rows::llm_summary_json`), and no API response can ever
+    /// carry it by accident.
+    #[serde(default, skip_serializing)]
+    pub fp: Option<String>,
 }
 
 /// A single finding / issue identified during a code review.
@@ -201,6 +215,10 @@ pub struct AggregatedReport {
     /// Model identifier snapshot paired with [`Self::llm_provider`].
     #[serde(default)]
     pub llm_model: Option<String>,
+    /// RENG-75: entry fingerprint of the serving card — IN-MEMORY ONLY, like
+    /// [`ExpertReport::llm_fp`].
+    #[serde(default, skip_serializing)]
+    pub llm_fp: Option<String>,
 }
 
 impl ReviewOutput {
@@ -243,14 +261,17 @@ impl ReviewOutput {
     /// `reviews.llm_summary` by the store layer.
     pub fn llm_usages(&self) -> Vec<LlmUsage> {
         let mut usages: Vec<LlmUsage> = Vec::new();
-        let mut push = |provider: &Option<String>, model: &Option<String>| {
+        let mut push = |provider: &Option<String>, model: &Option<String>, fp: &Option<String>| {
             if let (Some(p), Some(m)) = (provider, model) {
                 if p.is_empty() || m.is_empty() {
                     return;
                 }
+                // RENG-75: deduplicated per (provider, model, fp) — two
+                // same-named cards with different keys count as two usages.
                 let usage = LlmUsage {
                     provider: p.clone(),
                     model: m.clone(),
+                    fp: fp.clone(),
                 };
                 if !usages.contains(&usage) {
                     usages.push(usage);
@@ -258,10 +279,10 @@ impl ReviewOutput {
             }
         };
         for report in &self.reports {
-            push(&report.llm_provider, &report.llm_model);
+            push(&report.llm_provider, &report.llm_model, &report.llm_fp);
         }
         if let Some(agg) = &self.aggregated {
-            push(&agg.llm_provider, &agg.llm_model);
+            push(&agg.llm_provider, &agg.llm_model, &agg.llm_fp);
         }
         usages
     }
@@ -413,6 +434,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: provider.map(str::to_string),
             llm_model: model.map(str::to_string),
+            llm_fp: None,
         }
     }
 
@@ -437,6 +459,7 @@ mod tests {
             raw_dump_path: None,
             llm_provider: Some("deepseek".to_string()),
             llm_model: Some("deepseek-v4".to_string()),
+            llm_fp: None,
         });
 
         let usages = output.llm_usages();
@@ -445,15 +468,18 @@ mod tests {
             vec![
                 LlmUsage {
                     provider: "xiaomi".into(),
-                    model: "mimo-v2.5-pro".into()
+                    model: "mimo-v2.5-pro".into(),
+                    fp: None,
                 },
                 LlmUsage {
                     provider: "deepseek".into(),
-                    model: "deepseek-v4".into()
+                    model: "deepseek-v4".into(),
+                    fp: None,
                 },
                 LlmUsage {
                     provider: "xiaomi".into(),
-                    model: "mimo-v2-pro".into()
+                    model: "mimo-v2-pro".into(),
+                    fp: None,
                 },
             ]
         );
@@ -461,6 +487,42 @@ mod tests {
         // No snapshots anywhere → empty list (→ NULL column upstream).
         let bare = ReviewOutput::new(vec![bare_report("a", None, None)]);
         assert!(bare.llm_usages().is_empty());
+    }
+
+    /// RENG-75: the fingerprint is part of the usage identity — two reports
+    /// from same-(provider, model) cards with different keys count as two
+    /// usages — and it NEVER serializes (it hashes the API key).
+    #[test]
+    fn llm_usages_carry_fp_without_serializing_it() {
+        let mut report = bare_report("a", Some("acme"), Some("m1"));
+        report.llm_fp = Some("fp-aaaa".to_string());
+        let mut other = bare_report("b", Some("acme"), Some("m1"));
+        other.llm_fp = Some("fp-bbbb".to_string());
+        let output = ReviewOutput::new(vec![report, other]);
+
+        let usages = output.llm_usages();
+        assert_eq!(usages.len(), 2, "same (provider, model), different fp: two usages");
+        assert_eq!(usages[0].fp.as_deref(), Some("fp-aaaa"));
+        assert_eq!(usages[1].fp.as_deref(), Some("fp-bbbb"));
+
+        // The fingerprint must not leak into any serialized form: not the
+        // usage, not the report it came from (reviews.result).
+        let usage_json = serde_json::to_string(&usages[0]).unwrap();
+        assert!(
+            !usage_json.contains("fp-aaaa"),
+            "usage JSON must not carry the fp: {usage_json}"
+        );
+        let report_json = serde_json::to_string(&output.reports[0]).unwrap();
+        assert!(
+            !report_json.contains("fp-aaaa"),
+            "the report (reviews.result) must not carry the fp: {report_json}"
+        );
+        // …and it deserializes back from the llm_summary column shape.
+        let back: Vec<LlmUsage> = serde_json::from_str(r#"[{"provider":"acme","model":"m1","fp":"fp-aaaa"}]"#).unwrap();
+        assert_eq!(back[0].fp.as_deref(), Some("fp-aaaa"));
+        // Pre-RENG-75 rows (no fp key) deserialize as the unmarked bucket.
+        let old: Vec<LlmUsage> = serde_json::from_str(r#"[{"provider":"acme","model":"m1"}]"#).unwrap();
+        assert_eq!(old[0].fp, None);
     }
 
     /// Pre-0.10.2 report JSON (no llm_* keys) must still deserialize.

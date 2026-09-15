@@ -93,6 +93,13 @@ pub struct UiLlmProviderConfig {
     pub timeout_seconds: u32,
     #[serde(default = "default_retry_attempts")]
     pub retry_attempts: u32,
+    /// Administrative off switch (RENG-75). `Option` so a save that omits the
+    /// key can be told apart from an explicit `false`: `None` keeps the stored
+    /// value of the same-named provider (masked-keep semantics, like the API
+    /// key), `Some(_)` sets it. The stored projection always carries
+    /// `Some(_)`, so `GET /config` reports a concrete bool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -277,6 +284,7 @@ impl UiConfig {
                 temperature: l.temperature,
                 timeout_seconds: 60,
                 retry_attempts: 3,
+                disabled: Some(l.disabled),
             });
         }
 

@@ -411,6 +411,7 @@ impl LLMProvider for ScriptedProvider {
             model: "mock".to_string(),
             provider: "mock".to_string(),
             fallback: false,
+            entry_fp: None,
         })
     }
 }
@@ -439,6 +440,7 @@ fn mock_configs() -> Vec<crate::models::LLMConfig> {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }]
 }
 
@@ -507,6 +509,7 @@ async fn test_sampling_all_failed_is_error_for_fallback_path() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     let err = call_scoring(
         &client,
@@ -534,6 +537,7 @@ fn test_scoring_configs_runs_cold_and_preserves_input() {
         max_tokens: 4096,
         temperature,
         disable_thinking: None,
+        disabled: false,
     };
     let configs = vec![mk(0.3), mk(0.9)];
     let overridden = scoring_configs(&configs);

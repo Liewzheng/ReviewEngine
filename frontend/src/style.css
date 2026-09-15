@@ -15,6 +15,15 @@
   --bg-hover: rgba(255,255,255,0.04);
   --bg-active: rgba(99,102,241,0.12);
   --shadow-card: 0 4px 6px -1px rgba(0,0,0,0.5), 0 2px 4px -1px rgba(0,0,0,0.4);
+  /* RENG-76 design language: one fading step below `--text-secondary`, for
+     values that are present but deliberately quiet (a null `—`, a chain
+     marker, a disabled footer). Named aliases resolve onto the palette above
+     so a component can speak the design language without re-picking colours. */
+  --text-tertiary: #6b7280;
+  --accent-primary: var(--brand);
+  --accent-error: var(--error);
+  --accent-warning: var(--warning);
+  --accent-success: var(--success);
   /* Dashboard trend chart (RENG-50): brightened for dark-theme readability —
      grid lines clearly visible, high-contrast tick text, series colors in the
      accent's blue/violet family. Consumed by lightweight-charts options. */
@@ -48,6 +57,7 @@
   --bg-hover: rgba(0,0,0,0.04);
   --bg-active: rgba(99,102,241,0.08);
   --shadow-card: 0 4px 6px -1px rgba(0,0,0,0.1), 0 2px 4px -1px rgba(0,0,0,0.06);
+  --text-tertiary: #94a3b8;
   --chart-grid: rgba(100, 116, 139, 0.25);
   --chart-text: #475569;
   --chart-line: #6366f1;
@@ -71,6 +81,10 @@ html, body, #app {
   background-color: var(--bg-primary);
   color: var(--text-primary);
   transition: background-color 0.3s, color 0.3s;
+}
+
+button, input, select, textarea {
+  font: inherit;
 }
 
 a {

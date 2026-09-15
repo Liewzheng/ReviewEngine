@@ -337,7 +337,7 @@ function onHeaderPointerDown(event: PointerEvent) {
   display: flex;
   flex-direction: column;
   min-height: 183px;
-  padding: 16px;
+  padding: var(--space-4);
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -384,7 +384,7 @@ function onHeaderPointerDown(event: PointerEvent) {
 .provider-card__header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   height: 36px;
   cursor: grab;
 }
@@ -406,7 +406,7 @@ function onHeaderPointerDown(event: PointerEvent) {
   height: 24px;
   border-radius: 50%;
   background: var(--accent-primary);
-  color: #fff;
+  color: var(--text-on-accent);
   font-family: var(--font-mono);
   font-size: 11px;
   font-weight: 700;
@@ -435,7 +435,7 @@ function onHeaderPointerDown(event: PointerEvent) {
   margin-left: auto;
   display: inline-flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--space-1);
   font-size: 11px;
   color: var(--text-secondary);
   white-space: nowrap;
@@ -477,7 +477,7 @@ function onHeaderPointerDown(event: PointerEvent) {
 .provider-card__stats {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: 6px;
   font-size: 13px;
   line-height: 1.5;
@@ -496,13 +496,13 @@ function onHeaderPointerDown(event: PointerEvent) {
 .provider-card__usage {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  margin-top: 8px;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
 }
 
 .provider-card__usage-bar {
-  height: 1px;
-  margin: 3px 0;
+  height: var(--progress-h-hairline);
+  margin: var(--space-1) 0;
   background: var(--bg-surface);
   overflow: hidden;
 }
@@ -554,6 +554,6 @@ function onHeaderPointerDown(event: PointerEvent) {
 :global(.provider-card-ghost) {
   z-index: 2000;
   opacity: 0.9;
-  filter: drop-shadow(0 8px 24px rgba(0, 0, 0, 0.35));
+  filter: drop-shadow(var(--shadow-float));
 }
 </style>

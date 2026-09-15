@@ -48,19 +48,6 @@ export interface ExpertUpdateResult extends Expert {
   persisted?: boolean
 }
 
-/** Maps each expert category to its display color (hex). */
-export const categoryColorMap: Record<ExpertCategory, string> = {
-  security: '#ef4444',
-  performance: '#f59e0b',
-  quality: '#22c55e',
-  maintainability: '#3b82f6',
-  'test-coverage': '#a855f7',
-  documentation: '#6b7280',
-  dependencies: '#6366f1',
-  accessibility: '#ec4899',
-  architecture: '#14b8a6',
-}
-
 /** Maps each expert category to its human-readable label. */
 export const categoryLabelMap: Record<ExpertCategory, string> = {
   security: 'Security',

@@ -330,7 +330,7 @@ const pageTitle = computed(() => {
   <el-dialog
     v-model="tokenDialogVisible"
     :title="tokenDialogMode === 'rotate' ? $t('token.rotateTitle') : $t('token.title')"
-    width="440px"
+    width="var(--modal-w-sm)"
     :close-on-click-modal="false"
     :close-on-press-escape="false"
     align-center
@@ -415,7 +415,7 @@ const pageTitle = computed(() => {
   height: var(--header-height);
   display: flex;
   align-items: center;
-  padding: 0 16px;
+  padding: 0 var(--space-4);
   border-bottom: 1px solid var(--border-color);
   gap: 10px;
 }
@@ -435,15 +435,15 @@ const pageTitle = computed(() => {
 
 .sidebar-nav {
   flex: 1;
-  padding: 12px 0;
+  padding: var(--space-3) 0;
   overflow-y: auto;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
-  padding: 10px 16px;
-  margin: 2px 8px;
+  padding: 10px var(--space-4);
+  margin: 2px var(--space-2);
   border-radius: var(--radius-md);
   color: var(--text-secondary);
   text-decoration: none;
@@ -473,17 +473,17 @@ const pageTitle = computed(() => {
 }
 
 .sidebar-footer {
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   border-top: 1px solid var(--border-color);
 }
 
 .version-chip {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 4px 10px;
-  margin-bottom: 8px;
-  border-radius: 12px;
+  gap: var(--space-2);
+  padding: var(--space-1) 10px;
+  margin-bottom: var(--space-2);
+  border-radius: var(--radius-pill);
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-secondary);
@@ -500,12 +500,12 @@ const pageTitle = computed(() => {
 }
 
 .version-chip.has-update {
-  color: var(--success);
-  border-color: rgba(34, 197, 94, 0.35);
+  color: var(--accent-success);
+  border-color: var(--accent-success-border);
 }
 
 .version-chip.has-update .version-dot {
-  background: var(--success);
+  background: var(--accent-success);
 }
 
 .version-text {
@@ -516,16 +516,16 @@ const pageTitle = computed(() => {
 .update-tag {
   font-size: 12px;
   font-weight: 500;
-  color: var(--success);
-  padding: 3px 10px;
-  border-radius: 12px;
-  background: rgba(34, 197, 94, 0.12);
-  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: var(--accent-success);
+  padding: var(--space-1) 10px;
+  border-radius: var(--radius-pill);
+  background: var(--accent-success-soft);
+  border: 1px solid var(--accent-success-border);
 }
 
 .theme-toggle {
   width: 100%;
-  padding: 8px;
+  padding: var(--space-2);
   border: none;
   border-radius: var(--radius-md);
   background: var(--bg-card);
@@ -534,7 +534,7 @@ const pageTitle = computed(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .theme-toggle:hover {
@@ -557,7 +557,7 @@ const pageTitle = computed(() => {
   display: flex;
   align-items: center;
   padding: 0 20px;
-  gap: 16px;
+  gap: var(--space-4);
   flex-shrink: 0;
 }
 
@@ -589,26 +589,26 @@ const pageTitle = computed(() => {
 .header-actions {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .status-badge {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 4px 12px;
-  border-radius: 12px;
+  padding: var(--space-1) var(--space-3);
+  border-radius: var(--radius-pill);
   font-size: 13px;
   font-weight: 500;
-  background: rgba(34, 197, 94, 0.15);
-  color: var(--success);
+  background: var(--accent-success-soft);
+  color: var(--accent-success);
 }
 
 .status-dot {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--success);
+  background: var(--accent-success);
   animation: pulse 2s infinite;
 }
 
@@ -627,14 +627,14 @@ const pageTitle = computed(() => {
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.5;
-  margin: 0 0 16px 0;
+  margin: 0 0 var(--space-4) 0;
 }
 
 .token-error {
   color: var(--error);
   font-size: 13px;
   line-height: 1.5;
-  margin: 0 0 12px;
+  margin: 0 0 var(--space-3);
 }
 
 .token-field-label {
@@ -642,7 +642,7 @@ const pageTitle = computed(() => {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
-  margin: 14px 0 6px;
+  margin: var(--space-4) 0 6px;
 }
 
 .token-bootstrap-hint {

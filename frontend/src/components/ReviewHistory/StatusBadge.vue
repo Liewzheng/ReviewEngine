@@ -58,12 +58,12 @@ const config = computed(() => {
 .status-badge {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 /* Neutral grey tag (cancelled/skipped): theme vars so the tag reads as a
-   muted surface in BOTH themes — the previous fixed light greys (#f4f4f5…)
-   rendered as a light panel in dark mode. */
+   muted surface in BOTH themes — the former fixed light greys rendered as a
+   light panel in dark mode. */
 .status-badge.status-grey {
   --el-tag-bg-color: var(--bg-card);
   --el-tag-border-color: var(--border-color);
@@ -75,25 +75,25 @@ const config = computed(() => {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--el-tag-bg-color, #909399);
+  background: var(--text-tertiary);
   position: relative;
 }
 
 .status-dot.success {
-  background: #67c23a;
+  background: var(--accent-success);
 }
 
 .status-dot.warning {
-  background: #e6a23c;
+  background: var(--accent-warning);
 }
 
 .status-dot.danger {
-  background: #f56c6c;
+  background: var(--accent-error);
 }
 
 .status-dot.status-grey,
 .status-dot.info {
-  background: #909399;
+  background: var(--text-tertiary);
 }
 
 .dot-pulse {

@@ -35,7 +35,7 @@ withDefaults(defineProps<Props>(), {
 }
 
 .card-panel :deep(.el-card__header) {
-  padding: 16px 20px;
+  padding: var(--space-4) 20px;
   border-bottom: 1px solid var(--border-color);
   font-weight: 600;
   font-size: 14px;

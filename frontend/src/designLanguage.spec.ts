@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 // Stylesheet sources, imported as text — see the note on this file above.
 import styleCss from './style.css?raw';
+import { CHART_PALETTE_FALLBACKS } from './chartPalette';
 import pageHeaderSource from './components/common/PageHeader.vue?raw';
 import providerCardSource from './components/Config/ProviderCardCompact.vue?raw';
 import kpiCardSource from './components/Dashboard/KpiCard.vue?raw';
@@ -163,7 +164,7 @@ describe('RENG-75 — the card’s state visuals', () => {
   });
 
   it('draws the usage share as a 1px hairline', () => {
-    expect(rule(css, '.provider-card__usage-bar')).toContain('height: 1px');
+    expect(rule(css, '.provider-card__usage-bar')).toContain('height: var(--progress-h-hairline)');
   });
 
   it('uses a grab cursor and no drag handle element', () => {
@@ -178,5 +179,288 @@ describe('design tokens the rules depend on', () => {
     expect(tokens).toContain('--text-tertiary:');
     expect(tokens).toContain('--accent-primary: var(--brand)');
     expect(tokens).toContain('--accent-error: var(--error)');
+  });
+});
+
+/**
+ * RENG-76 P1/P2: the token layer itself (colour, radius, spacing, modal
+ * widths), the Element Plus bridge that carries it into EP's own components,
+ * and the badge/progress treatments that name it.
+ */
+const appSources = import.meta.glob('./**/*.{vue,ts,css}', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>;
+
+/** The two files whose job is to hold a literal: the token layer, and the one
+ *  canvas palette JavaScript cannot read a `var()` out of. */
+const TOKEN_LAYER = new Set(['./style.css', './chartPalette.ts']);
+
+const allSources = (): [string, string][] =>
+  Object.entries(appSources).filter(([path]) => !path.endsWith('.spec.ts'));
+
+const presentationSources = (): [string, string][] =>
+  allSources().filter(([path]) => !TOKEN_LAYER.has(path));
+
+/**
+ * Source of an app file by its path relative to `src/`. Asserted to exist so a
+ * renamed file fails loudly here instead of silently asserting against `''`.
+ */
+function source(relative: string): string {
+  const text = appSources[`./${relative}`];
+  expect(text, `${relative} is missing from the scanned sources`).toBeTypeOf('string');
+  return text;
+}
+
+/** The value of every `padding` / `margin` / `gap` declaration in a source. */
+function spacingValues(source: string): string[] {
+  const pattern =
+    /(?:^|[\s;,])(?:padding|margin|gap)(?:-(?:top|right|bottom|left|inline|inline-start|inline-end|block|block-start|block-end))?\s*:\s*([^;{}\n]*)/g;
+  return [...source.matchAll(pattern)].map((match) => match[1]);
+}
+
+/** The px lengths a declaration value is built from. */
+function pxLengths(value: string): number[] {
+  return [...value.matchAll(/(?<![\w.])(\d+(?:\.\d+)?)px/g)].map((match) => Number(match[1]));
+}
+
+const RADIUS_VALUE = /^(?:var\(--radius-(?:sm|md|lg|pill)\)|50%|100%|0|0px)$/;
+
+describe('R1.1 — colour lives in the token layer', () => {
+  it('leaves no colour literal in a component or stylesheet', () => {
+    const offenders: string[] = [];
+    for (const [path, source] of presentationSources()) {
+      for (const match of source.matchAll(/#[0-9a-fA-F]{3,8}\b|rgba?\(|hsla?\(/g)) {
+        offenders.push(`${path}: ${match[0]}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('keeps the one JS palette identical to the stylesheet it mirrors', () => {
+    const tokens = flat(read('src/style.css'));
+    for (const [name, value] of Object.entries(CHART_PALETTE_FALLBACKS)) {
+      expect(tokens, `${name} has drifted from style.css`).toContain(`${name}: ${value};`);
+    }
+  });
+});
+
+describe('R1.2 — every corner is one of four radii', () => {
+  const css = read('src/style.css');
+
+  it('declares the four radii', () => {
+    const tokens = flat(css);
+    expect(tokens).toContain('--radius-sm: 6px');
+    expect(tokens).toContain('--radius-md: 8px');
+    expect(tokens).toContain('--radius-lg: 12px');
+    expect(tokens).toContain('--radius-pill: 999px');
+  });
+
+  it('draws every border-radius from a token (circles and 0 excepted)', () => {
+    const offenders: string[] = [];
+    for (const [path, source] of presentationSources()) {
+      for (const decl of source.matchAll(/border-radius\s*:\s*([^;{}\n]+)/g)) {
+        const value = decl[1].trim();
+        for (const part of value.split(/\s+/)) {
+          if (!RADIUS_VALUE.test(part)) offenders.push(`${path}: ${value}`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('overrides the Element Plus defaults in style.css, not per component', () => {
+    const tokens = flat(css);
+    expect(tokens).toContain('--el-border-radius-base: var(--radius-sm)');
+    expect(tokens).toContain('--el-border-radius-small: var(--radius-sm)');
+    expect(rule(css, '.el-pagination')).toContain(
+      '--el-pagination-border-radius: var(--radius-sm)',
+    );
+    expect(rule(css, '.el-dialog')).toContain('--el-dialog-border-radius: var(--radius-md)');
+    expect(rule(css, '.el-message-box')).toContain(
+      '--el-messagebox-border-radius: var(--radius-md)',
+    );
+  });
+});
+
+describe('R1.3 — the Element Plus bridge covers both themes', () => {
+  const tokens = flat(read('src/style.css'));
+
+  it('maps EP onto the app palette in light and dark alike', () => {
+    expect(tokens).toContain("html[data-theme='light'], html.dark {");
+    expect(tokens).toContain('--el-bg-color: var(--bg-surface)');
+    expect(tokens).toContain('--el-border-color: var(--border-color)');
+    expect(tokens).toContain('--el-color-primary: var(--accent-primary)');
+    expect(tokens).not.toContain('html.dark {\n  --el-bg-color');
+  });
+
+  it('re-mixes EP’s lighter/darker ladder from the same accent', () => {
+    expect(tokens).toContain(
+      '--el-color-success-light-9: color-mix(in srgb, var(--accent-success) 10%, var(--bg-surface))',
+    );
+    expect(tokens).toContain(
+      '--el-color-primary-dark-2: color-mix(in srgb, var(--accent-primary) 80%, var(--bg-primary))',
+    );
+  });
+});
+
+describe('R1.4 — spacing comes off one six-step scale', () => {
+  const css = read('src/style.css');
+
+  it('declares the six steps', () => {
+    const tokens = flat(css);
+    for (const [token, value] of Object.entries({
+      '--space-1': '4px',
+      '--space-2': '8px',
+      '--space-3': '12px',
+      '--space-4': '16px',
+      '--space-5': '24px',
+      '--space-6': '32px',
+    })) {
+      expect(tokens, `${token} is missing`).toContain(`${token}: ${value};`);
+    }
+  });
+
+  it('leaves no bare scale step and no off-scale step in the app', () => {
+    const scale = new Set([4, 8, 12, 16, 24, 32]);
+    const odd = new Set([3, 5, 14, 18]);
+    const offenders: string[] = [];
+    for (const [path, source] of allSources()) {
+      for (const value of spacingValues(source)) {
+        for (const px of pxLengths(value)) {
+          if (scale.has(px)) offenders.push(`${path}: bare ${px}px in "${value.trim()}"`);
+          if (odd.has(px)) offenders.push(`${path}: off-scale ${px}px in "${value.trim()}"`);
+        }
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it('moves Element Plus’ own off-scale spacing onto the scale', () => {
+    expect(rule(css, '.el-form-item')).toContain('margin-bottom: var(--space-4)');
+    expect(rule(css, '.el-empty')).toContain('--el-empty-padding: var(--space-6) 0');
+    expect(rule(css, '.el-tag')).toContain('padding: 0 var(--space-2)');
+  });
+});
+
+describe('R1.5 — the expert cards are monochrome', () => {
+  const card = read('src/components/ExpertsManagement/ExpertCard.vue');
+
+  it('drops the nine-colour category palette', () => {
+    expect(source('types/expert.ts')).not.toContain('categoryColorMap');
+    expect(card).not.toContain('categoryColorMap');
+    expect(card).not.toContain('grayscale');
+    expect(card).toContain("props.expert.enabled ? 'var(--accent-primary)' : 'var(--text-secondary)'");
+  });
+
+  it('turns the category chip into a muted surface', () => {
+    const tag = rule(card, '.category-tag');
+    expect(tag).toContain('background: var(--bg-hover)');
+    expect(tag).toContain('color: var(--text-secondary)');
+  });
+
+  it('keeps the enabled/disabled switch legible', () => {
+    expect(card).toContain(":active-color=\"'var(--accent-success)'\"");
+  });
+});
+
+describe('R2.1 — one modal surface', () => {
+  const css = read('src/style.css');
+
+  it('gives the dialog, the message box and the drawer the same surface', () => {
+    const surface = rule(css, '.el-dialog, .el-message-box, .el-drawer');
+    expect(surface).toContain('background-color: var(--bg-elevated)');
+    expect(surface).toContain('border: 1px solid var(--border-subtle)');
+    expect(surface).toContain('border-radius: var(--radius-md)');
+  });
+
+  it('puts all three bodies on the same 12px padding', () => {
+    expect(rule(css, '.el-dialog')).toContain('--el-dialog-padding-primary: var(--space-3)');
+    expect(rule(css, '.el-message-box')).toContain(
+      '--el-messagebox-padding-primary: var(--space-3)',
+    );
+    expect(rule(css, '.el-drawer')).toContain('--el-drawer-padding-primary: var(--space-3)');
+  });
+});
+
+describe('R2.2 — the modal width scale', () => {
+  it('declares the four steps', () => {
+    const tokens = flat(read('src/style.css'));
+    expect(tokens).toContain('--modal-w-sm: 420px');
+    expect(tokens).toContain('--modal-w-md: 520px');
+    expect(tokens).toContain('--modal-w-lg: 640px');
+    expect(tokens).toContain('--modal-w-xl: 760px');
+  });
+
+  it('sends every dialog and drawer through the scale', () => {
+    const offenders: string[] = [];
+    for (const [path, source] of allSources()) {
+      for (const match of source.matchAll(/\b(?:width|size)="(\d+px)"/g)) {
+        offenders.push(`${path}: ${match[0]}`);
+      }
+    }
+    expect(offenders).toEqual([]);
+    expect(source('App.vue')).toContain('width="var(--modal-w-sm)"');
+    expect(source('views/ExpertsManagement.vue')).toContain('width="var(--modal-w-lg)"');
+    expect(source('components/Upgrade/UpgradeDialog.vue')).toContain(
+      'width="var(--modal-w-md)"',
+    );
+    expect(source('views/ReviewHistory.vue')).toContain('size="var(--modal-w-lg)"');
+  });
+});
+
+describe('R2.3 — status colours are the app’s accents', () => {
+  it('paints the review-history status dots from the accents', () => {
+    const css = source('components/ReviewHistory/StatusBadge.vue');
+    expect(rule(css, '.status-dot.success')).toContain('background: var(--accent-success)');
+    expect(rule(css, '.status-dot.warning')).toContain('background: var(--accent-warning)');
+    expect(rule(css, '.status-dot.danger')).toContain('background: var(--accent-error)');
+    expect(rule(css, '.status-dot.info')).toContain('background: var(--text-tertiary)');
+  });
+
+  it('rings the dashboard health dot with the accent, not a literal', () => {
+    const css = source('components/Dashboard/StatusBadge.vue');
+    expect(rule(css, '.status-dot.status-success')).toContain(
+      'box-shadow: 0 0 0 2px var(--accent-success-ring)',
+    );
+    expect(rule(css, '.status-dot.status-queued')).toContain(
+      'box-shadow: 0 0 0 2px var(--text-secondary-ring)',
+    );
+  });
+
+  it('no longer knows any of the stock Element Plus status colours', () => {
+    for (const [path, source] of allSources()) {
+      for (const stock of ['#67c23a', '#e6a23c', '#f56c6c', '#909399']) {
+        expect(source, `${path} still carries ${stock}`).not.toContain(stock);
+      }
+    }
+  });
+});
+
+describe('R2.4 — a progress bar is a restraint', () => {
+  const css = read('src/style.css');
+
+  it('sizes every bar from the progress token', () => {
+    expect(flat(css)).toContain('--progress-h: 2px;');
+    expect(rule(css, '.el-progress-bar__outer')).toContain('height: var(--progress-h) !important');
+    expect(rule(css, '.el-progress-bar__outer')).toContain('background-color: var(--bg-hover)');
+    expect(rule(css, '.el-progress-bar__inner')).toContain('border-radius: var(--radius-pill)');
+    expect(rule(css, '.el-progress-bar__inner')).toContain('opacity: 0.55');
+  });
+
+  it('strengthens the fill when the bar is hovered', () => {
+    expect(flat(css)).toContain('.el-progress:hover .el-progress-bar__inner { opacity: 1;');
+  });
+
+  it('keeps the RENG-75 usage share on its own hairline token', () => {
+    const card = read('src/components/Config/ProviderCardCompact.vue');
+    expect(rule(card, '.provider-card__usage-bar')).toContain('height: var(--progress-h-hairline)');
+  });
+
+  it('leaves no component sizing a bar inline', () => {
+    for (const [path, source] of allSources()) {
+      expect(source, `${path} still binds :stroke-width`).not.toContain(':stroke-width=');
+    }
   });
 });

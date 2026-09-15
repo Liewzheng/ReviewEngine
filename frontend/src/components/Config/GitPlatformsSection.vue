@@ -77,7 +77,7 @@
         ? $t('config.gitPlatforms.addDialogTitle')
         : $t('config.gitPlatforms.editDialogTitle')
     "
-    width="640px"
+    width="var(--modal-w-lg)"
     append-to-body
   >
     <el-form
@@ -545,7 +545,7 @@ function confirmRemove(index: number) {
 .card-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-weight: 500;
   font-size: 14px;
   color: var(--text-primary);
@@ -560,13 +560,13 @@ function confirmRemove(index: number) {
 }
 
 .git-platforms-card :deep(.el-card__body) {
-  padding: 16px 20px;
+  padding: var(--space-4) 20px;
 }
 
 .platforms-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .platform-item {
@@ -586,8 +586,8 @@ function confirmRemove(index: number) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 16px;
-  gap: 12px;
+  padding: var(--space-3) var(--space-4);
+  gap: var(--space-3);
 }
 
 .platform-item-info {
@@ -601,7 +601,7 @@ function confirmRemove(index: number) {
 
 /* RENG-54: the last probe's outcome, one line under the row it belongs to. */
 .platform-item-test {
-  padding: 0 16px 12px;
+  padding: 0 var(--space-4) var(--space-3);
 }
 
 .platform-item-name {
@@ -634,32 +634,28 @@ function confirmRemove(index: number) {
 .platform-item-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   flex-shrink: 0;
 }
 
 /* Info icon next to form labels; hover/focus reveals the tooltip */
 .help-icon {
-  margin-left: 4px;
+  margin-left: var(--space-1);
   font-size: 14px;
   vertical-align: text-bottom;
-  color: var(--el-text-color-secondary);
+  color: var(--text-secondary);
   cursor: help;
 }
 
 .help-icon:focus-visible {
-  outline: 2px solid var(--el-color-primary);
+  outline: 2px solid var(--accent-primary);
   outline-offset: 1px;
   border-radius: 50%;
 }
 
-:deep(.el-dialog__body) {
-  padding-top: 12px;
-}
-
 @media (max-width: 767px) {
   .card-body {
-    padding: 16px;
+    padding: var(--space-4);
   }
 }
 </style>

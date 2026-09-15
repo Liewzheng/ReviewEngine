@@ -531,25 +531,25 @@ onUnmounted(() => {
 }
 
 .btn-icon {
-  margin-right: 4px;
+  margin-right: var(--space-1);
 }
 
 /* Skeleton */
 .stats-skeleton {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 
 .tasks-skeleton {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .skeleton-item {
-  padding: 16px;
+  padding: var(--space-4);
   background: var(--bg-card);
   border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
@@ -559,13 +559,13 @@ onUnmounted(() => {
 .stats-row {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 16px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-4);
 }
 
 /* Task Sections */
 .task-section {
-  margin-top: 24px;
+  margin-top: var(--space-5);
 }
 
 .task-section:first-of-type {
@@ -576,29 +576,29 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding-bottom: 12px;
+  padding-bottom: var(--space-3);
   border-bottom: 1px solid var(--border-color);
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .section-title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-size: 16px;
   font-weight: 600;
   color: var(--text-primary);
 }
 
 .section-empty {
-  padding: 32px 0;
+  padding: var(--space-6) 0;
 }
 
 /* Task Grid */
 .task-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 /* Global Empty */
@@ -609,7 +609,7 @@ onUnmounted(() => {
 .empty-text {
   color: var(--text-secondary);
   font-size: 14px;
-  margin-top: 8px;
+  margin-top: var(--space-2);
 }
 
 /* Transitions */

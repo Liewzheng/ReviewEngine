@@ -414,7 +414,7 @@ onUnmounted(() => {
 }
 
 .skeleton-card {
-  padding: 16px;
+  padding: var(--space-4);
 }
 
 /* Form */
@@ -439,14 +439,14 @@ onUnmounted(() => {
 }
 
 .config-card :deep(.el-card__header) {
-  padding: 14px 20px;
+  padding: var(--space-4) 20px;
   border-bottom: 1px solid var(--border-color);
 }
 
 .card-header {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-weight: 500;
   font-size: 14px;
   color: var(--text-primary);
@@ -473,7 +473,7 @@ onUnmounted(() => {
 .slider-with-value {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
 }
 
@@ -495,9 +495,9 @@ onUnmounted(() => {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   width: 100%;
-  padding: 4px;
+  padding: var(--space-1);
   min-height: 32px;
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
@@ -514,21 +514,21 @@ onUnmounted(() => {
 
 .tag-input .el-button {
   height: 24px;
-  padding: 0 8px;
+  padding: 0 var(--space-2);
 }
 
 /* Advanced toggle */
 .advanced-toggle {
   display: flex;
   justify-content: center;
-  padding: 8px 0;
+  padding: var(--space-2) 0;
 }
 
 /* Checkbox group */
 :deep(.el-checkbox-group) {
   display: flex;
   flex-wrap: wrap;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 :deep(.el-checkbox) {
@@ -568,7 +568,7 @@ onUnmounted(() => {
   }
 
   .card-body {
-    padding: 16px;
+    padding: var(--space-4);
   }
   :deep(.el-form-item__label) {
     font-size: 13px;

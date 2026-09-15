@@ -329,36 +329,36 @@ onUnmounted(() => {
       </el-card>
       <el-card shadow="never" class="stat-card">
         <div class="stat-content">
-          <el-icon class="stat-icon" :size="24" color="var(--success)"><CircleCheck /></el-icon>
+          <el-icon class="stat-icon" :size="24" color="var(--accent-success)"><CircleCheck /></el-icon>
           <div class="stat-body">
-            <div class="stat-value" style="color: var(--success)">{{ healthyCount }}</div>
+            <div class="stat-value" style="color: var(--accent-success)">{{ healthyCount }}</div>
             <div class="stat-label">{{ $t('llm.status.healthy') }}</div>
           </div>
         </div>
       </el-card>
       <el-card shadow="never" class="stat-card">
         <div class="stat-content">
-          <el-icon class="stat-icon" :size="24" color="var(--warning)"><Warning /></el-icon>
+          <el-icon class="stat-icon" :size="24" color="var(--accent-warning)"><Warning /></el-icon>
           <div class="stat-body">
-            <div class="stat-value" style="color: var(--warning)">{{ degradedCount }}</div>
+            <div class="stat-value" style="color: var(--accent-warning)">{{ degradedCount }}</div>
             <div class="stat-label">{{ $t('llm.status.degraded') }}</div>
           </div>
         </div>
       </el-card>
       <el-card shadow="never" class="stat-card">
         <div class="stat-content">
-          <el-icon class="stat-icon" :size="24" color="var(--error)"><CircleClose /></el-icon>
+          <el-icon class="stat-icon" :size="24" color="var(--accent-error)"><CircleClose /></el-icon>
           <div class="stat-body">
-            <div class="stat-value" style="color: var(--error)">{{ errorCount }}</div>
+            <div class="stat-value" style="color: var(--accent-error)">{{ errorCount }}</div>
             <div class="stat-label">{{ $t('llm.status.error') }}</div>
           </div>
         </div>
       </el-card>
       <el-card shadow="never" class="stat-card">
         <div class="stat-content">
-          <el-icon class="stat-icon" :size="24" color="var(--offline)"><Remove /></el-icon>
+          <el-icon class="stat-icon" :size="24" color="var(--accent-offline)"><Remove /></el-icon>
           <div class="stat-body">
-            <div class="stat-value" style="color: var(--offline)">{{ offlineCount }}</div>
+            <div class="stat-value" style="color: var(--accent-offline)">{{ offlineCount }}</div>
             <div class="stat-label">{{ $t('llm.status.offline') }}</div>
           </div>
         </div>
@@ -495,18 +495,18 @@ onUnmounted(() => {
 .stats-row {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-  gap: 12px;
-  margin-bottom: 24px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
 }
 
 .stat-card :deep(.el-card__body) {
-  padding: 16px;
+  padding: var(--space-4);
 }
 
 .stat-content {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .stat-icon {
@@ -550,7 +550,7 @@ onUnmounted(() => {
 .skeleton-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .skeleton-card {
@@ -566,12 +566,12 @@ onUnmounted(() => {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
   align-items: stretch;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 /* Recent usage (RENG-55) — same card chrome as the grid, quieter type. */
 .recent-usage-card {
-  margin-top: 24px;
+  margin-top: var(--space-5);
   background-color: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -581,9 +581,9 @@ onUnmounted(() => {
 .recent-usage-header {
   display: flex;
   align-items: baseline;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-3);
 }
 
 .recent-usage-title {
@@ -603,15 +603,15 @@ onUnmounted(() => {
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .recent-usage-item {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
-  padding-top: 8px;
+  padding-top: var(--space-2);
   border-top: 1px solid var(--border-color);
   font-size: 13px;
 }

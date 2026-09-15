@@ -26,11 +26,44 @@ export interface LlmProvider {
   /** Whether API credentials are configured. */
   configured: boolean
   /**
-   * Round-trip time of the last health probe in milliseconds (0 when the
-   * provider was not probed, e.g. no API key stored) — the value
+   * Round-trip time of the health probe in milliseconds (0 when the provider
+   * was not probed, e.g. no API key stored) — the value
    * `GET /api/v1/llm/providers` reports from its probe cache (RENG-36).
+   *
+   * RENG-57 renamed this from `latencyMs`: it is an INSTANTANEOUS measurement
+   * of one `GET /models`, and the card also shows a historical average
+   * (`avgLatencyMs`) — the RENG-53 finding was that the two were
+   * indistinguishable on screen.
    */
-  latencyMs: number
+  lastProbeLatencyMs: number
+  /**
+   * RENG-57: mean round-trip time of the SUCCESSFUL LLM calls this provider
+   * served inside the latency window (`latencyWindowDays`), in whole
+   * milliseconds; `null` when the window holds no successful call (or the
+   * server could not read the samples) — `null` means unknown, never `0`.
+   *
+   * Failed calls are excluded (a 401 answered in 5 ms or a 120 s timeout
+   * measures the failure, not the provider) and counted in
+   * `latencyFailureCount` instead.
+   */
+  avgLatencyMs: number | null
+  /**
+   * RENG-57: successful calls in the window — the average's denominator, a
+   * measured count (0 is a real value). `null` when the samples could not be
+   * read at all.
+   */
+  latencySampleCount: number | null
+  /** RENG-57: failed calls in the window, excluded from the average. */
+  latencyFailureCount: number | null
+  /** RENG-57: ISO 8601 time of the newest recorded call, or `null`. */
+  latencyLastSampleAt: string | null
+  /**
+   * RENG-57: per-bucket mean latency over the window, oldest bucket first
+   * (28 six-hour buckets). `null` means the provider has no recorded call in
+   * the window — there is no series to draw, and a flat zero line would be a
+   * fabrication. Inside a series, a `null` bucket is a gap with no calls.
+   */
+  latencySparkline: (number | null)[] | null
   /**
    * RENG-56: reviews that recorded this provider inside the usage window
    * (`usageWindowDays`), or `null` when the server could not read the usage

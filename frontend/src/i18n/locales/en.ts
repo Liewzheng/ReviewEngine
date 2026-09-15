@@ -497,16 +497,23 @@ export default {
     stats: {
       providers: 'Providers',
       avgLatency: 'Avg Latency',
+      avgLatencyWindow: 'Avg latency (last {days} days)',
       totalRequests: 'Total Usages',
       totalRequestsWindow: 'Recorded usages (last {days} days)',
     },
     metrics: {
-      latency: 'Latency',
+      avgLatency: 'Avg Latency',
       requests: 'Usages',
       successRate: 'Success Rate',
     },
+    latencySamples: '{n} calls · {failed} failed',
+    probeLatency: 'Probe {n} ms',
+    sparkline: {
+      caption: 'Call latency · last {days} days',
+      label: 'Recorded call latency over the last {days} days',
+    },
     usageShare: '{percent}% of usage (last {days} days)',
-    usageWindow: 'last {days} days',
+    windowLabel: 'last {days} days',
     lastUsed: 'Last used: {date}',
     lastChecked: 'Last checked: {date}',
     recentUsage: {

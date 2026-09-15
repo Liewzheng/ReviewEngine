@@ -487,16 +487,23 @@ export default {
     stats: {
       providers: 'プロバイダー',
       avgLatency: '平均レイテンシー',
+      avgLatencyWindow: '平均レイテンシー（過去 {days} 日間）',
       totalRequests: '使用回数',
       totalRequestsWindow: '記録された使用回数（過去 {days} 日間）',
     },
     metrics: {
-      latency: 'レイテンシー',
+      avgLatency: '平均レイテンシー',
       requests: '使用回数',
       successRate: '成功率',
     },
+    latencySamples: '{n} 回の呼び出し・失敗 {failed} 回',
+    probeLatency: 'プローブ {n} ms',
+    sparkline: {
+      caption: '呼び出しレイテンシー・過去 {days} 日間',
+      label: '過去 {days} 日間に記録された呼び出しレイテンシー',
+    },
     usageShare: '使用シェア {percent}%（過去 {days} 日間）',
-    usageWindow: '過去 {days} 日間',
+    windowLabel: '過去 {days} 日間',
     lastUsed: '最終使用：{date}',
     lastChecked: '最終チェック：{date}',
     recentUsage: {

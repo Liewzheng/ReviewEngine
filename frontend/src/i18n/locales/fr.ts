@@ -492,16 +492,23 @@ export default {
     stats: {
       providers: 'Fournisseurs',
       avgLatency: 'Latence moyenne',
+      avgLatencyWindow: 'Latence moyenne ({days} derniers jours)',
       totalRequests: 'Utilisations totales',
       totalRequestsWindow: 'Utilisations enregistrées ({days} derniers jours)',
     },
     metrics: {
-      latency: 'Latence',
+      avgLatency: 'Latence moy.',
       requests: 'Utilisations',
       successRate: 'Taux de réussite',
     },
+    latencySamples: '{n} appels · {failed} en échec',
+    probeLatency: 'Sonde {n} ms',
+    sparkline: {
+      caption: 'Latence des appels · {days} derniers jours',
+      label: 'Latence des appels enregistrés sur les {days} derniers jours',
+    },
     usageShare: '{percent}% des utilisations ({days} derniers jours)',
-    usageWindow: '{days} derniers jours',
+    windowLabel: '{days} derniers jours',
     lastUsed: 'Dernière utilisation : {date}',
     lastChecked: 'Dernière vérification : {date}',
     recentUsage: {

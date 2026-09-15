@@ -27,12 +27,25 @@ const degradedCount = computed(() => llm.degradedCount.value)
 const errorCount = computed(() => llm.errorCount.value)
 const offlineCount = computed(() => llm.offlineCount.value)
 
-/** Probe round-trip time of the active providers, or null when none is
- *  probed — `—` beats a fabricated `0 ms` (RENG-56). */
+/** RENG-57: length of the latency window the recorded averages cover (days);
+ *  null when the server could not read the call samples, which turns the KPI
+ *  into `—` rather than a fabricated number. */
+const latencyWindowDays = computed(() => (llm.latencyAvailable.value ? llm.latencyWindowDays.value : null))
+
+/** Mean recorded call latency over the window, weighted by each provider's
+ *  successful sample count — i.e. the average call this instance made, not the
+ *  average of the per-provider averages (a provider with 100 calls is not the
+ *  same evidence as one with 2). `—` when no provider has a recorded sample,
+ *  including when the samples could not be read at all; the probe's own
+ *  instantaneous number is NOT a substitute for it. */
 const avgLatency = computed(() => {
-  const active = providers.value.filter(p => p.configured && p.status !== 'offline' && p.latencyMs > 0)
-  if (!active.length) return null
-  return Math.round(active.reduce((sum, p) => sum + p.latencyMs, 0) / active.length)
+  const measured = providers.value.filter(
+    (p) => typeof p.avgLatencyMs === 'number' && (p.latencySampleCount ?? 0) > 0
+  )
+  if (!measured.length) return null
+  const total = measured.reduce((sum, p) => sum + (p.latencySampleCount ?? 0), 0)
+  const weighted = measured.reduce((sum, p) => sum + (p.avgLatencyMs as number) * (p.latencySampleCount ?? 0), 0)
+  return Math.round(weighted / total)
 })
 
 /** RENG-56: usage window the per-provider numbers cover; null when the
@@ -316,7 +329,11 @@ onUnmounted(() => {
             <div class="stat-value">
               {{ avgLatency === null ? '—' : `${avgLatency} ms` }}
             </div>
-            <div class="stat-label">{{ $t('llm.stats.avgLatency') }}</div>
+            <div class="stat-label">
+              {{ latencyWindowDays === null
+                ? $t('llm.stats.avgLatency')
+                : $t('llm.stats.avgLatencyWindow', { days: latencyWindowDays }) }}
+            </div>
           </div>
         </div>
       </el-card>
@@ -370,6 +387,7 @@ onUnmounted(() => {
         :health="healthByName.get(card.provider)"
         :chain-position="healthByName.get(card.provider)?.chainPosition"
         :usage-window-days="usageWindowDays"
+        :latency-window-days="latencyWindowDays"
         :testing="isCardTesting(card)"
         :saving="cardsSaving"
         :test-result="cardTestResult(card)"

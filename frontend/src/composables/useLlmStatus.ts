@@ -35,6 +35,15 @@ export function useLlmStatus() {
    * server could not read the history.
    */
   const usageTotal = ref<number | null>(null);
+  /**
+   * RENG-57: latency window the per-call numbers cover, and whether any
+   * sample history could be read at all. Same contract as the usage window:
+   * the numbers are meaningless without the window, and `latencyAvailable`
+   * false means every latency metric is `null` (the page shows `—`), not 0.
+   */
+  const latencyWindowDays = ref<number | null>(null);
+  const latencySince = ref<string | null>(null);
+  const latencyAvailable = ref(false);
 
   /**
    * Last connectivity-test result per provider identity (RENG-54).
@@ -43,9 +52,9 @@ export function useLlmStatus() {
    * `GET /llm/providers` every 30 s and `reconcileProviders` writes the
    * server's answer onto those objects in place, so a result stored there is
    * gone on the next tick — what the poll carries is the server's own health
-   * probe (`latencyMs` is that probe's round-trip time, RENG-36), not the
-   * measurement of the call the user just made, which is the whole reason the
-   * test exists. Written only by `test()`; cleared by the card's dismiss
+   * probe (`lastProbeLatencyMs` is that probe's round-trip time, RENG-36), not
+   * the measurement of the call the user just made, which is the whole reason
+   * the test exists. Written only by `test()`; cleared by the card's dismiss
    * control, by an edit that invalidates the tested configuration, or by
    * leaving the page (this composable instance is page-scoped).
    *
@@ -94,6 +103,11 @@ export function useLlmStatus() {
       usageSince.value = response.usageSince ?? null;
       usageAvailable.value = response.usageAvailable === true;
       usageTotal.value = response.usageTotal ?? null;
+      // RENG-57: same for the recorded latency, which is a different
+      // measurement over its own (separately reported) window.
+      latencyWindowDays.value = response.latencyWindowDays ?? null;
+      latencySince.value = response.latencySince ?? null;
+      latencyAvailable.value = response.latencyAvailable === true;
       if (silent) {
         error.value = null;
       }
@@ -101,9 +115,11 @@ export function useLlmStatus() {
       if (!silent) {
         error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
         providers.value = [];
-        // No list means no usage to show either: report unknown, not stale.
+        // No list means no usage or latency to show either: report unknown,
+        // not stale.
         usageAvailable.value = false;
         usageTotal.value = null;
+        latencyAvailable.value = false;
       }
     } finally {
       if (!silent) {
@@ -179,6 +195,9 @@ export function useLlmStatus() {
     usageSince,
     usageAvailable,
     usageTotal,
+    latencyWindowDays,
+    latencySince,
+    latencyAvailable,
     healthyCount,
     degradedCount,
     errorCount,

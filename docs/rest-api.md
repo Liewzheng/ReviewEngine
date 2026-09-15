@@ -609,7 +609,7 @@ VSCode Extension 可用此接口展示可选专家、让用户开关。
 
 #### `PUT /api/v1/system/experts/{id}`
 
-更新单个专家的启用状态与权重（`{id}` 为专家名 slug，如 `security`）。
+更新单个专家的启用状态与权重（`{id}` 为专家名 slug，如 `security`）。请求体字段都是可选的，只提交需要改的字段。
 
 ```
 Request:
@@ -618,9 +618,25 @@ Request:
   "weight": 20
 }
 
-Response 200: 更新后的专家对象（结构同 GET）
+Response 200: 更新后的专家对象（结构同 GET），额外带一个 `persisted` 字段：
+{
+  "id": "security",
+  "enabled": false,
+  "weight": 20,
+  ...,
+  "persisted": true
+}
 Response 404: { "error": "expert not found" }
+Response 500: { "error": "expert updated in memory but failed to persist to the database: ..." }
 ```
+
+`persisted` 的语义（RENG-69）：
+
+- `true` — 改动已写入配置数据库，重启后仍生效；
+- `false` — 服务没有挂数据库（`REVIEW_DISABLE_DB=1`、嵌入式使用），改动只在内存里生效，重启即丢失。前端据此显示警告而不是成功提示；
+- 写库失败时返回 `500`，调用方不得当作保存成功。
+
+改动会立即写进运行中的 `app_config`，并同时作用于 REST 提交的 review、webhook 触发的 review 与仓库扫描——这些路径各自重新解析配置文件，服务会把已持久化的 override 叠加到它们解析出的 `[review_experts]` 上（数据库覆盖配置文件，见 [configuration.md](configuration.md#experts-page-experts)）。
 
 #### `GET /api/v1/system/version`
 

@@ -111,17 +111,22 @@ Last 5 Reviews:
 ### 3.3 Enable / Disable Interaction
 
 - Toggle `ElSwitch` on a card → immediate visual feedback (card border color changes: enabled = default, disabled = `opacity: 0.6; border-color: var(--offline);`).
-- `POST /api/v1/experts/{id}/toggle` with body `{ enabled: boolean }`.
+- `PUT /api/v1/system/experts/{id}` with body `{ enabled: boolean }`.
 - On success: `ElNotification` "{ExpertName} {enabled/disabled}" (success, 2000ms).
 - On error: revert switch state, `ElNotification` error.
 - Optimistic UI: update switch state immediately, revert on error.
+- **Persistence (RENG-69)**: the server applies the change to the running config AND stores it as an override (per-expert `enabled`/`weight`) in the configuration database — DB over the file's `[review_experts]`, so a restart keeps the edit while every expert the UI never touched keeps its file value. The response carries `persisted`:
+  - `true` → the edit survives a restart;
+  - `false` → no database is attached (`REVIEW_DISABLE_DB=1`, embedded use): the edit is memory-only and the page shows a warning notification (`experts.memoryOnlyTitle` / `experts.memoryOnlyMessage`) instead of the success one;
+  - a failed write is a `500` → the error path above fires; a change is never reported as saved when it was not.
 
 ### 3.4 Weight Editing
 
 - Enter edit mode (global "Edit" button or per-card edit) → weight slider becomes active.
-- Drag slider → value updates in real time with debounced `POST /api/v1/experts/{id}/weight` (debounce: 500ms after drag ends).
-- On save: subtle green flash on the card.
+- Drag slider → value updates in real time with debounced `PUT /api/v1/system/experts/{id}` (debounce: 500ms after drag ends).
+- On save: subtle green flash on the card; a memory-only (`persisted: false`) commit shows the same warning as the toggle instead.
 - Weight affects how much the expert's opinion contributes to the final review score.
+- The `sum to 100` rule is validated for config files (`review-engine validate`); the slider stores the value as-is.
 
 ## 4. Interactions & State Changes
 
@@ -213,9 +218,8 @@ interface ExpertReviewSummary {
   date: string;
 }
 
-// API endpoints
-GET  /api/v1/experts              → Expert[]
-POST /api/v1/experts/{id}/toggle  → { success: boolean; enabled: boolean }
-POST /api/v1/experts/{id}/weight  → { success: boolean; weight: number }
-POST /api/v1/experts/{id}         → { success: boolean; expert: Expert } // full update
+// API endpoints (0.10.x: the toggle/weight POST endpoints were folded into
+// one PUT per expert; the response carries `persisted`, see §3.3)
+GET /api/v1/system/experts             → { experts: Expert[] }
+PUT /api/v1/system/experts/{id}        → Expert & { persisted: boolean }  // enabled and/or weight
 ```

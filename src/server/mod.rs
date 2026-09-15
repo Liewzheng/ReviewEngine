@@ -220,6 +220,12 @@ pub(crate) async fn run_review_common(
     // Run the review with progress tracking
     let progress_map = crate::progress::new_progress_map();
     let review_id = uuid::Uuid::new_v4().to_string();
+    // RENG-31: this review fetched the diff through the provider API and has
+    // no checkout, so the adjudication pass reads the cited files through the
+    // provider at the reviewed SHA (token and SHA are both in hand here). The
+    // webhook's own SHA wins when present; the MR metadata is the fallback.
+    let revision = sha.filter(|s| !s.trim().is_empty()).unwrap_or(&mr_info.git_hash);
+    let remote_files = crate::team::file_source::provider_source_or_warn(url, token, revision);
     let (reports, global_context, dropped_findings, consolidated) = orchestrator::run_experts(
         &experts,
         &mr_info,
@@ -229,6 +235,7 @@ pub(crate) async fn run_review_common(
         Some(progress_map.clone()),
         &review_id,
         None,
+        remote_files,
     )
     .await?;
 

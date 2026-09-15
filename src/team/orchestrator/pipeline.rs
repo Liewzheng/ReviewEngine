@@ -396,6 +396,12 @@ fn collect_expert_results(
 
 /// Run the core expert pipeline: diff parsing → large PR handling → parallel LLM execution.
 ///
+/// `remote_files` is the provider-API ground-truth source for the
+/// adjudication pass: server-side (webhook/API) reviews pass it because they
+/// never clone the repository, so the cited files must be fetched through the
+/// provider at the reviewed SHA. Local reviews pass `None` and the pass reads
+/// the checkout.
+///
 /// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context,
 /// dropped_findings, consolidated).
 #[allow(clippy::type_complexity)]
@@ -410,6 +416,7 @@ pub(crate) async fn run_experts_inner(
     base_ref: Option<&str>,
     head_ref: Option<&str>,
     dump_dir: Option<std::path::PathBuf>,
+    remote_files: Option<Arc<dyn crate::team::file_source::FileSource>>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Vec<ExpertMetrics>,
@@ -670,6 +677,11 @@ pub(crate) async fn run_experts_inner(
     // recorded on the report (`adjudicated_removed`), never silent. Runs
     // after consolidation so each surviving finding is adjudicated exactly
     // once; fail-open on any infrastructure problem.
+    //
+    // Ground truth comes from `resolve_ground_truth`: the local checkout when
+    // `project_path` is a directory (CLI reviews), otherwise the provider-API
+    // source the caller plumbed in for server-side reviews — which never
+    // clone, so before RENG-31 every such pass skipped wholesale.
     if config.report.adjudicate && !llm_configs.is_empty() {
         let min_severity = adjudicator::parse_min_severity(&config.report.adjudicate_min_severity);
         let candidates = consolidated
@@ -693,6 +705,7 @@ pub(crate) async fn run_experts_inner(
         let removed = adjudicator::adjudicate_findings(
             &mut consolidated.findings,
             &mr_info.project_path,
+            remote_files.clone(),
             &adjudication_configs,
             &min_severity,
         )

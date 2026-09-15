@@ -2,16 +2,16 @@
 //!
 //! After lead consolidation, each finding at or above a configured severity
 //! (default: High and Critical) is re-examined one last time by the
-//! lead-model LLM against the FULL current content of the cited file — read
-//! from disk and deliberately NOT subject to the expert-context
-//! (`max_context_file_bytes`) or verification-pass
+//! lead-model LLM against the FULL current content of the cited file —
+//! fetched through a [`FileSource`] and deliberately NOT subject to the
+//! expert-context (`max_context_file_bytes`) or verification-pass
 //! (`verification_max_file_bytes`) byte caps, which hid defensive code far
 //! from the diff hunk and let confident hallucinations survive. Findings the
 //! actual code disproves are dropped with a recorded reason; overstated
 //! findings are downgraded in place; everything else is kept.
 //!
 //! The pass is fail-open by construction: LLM call failures, unparseable
-//! verdicts, or unreadable files keep the finding unchanged — infrastructure
+//! verdicts, or unfetchable files keep the finding unchanged — infrastructure
 //! problems never silently drop a finding.
 //!
 //! Before any LLM call, a cheap deterministic pre-filter checks whether the
@@ -19,20 +19,26 @@
 //! is attached to the prompt as a PRE-FILTER NOTE (never an auto-drop — the
 //! LLM decides with the hint).
 //!
-//! When there is NO local checkout (server-side webhook/API reviews, where
-//! `project_path` is a provider slug like `group/project` and the diff
-//! arrives via the provider API), full-file ground truth cannot be obtained
-//! from the diff alone: a unified diff carries only the changed regions ±3
-//! context lines, so the "defensive code far from the hunk" check the pass
-//! exists for is unsatisfiable, and adjudicating against patch-only content
-//! would risk fail-closed drops on missing data. The pass therefore skips
-//! explicitly — one WARN naming the reason and the number of findings that
-//! pass through unadjudicated — instead of per-file INFO noise followed by a
-//! summary that claims findings were examined.
+//! Ground truth comes from [`crate::team::file_source`]: the local checkout
+//! for CLI reviews, the provider API at the reviewed commit SHA for
+//! server-side (webhook/API) reviews, which never clone the repository and
+//! where `project_path` is a provider slug like `group/project`. Until
+//! RENG-31 only the local checkout existed, so the pass skipped wholesale on
+//! the deployed path and dropped nothing, while High/10-confidence notes
+//! landed on claims the author had already disproved. The diff patch is
+//! still never a substitute for full-file content: a unified diff carries
+//! only the changed regions ±3 context lines, so adjudicating against it
+//! would risk fail-closed drops on code the patch simply does not show. When
+//! no source can produce the file, the pass keeps the findings and says so.
+
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::llm::client::LLMClient;
 use crate::models::{Finding, LLMConfig, Severity};
 use crate::prompt::templates::ADJUDICATOR_SYSTEM_TEMPLATE;
+use crate::team::file_source::{FileReadError, FileSource};
 use crate::team::verifier::DroppedFinding;
 
 /// Maximum number of findings sent to the adjudicator in a single LLM call.
@@ -50,6 +56,19 @@ const REGION_CONTEXT_LINES: u32 = 200;
 /// Maximum line distance between the cited line and the located evidence
 /// before the pre-filter flags a mismatch.
 const EVIDENCE_LINE_TOLERANCE: u32 = 50;
+
+/// Maximum number of ground-truth reads in flight while prefetching.
+const MAX_CONCURRENT_FETCHES: usize = 4;
+
+/// Per-file read ceiling. A source that never answers counts as an
+/// unfetchable file (fail-open) instead of stalling the rest of the pass.
+const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Ceiling for the whole ground-truth prefetch phase. The review itself runs
+/// under a caller-imposed budget (600 s for API reviews), which adjudication
+/// must not eat: whatever is still unfetched when the budget is gone fails
+/// open.
+const FETCH_PHASE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Adjudication verdicts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,11 +134,16 @@ fn parse_severity_label(value: &str) -> Option<Severity> {
 /// mutating it in place and returning the findings dropped as false
 /// positives together with the adjudicator's reasons.
 ///
-/// Only findings at or above `min_severity` are examined. The pass never
-/// fails: on any LLM or parsing error the affected findings are kept.
+/// Only findings at or above `min_severity` are examined. Ground truth comes
+/// from the local checkout when `project_path` is a directory, otherwise from
+/// `remote_source` (the provider-API source the caller plumbed in for
+/// server-side reviews); when neither exists the pass keeps every candidate
+/// and warns. It never fails: on any LLM, fetch or parsing error the affected
+/// findings are kept.
 pub(crate) async fn adjudicate_findings(
     findings: &mut Vec<Finding>,
     project_path: &str,
+    remote_source: Option<Arc<dyn FileSource>>,
     llm_configs: &[LLMConfig],
     min_severity: &Severity,
 ) -> Vec<DroppedFinding> {
@@ -128,9 +152,10 @@ pub(crate) async fn adjudicate_findings(
         return Vec::new();
     }
 
+    let source = crate::team::file_source::resolve_ground_truth(project_path, remote_source);
     let client = LLMClient::new();
     let configs = llm_configs.to_vec();
-    adjudicate_with_llm(findings, project_path, min_severity, move |user| {
+    adjudicate_with_llm(findings, project_path, source.as_deref(), min_severity, move |user| {
         let client = client.clone();
         let configs = configs.clone();
         async move {
@@ -144,9 +169,13 @@ pub(crate) async fn adjudicate_findings(
 }
 
 /// Core adjudication loop with the LLM call injected for testability.
+///
+/// `project_path` is used only to name the review in the no-source fail-open
+/// warning.
 async fn adjudicate_with_llm<F, Fut>(
     findings: &mut Vec<Finding>,
     project_path: &str,
+    source: Option<&dyn FileSource>,
     min_severity: &Severity,
     llm: F,
 ) -> Vec<DroppedFinding>
@@ -167,35 +196,51 @@ where
         }
     }
 
-    let mut drop_marks: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
-    let mut downgrades: Vec<(usize, Severity)> = Vec::new();
-
-    // No local checkout at all (server-side webhook/API reviews pass the
-    // provider slug as `project_path` and never clone): every per-file load
-    // below would fail, so skip once, loudly, instead of emitting one INFO
-    // per file and a summary that miscounts these findings as examined.
-    // Fail-open: all candidates are kept unchanged. The diff patch alone is
-    // NOT a substitute ground truth — it covers only changed regions ±3
-    // lines, and adjudicating against it would risk fail-closed drops on
-    // code the patch simply doesn't show.
     let candidate_count: usize = groups.iter().map(|(_, g)| g.len()).sum();
-    if candidate_count > 0 && !std::path::Path::new(project_path).is_dir() {
+    if candidate_count == 0 {
+        return Vec::new();
+    }
+
+    // No ground truth at all: every read below would fail, so skip once,
+    // loudly, instead of emitting one INFO per file and a summary that
+    // miscounts these findings as examined. Fail-open: all candidates are
+    // kept unchanged. The diff patch alone is NOT a substitute ground truth —
+    // it covers only changed regions ±3 lines, and adjudicating against it
+    // would risk fail-closed drops on code the patch simply doesn't show.
+    let Some(source) = source else {
         tracing::warn!(
-            "Adjudication: no local checkout at '{}' (server-side reviews fetch the diff via the \
-             provider API and never clone), so full-file ground truth is unavailable — \
-             {} candidate finding(s) pass through UNADJUDICATED and are kept unchanged (fail-open). \
-             To enable adjudication, run the review against a local checkout of the repository.",
+            "Adjudication: no file source for '{}' — no local checkout exists and no provider-API file \
+             source was available for this review (a server-side review needs the reviewed commit SHA and a \
+             token with repository read access), so full-file ground truth cannot be obtained — \
+             {} candidate finding(s) pass through UNADJUDICATED and are kept unchanged (fail-open).",
             project_path,
             candidate_count
         );
         return Vec::new();
-    }
+    };
+
+    // Ground truth for the pass, one read per (path, revision): a
+    // finding-dense review cites the same file many times, and a repeated
+    // failure must not be retried either.
+    let revision = source.revision().unwrap_or("").to_string();
+    let cache = prefetch_ground_truth(source, &groups, &revision).await;
+
+    let mut drop_marks: HashMap<usize, String> = HashMap::new();
+    let mut downgrades: Vec<(usize, Severity)> = Vec::new();
+    let mut adjudicated_files = 0usize;
+    let mut unauthorized_files = 0usize;
 
     for (file, group) in &groups {
-        let cited_line = group.iter().find_map(|&i| findings[i].line);
-        let content = match load_full_file(project_path, file, cited_line) {
-            Ok(c) => c,
-            Err(note) => {
+        let key = (file.clone(), revision.clone());
+        let content = match cache.get(&key) {
+            Some(Ok(raw)) => format_full_file(raw, group.iter().find_map(|&i| findings[i].line)),
+            // 401/403 is a credential-level failure: every other file would
+            // fail the same way, so it is reported once for the pass.
+            Some(Err(FileReadError::Unauthorized(_))) => {
+                unauthorized_files += 1;
+                continue;
+            }
+            Some(Err(note)) => {
                 // Fail-open: without the ground-truth file the adjudicator
                 // has nothing to judge against — keep every finding in the
                 // group untouched rather than inviting speculative drops.
@@ -210,7 +255,17 @@ where
                 );
                 continue;
             }
+            // Unreachable: the prefetch fills an entry for every cited file.
+            None => {
+                tracing::warn!(
+                    "Adjudication: skipping '{}': no ground-truth content available — {} finding(s) kept unchanged (fail-open)",
+                    file,
+                    group.len()
+                );
+                continue;
+            }
         };
+        adjudicated_files += 1;
 
         for batch in group.chunks(MAX_FINDINGS_PER_BATCH) {
             let user = build_user_prompt(file, &content, batch, findings);
@@ -272,6 +327,16 @@ where
         }
     }
 
+    if unauthorized_files > 0 {
+        tracing::warn!(
+            "Adjudication: the provider API rejected file reads (401/403) for {} cited file(s) — the \
+             credential most likely lacks repository read access (GitLab `read_repository` / GitHub \
+             contents read); those candidate findings are kept unchanged (fail-open). Grant the token \
+             read access to enable adjudication.",
+            unauthorized_files
+        );
+    }
+
     for (idx, target) in downgrades {
         if let Some(f) = findings.get_mut(idx) {
             tracing::info!(
@@ -285,6 +350,19 @@ where
             f.severity = target;
         }
     }
+
+    // One line that makes the pass auditable: which source produced the
+    // ground truth, how much of it there was, and what the filter did. A
+    // production (server-side) pass says `source=provider-api`, not
+    // `0 dropped, unadjudicated`.
+    tracing::info!(
+        "Adjudication: source={} files={} fetches={} dropped={} kept={}",
+        source.kind(),
+        adjudicated_files,
+        cache.len(),
+        drop_marks.len(),
+        candidate_count.saturating_sub(drop_marks.len())
+    );
 
     if drop_marks.is_empty() {
         return Vec::new();
@@ -304,24 +382,76 @@ where
     dropped
 }
 
-/// Read the FULL current content of the referenced file from the local
-/// checkout for adjudication — bypassing the expert-context and
-/// verification byte caps. Lines are numbered (` 1234| code`) so verdicts
-/// can cite exact lines. Files larger than [`HARD_FILE_CAP_BYTES`] are
-/// represented by the cited region (± [`REGION_CONTEXT_LINES`] lines) plus
-/// a function-level outline of the rest. Returns `Err(note)` (fail-open)
-/// when the content cannot be provided.
-fn load_full_file(project_path: &str, file: &str, cited_line: Option<u32>) -> Result<String, String> {
-    let rel = std::path::Path::new(file);
-    if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err("path escapes the project root".to_string());
-    }
-    let full = std::path::Path::new(project_path).join(rel);
-    let bytes = std::fs::read(&full).map_err(|_| "not readable from the local checkout".to_string())?;
-    let text = String::from_utf8(bytes).map_err(|_| "not valid UTF-8".to_string())?;
+/// Read the full content of every cited file, once per (path, revision).
+///
+/// Reads run concurrently, capped at [`MAX_CONCURRENT_FETCHES`], each under
+/// [`FETCH_TIMEOUT`], with the phase as a whole under [`FETCH_PHASE_TIMEOUT`].
+/// Every requested key gets an entry — a file that was never read (the phase
+/// budget ran out) is recorded as a failure, so the caller fails open on it
+/// rather than reading a stale or empty file.
+async fn prefetch_ground_truth(
+    source: &dyn FileSource,
+    groups: &[(String, Vec<usize>)],
+    revision: &str,
+) -> HashMap<(String, String), Result<String, FileReadError>> {
+    use futures::StreamExt;
 
+    let mut keys: Vec<(String, String)> = Vec::new();
+    for (file, _) in groups {
+        let key = (file.clone(), revision.to_string());
+        if !keys.contains(&key) {
+            keys.push(key);
+        }
+    }
+
+    let mut cache: HashMap<(String, String), Result<String, FileReadError>> = HashMap::new();
+    let mut stream = futures::stream::iter(keys.iter().cloned())
+        .map(|key| async move {
+            let fetched = match tokio::time::timeout(FETCH_TIMEOUT, source.read_file(&key.0)).await {
+                Ok(result) => result,
+                Err(_) => Err(FileReadError::Other(format!(
+                    "no response from the file source within {}s",
+                    FETCH_TIMEOUT.as_secs()
+                ))),
+            };
+            (key, fetched)
+        })
+        .buffer_unordered(MAX_CONCURRENT_FETCHES);
+
+    let deadline = tokio::time::Instant::now() + FETCH_PHASE_TIMEOUT;
+    loop {
+        match tokio::time::timeout_at(deadline, stream.next()).await {
+            Ok(Some(entry)) => {
+                cache.insert(entry.0, entry.1);
+            }
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    for key in &keys {
+        cache.entry(key.clone()).or_insert_with(|| {
+            Err(FileReadError::Other(format!(
+                "the ground-truth fetch phase exceeded its {}s budget",
+                FETCH_PHASE_TIMEOUT.as_secs()
+            )))
+        });
+    }
+    cache
+}
+
+/// Render fetched full-file content for the adjudication prompt — bypassing
+/// the expert-context and verification byte caps. Lines are numbered
+/// (` 1234| code`) so verdicts can cite exact lines. Files larger than
+/// [`HARD_FILE_CAP_BYTES`] are represented by the cited region
+/// (± [`REGION_CONTEXT_LINES`] lines) plus a function-level outline of the
+/// rest.
+///
+/// Formatting is separate from fetching so the raw text can be cached per
+/// file and re-rendered per group (the cited line decides how an oversized
+/// file is windowed).
+fn format_full_file(text: &str, cited_line: Option<u32>) -> String {
     if text.len() <= HARD_FILE_CAP_BYTES {
-        return Ok(number_lines(&text, 1));
+        return number_lines(text, 1);
     }
 
     // Oversized file: cited region ± context, plus an outline of the rest.
@@ -342,7 +472,7 @@ fn load_full_file(project_path: &str, file: &str, cited_line: Option<u32>) -> Re
     out.push_str(&region);
     out.push_str("\n\n### Outline of the remaining file (line: item)\n");
     out.push_str(&function_outline(&lines));
-    Ok(out)
+    out
 }
 
 /// Number every line of `text` starting at `first` (`    1| code`).
@@ -540,6 +670,7 @@ fn build_user_prompt(file: &str, content: &str, batch: &[usize], findings: &[Fin
 mod tests {
     use super::*;
     use crate::models::Effort;
+    use crate::team::file_source::LocalFileSource;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -562,6 +693,117 @@ mod tests {
             agrees_with: vec![],
             references: vec![],
         }
+    }
+
+    /// Adjudicate against a local checkout, with the LLM call injected.
+    async fn adjudicate_local<F, Fut>(
+        findings: &mut Vec<Finding>,
+        dir: &std::path::Path,
+        min_severity: &Severity,
+        llm: F,
+    ) -> Vec<DroppedFinding>
+    where
+        F: Fn(String) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<String>> + Send,
+    {
+        let source = LocalFileSource::new(dir);
+        adjudicate_with_llm(findings, dir.to_str().unwrap(), Some(&source), min_severity, llm).await
+    }
+
+    /// A stand-in for the provider-API source: fixed content per path, a
+    /// preset failure per path, and a read counter.
+    struct MockProviderSource {
+        files: Mutex<HashMap<String, String>>,
+        failures: HashMap<String, FileReadError>,
+        reads: AtomicUsize,
+    }
+
+    impl MockProviderSource {
+        fn new(files: &[(&str, &str)]) -> Self {
+            Self {
+                files: Mutex::new(
+                    files
+                        .iter()
+                        .map(|(p, c)| ((*p).to_string(), (*c).to_string()))
+                        .collect(),
+                ),
+                failures: HashMap::new(),
+                reads: AtomicUsize::new(0),
+            }
+        }
+
+        fn failing(files: &[(&str, &str)], failures: &[(&str, FileReadError)]) -> Self {
+            let mut source = Self::new(files);
+            source.failures = failures.iter().map(|(p, e)| ((*p).to_string(), e.clone())).collect();
+            source
+        }
+
+        fn reads(&self) -> usize {
+            self.reads.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl FileSource for MockProviderSource {
+        async fn read_file(&self, path: &str) -> Result<String, FileReadError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(e) = self.failures.get(path) {
+                return Err(e.clone());
+            }
+            match self.files.lock().unwrap().get(path) {
+                Some(content) => Ok(content.clone()),
+                None => Err(FileReadError::NotFound),
+            }
+        }
+
+        fn kind(&self) -> &'static str {
+            "provider-api"
+        }
+
+        fn revision(&self) -> Option<&str> {
+            Some("deadbeef")
+        }
+    }
+
+    /// In-memory `tracing` sink for asserting the pass's own warnings.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturedLogs {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
+        type Writer = CapturedLogs;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl CapturedLogs {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).to_string()
+        }
+    }
+
+    /// Capture this thread's `tracing` output (the tests run on a
+    /// current-thread runtime, so the pass's logs land here).
+    fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+        let logs = CapturedLogs::default();
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::INFO)
+                .finish(),
+        );
+        (logs, guard)
     }
 
     // ─── severity helpers ────────────────────────
@@ -626,10 +868,21 @@ mod tests {
         assert!(decisions[0].new_severity.is_none());
     }
 
-    // ─── load_full_file ──────────────────────────
+    // ─── ground-truth fetching + formatting ──────
 
-    #[test]
-    fn test_load_full_file_bypasses_twenty_kb_cap() {
+    /// Reproduce what the pass does for one local file: read through the
+    /// source, then render for the prompt.
+    async fn load_full_file(project_path: &str, file: &str, cited_line: Option<u32>) -> Result<String, String> {
+        let source = LocalFileSource::new(project_path);
+        source
+            .read_file(file)
+            .await
+            .map(|text| format_full_file(&text, cited_line))
+            .map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_load_full_file_bypasses_twenty_kb_cap() {
         // A file well above the 20KB expert-context cap must be delivered in
         // full — this is the core fix for hidden defensive code. 1500 lines
         // at ~20 bytes each ≈ 30KB on disk, comfortably over the cap.
@@ -641,14 +894,16 @@ mod tests {
         assert!(body.len() > 20_000);
         std::fs::write(dir.path().join("big.rs"), &body).unwrap();
 
-        let content = load_full_file(dir.path().to_str().unwrap(), "big.rs", None).unwrap();
+        let content = load_full_file(dir.path().to_str().unwrap(), "big.rs", None)
+            .await
+            .unwrap();
         assert!(content.contains("let line_1 = 1;"));
         assert!(content.contains("let line_1500 = 1500;"));
         assert!(!content.contains("Outline of the remaining"));
     }
 
-    #[test]
-    fn test_load_full_file_hard_cap_gives_region_plus_outline() {
+    #[tokio::test]
+    async fn test_load_full_file_hard_cap_gives_region_plus_outline() {
         let dir = tempfile::tempdir().unwrap();
         // Build a >200KB file: ~9000 numbered lines with some `fn` markers.
         let mut lines = Vec::new();
@@ -663,7 +918,9 @@ mod tests {
         assert!(body.len() > HARD_FILE_CAP_BYTES);
         std::fs::write(dir.path().join("huge.rs"), &body).unwrap();
 
-        let content = load_full_file(dir.path().to_str().unwrap(), "huge.rs", Some(4500)).unwrap();
+        let content = load_full_file(dir.path().to_str().unwrap(), "huge.rs", Some(4500))
+            .await
+            .unwrap();
         // Region around the cited line, numbered.
         assert!(content.contains("4500| fn handler_4500()"));
         assert!(content.contains("Outline of the remaining"));
@@ -673,11 +930,11 @@ mod tests {
         assert!(!content.contains("let value_100 = 100;"));
     }
 
-    #[test]
-    fn test_load_full_file_unreadable_or_escaping() {
-        assert!(load_full_file("/nonexistent", "a.rs", None).is_err());
-        assert!(load_full_file("/tmp", "../secret", None).is_err());
-        assert!(load_full_file("/tmp", "/etc/passwd", None).is_err());
+    #[tokio::test]
+    async fn test_load_full_file_unreadable_or_escaping() {
+        assert!(load_full_file("/nonexistent", "a.rs", None).await.is_err());
+        assert!(load_full_file("/tmp", "../secret", None).await.is_err());
+        assert!(load_full_file("/tmp", "/etc/passwd", None).await.is_err());
     }
 
     // ─── evidence_hint ───────────────────────────
@@ -736,7 +993,7 @@ mod tests {
             Ok("verdicts:\n  - index: 0\n    verdict: false_positive\n    reason: \"guard is present\"\n    cited_lines: \"1\"\n  - index: 1\n    verdict: confirmed\n    reason: \"\"\n    cited_lines: \"1\"\n".to_string())
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].title, "real bug");
@@ -755,7 +1012,7 @@ mod tests {
             Ok("verdicts:\n  - index: 0\n    verdict: downgrade\n    new_severity: low\n    reason: \"unlikely\"\n    cited_lines: \"1\"\n".to_string())
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 1);
@@ -772,7 +1029,7 @@ mod tests {
             Ok("verdicts:\n  - index: 0\n    verdict: downgrade\n    new_severity: critical\n    reason: \"worse\"\n    cited_lines: \"1\"\n".to_string())
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings[0].severity, Severity::High);
@@ -785,7 +1042,7 @@ mod tests {
         let mut findings = vec![make_finding("a.rs", Some(1), Severity::Critical, "bug")];
         let llm = |_u: String| async { anyhow::bail!("network down") };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 1);
@@ -799,7 +1056,7 @@ mod tests {
         let mut findings = vec![make_finding("a.rs", Some(1), Severity::Critical, "bug")];
         let llm = |_u: String| async { Ok("total garbage, no yaml".to_string()) };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 1);
@@ -815,18 +1072,18 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, "/nonexistent", &Severity::High, llm).await;
+        let dropped = adjudicate_with_llm(&mut findings, "/nonexistent", None, &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 1);
         assert_eq!(calls.load(Ordering::SeqCst), 0, "no LLM call without ground truth");
     }
 
-    /// RENG-25 regression: server-side webhook reviews pass the provider
-    /// slug (`group/project`) as `project_path` and never clone the repo.
-    /// The pass must skip explicitly — no LLM calls, every candidate kept
-    /// unchanged — instead of per-file "not readable" noise followed by a
-    /// summary claiming the findings were examined.
+    /// Regression (RENG-25, still true after RENG-31): when the review has
+    /// neither a local checkout nor a provider file source, the pass must
+    /// skip explicitly — no LLM calls, every candidate kept unchanged, one
+    /// WARN that says so — instead of per-file "not readable" noise followed
+    /// by a summary claiming the findings were examined.
     #[tokio::test]
     async fn test_adjudicate_no_local_checkout_slug_skips_all_candidates() {
         // Hermetic stand-in for a provider slug: a path that is not a
@@ -849,7 +1106,8 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, slug, &Severity::High, llm).await;
+        let (logs, _guard) = capture_logs();
+        let dropped = adjudicate_with_llm(&mut findings, slug, None, &Severity::High, llm).await;
 
         assert!(dropped.is_empty(), "fail-open: nothing dropped without ground truth");
         assert_eq!(findings.len(), 4, "all findings kept unchanged");
@@ -860,6 +1118,10 @@ mod tests {
             0,
             "no LLM call when no local checkout exists"
         );
+        let logged = logs.text();
+        assert!(logged.contains("no file source"), "{logged}");
+        assert!(logged.contains("3 candidate finding(s)"), "{logged}");
+        assert!(logged.contains("UNADJUDICATED"), "{logged}");
     }
 
     /// A real checkout where one cited file is missing (e.g. deleted by the
@@ -882,7 +1144,7 @@ mod tests {
             }
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 2);
@@ -912,7 +1174,7 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 2);
@@ -941,7 +1203,7 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         let prompts = prompts.lock().unwrap();
@@ -972,11 +1234,213 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = adjudicate_with_llm(&mut findings, dir.path().to_str().unwrap(), &Severity::High, llm).await;
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
 
         assert!(dropped.is_empty());
         assert_eq!(findings.len(), 7);
         // 6 findings in a.rs → 2 batches; 1 in b.rs → 1 batch.
         assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    // ─── RENG-31: server-side ground truth ───────
+
+    /// The point of the ticket: a review with NO checkout at all — a provider
+    /// slug for `project_path`, the file read through the provider source —
+    /// now adjudicates. The claim the guard disproves is dropped; the valid
+    /// one is kept, and the pass says which source produced the ground truth.
+    #[tokio::test]
+    async fn test_adjudicate_with_provider_source_drops_false_positive_without_checkout() {
+        let dir = tempfile::tempdir().unwrap();
+        // A provider slug is not a directory: without the provider source this
+        // pass used to bail out and drop nothing.
+        let slug = dir.path().join("group/project");
+        let slug = slug.to_str().unwrap().to_string();
+        assert!(!std::path::Path::new(&slug).is_dir());
+
+        let source = MockProviderSource::new(&[("src/a.rs", "fn guard() {\n    assert!(x);\n}\n")]);
+        let mut findings = vec![
+            make_finding("src/a.rs", Some(1), Severity::Critical, "hallucinated: no guard"),
+            make_finding("src/a.rs", Some(2), Severity::High, "real bug"),
+        ];
+        let llm = |_u: String| async {
+            Ok("verdicts:\n  - index: 0\n    verdict: false_positive\n    reason: \"the guard is present\"\n    cited_lines: \"2\"\n  - index: 1\n    verdict: confirmed\n    reason: \"\"\n    cited_lines: \"2\"\n".to_string())
+        };
+
+        let (logs, _guard) = capture_logs();
+        let dropped = adjudicate_with_llm(&mut findings, &slug, Some(&source), &Severity::High, llm).await;
+
+        assert_eq!(dropped.len(), 1, "the disproved claim is dropped");
+        assert_eq!(dropped[0].finding.title, "hallucinated: no guard");
+        assert!(dropped[0].reason.contains("guard is present"));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].title, "real bug");
+
+        let logged = logs.text();
+        assert!(logged.contains("Adjudication: source=provider-api"), "{logged}");
+        assert!(logged.contains("files=1"), "{logged}");
+        assert!(logged.contains("dropped=1"), "{logged}");
+    }
+
+    /// The same pass driven through the real provider client against a mock
+    /// GitLab: the fetch goes to the reviewed SHA and the filter drops the
+    /// finding the fetched file disproves.
+    #[tokio::test]
+    async fn test_adjudicate_over_the_gitlab_api_without_a_checkout() {
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v4/projects/group%2Fproject/repository/files/src%2Fguard.rs/raw",
+            ))
+            .and(query_param("ref", "headsha"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("fn guard() {\n    assert!(x);\n}\n"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().unwrap();
+        let slug = dir.path().join("group/project").to_str().unwrap().to_string();
+        let mr_url = format!("{}/group/project/-/merge_requests/26", server.uri());
+        let source = crate::team::file_source::ProviderFileSource::gitlab("token", &mr_url, "headsha").unwrap();
+
+        let mut findings = vec![
+            make_finding("src/guard.rs", Some(1), Severity::High, "CRITICAL 10/10: no guard"),
+            make_finding("src/guard.rs", Some(3), Severity::High, "unreachable branch"),
+        ];
+        let llm = |_u: String| async {
+            Ok("verdicts:\n  - index: 0\n    verdict: false_positive\n    reason: \"`assert!(x)` is right there\"\n    cited_lines: \"2\"\n  - index: 1\n    verdict: confirmed\n    reason: \"\"\n    cited_lines: \"3\"\n".to_string())
+        };
+
+        let dropped = adjudicate_with_llm(&mut findings, &slug, Some(&source), &Severity::High, llm).await;
+
+        assert_eq!(dropped.len(), 1);
+        assert_eq!(findings.len(), 1);
+        // `expect(1)` above fails the test if the file was read twice.
+    }
+
+    #[tokio::test]
+    async fn test_adjudicate_provider_failure_fails_open_and_warns() {
+        for (failure, expected) in [
+            (FileReadError::Other("boom".to_string()), "skipping 'src/a.rs': boom"),
+            (FileReadError::NotFound, "not present at the reviewed revision (404)"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let slug = dir.path().join("group/project").to_str().unwrap().to_string();
+            let source = MockProviderSource::failing(&[], &[("src/a.rs", failure)]);
+            let mut findings = vec![make_finding("src/a.rs", Some(1), Severity::Critical, "bug")];
+            let calls = Arc::new(AtomicUsize::new(0));
+            let calls2 = calls.clone();
+            let llm = move |_u: String| {
+                calls2.fetch_add(1, Ordering::SeqCst);
+                async { Ok("verdicts: []".to_string()) }
+            };
+
+            let (logs, _guard) = capture_logs();
+            let dropped = adjudicate_with_llm(&mut findings, &slug, Some(&source), &Severity::High, llm).await;
+
+            assert!(dropped.is_empty(), "fail-open");
+            assert_eq!(findings.len(), 1);
+            assert_eq!(calls.load(Ordering::SeqCst), 0, "no LLM call without ground truth");
+            assert!(findings[0].severity == Severity::Critical);
+            let logged = logs.text();
+            assert!(logged.contains(expected), "{logged}");
+            assert!(logged.contains("fail-open"), "{logged}");
+        }
+    }
+
+    /// 401/403 is a credential-level failure: one WARN for the pass, naming
+    /// the read permission, never one per cited file.
+    #[tokio::test]
+    async fn test_adjudicate_unauthorized_source_warns_once_and_keeps_everything() {
+        let dir = tempfile::tempdir().unwrap();
+        let slug = dir.path().join("group/project").to_str().unwrap().to_string();
+        let denied = FileReadError::Unauthorized("GitLab API returned 401 Unauthorized: denied".to_string());
+        let source = MockProviderSource::failing(&[], &[("src/a.rs", denied.clone()), ("src/b.rs", denied)]);
+
+        let mut findings = vec![
+            make_finding("src/a.rs", Some(1), Severity::Critical, "A"),
+            make_finding("src/b.rs", Some(2), Severity::High, "B"),
+        ];
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = calls.clone();
+        let llm = move |_u: String| {
+            calls2.fetch_add(1, Ordering::SeqCst);
+            async { Ok("verdicts: []".to_string()) }
+        };
+
+        let (logs, _guard) = capture_logs();
+        let dropped = adjudicate_with_llm(&mut findings, &slug, Some(&source), &Severity::High, llm).await;
+
+        assert!(dropped.is_empty());
+        assert_eq!(findings.len(), 2);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        let logged = logs.text();
+        assert_eq!(
+            logged.matches("rejected file reads (401/403)").count(),
+            1,
+            "one credential warning for the whole pass: {logged}"
+        );
+        assert!(logged.contains("read_repository"), "{logged}");
+        assert_eq!(
+            logged.matches("Adjudication: skipping").count(),
+            0,
+            "no per-file noise for a credential problem: {logged}"
+        );
+    }
+
+    /// A finding-dense review cites the same file from many findings and
+    /// batches; the pass reads each (path, revision) once. A failed read is
+    /// not retried either.
+    #[tokio::test]
+    async fn test_adjudicate_fetches_each_file_once_per_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let slug = dir.path().join("group/project").to_str().unwrap().to_string();
+        let source = MockProviderSource::failing(
+            &[("a.rs", "fn a() {}"), ("b.rs", "fn b() {}")],
+            &[("gone.rs", FileReadError::NotFound)],
+        );
+
+        let mut findings: Vec<Finding> = (0..7)
+            .map(|i| make_finding("a.rs", Some(1), Severity::High, &format!("A{i}")))
+            .collect();
+        findings.push(make_finding("b.rs", Some(1), Severity::High, "B0"));
+        findings.push(make_finding("gone.rs", Some(1), Severity::High, "G0"));
+        findings.push(make_finding("gone.rs", Some(2), Severity::High, "G1"));
+        let llm = |_u: String| async { Ok("verdicts: []".to_string()) };
+
+        let dropped = adjudicate_with_llm(&mut findings, &slug, Some(&source), &Severity::High, llm).await;
+
+        assert!(dropped.is_empty());
+        assert_eq!(
+            source.reads(),
+            3,
+            "one read per cited file (7+1 findings on a.rs span 2 batches; gone.rs is cited twice)"
+        );
+    }
+
+    /// The local path is unchanged in kind and behaviour — the cache just
+    /// makes the per-file count explicit.
+    #[tokio::test]
+    async fn test_adjudicate_local_source_reads_each_file_once() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(dir.path().join("b.rs"), "fn b() {}").unwrap();
+        let mut findings: Vec<Finding> = (0..7)
+            .map(|i| make_finding("a.rs", Some(1), Severity::High, &format!("A{i}")))
+            .collect();
+        findings.push(make_finding("b.rs", Some(1), Severity::High, "B0"));
+        let llm = |_u: String| async { Ok("verdicts: []".to_string()) };
+
+        let (logs, _guard) = capture_logs();
+        let dropped = adjudicate_local(&mut findings, dir.path(), &Severity::High, llm).await;
+
+        assert!(dropped.is_empty());
+        let logged = logs.text();
+        assert!(
+            logged.contains("Adjudication: source=local files=2 fetches=2 dropped=0 kept=8"),
+            "{logged}"
+        );
     }
 }

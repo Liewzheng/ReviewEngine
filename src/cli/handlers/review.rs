@@ -215,6 +215,8 @@ pub async fn run_local(
         progress_map.clone(),
         review_id,
         dump_dir,
+        // Local diff review: the adjudicator reads this checkout directly.
+        None,
     )
     .await?;
 
@@ -306,6 +308,8 @@ pub async fn run_local_repo(
         progress_map.clone(),
         review_id,
         dump_dir,
+        // Local repo review: the adjudicator reads this checkout directly.
+        None,
     )
     .await?;
 
@@ -382,6 +386,8 @@ pub async fn run_local_path(
         progress_map.clone(),
         review_id,
         dump_dir,
+        // Full-content path review over a local checkout: no provider source.
+        None,
     )
     .await?;
 

@@ -9,6 +9,7 @@
 //! [`ExpertMetrics`] capture the final results.
 
 pub mod adjudicator;
+pub mod file_source;
 pub mod lead_consolidator;
 pub mod orchestrator;
 pub mod verifier;

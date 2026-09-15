@@ -7,6 +7,7 @@ pub(crate) use pipeline::run_experts_inner;
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Instant;
 
 use crate::actions::registry::CommandRegistry;
@@ -156,6 +157,10 @@ impl TeamOrchestrator for DefaultOrchestrator {
                 base_ref.as_deref(),
                 head_ref.as_deref(),
                 None,
+                // `DefaultOrchestrator` only serves local checkouts (remote
+                // inputs are rejected below), so the adjudicator reads the
+                // working tree and needs no provider source.
+                None,
             )
             .await?;
 
@@ -222,6 +227,10 @@ impl TeamOrchestrator for DefaultOrchestrator {
 /// Returns per-expert reports, an optional global review context, any
 /// findings dropped by the optional verification pass, and the lead
 /// consolidation summary (always computed — pure post-processing).
+///
+/// `remote_files` is the provider-API file source the adjudication pass uses
+/// when the review has no local checkout (server-side webhook/API reviews);
+/// see [`crate::team::file_source`]. Local reviews pass `None`.
 pub async fn run_experts(
     experts: &[ExpertDef],
     mr_info: &MRInfo,
@@ -231,6 +240,7 @@ pub async fn run_experts(
     progress_map: Option<ProgressMap>,
     review_id: &str,
     dump_dir: Option<std::path::PathBuf>,
+    remote_files: Option<Arc<dyn crate::team::file_source::FileSource>>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Option<GlobalReviewContext>,
@@ -264,6 +274,7 @@ pub async fn run_experts(
         Some(&mr_info.target_branch),
         Some(&mr_info.source_branch),
         dump_dir,
+        remote_files,
     )
     .await?;
 

@@ -116,6 +116,11 @@ pub async fn run_review(
         None => (crate::progress::new_progress_map(), uuid::Uuid::new_v4().to_string()),
     };
 
+    // The review never clones the repository: the adjudication pass (when
+    // enabled) gets full-file ground truth through the provider API at the
+    // reviewed SHA, so the false-positive filter works here too (RENG-31).
+    let remote_files = crate::team::file_source::provider_source_or_warn(mr_url, token, &mr_info.git_hash);
+
     let (findings, global_context, dropped_findings, consolidated) = crate::team::orchestrator::run_experts(
         &experts,
         &mr_info,
@@ -125,6 +130,7 @@ pub async fn run_review(
         Some(progress_map.clone()),
         &review_id,
         dump_dir,
+        remote_files,
     )
     .await?;
 

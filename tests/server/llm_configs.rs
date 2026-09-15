@@ -876,6 +876,8 @@ async fn post_gitlab_mr_review_and_poll(base: &str, client: &reqwest::Client, mr
 
 /// Parse the count that precedes `unit` in the assessment prose
 /// (`"Risk Level: Low. 2 critical, 1 high found by 2 reviewers."`).
+/// Kept local to this integration test: it links the library built without
+/// `cfg(test)`, so `crate::test_util` (the shared copy) does not exist here.
 fn parse_tldr_count(tl_dr: &str, unit: &str) -> usize {
     for part in tl_dr.split([',', '.']) {
         let tokens: Vec<&str> = part.split_whitespace().collect();

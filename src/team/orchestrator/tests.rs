@@ -1,6 +1,7 @@
 use super::validation::*;
 use super::*;
 use crate::team::lead_consolidator::FileCoverage;
+use crate::test_util::parse_tldr_count;
 use std::collections::HashSet;
 
 fn make_finding(severity: Severity, confidence: u8, file: &str, line: Option<u32>, title: &str) -> Finding {
@@ -139,23 +140,6 @@ async fn test_run_experts_returns_consolidated_report() {
 }
 
 // ─── RENG-73: the consolidated TL;DR counts describe the published findings ───
-
-/// Parse the count that precedes `unit` in a TL;DR
-/// (`"Risk Level: Low. 2 critical, 1 high found by 2 reviewers."`).
-/// Mirrors the helper in `team::lead_consolidator::tests`.
-fn parse_tldr_count(tl_dr: &str, unit: &str) -> usize {
-    for part in tl_dr.split([',', '.']) {
-        let tokens: Vec<&str> = part.split_whitespace().collect();
-        if let Some(pos) = tokens.iter().position(|t| *t == unit) {
-            if pos > 0 {
-                if let Ok(n) = tokens[pos - 1].parse::<usize>() {
-                    return n;
-                }
-            }
-        }
-    }
-    0
-}
 
 #[test]
 fn test_build_consolidated_report_tldr_matches_findings() {

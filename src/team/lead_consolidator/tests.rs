@@ -1,5 +1,6 @@
 use super::*;
 use crate::models::ExpertReport;
+use crate::test_util::parse_tldr_count;
 
 fn make_finding(severity: Severity, confidence: u8, file: &str, line: Option<u32>, title: &str) -> Finding {
     Finding {
@@ -417,22 +418,6 @@ fn test_non_zero_findings_not_unverified() {
 }
 
 // ─── RENG-73: the summary counts must describe the published findings ───
-
-/// Parse the count that precedes `unit` in a consolidator TL;DR, e.g.
-/// `parse_tldr_count("Risk Level: Low. 2 critical, 3 high found by 1 reviewers.", "high") == 3`.
-fn parse_tldr_count(tl_dr: &str, unit: &str) -> usize {
-    for part in tl_dr.split([',', '.']) {
-        let tokens: Vec<&str> = part.split_whitespace().collect();
-        if let Some(pos) = tokens.iter().position(|t| *t == unit) {
-            if pos > 0 {
-                if let Ok(n) = tokens[pos - 1].parse::<usize>() {
-                    return n;
-                }
-            }
-        }
-    }
-    0
-}
 
 /// The TL;DR's severity counts must be the histogram of `findings` — the set
 /// the report actually publishes. Regression guard for RENG-73, where the

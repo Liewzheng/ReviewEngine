@@ -1310,6 +1310,12 @@ mod tests {
             async fn upsert_review_context(&self, _: Uuid, _: &str, _: &str, _: &str, _: i64) -> anyhow::Result<()> {
                 anyhow::bail!("db down")
             }
+            async fn llm_usage_since(
+                &self,
+                _: chrono::DateTime<chrono::Utc>,
+            ) -> anyhow::Result<Vec<crate::store::traits::ProviderUsageStats>> {
+                anyhow::bail!("db down")
+            }
         }
 
         let failing = Arc::new(FailingStore::default());

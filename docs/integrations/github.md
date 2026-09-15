@@ -78,6 +78,16 @@ Not every high-severity finding deserves its own line-anchored comment. A round'
 
 The policy is built in code with those defaults and can be overridden with four environment variables — see [Inline-note delivery policy](../configuration.md#inline-note-delivery-policy).
 
+### Adjudication on server-side reviews
+
+The final false-positive filter — the *adjudication pass* (`[report] adjudicate`, on by default at `adjudicate_min_severity = "high"`) — re-reads each high-severity finding with the lead model **against the full current content of the cited file** and drops claims the code disproves. A webhook review never clones the repository, so since 0.10.22 the cited file is fetched through the GitHub API at the reviewed commit SHA (`GET /repos/:owner/:repo/contents/:path?ref=<sha>` with the raw media type, using the same token as the diff fetch) instead of from a checkout. Local reviews (`--local-path`) keep reading their working tree.
+
+- **Full file, not the patch.** The diff a review is triggered on carries only the changed regions ±3 context lines, so it is never used as ground truth here.
+- **Fail-open, with the reason logged.** A file the revision does not contain (404), a transport or decode failure, or a token that may not read the repository (401/403 — GitHub contents read) keeps every finding of that file unchanged, and says so: one `WARN` per file for a missing/failed file, one for the whole pass for a credential problem. If no source at all is available (no token, or the reviewed SHA could not be resolved) the pass warns and keeps every candidate.
+- **The log line states the source.** Each pass ends with `Adjudication: source=<local|provider-api> files=N fetches=N dropped=N kept=N`. Files are fetched once per `(path, revision)` for the pass, at most 4 at a time and under a bounded budget.
+
+See [`[report]`](../config-schema.md#report) for the knobs.
+
 ## Next steps
 
 - See the [GitLab webhook setup](gitlab.md) for a similar configuration on GitLab.

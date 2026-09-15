@@ -773,6 +773,7 @@ Response 200:
   "usageWindowDays": 7,
   "usageSince": "2026-09-08T02:00:00Z",
   "usageAvailable": true,
+  "usageTotal": 88,
   "items": [
     {
       "id": "openai-0",
@@ -813,6 +814,7 @@ API key 永远不会在响应中返回。
 0.10.21 起（RENG-56）每个 provider 额外返回**真实使用统计**，数据源是评审记录本身（`reviews.llm_summary`，RENG-38 起每次评审写入的 `[{provider, model}]` 快照）而不是任何估算值：
 
 - 窗口：`usageWindowDays`（当前恒为 7）与 `usageSince`（滚动窗口起点，含端点）随列表一起返回 —— UI 用它标注「过去 7 天」，不自行假设窗口。
+- `usageTotal`：窗口内**全部**已记录使用数（所有 provider 名，含已不再配置的），即每个 `usageShare` 的分母。因此它可以大于各卡片 `requestCount` 之和：卡片只统计当前配置里的 provider。`null` 表示读不到历史。
 - `requestCount`：该 provider 在窗口内被记录到的**评审数**（评审级粒度：一次评审无论用几个模型，都只给该 provider 记一次）。可直接用 `GET /api/v1/reviews` 的 `llmSummary` 逐条核对。
 - `usageShare`：该 provider 占窗口内**全部**已记录使用（含已不再配置的 provider 名）的比例，0–1。
 - `successRate`：使用过该 provider 且已终态的评审中 `completed / (completed + failed)`，0–1。

@@ -29,6 +29,12 @@ export function useLlmStatus() {
   const usageWindowDays = ref<number | null>(null);
   const usageSince = ref<string | null>(null);
   const usageAvailable = ref(false);
+  /**
+   * RENG-56: every usage recorded in the window, across all provider names —
+   * the share denominator the cards are a breakdown of. `null` when the
+   * server could not read the history.
+   */
+  const usageTotal = ref<number | null>(null);
 
   /**
    * Last connectivity-test result per provider identity (RENG-54).
@@ -82,10 +88,12 @@ export function useLlmStatus() {
     try {
       const response = await getProviders();
       reconcileProviders(response.items);
-      // RENG-56: the window travels with the numbers it describes.
+      // RENG-56: the window travels with the numbers it describes, and so
+      // does the window total the per-provider shares are taken against.
       usageWindowDays.value = response.usageWindowDays ?? null;
       usageSince.value = response.usageSince ?? null;
       usageAvailable.value = response.usageAvailable === true;
+      usageTotal.value = response.usageTotal ?? null;
       if (silent) {
         error.value = null;
       }
@@ -95,6 +103,7 @@ export function useLlmStatus() {
         providers.value = [];
         // No list means no usage to show either: report unknown, not stale.
         usageAvailable.value = false;
+        usageTotal.value = null;
       }
     } finally {
       if (!silent) {
@@ -169,6 +178,7 @@ export function useLlmStatus() {
     usageWindowDays,
     usageSince,
     usageAvailable,
+    usageTotal,
     healthyCount,
     degradedCount,
     errorCount,

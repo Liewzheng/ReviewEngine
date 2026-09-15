@@ -498,7 +498,7 @@ export default {
       providers: 'Providers',
       avgLatency: 'Avg Latency',
       totalRequests: 'Total Usages',
-      totalRequestsWindow: 'Total usages (last {days} days)',
+      totalRequestsWindow: 'Recorded usages (last {days} days)',
     },
     metrics: {
       latency: 'Latency',

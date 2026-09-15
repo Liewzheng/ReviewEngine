@@ -45,6 +45,11 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         "usageWindowDays": USAGE_WINDOW_DAYS,
         "usageSince": super::llm_usage::window_start(usage_now).to_rfc3339(),
         "usageAvailable": usage.is_some(),
+        // Every usage recorded in the window, across ALL provider names —
+        // including ones that are no longer configured, which is why this can
+        // exceed the sum of the cards. It is the denominator of every
+        // `usageShare`, so the page can state it instead of guessing.
+        "usageTotal": usage.as_ref().map(|snapshot| snapshot.total_usage),
         "items": provider_items(&primary, &configs, &health, usage.as_ref()),
     }))
 }
@@ -822,6 +827,10 @@ mod tests {
 
         assert_eq!(payload["usageWindowDays"], 7);
         assert_eq!(payload["usageAvailable"], true);
+        assert_eq!(
+            payload["usageTotal"], 4,
+            "the window total is the share denominator (all recorded usages)"
+        );
         assert!(
             chrono::DateTime::parse_from_rfc3339(payload["usageSince"].as_str().unwrap()).is_ok(),
             "the window start must travel as RFC3339: {payload}"
@@ -858,6 +867,7 @@ mod tests {
         let payload = get_providers(State(state)).await.0;
 
         assert_eq!(payload["usageAvailable"], true);
+        assert_eq!(payload["usageTotal"], 0, "a read window with no usage totals zero");
         let item = &payload["items"][0];
         assert_eq!(item["requestCount"], 0);
         assert_eq!(item["usageShare"], serde_json::Value::Null);
@@ -873,6 +883,7 @@ mod tests {
         let payload = get_providers(State(state)).await.0;
 
         assert_eq!(payload["usageAvailable"], false);
+        assert_eq!(payload["usageTotal"], serde_json::Value::Null);
         let item = &payload["items"][0];
         assert_eq!(item["name"], "xiaomi");
         assert_eq!(item["status"], "healthy");

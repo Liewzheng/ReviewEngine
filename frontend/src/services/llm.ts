@@ -17,6 +17,12 @@ export interface LlmProvidersResponse {
    * `null` then, and the page shows `—` instead of a window.
    */
   usageAvailable: boolean
+  /**
+   * RENG-56: total usages recorded in the window, across EVERY provider name
+   * (including ones no longer configured), i.e. the denominator of each
+   * card's `usageShare`. `null` when unavailable.
+   */
+  usageTotal: number | null
 }
 
 export async function getProviders(): Promise<LlmProvidersResponse> {

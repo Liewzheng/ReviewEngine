@@ -487,7 +487,7 @@ export default {
       providers: '제공자',
       avgLatency: '평균 지연 시간',
       totalRequests: '총 사용 횟수',
-      totalRequestsWindow: '총 사용 횟수(최근 {days}일)',
+      totalRequestsWindow: '기록된 사용 횟수(최근 {days}일)',
     },
     metrics: {
       latency: '지연 시간',

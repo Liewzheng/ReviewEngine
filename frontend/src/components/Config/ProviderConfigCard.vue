@@ -146,7 +146,8 @@ const usageSharePercent = computed(() => {
 const usageShareLabel = computed(() => {
   if (usageSharePercent.value === null) return '—'
   return t('llm.usageShare', {
-    percent: usageSharePercent.value,
+    // One decimal so every card reads the same way (8.0 %, not 8 %).
+    percent: usageSharePercent.value.toFixed(1),
     days: props.usageWindowDays,
   })
 })

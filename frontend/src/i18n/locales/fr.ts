@@ -493,7 +493,7 @@ export default {
       providers: 'Fournisseurs',
       avgLatency: 'Latence moyenne',
       totalRequests: 'Utilisations totales',
-      totalRequestsWindow: 'Utilisations totales ({days} derniers jours)',
+      totalRequestsWindow: 'Utilisations enregistrées ({days} derniers jours)',
     },
     metrics: {
       latency: 'Latence',

@@ -133,6 +133,12 @@ window reported alongside them:
 | `successRate` | `completed / (completed + failed)` over those reviews | none of them reached an outcome |
 | `lastUsedAt` | newest recorded use | it was not used in the window |
 
+The envelope carries `usageWindowDays` / `usageSince` / `usageAvailable` and
+`usageTotal` — every usage of the window, across all provider names, which is
+the denominator of each share and therefore can exceed the sum of the cards
+(a recorded provider may no longer be configured). The page's "recorded
+usages" KPI shows `usageTotal`, not the sum of the visible cards.
+
 Because `llm_summary` is written on the completion path, a review that failed
 before producing a report carries no snapshot: `successRate` therefore reads
 "of the reviews that used it and finished, how many completed", an upper bound

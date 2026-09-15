@@ -482,7 +482,7 @@ export default {
       providers: '提供者',
       avgLatency: '平均延遲',
       totalRequests: '使用總數',
-      totalRequestsWindow: '使用總數（過去 {days} 天）',
+      totalRequestsWindow: '已記錄使用（過去 {days} 天）',
     },
     metrics: {
       latency: '延遲',

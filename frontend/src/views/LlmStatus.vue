@@ -39,11 +39,9 @@ const avgLatency = computed(() => {
  *  server could not read the usage history, which hides the usage row. */
 const usageWindowDays = computed(() => (llm.usageAvailable.value ? llm.usageWindowDays.value : null))
 
-/** Recorded usages across all providers in the window; null when unknown. */
-const totalRequests = computed(() => {
-  if (!llm.usageAvailable.value) return null
-  return providers.value.reduce((sum, p) => sum + (p.requestCount ?? 0), 0)
-})
+/** RENG-56: usages recorded in the window across ALL provider names — what
+ *  the cards' shares are taken against; null when the server has no history. */
+const totalRequests = computed(() => (llm.usageAvailable.value ? llm.usageTotal.value : null))
 
 const totalRequestsDisplay = computed(() =>
   totalRequests.value === null ? '—' : new Intl.NumberFormat('en-US').format(totalRequests.value)

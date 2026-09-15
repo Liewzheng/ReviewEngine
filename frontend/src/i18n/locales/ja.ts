@@ -488,7 +488,7 @@ export default {
       providers: 'プロバイダー',
       avgLatency: '平均レイテンシー',
       totalRequests: '使用回数',
-      totalRequestsWindow: '使用回数（過去 {days} 日間）',
+      totalRequestsWindow: '記録された使用回数（過去 {days} 日間）',
     },
     metrics: {
       latency: 'レイテンシー',

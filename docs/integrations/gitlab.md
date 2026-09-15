@@ -163,6 +163,16 @@ When the cap binds, the highest-ranked findings are the ones posted. The ranking
 
 The policy is built in code with those defaults and can be overridden with four environment variables — see [Inline-note delivery policy](../configuration.md#inline-note-delivery-policy) for the names, defaults and the fail-open behaviour on a malformed value.
 
+### Adjudication on server-side reviews
+
+The final false-positive filter — the *adjudication pass* (`[report] adjudicate`, on by default at `adjudicate_min_severity = "high"`) — re-reads each high-severity finding with the lead model **against the full current content of the cited file** and drops claims the code disproves. A webhook review never clones the repository, so since 0.10.22 the cited file is fetched through the GitLab API at the reviewed commit SHA (`GET /projects/:id/repository/files/:urlencoded_path/raw?ref=<sha>`, using the same token as the diff fetch) instead of from a checkout. Local reviews (`--local-path`) keep reading their working tree.
+
+- **Full file, not the patch.** The diff a review is triggered on carries only the changed regions ±3 context lines, so it is never used as ground truth here: adjudicating against it would risk dropping findings on code the patch simply does not show.
+- **Fail-open, with the reason logged.** A file the revision does not contain (404), a transport or decode failure, or a token that may not read the repository (401/403 — GitLab `read_repository`) keeps every finding of that file unchanged, and says so: one `WARN` per file for a missing/failed file, one for the whole pass for a credential problem. If no source at all is available (no token, or the reviewed SHA could not be resolved) the pass warns and keeps every candidate.
+- **The log line states the source.** Each pass ends with `Adjudication: source=<local|provider-api> files=N fetches=N dropped=N kept=N`, so it is visible which ground truth was used and how many findings the filter removed. Files are fetched once per `(path, revision)` for the pass, at most 4 at a time and under a bounded budget, so a large review does not pay for the same file repeatedly.
+
+See [`[report]`](../config-schema.md#report) for the knobs.
+
 ## When a review is triggered
 
 | Event | Handler | What happens |

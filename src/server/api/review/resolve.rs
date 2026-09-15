@@ -55,13 +55,29 @@ pub(crate) fn resolve_gitlab_token(
 /// A resolved review source: the raw diff plus, for MR-based sources, the MR
 /// metadata fetched from the provider API. `mr_info` is `Some` only for
 /// `gitlab_mr` sources today; local/static sources carry no MR context.
-#[derive(Debug)]
 pub(crate) struct ResolvedSource {
     pub diff: String,
     pub mr_info: Option<crate::models::MRInfo>,
     /// Rendered AGENTS.md prompt section (RENG-18). `None` when disabled,
     /// missing, or unavailable.
     pub agents_md: Option<String>,
+    /// Provider-API ground truth for the adjudication pass (RENG-31), built
+    /// while the MR client and its credential are in hand. `None` for local
+    /// (the pass reads the checkout) and static-diff sources.
+    pub file_source: Option<std::sync::Arc<dyn crate::team::file_source::FileSource>>,
+}
+
+impl std::fmt::Debug for ResolvedSource {
+    /// The `FileSource` is summarised by kind: the diff body would drown the
+    /// output and the source has nothing else to say about itself.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResolvedSource")
+            .field("diff_bytes", &self.diff.len())
+            .field("mr_info", &self.mr_info)
+            .field("agents_md", &self.agents_md.is_some())
+            .field("file_source", &self.file_source.as_ref().map(|s| s.kind()))
+            .finish()
+    }
 }
 
 pub(crate) async fn run_review(
@@ -97,6 +113,7 @@ pub(crate) async fn run_review(
             None,
             "",
             None,
+            resolved.file_source,
         ),
     )
     .await;
@@ -149,10 +166,16 @@ pub(crate) async fn resolve_source(
             } else {
                 None
             };
+            // RENG-31: the adjudication pass needs the cited files' full
+            // content, and this review never clones — fetch them through the
+            // provider API at the reviewed SHA. The client and its credential
+            // are already in hand here.
+            let file_source = crate::team::file_source::provider_source_from_client_or_warn(&client, &mr_info.git_hash);
             Ok(ResolvedSource {
                 diff,
                 mr_info: Some(mr_info),
                 agents_md,
+                file_source,
             })
         }
         ReviewSource::LocalRepo { path, base, head } => {
@@ -186,6 +209,11 @@ pub(crate) async fn resolve_source(
                 diff,
                 mr_info: None,
                 agents_md,
+                // RENG-31: the placeholder MR context of a local-path review
+                // names the review `api`, not a filesystem path, so hand the
+                // adjudicator the checkout explicitly instead of letting it
+                // fall back to "no ground truth".
+                file_source: Some(Arc::new(crate::team::file_source::LocalFileSource::new(&path))),
             })
         }
         ReviewSource::StaticDiff { diff } => {
@@ -199,6 +227,7 @@ pub(crate) async fn resolve_source(
                 diff,
                 mr_info: None,
                 agents_md: None,
+                file_source: None,
             })
         }
     }

@@ -105,6 +105,11 @@ pub struct ReportConfig {
     /// context-injection byte caps), and findings the actual code disproves are
     /// dropped with a recorded reason (`adjudicated_removed` on the report).
     /// Fail-open: LLM or parsing errors keep the finding unchanged. On by default.
+    ///
+    /// The file is read from the local checkout for CLI reviews and fetched
+    /// through the provider API at the reviewed SHA for server-side
+    /// (webhook/API) reviews, which never clone (RENG-31); see
+    /// [`crate::team::file_source`].
     #[serde(default = "default_adjudicate")]
     pub adjudicate: bool,
     /// Minimum severity a finding must have to be sent to the adjudication

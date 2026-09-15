@@ -96,6 +96,13 @@ async fn test_resolve_source_local_repo_injects_agents_md_when_enabled() {
         "section must carry the fixed header"
     );
     assert!(section.contains("Run tests before merging."));
+
+    // RENG-31: a local-path review's adjudication ground truth is the
+    // checkout itself (its placeholder MR context names the review `api`,
+    // not a path, so the pipeline cannot discover it).
+    let file_source = resolved.file_source.expect("local_repo must carry a file source");
+    assert_eq!(file_source.kind(), "local");
+    assert!(file_source.read_file("main.rs").await.is_ok());
 }
 
 #[tokio::test]
@@ -651,7 +658,7 @@ fn test_source_meta_from_mr_info_empty_strings_become_none() {
 
 #[tokio::test]
 async fn test_resolve_source_gitlab_mr_resolves_mr_info() {
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
@@ -672,6 +679,17 @@ async fn test_resolve_source_gitlab_mr_resolves_mr_info() {
         .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/a b/a\n"))
         .mount(&server)
         .await;
+    // RENG-31: the adjudication pass reads the cited file through the same
+    // client at the reviewed SHA.
+    Mock::given(method("GET"))
+        .and(path(
+            "/api/v4/projects/group%2Fproject/repository/files/src%2Fmain.rs/raw",
+        ))
+        .and(query_param("ref", "deadbeef"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("fn main() {}\n"))
+        .expect(1)
+        .mount(&server)
+        .await;
 
     let source = ReviewSource::GitLabMr {
         url: format!("{}/group/project/-/merge_requests/1", server.uri()),
@@ -686,6 +704,15 @@ async fn test_resolve_source_gitlab_mr_resolves_mr_info() {
     assert_eq!(info.target_branch, "main");
     assert_eq!(info.git_hash, "deadbeef");
     assert_eq!(info.pr_author.as_deref(), Some("alice"));
+
+    // A `gitlab_mr` review never clones, so the adjudicator's ground truth is
+    // fetched from the provider at the reviewed SHA (RENG-31).
+    let file_source = resolved
+        .file_source
+        .expect("gitlab_mr must carry a provider file source");
+    assert_eq!(file_source.kind(), "provider-api");
+    assert_eq!(file_source.revision(), Some("deadbeef"));
+    assert_eq!(file_source.read_file("src/main.rs").await.unwrap(), "fn main() {}\n");
 }
 
 /// End-to-end at the handler level: a task created with URL-parse-only

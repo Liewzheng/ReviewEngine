@@ -116,7 +116,7 @@ async fn test_run_experts_returns_consolidated_report() {
         "main".to_string(),
     );
     let (reports, _global_context, dropped_findings, consolidated) =
-        run_experts(&[], &mr_info, "", &[], &config, None, "test-review-id", None)
+        run_experts(&[], &mr_info, "", &[], &config, None, "test-review-id", None, None)
             .await
             .expect("run_experts with empty team should succeed");
     assert!(reports.is_empty());

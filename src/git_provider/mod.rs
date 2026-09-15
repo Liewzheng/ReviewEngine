@@ -21,6 +21,43 @@ use crate::models::*;
 /// Default upper bound on `search_code` results returned by remote browsers.
 pub(crate) const SEARCH_RESULTS_LIMIT: usize = 20;
 
+/// A failed raw repository-file fetch, keeping the HTTP status.
+///
+/// Callers that can recover differently per failure kind (the adjudication
+/// pass of RENG-31: a file the revision does not contain is a different
+/// situation from a credential that is not allowed to read the repository)
+/// need the status, which a flattened `anyhow::Error` string does not expose.
+/// Transport, decode and rejected-path failures carry `status: None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFetchError {
+    /// HTTP status of the provider response, when there was one.
+    pub status: Option<u16>,
+    /// Human-readable failure, identical to the message the `anyhow` variant
+    /// of the same call produces.
+    pub message: String,
+}
+
+impl FileFetchError {
+    /// The file does not exist at the requested revision.
+    pub fn is_not_found(&self) -> bool {
+        self.status == Some(404)
+    }
+
+    /// The credential may not read the repository (401 unauthenticated /
+    /// 403 forbidden).
+    pub fn is_unauthorized(&self) -> bool {
+        matches!(self.status, Some(401) | Some(403))
+    }
+}
+
+impl std::fmt::Display for FileFetchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for FileFetchError {}
+
 /// Run an async provider call from a synchronous context.
 ///
 /// [`RepoBrowser`] is a synchronous trait while the provider HTTP clients are

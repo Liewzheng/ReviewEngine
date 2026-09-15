@@ -6,6 +6,7 @@ use anyhow::{Context, Result};
 use reqwest::Client as HttpClient;
 use tracing::{error, info};
 
+use crate::git_provider::FileFetchError;
 use crate::models::*;
 
 /// GitLab REST API client for MR operations.
@@ -529,7 +530,19 @@ impl Client {
     /// Uses `GET /projects/:id/repository/files/:path/raw?ref=:ref` (the same
     /// endpoint family as [`fetch_config_toml`](Self::fetch_config_toml)).
     pub async fn fetch_file_raw(&self, path: &str, git_ref: &str) -> Result<String> {
-        validate_repo_file_path(path)?;
+        self.fetch_file_raw_checked(path, git_ref)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.message))
+    }
+
+    /// [`fetch_file_raw`](Self::fetch_file_raw) keeping the HTTP status, so a
+    /// caller can tell "the file is not in this revision" (404) from "this
+    /// credential cannot read the repository" (401/403).
+    pub async fn fetch_file_raw_checked(&self, path: &str, git_ref: &str) -> Result<String, FileFetchError> {
+        validate_repo_file_path(path).map_err(|e| FileFetchError {
+            status: None,
+            message: e.to_string(),
+        })?;
         let project = self.encoded_project_path();
         let url = format!(
             "{}/projects/{}/repository/files/{}/raw",
@@ -545,18 +558,25 @@ impl Client {
             .query(&[("ref", git_ref)])
             .send()
             .await
-            .with_context(|| format!("Failed to send GET {url}"))?;
+            .map_err(|e| FileFetchError {
+                status: None,
+                message: format!("Failed to send GET {url}: {e}"),
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             error!(status = %status, path = %path, "Failed to fetch file content");
-            anyhow::bail!("GitLab API returned {status} for file '{path}': {body}");
+            return Err(FileFetchError {
+                status: Some(status.as_u16()),
+                message: format!("GitLab API returned {status} for file '{path}': {body}"),
+            });
         }
 
-        resp.text()
-            .await
-            .with_context(|| format!("Failed to read file content response for '{path}'"))
+        resp.text().await.map_err(|e| FileFetchError {
+            status: None,
+            message: format!("Failed to read file content response for '{path}': {e}"),
+        })
     }
 
     /// Search the project's blobs for `query`, returning up to `limit`

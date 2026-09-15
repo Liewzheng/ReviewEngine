@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info};
 
+use crate::git_provider::FileFetchError;
 use crate::models::{aggregate_participants, MRInfo, ParticipantInput, ParticipantRole};
 
 use super::types::{GitHubUser, PrReview, PrUser, PullRequest, ReviewComment};
@@ -376,9 +377,21 @@ impl Client {
     /// `application/vnd.github.raw+json` media type so the response body is
     /// the file content itself.
     pub async fn fetch_file_raw(&self, path: &str, git_ref: &str) -> Result<String> {
+        self.fetch_file_raw_checked(path, git_ref)
+            .await
+            .map_err(|e| anyhow::anyhow!(e.message))
+    }
+
+    /// [`fetch_file_raw`](Self::fetch_file_raw) keeping the HTTP status, so a
+    /// caller can tell "the file is not in this revision" (404) from "this
+    /// credential cannot read the repository" (401/403).
+    pub async fn fetch_file_raw_checked(&self, path: &str, git_ref: &str) -> Result<String, FileFetchError> {
         // Defensive: validate file path, consistent with create_review_comment
         if path.is_empty() || path.contains("..") || path.starts_with('/') || path.starts_with('~') {
-            anyhow::bail!("Invalid repository file path: {path}");
+            return Err(FileFetchError {
+                status: None,
+                message: format!("Invalid repository file path: {path}"),
+            });
         }
         let url = self.api_url(&format!("contents/{}", encode_content_path(path)));
         let resp = self
@@ -395,18 +408,25 @@ impl Client {
             .query(&[("ref", git_ref)])
             .send()
             .await
-            .with_context(|| format!("Failed to fetch file '{path}'"))?;
+            .map_err(|e| FileFetchError {
+                status: None,
+                message: format!("Failed to fetch file '{path}': {e}"),
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
             error!(status = %status, path = %path, "Failed to fetch file content");
-            anyhow::bail!("GitHub API returned {status} for file '{path}': {body}");
+            return Err(FileFetchError {
+                status: Some(status.as_u16()),
+                message: format!("GitHub API returned {status} for file '{path}': {body}"),
+            });
         }
 
-        resp.text()
-            .await
-            .with_context(|| format!("Failed to read file content response for '{path}'"))
+        resp.text().await.map_err(|e| FileFetchError {
+            status: None,
+            message: format!("Failed to read file content response for '{path}': {e}"),
+        })
     }
 
     /// Search code in this repository, returning up to `limit` distinct

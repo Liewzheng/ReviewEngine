@@ -11,8 +11,10 @@
 //! vs. config-file values.
 
 pub mod defaults;
+pub mod expert_overrides;
 pub mod resolver;
 pub mod secrets;
 
 pub use defaults::*;
+pub use expert_overrides::{ExpertOverride, ExpertOverrides};
 pub use resolver::*;

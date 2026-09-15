@@ -261,6 +261,14 @@ pub struct AppState {
     /// with so a credential change can never be answered by the previous
     /// config's status.
     pub llm_health: Arc<crate::server::api::llm_health::LlmHealthStore>,
+    /// WebUI expert overrides (RENG-69), keyed by expert name. The source of
+    /// truth for what `PUT /api/v1/system/experts/{id}` changed, kept beside
+    /// the persisted `app_settings` row so every review dispatch can re-apply
+    /// it to its own freshly resolved config (neither `run_review` nor
+    /// `run_review_common` reads `app_config`; both re-resolve the config
+    /// file). Empty when no DB is attached (`REVIEW_DISABLE_DB=1`, tests) —
+    /// expert edits are then memory-only, exactly as before 0.10.24.
+    pub expert_overrides: RwLock<Arc<crate::config::ExpertOverrides>>,
 }
 
 impl AppState {
@@ -291,6 +299,7 @@ impl AppState {
             upgrade: UpgradeStore::new(),
             catalog: CatalogStore::new(),
             llm_health: Arc::new(crate::server::api::llm_health::LlmHealthStore::new()),
+            expert_overrides: RwLock::new(Arc::new(crate::config::ExpertOverrides::default())),
         }
     }
 
@@ -306,6 +315,34 @@ impl AppState {
         let primary = self.ui_config.read().unwrap().llm.primary_provider.clone();
         let configs = self.llm_configs.read().unwrap();
         crate::llm::ordered_llm_configs(&primary, &configs)
+    }
+
+    /// Snapshot of the WebUI expert overrides (RENG-69). Cheap: the map is
+    /// immutable behind an `Arc`, so a review dispatch clones the handle, not
+    /// the data. Review paths take this snapshot at enqueue time and apply it
+    /// to the config they resolve themselves.
+    pub fn expert_overrides_snapshot(&self) -> Arc<crate::config::ExpertOverrides> {
+        self.expert_overrides.read().unwrap().clone()
+    }
+
+    /// Publish `overrides` as the runtime override map AND apply them to the
+    /// current `app_config` (so `GET /system/experts` and the
+    /// `app_config`-consuming paths — repo scans, `inject_agents_md` — see the
+    /// edited values immediately). Returns the number of experts patched.
+    ///
+    /// Lock order is fixed here (`app_config` → `expert_overrides`) and this
+    /// is the only place both are written, so it cannot deadlock against the
+    /// readers of either lock.
+    pub fn set_expert_overrides(&self, overrides: crate::config::ExpertOverrides) -> usize {
+        let applied = {
+            let mut cfg_opt = self.app_config.write().unwrap();
+            match cfg_opt.as_mut() {
+                Some(arc) => overrides.apply_to(Arc::make_mut(arc)),
+                None => 0,
+            }
+        };
+        *self.expert_overrides.write().unwrap() = Arc::new(overrides);
+        applied
     }
 }
 

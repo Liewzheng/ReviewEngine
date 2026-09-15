@@ -37,8 +37,9 @@ async fn list_experts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     };
 
     // Read straight from `review_experts` — the same config source the PUT
-    // handler writes to — so the list reflects the true configured state:
-    // real weights (never a placeholder) and disabled experts included with
+    // handler writes to, with the persisted WebUI overrides already applied on
+    // top (RENG-69) — so the list reflects the true configured state: real
+    // weights (never a placeholder) and disabled experts included with
     // `enabled: false` (the management UI needs them to re-enable a card).
     // `build_expert_defs` is deliberately NOT used here: it filters disabled
     // and invalid experts, which is right for review execution but wrong for
@@ -46,22 +47,7 @@ async fn list_experts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let experts: Vec<serde_json::Value> = cfg
         .review_experts
         .iter()
-        .map(|(name, e)| {
-            let id = slugify(name);
-            let category = derive_category(name, &e.role);
-            let icon = icon_for_category(&category);
-            serde_json::json!({
-                "id": id,
-                "name": if e.title.is_empty() { name } else { &e.title },
-                "category": category,
-                "icon": icon,
-                "enabled": e.enabled,
-                "weight": e.weight,
-                "description": e.role,
-                "promptPreview": e.prompt.clone().unwrap_or_default(),
-                "lastReviews": [],
-            })
-        })
+        .map(|(name, e)| expert_view(&slugify(name), name, e))
         .collect();
 
     Json(serde_json::json!({ "experts": experts })).into_response()
@@ -234,27 +220,132 @@ struct UpdateExpertRequest {
     weight: Option<u8>,
 }
 
+/// The JSON view of one configured expert — the shape `GET /system/experts`
+/// and `PUT /system/experts/{id}` both return. `id` is the slug the UI uses
+/// to address the expert, `name` its key in `[review_experts]`.
+fn expert_view(id: &str, name: &str, expert: &crate::models::ExpertTomlDef) -> serde_json::Value {
+    let category = derive_category(name, &expert.role);
+    let icon = icon_for_category(&category);
+    serde_json::json!({
+        "id": id,
+        "name": if expert.title.is_empty() { name } else { &expert.title },
+        "category": category,
+        "icon": icon,
+        "enabled": expert.enabled,
+        "weight": expert.weight,
+        "description": expert.role,
+        "promptPreview": expert.prompt.clone().unwrap_or_default(),
+        "lastReviews": [],
+    })
+}
+
+/// `PUT /api/v1/system/experts/{id}` — enable/disable an expert or change its
+/// weight.
+///
+/// The edit is applied to the running config immediately AND persisted before
+/// success is reported (RENG-69 — pre-0.10.24 it was memory-only, so every
+/// container recreate silently reverted it to the config file's value):
+///
+/// - **DB attached** → the whole override map is upserted into `app_settings`
+///   (key `experts`, see [`super::config::persist::save_expert_overrides`]) and
+///   the response carries `"persisted": true`. A failed write is answered with
+///   `500` — the caller must not report success (the in-memory value stays
+///   applied, exactly like a failed `PUT /config`).
+/// - **No DB** (`REVIEW_DISABLE_DB=1`, tests, embedded use) → memory-only, the
+///   pre-0.10.24 behaviour, reported honestly as `"persisted": false` plus a
+///   warning log; the response never implies the edit survives a restart.
+///
+/// The override is published on [`AppState::expert_overrides`] so every review
+/// dispatch re-applies it: neither `run_review` (REST) nor `run_review_common`
+/// (webhooks) reads `app_config` — both re-resolve the config file — so the
+/// override is threaded to them instead of living only in memory.
 async fn update_expert(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<UpdateExpertRequest>,
 ) -> impl IntoResponse {
-    let mut cfg_opt = state.app_config.write().unwrap();
-    let cfg = match cfg_opt.as_mut() {
-        Some(arc) => Arc::make_mut(arc),
-        None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(serde_json::json!({"error": "config not loaded"})),
-            )
-                .into_response();
+    // Locate the expert first (read snapshot, never a guard held across the
+    // persistence await below).
+    let name = {
+        let cfg_opt = state.app_config.read().unwrap();
+        let cfg = match cfg_opt.as_ref() {
+            Some(c) => c,
+            None => {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({"error": "config not loaded"})),
+                )
+                    .into_response();
+            }
+        };
+        match cfg.review_experts.keys().find(|name| slugify(name) == id).cloned() {
+            Some(n) => n,
+            None => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({"error": "expert not found"})),
+                )
+                    .into_response();
+            }
         }
     };
 
-    let expert_name = cfg.review_experts.keys().find(|name| slugify(name) == id).cloned();
+    // Merge this request into the persisted override map (fields the body
+    // omitted keep their stored value) and apply + publish it: the running
+    // `app_config`, `GET /system/experts` and every subsequent review dispatch
+    // all see the edit immediately.
+    let patch = crate::config::ExpertOverride {
+        enabled: body.enabled,
+        weight: body.weight,
+    };
+    let mut overrides = (*state.expert_overrides_snapshot()).clone();
+    overrides.record(&name, patch);
+    state.set_expert_overrides(overrides.clone());
 
-    let name = match expert_name {
-        Some(n) => n,
+    let persisted = match state.db.as_ref() {
+        Some(db) => {
+            if overrides.is_empty() {
+                // Nothing was ever overridden: the volatile state equals the
+                // durable state, so a restart cannot lose anything and there is
+                // no row to write.
+                true
+            } else {
+                match super::config::persist::save_expert_overrides(db, &overrides).await {
+                    Ok(()) => true,
+                    Err(e) => {
+                        tracing::error!(
+                            expert = %name,
+                            error = %format!("{e:#}"),
+                            "failed to persist expert override to the database"
+                        );
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error": format!(
+                                    "expert updated in memory but failed to persist to the database: {e}"
+                                )
+                            })),
+                        )
+                            .into_response();
+                    }
+                }
+            }
+        }
+        None => {
+            tracing::warn!(
+                expert = %name,
+                "expert override applied in memory only: no database is attached \
+                 (REVIEW_DISABLE_DB=1 or embedded use) — it will be lost on restart"
+            );
+            false
+        }
+    };
+
+    // Echo the effective expert back (read after the apply, so the response is
+    // the value the server will use, not the request echo).
+    let cfg_opt = state.app_config.read().unwrap();
+    let mut response = match cfg_opt.as_ref().and_then(|cfg| cfg.review_experts.get(&name)) {
+        Some(expert) => expert_view(&id, &name, expert),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -263,36 +354,11 @@ async fn update_expert(
                 .into_response();
         }
     };
-
-    if let Some(expert) = cfg.review_experts.get_mut(&name) {
-        if let Some(enabled) = body.enabled {
-            expert.enabled = enabled;
-        }
-        if let Some(weight) = body.weight {
-            expert.weight = weight;
-        }
-
-        let category = derive_category(&name, &expert.role);
-        let icon = icon_for_category(&category);
-        let response = serde_json::json!({
-            "id": id,
-            "name": if expert.title.is_empty() { &name } else { &expert.title },
-            "category": category,
-            "icon": icon,
-            "enabled": expert.enabled,
-            "weight": expert.weight,
-            "description": expert.role,
-            "promptPreview": expert.prompt.clone().unwrap_or_default(),
-            "lastReviews": [],
-        });
-        Json(response).into_response()
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "expert not found"})),
-        )
-            .into_response()
+    drop(cfg_opt);
+    if let Some(obj) = response.as_object_mut() {
+        obj.insert("persisted".to_string(), serde_json::Value::Bool(persisted));
     }
+    Json(response).into_response()
 }
 
 /// Body for `PUT /api/v1/system/token`.
@@ -380,8 +446,9 @@ mod tests {
 
     /// Expert fixture per the audit notes: four enabled experts whose
     /// weights sum to 100 (docs=5), plus one disabled expert that must
-    /// remain visible in the management listing.
-    fn state_with_experts() -> Arc<AppState> {
+    /// remain visible in the management listing. `db` attaches a persistence
+    /// store (RENG-69); `None` is the no-database deployment.
+    fn expert_state_with_db(db: Option<Arc<crate::store::SqlxStore>>) -> Arc<AppState> {
         let mut review_experts = HashMap::new();
         review_experts.insert(
             "Lead".to_string(),
@@ -417,9 +484,49 @@ mod tests {
             rate_limit: RateLimitConfig::default(),
             languages: LanguagesConfig::default(),
         };
-        let state = Arc::new(AppState::new(vec![]));
+        let mut state = AppState::new(vec![]);
         *state.app_config.write().unwrap() = Some(Arc::new(config));
+        state.db = db;
+        Arc::new(state)
+    }
+
+    fn state_with_experts() -> Arc<AppState> {
+        expert_state_with_db(None)
+    }
+
+    /// An in-memory store with the schema applied — the same store the server
+    /// would boot with.
+    async fn fresh_store() -> Arc<crate::store::SqlxStore> {
+        let store = crate::store::SqlxStore::new_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+        Arc::new(store)
+    }
+
+    /// The effective expert table of a state, as the review paths see it.
+    fn effective_experts(state: &Arc<AppState>) -> HashMap<String, ExpertTomlDef> {
         state
+            .app_config
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("app_config seeded")
+            .review_experts
+            .clone()
+    }
+
+    async fn put_expert(
+        state: &Arc<AppState>,
+        id: &str,
+        enabled: Option<bool>,
+        weight: Option<u8>,
+    ) -> axum::response::Response {
+        update_expert(
+            State(state.clone()),
+            Path(id.to_string()),
+            Json(UpdateExpertRequest { enabled, weight }),
+        )
+        .await
+        .into_response()
     }
 
     async fn experts_body(state: Arc<AppState>) -> serde_json::Value {
@@ -491,6 +598,163 @@ mod tests {
             .await
             .into_response();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    // ─── RENG-69: expert edits are persisted, not memory-only ───
+
+    /// (a) A UI-style PUT writes the override into the store (`app_settings`
+    /// key `experts`) and applies it to the running config immediately.
+    #[tokio::test]
+    async fn update_expert_persists_the_override() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+
+        let resp = put_expert(&state, "security", Some(false), Some(45)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["enabled"], false, "the response echoes the new state: {body}");
+        assert_eq!(body["weight"], 45);
+        assert_eq!(
+            body["persisted"], true,
+            "a successful store write must be reported: {body}"
+        );
+
+        // The durable form is the `app_settings` row, keyed by expert NAME.
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .expect("stored overrides must load");
+        assert_eq!(stored.len(), 1, "one override stored: {stored:?}");
+        assert_eq!(stored.get("Security").and_then(|o| o.enabled), Some(false));
+        assert_eq!(stored.get("Security").and_then(|o| o.weight), Some(45));
+
+        // Immediately effective in the running config, and on the published
+        // snapshot the review paths take.
+        let effective = effective_experts(&state);
+        assert!(!effective["Security"].enabled);
+        assert_eq!(effective["Security"].weight, 45);
+        assert_eq!(
+            state.expert_overrides_snapshot().get("Security").and_then(|o| o.weight),
+            Some(45)
+        );
+
+        // A second edit for another expert accumulates instead of replacing.
+        assert_eq!(
+            put_expert(&state, "docs", None, Some(15)).await.status(),
+            StatusCode::OK
+        );
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .unwrap();
+        assert_eq!(stored.len(), 2, "both edits are stored: {stored:?}");
+        assert_eq!(stored.get("Security").and_then(|o| o.enabled), Some(false));
+        assert_eq!(stored.get("Docs").and_then(|o| o.weight), Some(15));
+    }
+
+    /// (b) A restart (fresh state from the config file + the stored overrides)
+    /// keeps the edited value while unedited experts keep the file values, and
+    /// the review-side expert set follows the override.
+    #[tokio::test]
+    async fn restart_replays_overrides_over_the_file_values() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+        assert_eq!(
+            put_expert(&state, "security", Some(false), None).await.status(),
+            StatusCode::OK
+        );
+
+        // "Restart": a brand-new state seeded from the same config file, with
+        // no overrides loaded yet — exactly what `resolve_config` produces at
+        // startup.
+        let restarted = expert_state_with_db(Some(db.clone()));
+        assert!(
+            effective_experts(&restarted)["Security"].enabled,
+            "the file value is the base before the replay"
+        );
+
+        let applied = crate::server::api::config::persist::load_and_apply_expert_overrides(&restarted, &db)
+            .await
+            .expect("override replay must succeed");
+        assert_eq!(applied, 1, "exactly the edited expert is patched");
+
+        let effective = effective_experts(&restarted);
+        assert!(!effective["Security"].enabled, "the edit survived the restart");
+        assert_eq!(
+            effective["Security"].weight, 30,
+            "the untouched field keeps the file value"
+        );
+        assert!(effective["Lead"].enabled, "an unedited expert keeps the file value");
+        assert_eq!(effective["Lead"].weight, 50);
+
+        // What a review would run: the disabled expert drops out of the expert
+        // set, the rest keep their file weights.
+        let mut resolved = restarted
+            .app_config
+            .read()
+            .unwrap()
+            .as_ref()
+            .expect("seeded")
+            .as_ref()
+            .clone();
+        restarted.expert_overrides_snapshot().apply_to(&mut resolved);
+        let names: Vec<String> = resolved.build_expert_defs().into_iter().map(|e| e.name).collect();
+        assert!(
+            !names.contains(&"Security".to_string()),
+            "a webhook/REST review must not run the disabled expert: {names:?}"
+        );
+        assert_eq!(names.len(), 3, "Lead + Performance + Docs: {names:?}");
+    }
+
+    /// (c) A failing store write is answered with 500 and never reports
+    /// success — the UI must be able to tell that nothing was persisted.
+    #[tokio::test]
+    async fn update_expert_surfaces_a_failed_store_write() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+        // Break the store's schema out from under it: every subsequent write
+        // fails, exactly like an unreachable database.
+        ::sqlx::query("DROP TABLE app_settings")
+            .execute(db.pool())
+            .await
+            .expect("dropping the settings table must succeed");
+
+        let resp = put_expert(&state, "security", Some(false), None).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a failed persist must be an error response"
+        );
+        let body = body_json(resp).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("failed to persist"),
+            "the error must name the persistence failure: {body}"
+        );
+        assert_ne!(
+            body["persisted"], true,
+            "a failed write must not report success: {body}"
+        );
+    }
+
+    /// (d) Without a store (REVIEW_DISABLE_DB=1, embedded use) the endpoint
+    /// keeps the pre-0.10.24 behaviour: applied in memory, but the response
+    /// says honestly that it is not persisted.
+    #[tokio::test]
+    async fn update_expert_without_a_store_is_memory_only_and_says_so() {
+        let state = expert_state_with_db(None);
+
+        let resp = put_expert(&state, "security", Some(false), None).await;
+        assert_eq!(resp.status(), StatusCode::OK, "no-store mode still applies the change");
+        let body = body_json(resp).await;
+        assert_eq!(body["enabled"], false);
+        assert_eq!(
+            body["persisted"], false,
+            "without a store the change is memory-only and must say so: {body}"
+        );
+        assert!(!effective_experts(&state)["Security"].enabled, "still effective now");
+
+        // The GET listing agrees with the PUT.
+        let listed = experts_body(state).await;
+        assert_eq!(expert_by_id(&listed, "security")["enabled"], false);
     }
 
     /// Unit 8: `/system/version` always exposes a `commit` string (from a

@@ -35,6 +35,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use crate::config::secrets::{self, ENC_PREFIX};
+use crate::config::ExpertOverrides;
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::AppState;
 use crate::store::traits::ConfigStore;
@@ -499,6 +500,41 @@ pub async fn load_and_apply_ui_state_from_db(
     }
     apply_replay(state, &file, overrides, "the database UI state")?;
     Ok(true)
+}
+
+/// RENG-69: `app_settings` row holding the WebUI expert overrides. A key of
+/// its own (next to `ui` / `gitlab`) — see [`crate::config::ExpertOverrides`]
+/// for why the overrides are not folded into the `ui` projection.
+pub const EXPERT_OVERRIDES_KEY: &str = "experts";
+
+/// Read the persisted expert overrides. A missing row is the empty map
+/// (nothing was ever overridden); a malformed row is a hard error so a
+/// corrupted setting is never silently dropped in favour of the file values.
+pub async fn load_expert_overrides(store: &SqlxStore) -> anyhow::Result<ExpertOverrides> {
+    match store.load_setting(EXPERT_OVERRIDES_KEY).await? {
+        Some(value) => ExpertOverrides::from_setting(&value),
+        None => Ok(ExpertOverrides::default()),
+    }
+}
+
+/// Persist the whole override map (one `app_settings` upsert): the endpoint
+/// that edits an expert always writes the merged map, exactly like
+/// `PUT /config` persists the whole resolved config rather than a delta.
+pub async fn save_expert_overrides(store: &SqlxStore, overrides: &ExpertOverrides) -> anyhow::Result<()> {
+    store.save_setting(EXPERT_OVERRIDES_KEY, &overrides.to_setting()).await
+}
+
+/// Startup: load the persisted expert overrides, publish them on
+/// [`AppState`], and apply them over the file-resolved `[review_experts]`.
+///
+/// Precedence is DB over file — the config file stays the base/default, the
+/// same rule the other config surfaces follow. Returns the number of experts
+/// actually patched so the caller can log the replay. `Ok(0)` covers both
+/// "no overrides stored" and "every stored name is gone from the file".
+pub async fn load_and_apply_expert_overrides(state: &AppState, store: &SqlxStore) -> anyhow::Result<usize> {
+    let overrides = load_expert_overrides(store).await?;
+    let applied = state.set_expert_overrides(overrides);
+    Ok(applied)
 }
 
 /// Build the `PUT /config`-equivalent JSON payload from the persisted file,

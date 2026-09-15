@@ -71,7 +71,9 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 /// encodes); `chainPosition` is the 1-based rank in the authoritative runtime
 /// chain ([`crate::llm::chain_positions`], the primary leading) and
 /// `isPrimary` marks its head — so the LLM page can show what a review will
-/// actually use (RENG-55).
+/// actually use (RENG-55). A DISABLED provider (RENG-75) carries
+/// `disabled: true` and `chainPosition: null`: it is not in the chain at all,
+/// so there is no rank to show.
 ///
 /// `health` holds one report per config, in the same order
 /// ([`AppState::llm_health`](crate::server::AppState::llm_health)); `status`
@@ -101,7 +103,8 @@ fn provider_items(
         .enumerate()
         .map(|(i, cfg)| {
             let id = format!("{}-{}", cfg.provider, i);
-            let chain_position = ranks.get(i).copied().unwrap_or(i + 1);
+            // `None` (a disabled entry — no chain rank) serializes as `null`.
+            let chain_position = ranks.get(i).copied().flatten();
             let report = health.get(i);
             let usage = usage.map(|snapshot| snapshot.for_provider(&cfg.provider));
             let latency = latency.map(|snapshot| snapshot.for_provider(&cfg.provider));
@@ -113,6 +116,10 @@ fn provider_items(
                     .map(|h| h.status.as_str())
                     .unwrap_or_else(|| super::llm_health::ProviderStatus::Offline.as_str()),
                 "configured": !cfg.api_key.is_empty(),
+                // RENG-75: the administrative off switch. A disabled provider
+                // keeps its config and history but is out of the chain and
+                // never probed (its `status` reads `disabled`, not `offline`).
+                "disabled": cfg.disabled,
                 // Echo the editable config back so the UI can prefill the edit
                 // form. The API key is intentionally never returned.
                 "apiBaseUrl": cfg.api_base,
@@ -121,9 +128,9 @@ fn provider_items(
                 "temperature": round_temperature(cfg.temperature),
                 "position": i,
                 "chainPosition": chain_position,
-                "isPrimary": chain_position == 1,
+                "isPrimary": chain_position == Some(1),
                 // Round-trip time of the probe behind `status` (0 when the
-                // provider was not probed because it has no key). Named
+                // provider was not probed — no key, or disabled). Named
                 // `lastProbeLatencyMs` (RENG-57) so it can never be mistaken
                 // for `avgLatencyMs` below.
                 "lastProbeLatencyMs": report.map(|h| h.latency_ms).unwrap_or(0),
@@ -156,11 +163,17 @@ fn provider_items(
                     .map(|t| t.to_rfc3339()),
                 "latencySparkline": latency.as_ref().and_then(|l| l.sparkline.clone()),
                 // Timestamp of the probe behind `status`; `null` when no probe
-                // happened — for an `offline` provider (no key, never probed)
-                // as much as for a config with no report at all. Never "now",
-                // which would claim a check that did not happen.
+                // happened — for an `offline` provider (no key, never probed),
+                // a `disabled` one (RENG-75: deliberately off, never probed),
+                // or a config with no report at all. Never "now", which would
+                // claim a check that did not happen.
                 "lastChecked": report
-                    .filter(|h| h.status != super::llm_health::ProviderStatus::Offline)
+                    .filter(|h| {
+                        !matches!(
+                            h.status,
+                            super::llm_health::ProviderStatus::Offline | super::llm_health::ProviderStatus::Disabled
+                        )
+                    })
                     .map(|h| h.checked_at.to_rfc3339()),
             })
         })
@@ -232,6 +245,7 @@ async fn add_provider(
         max_tokens: body.max_tokens,
         temperature: body.temperature,
         disable_thinking: None,
+        disabled: false,
     };
 
     // Derive the new id for the response
@@ -585,6 +599,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }
     }
 
@@ -636,6 +651,68 @@ mod tests {
     #[test]
     fn provider_items_empty_set() {
         assert!(provider_items("deepseek", &[], &[], None, None).is_empty());
+    }
+
+    /// RENG-75: a disabled provider's card tells "deliberately off", never a
+    /// failure and never a chain member: `disabled: true`, `status:
+    /// "disabled"` (NOT `offline`), `chainPosition: null`, `isPrimary: false`,
+    /// `lastChecked: null` (no probe happens). The enabled neighbours number
+    /// the chain without it (positions 1 and 2), and its recorded usage/latency
+    /// history stays visible — disabling hides nothing but the chain rank.
+    #[test]
+    fn provider_items_mark_a_disabled_provider_off_the_chain() {
+        let mut stored = vec![cfg("xiaomi"), cfg("deepseek"), cfg("openai")];
+        stored[1].disabled = true;
+        let items = provider_items(
+            "xiaomi",
+            &stored,
+            &[
+                ProviderHealth::healthy(7),
+                ProviderHealth::disabled(),
+                ProviderHealth::healthy(9),
+            ],
+            None,
+            None,
+        );
+
+        // Stored order and ids untouched; the disabled card keeps its slot.
+        assert_eq!(items[1]["name"], "deepseek");
+        assert_eq!(items[1]["id"], "deepseek-1");
+        assert_eq!(items[1]["position"], 1);
+        assert_eq!(items[1]["disabled"], true);
+        assert_eq!(items[0]["disabled"], false);
+        assert_eq!(items[2]["disabled"], false);
+
+        // Deliberately off ≠ unreachable, and it is no chain member.
+        assert_eq!(items[1]["status"], "disabled");
+        assert_eq!(items[1]["chainPosition"], serde_json::Value::Null);
+        assert_eq!(items[1]["isPrimary"], false);
+        assert_eq!(items[1]["lastProbeLatencyMs"], 0);
+        assert_eq!(items[1]["lastChecked"], serde_json::Value::Null);
+
+        // The enabled subset numbers the chain 1, 2 — the head is the first
+        // enabled entry.
+        assert_eq!(items[0]["chainPosition"], 1);
+        assert_eq!(items[0]["isPrimary"], true);
+        assert_eq!(items[2]["chainPosition"], 2);
+        assert_eq!(items[2]["isPrimary"], false);
+
+        // A recorded primary naming the disabled entry cannot put it back at
+        // the head: the first enabled provider leads.
+        let items = provider_items(
+            "deepseek",
+            &stored,
+            &[
+                ProviderHealth::healthy(7),
+                ProviderHealth::disabled(),
+                ProviderHealth::healthy(9),
+            ],
+            None,
+            None,
+        );
+        assert_eq!(items[1]["chainPosition"], serde_json::Value::Null);
+        assert_eq!(items[0]["chainPosition"], 1);
+        assert_eq!(items[0]["isPrimary"], true);
     }
 
     /// RENG-36: the card's `status`/`lastProbeLatencyMs`/`lastChecked` come
@@ -968,6 +1045,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         };
         let state = Arc::new(AppState::new(vec![provider.clone()]));
         {

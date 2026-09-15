@@ -470,6 +470,7 @@ fn test_apply_llm_env_fallback_keeps_file_providers() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     apply_llm_env_fallback(&mut config);
     // File-based providers win; the env var never overrides them.

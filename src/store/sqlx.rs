@@ -792,6 +792,7 @@ mod tests {
             && a.max_tokens == b.max_tokens
             && a.temperature == b.temperature
             && a.disable_thinking == b.disable_thinking
+            && a.disabled == b.disabled
     }
 
     #[tokio::test]
@@ -853,6 +854,7 @@ mod tests {
                 max_tokens: 8192,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             },
             LLMConfig {
                 provider: "deepseek".into(),
@@ -862,6 +864,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.7,
                 disable_thinking: Some(true),
+                disabled: false,
             },
         ];
         store.replace_llm_providers(&providers).await.unwrap();
@@ -913,6 +916,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             })
             .collect();
         store.replace_llm_providers(&providers).await.unwrap();
@@ -938,6 +942,69 @@ mod tests {
         );
     }
 
+    /// RENG-75: `disabled` round-trips inside `raw` next to `position` — no
+    /// column, no migration — and neither the raw `position` pins nor the
+    /// load order change. Rows written before the flag existed (no
+    /// `disabled` key in `raw`) load as enabled.
+    #[tokio::test]
+    async fn llm_providers_round_trip_preserves_disabled_and_position() {
+        let store = fresh_store().await;
+        let providers: Vec<LLMConfig> = ["xiaomi", "deepseek", "anthropic"]
+            .iter()
+            .map(|p| LLMConfig {
+                provider: (*p).into(),
+                model: format!("{p}-model"),
+                api_key: "k".into(),
+                api_base: format!("https://api.{p}.example/v1"),
+                max_tokens: 4096,
+                temperature: 0.3,
+                disable_thinking: None,
+                disabled: *p == "deepseek",
+            })
+            .collect();
+        store.replace_llm_providers(&providers).await.unwrap();
+
+        // At rest: position intact for every row; `disabled` only on the
+        // disabled one (an enabled row keeps the exact pre-RENG-75 shape).
+        for (index, provider) in ["xiaomi", "deepseek", "anthropic"].iter().enumerate() {
+            let raw: String = ::sqlx::query_scalar("SELECT raw FROM llm_providers WHERE provider = ?")
+                .bind(provider)
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            let raw: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(raw["position"], index as i64, "position pin for {provider}");
+            if *provider == "deepseek" {
+                assert_eq!(raw["disabled"], true, "the disabled flag is recorded");
+            } else {
+                assert!(
+                    raw.get("disabled").is_none(),
+                    "an enabled row must not grow a `disabled` key: {raw}"
+                );
+            }
+        }
+
+        // Load: order unchanged (position-authoritative), flag preserved.
+        let loaded = store.load_llm_providers().await.unwrap();
+        assert_eq!(
+            loaded.iter().map(|c| c.provider.as_str()).collect::<Vec<_>>(),
+            vec!["xiaomi", "deepseek", "anthropic"]
+        );
+        assert!(!loaded[0].disabled);
+        assert!(loaded[1].disabled, "the disabled flag must round-trip");
+        assert!(!loaded[2].disabled);
+        assert!(llm_eq(&loaded[1], &providers[1]), "field-level equality: {loaded:?}");
+
+        // A legacy row (no `disabled` key in raw — every pre-RENG-75 row)
+        // loads as enabled.
+        ::sqlx::query("UPDATE llm_providers SET raw = '{\"position\":1}' WHERE provider = 'deepseek'")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let loaded = store.load_llm_providers().await.unwrap();
+        assert!(!loaded[1].disabled, "a missing key means enabled (legacy row)");
+    }
+
     /// RENG-55: rows without a usable `position` (hand-written or legacy rows
     /// predating the field) sort after the positioned ones, in `updated_at`
     /// order — the deterministic tail of the same rule.
@@ -954,6 +1021,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             })
             .collect();
         store.replace_llm_providers(&providers).await.unwrap();
@@ -1021,6 +1089,7 @@ mod tests {
                 max_tokens: 8192,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             },
             LLMConfig {
                 provider: "pg-f1-deepseek".into(),
@@ -1030,6 +1099,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.7,
                 disable_thinking: Some(true),
+                disabled: false,
             },
         ];
         store.replace_llm_providers(&providers).await.unwrap();

@@ -45,11 +45,12 @@ pub(crate) struct LlmProviderRow {
     pub api_key: String,
     pub max_tokens: i64,
     pub temperature: f64,
-    /// JSON fallback bag: `disable_thinking`, plus `position` — the index of
-    /// this provider in the STORED list. Order is semantically meaningful
-    /// (RENG-55: the list order is the fallback order behind the persisted
-    /// primary, which is recorded separately as `ui.llm.primaryProvider`) and
-    /// the table has no sequence column.
+    /// JSON fallback bag: `disable_thinking`, `disabled` (RENG-75: the
+    /// provider is kept but excluded from the chain and never probed), plus
+    /// `position` — the index of this provider in the STORED list. Order is
+    /// semantically meaningful (RENG-55: the list order is the fallback order
+    /// behind the persisted primary, which is recorded separately as
+    /// `ui.llm.primaryProvider`) and the table has no sequence column.
     pub raw: String,
     pub updated_at: String,
 }
@@ -121,6 +122,11 @@ pub(crate) fn llm_to_row(
     if let Some(disable_thinking) = config.disable_thinking {
         raw["disable_thinking"] = json!(disable_thinking);
     }
+    // RENG-75: only written when true, so rows saved by older versions (no
+    // key at all) and enabled providers share the exact same shape.
+    if config.disabled {
+        raw["disabled"] = json!(true);
+    }
     Ok(LlmProviderRow {
         id,
         provider: config.provider.clone(),
@@ -153,6 +159,8 @@ pub(crate) fn llm_from_row(row: LlmProviderRow, key: &[u8; 32]) -> Result<LLMCon
             .with_context(|| format!("llm_providers.max_tokens out of range: {}", row.max_tokens))?,
         temperature: row.temperature as f32,
         disable_thinking,
+        // Absent (every pre-RENG-75 row) means enabled.
+        disabled: raw.get("disabled").and_then(Value::as_bool).unwrap_or(false),
     })
 }
 

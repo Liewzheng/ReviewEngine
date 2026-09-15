@@ -821,6 +821,7 @@ async fn test_run_repo_review_llm_failure_lands_visible_fallbacks() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     let client = crate::llm::client::LLMClient::new();
 

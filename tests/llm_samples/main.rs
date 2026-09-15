@@ -26,6 +26,7 @@ fn config(provider: &str, api_base: &str) -> LLMConfig {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }
 }
 

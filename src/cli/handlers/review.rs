@@ -492,6 +492,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }
     }
 

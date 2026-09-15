@@ -363,6 +363,7 @@ mod tests {
             max_tokens: 1024,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }
     }
 

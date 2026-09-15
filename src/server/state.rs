@@ -305,10 +305,12 @@ impl AppState {
 
     /// The authoritative provider chain a review runs on: the persisted
     /// primary selection first, then the remaining providers in their stored
-    /// order (RENG-55, [`crate::llm::ordered_llm_configs`]). Every
-    /// review-executing entry point (REST submit, repo review, GitLab/GitHub
-    /// webhooks) must take its configs from here — reading `llm_configs`
-    /// directly reintroduces the bug where the primary was ignored.
+    /// order (RENG-55, [`crate::llm::ordered_llm_configs`]), with DISABLED
+    /// providers skipped entirely (RENG-75) — a disabled provider is never
+    /// used by a review. Every review-executing entry point (REST submit,
+    /// repo review, GitLab/GitHub webhooks) must take its configs from here —
+    /// reading `llm_configs` directly reintroduces the bug where the primary
+    /// was ignored.
     pub fn ordered_llm_configs(&self) -> Vec<LLMConfig> {
         // Sequential reads (never nested) so a concurrent `PUT /config` — which
         // writes `llm_configs` then `ui_config` — cannot deadlock against us.
@@ -375,6 +377,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.7,
             disable_thinking: None,
+            disabled: false,
         }];
         let state = AppState::new(configs);
         let llm = state.llm_configs.read().unwrap();
@@ -484,6 +487,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }
     }
 
@@ -513,5 +517,35 @@ mod tests {
             vec!["deepseek", "xiaomi"],
             "the persisted primary must lead the chain"
         );
+    }
+
+    /// RENG-75: the runtime chain skips disabled providers — disabling the
+    /// recorded primary moves the head to the next enabled entry, and the
+    /// recorded primary cannot pull a disabled provider back in.
+    #[test]
+    fn ordered_llm_configs_skips_disabled_providers() {
+        let mut configs = vec![llm("xiaomi"), llm("deepseek"), llm("openai")];
+        configs[0].disabled = true;
+        let state = AppState::new(configs);
+
+        // Recorded primary names the DISABLED head: it is skipped, the first
+        // enabled entry leads.
+        state.ui_config.write().unwrap().llm.primary_provider = "xiaomi".to_string();
+        assert_eq!(
+            state
+                .ordered_llm_configs()
+                .iter()
+                .map(|c| c.provider.as_str())
+                .collect::<Vec<_>>(),
+            vec!["deepseek", "openai"],
+            "a disabled recorded primary is skipped like any disabled entry"
+        );
+
+        // All disabled → empty chain (the REST gate turns this into the
+        // named all-disabled 422 before a review is enqueued).
+        for c in state.llm_configs.write().unwrap().iter_mut() {
+            c.disabled = true;
+        }
+        assert!(state.ordered_llm_configs().is_empty());
     }
 }

@@ -293,6 +293,21 @@ pub(crate) fn apply_ui_config(
             .map(|c| c.api_key.clone())
             .unwrap_or_default()
     };
+    // RENG-75: `disabled` follows the same keep semantics as the masked API
+    // key — a providers[] entry that OMITS the key (`None`) keeps the stored
+    // flag of the same-named provider, so an unrelated save (or a client that
+    // does not know the field yet) cannot silently re-enable a provider the
+    // user switched off; an explicit `true`/`false` sets it.
+    let existing_disabled_for = |provider: &str| -> bool {
+        existing_llm
+            .iter()
+            .find(|c| c.provider == provider)
+            .map(|c| c.disabled)
+            .unwrap_or(false)
+    };
+    let resolve_disabled = |submitted: Option<bool>, provider: &str| -> bool {
+        submitted.unwrap_or_else(|| existing_disabled_for(provider))
+    };
 
     let mut new_llm_configs = Vec::new();
 
@@ -306,6 +321,17 @@ pub(crate) fn apply_ui_config(
     };
     if !openai_key.is_empty() {
         primary_provider = Some("openai");
+        // The legacy scalar section has no disabled flag of its own: the
+        // same-named providers[] entry speaks for it (and is skipped below to
+        // avoid a duplicate), falling back to the stored flag.
+        let disabled = resolve_disabled(
+            body.llm
+                .providers
+                .iter()
+                .find(|p| p.provider == "openai")
+                .and_then(|p| p.disabled),
+            "openai",
+        );
         new_llm_configs.push(crate::models::LLMConfig {
             provider: "openai".to_string(),
             model: body.llm.default_model.clone(),
@@ -314,6 +340,7 @@ pub(crate) fn apply_ui_config(
             max_tokens: body.llm.max_tokens,
             temperature: body.llm.temperature,
             disable_thinking: None,
+            disabled,
         });
     }
 
@@ -348,6 +375,7 @@ pub(crate) fn apply_ui_config(
             max_tokens: p.max_tokens,
             temperature: p.temperature,
             disable_thinking: None,
+            disabled: resolve_disabled(p.disabled, &p.provider),
         });
     }
 
@@ -384,6 +412,27 @@ pub(crate) fn apply_ui_config(
         } else {
             String::new()
         };
+        // Store the RESOLVED flag (keep semantics applied) so `GET /config`
+        // always reports a concrete bool and the next merge starts from it.
+        p.disabled = Some(resolve_disabled(p.disabled, &p.provider));
+    }
+
+    // RENG-75: the effective head is always an ENABLED provider. A recorded
+    // primary that still names an enabled entry is kept verbatim — RENG-72: a
+    // save that does not speak for the primary must never change it. One that
+    // is empty, unmatched, or names a now-DISABLED entry is normalised to the
+    // first enabled provider (or emptied when none are enabled — the stored
+    // order then stays authoritative until an entry is re-enabled).
+    if !new_llm_configs.is_empty()
+        && !new_llm_configs
+            .iter()
+            .any(|c| !c.disabled && c.provider == body.llm.primary_provider)
+    {
+        body.llm.primary_provider = new_llm_configs
+            .iter()
+            .find(|c| !c.disabled)
+            .map(|c| c.provider.clone())
+            .unwrap_or_default();
     }
 
     // Git platforms: resolve the submitted array (full-replace with

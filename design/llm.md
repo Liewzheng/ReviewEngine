@@ -26,18 +26,33 @@ Recent Usage card (RENG-55)
 ### 2.1 Chain order and effective-provider visibility (RENG-55)
 
 The cards are the *configuration*; the runtime order they are tried in is the
-**authoritative chain** — the persisted primary first, then the remaining
-providers in their stored order (`ordered_llm_configs` in `src/llm/mod.rs`).
-The page must therefore make three things visible, all of them derived from
-existing payloads (no new data source):
+**authoritative chain** — the stored order IS the chain: the persisted primary
+first when it names an enabled provider, then the remaining providers in
+their stored order, with disabled providers skipped entirely (RENG-75;
+`ordered_llm_configs` in `src/llm/mod.rs`). The first ENABLED entry is the
+head. The page must therefore make these things visible, all of them derived
+from existing payloads (no new data source):
 
-- **Primary** — `primaryBadge` on the card whose provider is
-  `llm.primaryProvider` (config echo, as before).
+- **Primary** — `primaryBadge` on the chain head (`isPrimary` of
+  `GET /llm/providers`; the recorded `llm.primaryProvider` is a compatibility
+  echo of it, normalised to the first enabled provider on save when it is
+  empty, unmatched, or names a disabled entry).
 - **Chain rank** — a quiet `Chain #N` / `链序 #N` tag per card from
   `chainPosition` of `GET /llm/providers` (1-based; the head is 1). `position`
   in the same payload stays the stored index, which is what the card order
   encodes. The grid keeps the stored order — the marker, not a re-sort,
-  expresses the chain.
+  expresses the chain. A disabled card has no rank (`chainPosition: null`)
+  and shows no marker.
+- **Disabled (RENG-75)** — a card switched off keeps its configuration and
+  its recorded usage/latency history, but leaves the chain and is never
+  probed: its `status` reads `disabled` (deliberately off, NOT `offline` —
+  the UI must render it as a deliberate state, not a failure) and its
+  `chainPosition` is `null`. Disabling the recorded primary moves the head —
+  and the recorded selection — to the first enabled provider; disabling
+  EVERY provider makes review submission fail fast with 422
+  `llmAllDisabled`. The `disabled` flag round-trips through
+  `PUT /api/v1/config`'s `llm.providers[]` with masked-keep semantics: a
+  save that omits the key keeps the stored value.
 - **Who may move the primary (RENG-72)** — only a save that carries the
   user's choice: **Set as Primary**, the first card of an empty page, or the
   deletion of the last provider. An add/edit omits `llm.primaryProvider`
@@ -45,7 +60,8 @@ existing payloads (no new data source):
   primary card cannot be deleted while another provider remains (the
   successor would be the array head, not a choice) — the alert says so and
   the card stays. The chain head the runtime uses is therefore always a
-  selection someone made.
+  selection someone made (or the first enabled provider once that selection
+  is gone or disabled).
 - **What actually ran** — the Recent Usage card lists the newest reviews'
   `reviews.llm_summary` `provider/model` pairs (via the existing
   `GET /api/v1/reviews` list endpoint, 8 rows). A row whose usages contain

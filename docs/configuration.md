@@ -65,20 +65,22 @@ temperature = 0.3
 
 > review-engine does not expand shell variables inside TOML values. Store keys directly in the file, or pass the whole provider block through the `LLM_CONFIG` environment variable for dynamic values.
 
+A `[[llm]]` entry also accepts `disabled = true` (RENG-75): the entry keeps its configuration but is skipped by the review chain and never probed — the same switch the Web UI's provider cards expose, defaulting to `false`.
+
 ### Chain order and the primary provider
 
-The order the runtime walks is the **authoritative chain**:
+**The stored order is the chain.** The provider list order (the Web UI card order, `llm.providers[]` of `GET /api/v1/config`, persisted as each `llm_providers` row's `position`) is the order a review walks. The **first enabled** provider is the head — the primary — and the rest are fallbacks in order.
 
-1. **The primary provider first.** In the Web UI (`/#/llm`) that is the card marked 主 / Primary — the persisted `llm.primaryProvider` selection. A review always starts there, whatever position that provider has in the provider list.
-2. **Then the remaining providers in their stored order** — the card order (`llm.providers[]` of `GET /api/v1/config`, persisted as each `llm_providers` row's `position`). Selecting a primary never reshuffles that order; it only moves the selected provider to the head of the chain.
+1. **Disabled providers are skipped entirely** (`disabled`, RENG-75). A disabled provider keeps its full configuration and its recorded usage history, but reviews never run on it, the health probe never checks it (`GET /api/v1/llm/providers` reports `status: "disabled"` — deliberately off, distinct from `offline` — and `chainPosition: null`), and it casts no vote on the dashboard's `overall`. Re-enabling restores it exactly as it was.
+2. **The recorded primary is a compatibility echo of the head.** The persisted `llm.primaryProvider` selection still leads the chain when it names an enabled provider (moving it to the head without reshuffling the stored order); when it is empty, names no stored provider, or names a disabled one, the save pipeline normalises it to the first enabled provider (or empties it when none are enabled).
 
 With the stored list `[xiaomi, deepseek]` and `deepseek` selected as primary, a review starts on **deepseek** and falls back to xiaomi. (Before 0.10.11 the selection was ignored at runtime and reviews always started on the first stored provider — xiaomi in this example.) The chain is produced in exactly one place, `ordered_llm_configs(primary, configs)` (`src/llm/mod.rs`), and every review-executing entry point takes its providers from it: the Web UI's review submit, repo reviews, and GitLab/GitHub webhook-triggered reviews (`AppState::ordered_llm_configs`).
 
-- **Custom expert model** (`[review_experts.<name>] model = "…"`): that expert runs **on the primary provider** with its model substituted (primary's endpoint and key, the expert's model id). This case has no fallback — the custom model is not assumed to exist on the other providers.
-- **No primary selected**, or a selection naming a provider that no longer exists: the first stored provider is the effective primary. The stored order *is* the chain, exactly like a `[[llm]]` list.
-- **The selection only moves when the user moves it**: setting a card as primary, adding the first provider to an empty page, and deleting the last provider are the only saves that carry `llm.primaryProvider`. An ordinary card add/edit omits it (the backend keeps the stored value), so saving from a page that is out of date — a second tab, a window opened before the change — cannot drag the selection back to the value that page last saw, and neither can deleting a *non-primary* card. Deleting the primary card itself is refused while another provider remains, naming the card and pointing at **Set as Primary**: the successor is the user's choice, never the array head picked on their behalf (RENG-72).
+- **Custom expert model** (`[review_experts.<name>] model = "…"`): that expert runs **on the chain head** with its model substituted (the head's endpoint and key, the expert's model id). This case has no fallback — the custom model is not assumed to exist on the other providers.
+- **All providers disabled** (or none configured): submitting a review fails fast at enqueue time with `422` and the machine-readable code `llmAllDisabled` ("all LLM providers are disabled: re-enable one …") — a named cause, never a generic per-provider failure deep in the pipeline. With nothing configured at all the code stays `llmNotConfigured`.
+- **The selection only moves when the user moves it**: setting a card as primary, adding the first provider to an empty page, and deleting the last provider are the only saves that carry `llm.primaryProvider`. An ordinary card add/edit omits it (the backend keeps the stored value), so saving from a page that is out of date — a second tab, a window opened before the change — cannot drag the selection back to the value that page last saw, and neither can deleting a *non-primary* card. Deleting the primary card itself is refused while another provider remains, naming the card and pointing at **Set as Primary**: the successor is the user's choice, never the array head picked on their behalf (RENG-72). Disabling the primary card is the one explicit action that moves the recorded selection — to the first enabled provider, since the head is always enabled.
 - **Config file vs Web UI**: when the config file holds `[[llm]]` entries, CLI and webhook-triggered reviews use those in **file order** — the file is the explicit configuration for that run. The UI's primary applies to providers configured through the Web UI / database. Configure providers in one place to avoid ambiguity.
-- **Order is persisted, not recomputed**: `llm_providers` rows store their list index in `raw.position`, and the loader orders by it, so the order the UI shows survives a restart. Rows without a `position` (hand-written import) sort last, in `updated_at` order.
+- **Order is persisted, not recomputed**: `llm_providers` rows store their list index in `raw.position`, and the loader orders by it, so the order the UI shows survives a restart. Rows without a `position` (hand-written import) sort last, in `updated_at` order. The `disabled` flag travels inside the same `raw` JSON bag, so no database migration is needed and rows written by older versions (no key) load as enabled.
 
 ### What happens on failure
 
@@ -114,7 +116,7 @@ Sampling is best-effort: a failed write is logged and never fails a review, and 
 
 ### Seeing the effective order in the Web UI
 
-Every provider card on the LLM page carries the primary badge and a quiet chain marker (链序 #1 / Chain #1). `GET /api/v1/llm/providers` returns, per provider, `position` (0-based index in the stored list), `chainPosition` (1-based rank in the runtime chain) and `isPrimary` (true for the chain head). 最近使用 / Recent Usage below the cards lists the newest reviews' `provider/model`, which is the ground truth for "what actually ran".
+Every provider card on the LLM page carries the primary badge and a quiet chain marker (链序 #1 / Chain #1). `GET /api/v1/llm/providers` returns, per provider, `position` (0-based index in the stored list), `chainPosition` (1-based rank in the runtime chain, `null` for a disabled card — it has no rank to show) and `isPrimary` (true for the chain head). 最近使用 / Recent Usage below the cards lists the newest reviews' `provider/model`, which is the ground truth for "what actually ran".
 
 ---
 

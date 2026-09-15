@@ -328,6 +328,136 @@ async fn put_config_explicit_primary_choice_still_wins() {
     );
 }
 
+/// RENG-75: `disabled` round-trips through `PUT /config`: setting it persists
+/// (runtime set + masked UI echo), an unrelated save that never mentions the
+/// field keeps it, a providers[] save that OMITS the key keeps it too (the
+/// masked-keep equivalent — `None` means "not spoken for"), and an explicit
+/// `false` re-enables with the configuration intact.
+#[tokio::test]
+async fn put_config_disabled_round_trips_and_unspoken_saves_keep_it() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_providers();
+
+    // 1) Disable deepseek explicitly (the payload the LLM page sends).
+    let mut payload = card_edit_payload(4096);
+    payload["llm"]["providers"][1]["disabled"] = serde_json::json!(true);
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let live = state.llm_configs.read().unwrap();
+        let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+        assert!(deepseek.disabled, "the flag must reach the runtime set");
+        let xiaomi = live.iter().find(|c| c.provider == "xiaomi-token-plan-cn").unwrap();
+        assert!(!xiaomi.disabled);
+    }
+    {
+        let ui = state.ui_config.read().unwrap();
+        let deepseek = ui.llm.providers.iter().find(|p| p.provider == "deepseek").unwrap();
+        assert_eq!(deepseek.disabled, Some(true), "GET /config echoes a concrete bool");
+        assert_eq!(deepseek.api_key, API_KEY_MASK, "masked-keep still applies");
+    }
+    // The chain skips the disabled entry: xiaomi alone remains.
+    assert_eq!(
+        state
+            .ordered_llm_configs()
+            .iter()
+            .map(|c| c.provider.as_str())
+            .collect::<Vec<_>>(),
+        vec!["xiaomi-token-plan-cn"]
+    );
+
+    // 2) An unrelated save (no `llm` key at all) keeps the flag.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(
+        state
+            .llm_configs
+            .read()
+            .unwrap()
+            .iter()
+            .find(|c| c.provider == "deepseek")
+            .unwrap()
+            .disabled,
+        "an unrelated save must not re-enable the provider"
+    );
+
+    // 3) A card edit whose entries OMIT `disabled` (an older client's shape)
+    //    keeps it too — the same keep semantics as the masked API key.
+    let resp = put_config(State(state.clone()), Json(card_edit_payload(2048)))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let live = state.llm_configs.read().unwrap();
+        let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+        assert!(deepseek.disabled, "an omitted `disabled` key keeps the stored flag");
+        assert_eq!(deepseek.max_tokens, 2048, "the edit itself applies");
+    }
+
+    // 4) An explicit `false` re-enables — the configuration was fully kept.
+    let mut payload = card_edit_payload(2048);
+    payload["llm"]["providers"][1]["disabled"] = serde_json::json!(false);
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let live = state.llm_configs.read().unwrap();
+        let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+        assert!(!deepseek.disabled, "explicit false re-enables");
+        assert_eq!(
+            deepseek.api_key, "sk-deepseek",
+            "the stored key survived the disable cycle"
+        );
+        assert_eq!(deepseek.api_base, "https://api.deepseek.com/v1");
+    }
+    assert_eq!(state.ordered_llm_configs().len(), 2, "back in the chain");
+}
+
+/// RENG-75: disabling the recorded primary normalises the echo to the first
+/// ENABLED provider — the effective head is never a disabled entry. (RENG-72
+/// is the other half: a primary that still names an enabled entry is never
+/// rewritten by a save that does not speak for it.)
+#[tokio::test]
+async fn put_config_disabling_the_primary_moves_the_recorded_primary_to_the_first_enabled() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_providers();
+    // The stored primary is the array head (from_app_config's default).
+    assert_eq!(
+        state.ui_config.read().unwrap().llm.primary_provider,
+        "xiaomi-token-plan-cn"
+    );
+
+    let mut payload = card_edit_payload(4096);
+    payload["llm"]["providers"][0]["disabled"] = serde_json::json!(true);
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    assert_eq!(
+        state.ui_config.read().unwrap().llm.primary_provider,
+        "deepseek",
+        "the recorded primary follows to the first enabled provider"
+    );
+    assert_eq!(
+        state.ordered_llm_configs()[0].provider,
+        "deepseek",
+        "and the chain head agrees"
+    );
+
+    // Disabling EVERY provider empties the echo (order stays authoritative)
+    // and the chain.
+    let mut payload = card_edit_payload(4096);
+    payload["llm"]["providers"][0]["disabled"] = serde_json::json!(true);
+    payload["llm"]["providers"][1]["disabled"] = serde_json::json!(true);
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.ui_config.read().unwrap().llm.primary_provider, "");
+    assert!(state.ordered_llm_configs().is_empty(), "no enabled provider, no chain");
+}
+
 /// An empty object `{}` is the degenerate sparse case: a no-op save that
 /// keeps every field, never a wipe.
 #[tokio::test]
@@ -392,6 +522,7 @@ fn state_with_llm_entry(api_base: &str, api_key: &str) -> Arc<AppState> {
         max_tokens: 4096,
         temperature: 0.7,
         disable_thinking: None,
+        disabled: false,
     }]))
 }
 

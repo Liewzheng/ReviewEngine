@@ -424,6 +424,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert!(registry.get("openai").is_some());
@@ -440,6 +441,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert!(registry.get("anthropic").is_some());
@@ -490,6 +492,7 @@ mod tests {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         }];
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         // Unknown providers fall back to OpenAI-compatible
@@ -526,6 +529,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             },
             LLMConfig {
                 provider: "anthropic".to_string(),
@@ -535,6 +539,7 @@ mod tests {
                 max_tokens: 4096,
                 temperature: 0.3,
                 disable_thinking: None,
+                disabled: false,
             },
         ];
         let (registry, order) = ProviderRegistry::from_configs(&configs);

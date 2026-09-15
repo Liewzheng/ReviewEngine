@@ -35,27 +35,57 @@ fn error_response_with_code(status: StatusCode, message: impl Into<String>, code
 /// Error message for the enqueue-time "no usable LLM configured" gate (422).
 const LLM_NOT_CONFIGURED_MSG: &str = "no usable LLM configured: set api_base (and api_key) via the config page, POST /api/v1/config, the LLM_CONFIG env var, or run `review-engine init`";
 
-/// Fail fast with 422 + `llmNotConfigured` when the review would be enqueued
-/// with no usable LLM. The effective configs mirror `task::enqueue_review`'s
-/// resolution: request-level `llm_configs` win when non-empty, otherwise the
-/// server-side configs. "Usable" = at least one entry with a non-empty
-/// `api_base` (`api_key` may be empty — local providers).
+/// Error message for the enqueue-time gate when providers ARE configured but
+/// every one is administratively disabled (RENG-75) — a distinct cause from
+/// "nothing configured", so the error names the way out instead of reading
+/// like a generic provider failure.
+const LLM_ALL_DISABLED_MSG: &str = "all LLM providers are disabled: re-enable one on the LLM page (Configuration → LLM), or pass per-request llm_configs — a disabled provider is kept but never used";
+
+/// Fail fast with 422 when the review would be enqueued with no usable LLM.
+/// The effective configs mirror `task::enqueue_review`'s resolution:
+/// request-level `llm_configs` win when non-empty, otherwise the server-side
+/// configs. "Usable" = at least one ENABLED entry with a non-empty `api_base`
+/// (`api_key` may be empty — local providers); a disabled provider (RENG-75)
+/// is out of the review chain, so it does not count.
 ///
-/// Returns the `(StatusCode, message)` convention of this file's other
-/// enqueue-time validators; the caller wraps it with
-/// [`error_response_with_code`] to attach the `llmNotConfigured` code.
-fn require_usable_llm(state: &AppState, request: &ReviewRequest) -> Result<(), (StatusCode, &'static str)> {
+/// Returns `(StatusCode, message, code)`: `llmAllDisabled` when configured
+/// providers exist but every one is switched off, `llmNotConfigured`
+/// otherwise — the two causes want different UI guidance.
+fn require_usable_llm(
+    state: &AppState,
+    request: &ReviewRequest,
+) -> Result<(), (StatusCode, &'static str, &'static str)> {
     fn any_usable(configs: &[crate::models::LLMConfig]) -> bool {
         configs.iter().any(|c| !c.api_base.trim().is_empty())
     }
-    let usable = match &request.llm_configs {
-        Some(configs) if !configs.is_empty() => any_usable(configs),
-        _ => any_usable(&state.llm_configs.read().unwrap()),
-    };
-    if usable {
-        Ok(())
-    } else {
-        Err((StatusCode::UNPROCESSABLE_ENTITY, LLM_NOT_CONFIGURED_MSG))
+    match &request.llm_configs {
+        // Request-level configs are the caller's explicit choice: the
+        // server-side disabled flag does not apply to them.
+        Some(configs) if !configs.is_empty() => {
+            if any_usable(configs) {
+                Ok(())
+            } else {
+                Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    LLM_NOT_CONFIGURED_MSG,
+                    "llmNotConfigured",
+                ))
+            }
+        }
+        _ => {
+            let stored = state.llm_configs.read().unwrap();
+            if stored.iter().any(|c| !c.disabled && !c.api_base.trim().is_empty()) {
+                Ok(())
+            } else if !stored.is_empty() && stored.iter().all(|c| c.disabled) {
+                Err((StatusCode::UNPROCESSABLE_ENTITY, LLM_ALL_DISABLED_MSG, "llmAllDisabled"))
+            } else {
+                Err((
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    LLM_NOT_CONFIGURED_MSG,
+                    "llmNotConfigured",
+                ))
+            }
+        }
     }
 }
 
@@ -225,8 +255,8 @@ pub(crate) async fn submit_review(
     // when neither the request nor the server holds a usable LLM — otherwise
     // the enqueued task fails deep in the pipeline with "all LLM providers
     // failed".
-    if let Err((status, msg)) = require_usable_llm(&state, &request) {
-        return error_response_with_code(status, msg, "llmNotConfigured");
+    if let Err((status, msg, code)) = require_usable_llm(&state, &request) {
+        return error_response_with_code(status, msg, code);
     }
 
     // The plan applies here: the credential lookup above keyed on the URL the
@@ -384,8 +414,8 @@ pub(crate) async fn rerun_review(
     // The no-usable-LLM policy gate runs last, as in `submit_review` (the
     // stored request may predate any LLM configuration, or the server config
     // may have been cleared since the original submit).
-    if let Err((status, msg)) = require_usable_llm(&state, &request) {
-        return error_response_with_code(status, msg, "llmNotConfigured");
+    if let Err((status, msg, code)) = require_usable_llm(&state, &request) {
+        return error_response_with_code(status, msg, code);
     }
 
     // Apply the route: a rewritten URL must be what the new task fetches AND

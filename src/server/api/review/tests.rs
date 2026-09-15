@@ -241,6 +241,7 @@ fn usable_llm_config() -> crate::models::LLMConfig {
         max_tokens: 4096,
         temperature: 0.7,
         disable_thinking: None,
+        disabled: false,
     }
 }
 
@@ -1465,6 +1466,68 @@ async fn submit_without_any_llm_config_returns_422_llm_not_configured() {
         0,
         "the gated request must not enqueue a task"
     );
+}
+
+/// RENG-75: providers ARE configured but every one is disabled → the fast,
+/// named failure (no task enqueued, no LLM call), distinguishable from
+/// "nothing configured" by both the code and the message.
+#[tokio::test]
+async fn submit_with_all_providers_disabled_returns_422_llm_all_disabled() {
+    let mut disabled_a = usable_llm_config();
+    disabled_a.disabled = true;
+    let mut disabled_b = usable_llm_config();
+    disabled_b.provider = "deepseek".to_string();
+    disabled_b.disabled = true;
+    let state = state_without_usable_llm(vec![disabled_a, disabled_b]);
+    let store = state.task_store.clone().unwrap();
+
+    let resp = submit_review(State(state.clone()), HeaderMap::new(), Ok(Json(static_diff_body())))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "got {json}");
+    assert_eq!(
+        json["code"], "llmAllDisabled",
+        "the all-disabled cause gets its own code: {json}"
+    );
+    assert!(
+        json["error"]
+            .as_str()
+            .unwrap()
+            .contains("all LLM providers are disabled"),
+        "the message names the cause: {json}"
+    );
+    assert_eq!(
+        store_task_count(&store).await,
+        0,
+        "the gated request must not enqueue a task (no LLM calls at all)"
+    );
+
+    // Re-enabling one provider lifts the gate — the configuration was kept.
+    state.llm_configs.write().unwrap()[0].disabled = false;
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(static_diff_body())))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "an enabled provider passes the gate, got {json}"
+    );
+
+    // A MIXED set (one disabled, one enabled-but-unusable) is NOT the
+    // all-disabled case: the generic guidance applies.
+    let mut unusable = usable_llm_config();
+    unusable.api_base = String::new();
+    let mut off = usable_llm_config();
+    off.disabled = true;
+    let state = state_without_usable_llm(vec![unusable, off]);
+    let resp = submit_review(State(state), HeaderMap::new(), Ok(Json(static_diff_body())))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "got {json}");
+    assert_eq!(json["code"], "llmNotConfigured");
 }
 
 #[tokio::test]

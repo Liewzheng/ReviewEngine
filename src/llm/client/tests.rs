@@ -55,6 +55,7 @@ fn test_build_chat_request_body_omits_thinking_by_default() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     };
     let body = LLMClient::build_chat_request_body(&config, "sys", "user");
     assert!(
@@ -75,6 +76,7 @@ fn test_build_chat_request_body_includes_thinking_when_disabled() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: Some(true),
+        disabled: false,
     };
     let body = LLMClient::build_chat_request_body(&config, "sys", "user");
     assert_eq!(body["thinking"], serde_json::json!({"type": "disabled"}));
@@ -91,6 +93,7 @@ fn test_build_chat_request_body_thinking_false_is_omitted() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: Some(false),
+        disabled: false,
     };
     let body = LLMClient::build_chat_request_body(&config, "sys", "user");
     assert!(body.get("thinking").is_none());
@@ -131,6 +134,7 @@ fn test_complete_direct_rejects_empty_api_base() {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         };
         let result = client.complete_direct(&config, "sys", "user").await;
         assert!(result.is_err());
@@ -149,6 +153,7 @@ fn test_provider_registry_from_configs_anthropic_default_url() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     let (registry, order) = ProviderRegistry::from_configs(&configs);
     assert_eq!(order, vec!["anthropic"]);
@@ -165,6 +170,7 @@ fn test_provider_registry_from_configs_openai_default_url() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     let (registry, order) = ProviderRegistry::from_configs(&configs);
     assert_eq!(order, vec!["openai"]);
@@ -181,6 +187,7 @@ fn test_provider_registry_from_configs_custom_provider_fallback() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     let (registry, order) = ProviderRegistry::from_configs(&configs);
     assert_eq!(order, vec!["custom"]);
@@ -197,6 +204,7 @@ fn test_provider_registry_from_configs_empty_provider_name() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     let (registry, order) = ProviderRegistry::from_configs(&configs);
     assert_eq!(order, vec!["openai-compatible"]);
@@ -214,6 +222,7 @@ fn test_provider_registry_from_configs_multiple_providers() {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         },
         LLMConfig {
             provider: "anthropic".to_string(),
@@ -223,6 +232,7 @@ fn test_provider_registry_from_configs_multiple_providers() {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         },
     ];
     let (registry, order) = ProviderRegistry::from_configs(&configs);
@@ -241,6 +251,7 @@ fn test_provider_registry_from_configs_preserves_user_api_base() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
     let (registry, _order) = ProviderRegistry::from_configs(&configs);
     // The provider should exist; we can't directly inspect the base URL,
@@ -323,6 +334,7 @@ async fn test_complete_with_fallback_success_on_first_try() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
 
     let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -346,6 +358,7 @@ async fn test_complete_with_fallback_retries_on_retriable_error() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
 
     let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -369,6 +382,7 @@ async fn test_complete_with_fallback_exhausts_all_retries() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
 
     let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -399,6 +413,7 @@ async fn test_complete_with_fallback_fails_fast_on_non_retriable_error() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }];
 
     let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -427,6 +442,7 @@ async fn test_complete_with_fallback_fallback_to_next_provider() {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         },
         LLMConfig {
             provider: "second".to_string(),
@@ -436,6 +452,7 @@ async fn test_complete_with_fallback_fallback_to_next_provider() {
             max_tokens: 4096,
             temperature: 0.3,
             disable_thinking: None,
+            disabled: false,
         },
     ];
     let result = client.complete_with_fallback(&configs, "system", "user").await;
@@ -463,6 +480,7 @@ async fn test_fallback_result_is_attributed_to_the_hitting_provider() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     };
 
     // Fallback hit: second config wins.
@@ -507,6 +525,7 @@ async fn test_fallback_result_is_flagged_and_uses_the_later_config() {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     };
 
     // Chain = [primary, secondary]: the primary answers nothing, so the used
@@ -629,6 +648,7 @@ fn real_config(base: &str) -> LLMConfig {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }
 }
 
@@ -642,6 +662,7 @@ fn mock_config(provider: &str) -> LLMConfig {
         max_tokens: 4096,
         temperature: 0.3,
         disable_thinking: None,
+        disabled: false,
     }
 }
 

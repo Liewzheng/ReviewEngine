@@ -1,12 +1,7 @@
 <template>
   <div class="logs-page">
-    <!-- Page Header -->
-    <div class="page-header">
-      <div class="header-title">
-        <h2 class="page-title">{{ $t('logs.title') }}</h2>
-        <p class="page-subtitle">{{ $t('logs.subtitle') }}</p>
-      </div>
-      <div class="header-actions">
+    <PageHeader :title="$t('logs.title')" :subtitle="$t('logs.subtitle')">
+      <template #actions>
         <el-button
           :type="logs.isPaused ? 'warning' : 'default'"
           :icon="logs.isPaused ? VideoPlay : VideoPause"
@@ -29,8 +24,8 @@
         >
           {{ $t('logs.clear') }}
         </el-button>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <!-- Toolbar -->
     <div class="toolbar" :class="{ paused: logs.isPaused }">
@@ -204,6 +199,7 @@ import { ElMessageBox, ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import type { LogLevel, TimestampFormat } from '../types/logs'
 import { useLogs } from '../composables/useLogs'
+import PageHeader from '../components/common/PageHeader.vue'
 
 // ==================== Composable ====================
 const { t } = useI18n()
@@ -413,41 +409,6 @@ onUnmounted(() => {
   gap: 12px;
   max-width: 1400px;
   margin: 0 auto;
-}
-
-/* Page Header */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 12px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border-color);
-}
-
-.header-title {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.page-title {
-  font-size: 20px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0;
-}
-
-.page-subtitle {
-  font-size: 13px;
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.header-actions {
-  display: flex;
-  gap: 8px;
 }
 
 /* Toolbar */
@@ -735,12 +696,12 @@ onUnmounted(() => {
 
 /* Responsive */
 @media (max-width: 768px) {
-  .page-header {
+  :deep(.page-header) {
     flex-direction: column;
     align-items: flex-start;
   }
 
-  .header-actions {
+  :deep(.page-header__right) {
     width: 100%;
     justify-content: flex-start;
   }

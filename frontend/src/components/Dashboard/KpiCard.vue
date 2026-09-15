@@ -6,7 +6,7 @@
       </el-icon>
       <span class="kpi-label">{{ label }}</span>
     </div>
-    <div class="kpi-value">{{ formattedValue }}</div>
+    <div class="kpi-value" :class="{ 'is-empty': props.value === null }">{{ formattedValue }}</div>
     <div v-if="trend != null" class="kpi-trend" :class="trendClass">
       <el-icon :size="14">
         <component :is="trendIcon" />
@@ -116,11 +116,16 @@ const trendText = computed(() => {
 
 .kpi-value {
   font-size: 28px;
-  font-weight: 700;
+  font-weight: 600;
   color: var(--text-primary);
   margin-bottom: 8px;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   line-height: 1.2;
+}
+
+.kpi-value.is-empty {
+  color: var(--text-tertiary);
 }
 
 .kpi-trend {
@@ -129,6 +134,12 @@ const trendText = computed(() => {
   gap: 4px;
   font-size: 12px;
   font-weight: 500;
+  color: var(--text-secondary);
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
 }
 
 .kpi-trend-up {

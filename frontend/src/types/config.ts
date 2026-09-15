@@ -16,6 +16,12 @@ export interface LlmProviderConfigEntry {
   timeoutSeconds: number
   /** Number of retry attempts on transient LLM API failures. */
   retryAttempts: number
+  /**
+   * Administrative off switch (RENG-75). `GET /config` always reports a
+   * concrete bool; a save that OMITS the key keeps the stored flag of the
+   * same entry, so only an explicit value can flip it.
+   */
+  disabled?: boolean
 }
 
 /** LLM provider configuration for code review AI models. */

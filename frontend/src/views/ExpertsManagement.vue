@@ -14,6 +14,7 @@ import { categoryColorMap, categoryLabelMap } from '../types/expert'
 import { useExperts } from '../composables/useExperts'
 import { useAutoRefresh } from '../composables/useAutoRefresh'
 import ExpertCard from '../components/ExpertsManagement/ExpertCard.vue'
+import PageHeader from '../components/common/PageHeader.vue'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -228,21 +229,16 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="experts-page">
-    <!-- Page Header -->
-    <div class="page-header">
-      <div class="header-title-section">
-        <h1 class="page-title">{{ $t('experts.title') }}</h1>
-        <p class="page-subtitle">{{ $t('experts.subtitle') }}</p>
-      </div>
-      <div class="header-actions">
+    <PageHeader :title="$t('experts.title')" :subtitle="$t('experts.subtitle')">
+      <template #actions>
         <el-tooltip :content="$t('experts.comingSoon')" placement="top">
           <el-button type="primary" disabled :aria-label="$t('experts.addExpertComingSoonAria')">
             <el-icon><Plus /></el-icon>
             {{ $t('experts.addExpert') }}
           </el-button>
         </el-tooltip>
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <!-- Stats Bar -->
     <div class="stats-bar">
@@ -450,41 +446,6 @@ onBeforeUnmount(() => {
   margin: 0 auto;
 }
 
-/* Page Header */
-.page-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 24px;
-  gap: 16px;
-  flex-wrap: wrap;
-}
-
-.header-title-section {
-  flex: 1;
-  min-width: 0;
-}
-
-.page-title {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin: 0 0 4px 0;
-}
-
-.page-subtitle {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin: 0;
-}
-
-.header-actions {
-  display: flex;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-/* Stats Bar */
 .stats-bar {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -550,10 +511,14 @@ onBeforeUnmount(() => {
   background: linear-gradient(90deg, var(--bg-surface) 25%, var(--bg-card) 50%, var(--bg-surface) 75%);
 }
 
-/* Expert Grid */
+/* Expert Grid: `1fr` auto rows equalise every row's height, and the cards
+   stretch to it, so all 12 cards line up and each "View Details" button sits
+   on the same baseline (RENG-76 R0.3). */
 .experts-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  grid-auto-rows: 1fr;
+  align-items: stretch;
   gap: 16px;
 }
 
@@ -642,12 +607,12 @@ onBeforeUnmount(() => {
 
 /* Responsive */
 @media (max-width: 768px) {
-  .page-header {
+  :deep(.page-header) {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .header-actions {
+  :deep(.page-header__right) {
     justify-content: flex-end;
   }
 

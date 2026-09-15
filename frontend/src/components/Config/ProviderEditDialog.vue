@@ -20,9 +20,14 @@ const props = defineProps<{
   mode: 'add' | 'edit'
   /** The card being edited (edit mode only). */
   initial?: ProviderCardState | null
-  /** Provider names already configured — the add form rejects duplicates. */
-  existingNames: string[]
-  /** True while the parent persists the form (confirm button loading). */
+  /**
+   * RENG-75: the provider NAME is a display label, not an identity — two
+   * cards may share one (two accounts, or one account × two models) — so the
+   * add form no longer rejects a name a sibling already uses. The real
+   * identity is the `(provider, base, model, key)` fingerprint, and the only
+   * part of it the client can see is the triple, which is legitimate to
+   * repeat: a duplicate starts as a sibling with the same credential.
+   */
   saving: boolean
 }>()
 
@@ -85,16 +90,6 @@ const advancedActive = ref<string[]>([])
 const rules = computed<FormRules>(() => ({
   provider: [
     { required: true, message: t('config.providerCards.providerRequired'), trigger: 'change' },
-    {
-      validator: (_rule: unknown, value: string, callback: (e?: Error) => void) => {
-        if (props.mode === 'add' && props.existingNames.includes(value)) {
-          callback(new Error(t('config.providerCards.duplicateProvider')))
-        } else {
-          callback()
-        }
-      },
-      trigger: 'change',
-    },
   ],
   apiKey: [
     {

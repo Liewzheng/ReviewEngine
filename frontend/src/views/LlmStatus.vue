@@ -9,9 +9,16 @@ import { useAutoRefresh } from '../composables/useAutoRefresh'
 import { useRecentLlmUsage } from '../composables/useRecentLlmUsage'
 import type { ProviderCardState } from '../composables/llmPayload'
 import { getSystemHealth } from '../services/health'
-import ProviderConfigCard from '../components/Config/ProviderConfigCard.vue'
+import PageHeader from '../components/common/PageHeader.vue'
+import ProviderCardCompact from '../components/Config/ProviderCardCompact.vue'
 import ProviderEditDialog from '../components/Config/ProviderEditDialog.vue'
-import type { LlmProvider } from '../types/llm'
+import {
+  dialogForDuplicate,
+  dialogForEdit,
+  healthTriple,
+  matchHealthToCards,
+  matchProbeMessages,
+} from '../components/Config/providerCardState'
 
 /* ------------------------------------------------------------------ */
 /*  Runtime health (KPIs + per-card metrics)                           */
@@ -67,12 +74,28 @@ const totalRequestsDisplay = computed(() =>
 /** True when the server reports no usable LLM via /system/health. */
 const llmNotConfigured = ref(false)
 
-/** Refresh the not-configured banner. Fail-open: a health-check error keeps
- *  the current banner state. */
-function checkLlmConfigured() {
+/** Probe failure text per card, from `/system/health`.
+ *
+ * `GET /llm/providers` reports the probe's status and timing but no message,
+ * while `/system/health` carries the probe's own words ("HTTP 401
+ * Unauthorized") — which is what an errored card has to show in its footer
+ * slot. Kept in page state rather than merged into `providers` because the
+ * 30 s poll reconciles that list in place. */
+const probeMessages = ref<(string | null)[]>([])
+
+/** Refresh the not-configured banner and the per-card probe messages.
+ *  Fail-open: a health-check error keeps the current values. */
+async function checkLlmConfigured() {
+  if (import.meta.env.VITE_USE_LLM_MOCKS === 'true') {
+    const { MOCK_HEALTH_ROWS } = await import('../dev-mocks/llm-providers.mock')
+    probeMessages.value = matchProbeMessages(providerCards.value, MOCK_HEALTH_ROWS)
+    llmNotConfigured.value = false
+    return
+  }
   getSystemHealth()
     .then((health) => {
       llmNotConfigured.value = health.llmConfigured === false
+      probeMessages.value = matchProbeMessages(providerCards.value, health.llmProviders ?? [])
     })
     .catch(() => {})
 }
@@ -86,7 +109,8 @@ const {
   load: loadProviderCards,
   addCard,
   editCard,
-  setPrimary,
+  toggleDisabled,
+  reorder,
   deleteCard,
 } = useProviderCards({
   statusProviders: llm.providers,
@@ -97,14 +121,12 @@ const {
   },
 })
 
-/** Runtime health entries keyed by provider name, for the config cards. */
-const healthByName = computed(() => {
-  const map = new Map<string, LlmProvider>()
-  for (const p of providers.value) {
-    if (!map.has(p.name)) map.set(p.name, p)
-  }
-  return map
-})
+/** Runtime health entries aligned with the config cards (RENG-75).
+ *
+ * The join is the visible `(provider, base, model)` triple, never the name:
+ * the name is a display label two cards may share, and joining on it would
+ * show the first account's latency on the second card. */
+const cardHealth = computed(() => matchHealthToCards(providerCards.value, llm.providers.value))
 
 /* ------------------------------------------------------------------ */
 /*  Recent usage (RENG-55): what the newest reviews actually ran on    */
@@ -135,42 +157,73 @@ function formatUsageWhen(createdAt: string): string {
 const dialogVisible = ref(false)
 const dialogMode = ref<'add' | 'edit'>('add')
 const editingCard = ref<ProviderCardState | null>(null)
+/** Grid index the dialog edits (edit mode) — a card is addressed by position,
+ *  never by name (RENG-75: two cards may share a name). */
+const editingIndex = ref(-1)
 
 function openAddDialog() {
   dialogMode.value = 'add'
   editingCard.value = null
+  editingIndex.value = -1
   dialogVisible.value = true
 }
 
-function openEditDialog(card: ProviderCardState) {
-  dialogMode.value = 'edit'
-  editingCard.value = { ...card }
+function openEditDialog(index: number) {
+  const open = dialogForEdit(providerCards.value, index)
+  if (!open) return
+  dialogMode.value = open.mode
+  editingCard.value = open.initial
+  editingIndex.value = open.index
   dialogVisible.value = true
+}
+
+/**
+ * "Duplicate card": the add dialog, pre-filled with the card the user picked
+ * and its API key. The key is the `***` sentinel the echo carries (the secret
+ * never leaves the server) — the masked-keep rule resolves it back to the
+ * original entry's stored key while the triple still matches, so the copy
+ * starts as a real sibling holding the same credential. Editing the copy's
+ * base URL or model is what makes it a distinct entry, and that edit needs a
+ * re-entered key (the same rule the API applies to any masked key).
+ */
+function openDuplicateDialog(index: number) {
+  const open = dialogForDuplicate(providerCards.value, index)
+  if (!open) return
+  dialogMode.value = open.mode
+  editingCard.value = open.initial
+  editingIndex.value = open.index
+  dialogVisible.value = true
+}
+
+function onToggleDisabled(index: number) {
+  void toggleDisabled(index)
+}
+
+function onReorder(fromIndex: number, toIndex: number) {
+  void reorder(fromIndex, toIndex)
+}
+
+function onDeleteCard(index: number) {
+  void deleteCard(index)
 }
 
 async function handleDialogSave(form: ProviderCardState) {
-  const editedName = editingCard.value?.provider ?? form.provider
   const isEdit = dialogMode.value === 'edit'
-  const ok = isEdit ? await editCard(editedName, form) : await addCard(form)
+  const previousHealth = isEdit ? cardHealth.value[editingIndex.value] : undefined
+  const ok = isEdit ? await editCard(editingIndex.value, form) : await addCard(form)
   if (ok) {
     // The configuration that was tested just changed, so the recorded
     // result no longer describes this provider (RENG-54).
-    if (isEdit) clearTestResultByName(editedName)
+    if (previousHealth) llm.testResults.clear(healthTriple(previousHealth))
     dialogVisible.value = false
   }
-}
-
-/** Dismiss the recorded test result of the named provider, if any. Keyed by
- *  the card's identity (`card.provider`), which is also `useLlmStatus`'s key. */
-function clearTestResultByName(providerName: string) {
-  llm.testResults.clear(providerName)
 }
 
 /** Card-level connectivity test rides the server-side probe (stored key),
  *  so no secret ever round-trips through the browser. The outcome is kept as
  *  page-session state (RENG-54) — see `cardTestResult`. */
-async function handleCardTest(card: ProviderCardState) {
-  const health = healthByName.value.get(card.provider)
+async function handleCardTest(index: number) {
+  const health = cardHealth.value[index]
   if (!health) return
   try {
     const result = await llm.test(health.id)
@@ -185,16 +238,12 @@ async function handleCardTest(card: ProviderCardState) {
   }
 }
 
-/** Last manual test result for a card's provider. Keyed by the card's own
- *  identity — the provider name — so reindexing the runtime provider list
- *  (deleting or re-adding a sibling) cannot orphan it. */
-function cardTestResult(card: ProviderCardState) {
-  return llm.testResults.get(card.provider)
-}
-
-function isCardTesting(card: ProviderCardState): boolean {
-  const health = healthByName.value.get(card.provider)
-  return !!health && llm.testingId.value === health.id
+/** Last manual test result for a card's runtime entry. Keyed by the entry's
+ *  triple — the identity the config echo can express too — so two cards that
+ *  share a provider name never share a result. */
+function cardTestResult(index: number) {
+  const health = cardHealth.value[index]
+  return health ? (llm.testResults.get(healthTriple(health))?.value ?? null) : null
 }
 
 /* ------------------------------------------------------------------ */
@@ -259,21 +308,13 @@ onUnmounted(() => {
 
 <template>
   <div class="llm-page">
-    <!-- Page Header -->
-    <div class="page-header">
-      <div class="header-text">
-        <h2 class="page-title">{{ $t('llm.title') }}</h2>
-        <p class="page-subtitle">{{ $t('llm.subtitle') }}</p>
-      </div>
-      <el-button
-        type="primary"
-        :icon="Plus"
-        :disabled="cardsLoading"
-        @click="openAddDialog"
-      >
-        {{ $t('config.providerCards.add') }}
-      </el-button>
-    </div>
+    <PageHeader :title="$t('llm.title')" :subtitle="$t('llm.subtitle')">
+      <template #actions>
+        <el-button type="primary" :icon="Plus" :disabled="cardsLoading" @click="openAddDialog">
+          {{ $t('config.providerCards.add') }}
+        </el-button>
+      </template>
+    </PageHeader>
 
     <!-- Summary Stats -->
     <div class="stats-row">
@@ -326,7 +367,7 @@ onUnmounted(() => {
         <div class="stat-content">
           <el-icon class="stat-icon" :size="24"><RefreshRight /></el-icon>
           <div class="stat-body">
-            <div class="stat-value">
+            <div class="stat-value" :class="{ 'is-empty': avgLatency === null }">
               {{ avgLatency === null ? '—' : `${avgLatency} ms` }}
             </div>
             <div class="stat-label">
@@ -341,7 +382,9 @@ onUnmounted(() => {
         <div class="stat-content">
           <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
           <div class="stat-body">
-            <div class="stat-value">{{ totalRequestsDisplay }}</div>
+            <div class="stat-value" :class="{ 'is-empty': totalRequests === null }">
+              {{ totalRequestsDisplay }}
+            </div>
             <div class="stat-label">
               {{ usageWindowDays === null
                 ? $t('llm.stats.totalRequests')
@@ -376,26 +419,28 @@ onUnmounted(() => {
       </el-button>
     </el-empty>
 
-    <!-- Unified Provider Card Grid: config echo joined with runtime health,
-         every mutation saves immediately (no page-level edit mode). -->
+    <!-- Unified Provider Card Grid: config echo joined with runtime health by
+         the visible (provider, base, model) triple, every mutation saved
+         immediately (no page-level edit mode). No buttons on the card face —
+         right-click (or click, for keyboard/touch) opens the action menu, and
+         the header is the drag handle for reordering the chain. -->
     <div v-else class="provider-grid">
-      <ProviderConfigCard
-        v-for="card in providerCards"
-        :key="card.provider"
+      <ProviderCardCompact
+        v-for="(card, index) in providerCards"
+        :key="`${card.provider}-${card.apiBaseUrl}-${card.defaultModel}-${index}`"
         :card="card"
-        :primary="card.provider === primaryName"
-        :health="healthByName.get(card.provider)"
-        :chain-position="healthByName.get(card.provider)?.chainPosition"
+        :health="cardHealth[index]"
+        :probe-message="probeMessages[index] ?? null"
         :usage-window-days="usageWindowDays"
-        :latency-window-days="latencyWindowDays"
-        :testing="isCardTesting(card)"
+        :test-result="cardTestResult(index)"
         :saving="cardsSaving"
-        :test-result="cardTestResult(card)"
-        @test="handleCardTest(card)"
-        @clear-test="clearTestResultByName(card.provider)"
-        @edit="openEditDialog(card)"
-        @delete="deleteCard(card)"
-        @set-primary="setPrimary(card)"
+        :index="index"
+        @edit="openEditDialog(index)"
+        @duplicate="openDuplicateDialog(index)"
+        @test="handleCardTest(index)"
+        @toggle-disabled="onToggleDisabled(index)"
+        @delete="onDeleteCard(index)"
+        @reorder="onReorder"
       />
     </div>
 
@@ -434,7 +479,6 @@ onUnmounted(() => {
       v-model:visible="dialogVisible"
       :mode="dialogMode"
       :initial="editingCard"
-      :existing-names="providerCards.map((c) => c.provider)"
       :saving="cardsSaving"
       @save="handleDialogSave"
     />
@@ -445,34 +489,6 @@ onUnmounted(() => {
 .llm-page {
   max-width: 1400px;
   margin: 0 auto;
-}
-
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-}
-
-.header-text {
-  flex: 1;
-}
-
-.page-title {
-  font-size: 24px;
-  font-weight: 600;
-  color: var(--text-primary);
-  margin-bottom: 4px;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-}
-
-.page-subtitle {
-  font-size: 14px;
-  color: var(--text-secondary);
-  margin: 0;
 }
 
 /* Stats Row */
@@ -505,16 +521,24 @@ onUnmounted(() => {
 
 .stat-value {
   font-family: var(--font-mono);
-  font-size: 20px;
+  font-size: 28px;
   font-weight: 600;
   color: var(--text-primary);
   line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.stat-value.is-empty {
+  color: var(--text-tertiary);
 }
 
 .stat-label {
   font-size: 12px;
   color: var(--text-secondary);
   margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* LLM-not-configured banner sits below the stats row, above the cards */
@@ -536,10 +560,12 @@ onUnmounted(() => {
   border: 1px solid var(--border-color);
 }
 
-/* Provider Grid */
+/* Provider Grid: every card stretches to the row's height so the footer
+   slots line up across the grid (RENG-76 R0.3). */
 .provider-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  align-items: stretch;
   gap: 16px;
 }
 
@@ -609,11 +635,6 @@ onUnmounted(() => {
 
 /* Responsive */
 @media (max-width: 768px) {
-  .page-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .stats-row {
     grid-template-columns: repeat(2, 1fr);
   }

@@ -107,6 +107,7 @@ const valueStyle = computed(() => ({
   font-size: 28px;
   font-weight: 600;
   font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
   transition: color 0.2s ease;
 }
 

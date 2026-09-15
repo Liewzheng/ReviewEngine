@@ -143,7 +143,7 @@ function headerCellStyle(): Record<string, string> {
 
 function cellStyle(): Record<string, string> {
   return {
-    padding: '12px 16px',
+    padding: '0 12px',
     borderBottom: '1px solid var(--border-color)',
   }
 }
@@ -939,12 +939,20 @@ onUnmounted(() => {
 
 :deep(.el-table__row) {
   cursor: pointer;
+  height: 48px;
+}
+
+:deep(.el-table__cell) {
+  height: 48px;
+  vertical-align: middle;
 }
 
 .mr-title-cell {
   display: flex;
-  flex-direction: column;
-  gap: 4px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .mr-title-text {
@@ -954,7 +962,8 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 100%;
+  min-width: 0;
+  flex: 1;
 }
 
 /* Status cell: badge dot + label must stay on one line; Element Plus'

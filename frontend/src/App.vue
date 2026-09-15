@@ -295,7 +295,7 @@ const pageTitle = computed(() => {
         <button class="menu-toggle" @click="toggleSidebar">
           <el-icon><Menu /></el-icon>
         </button>
-        <h1 class="page-title">{{ pageTitle }}</h1>
+        <h1 class="app-header__title">{{ pageTitle }}</h1>
         <div class="header-actions">
           <el-button text size="small" @click="openTokenDialog">
             <el-icon><Key /></el-icon>
@@ -579,7 +579,7 @@ const pageTitle = computed(() => {
   color: var(--text-primary);
 }
 
-.page-title {
+.app-header__title {
   font-size: 18px;
   font-weight: 600;
   color: var(--text-primary);

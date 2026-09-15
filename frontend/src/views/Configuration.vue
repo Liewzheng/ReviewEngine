@@ -1,14 +1,8 @@
 <template>
   <div class="config-page">
     <!-- Page Header -->
-    <div class="page-header">
-      <div class="header-left">
-        <h2 class="page-title">{{ $t('config.title') }}</h2>
-        <p class="page-subtitle">
-          {{ $t('config.subtitle') }}
-        </p>
-      </div>
-      <div class="header-actions">
+    <PageHeader :title="$t('config.title')" :subtitle="$t('config.subtitle')">
+      <template #actions>
         <!-- Instant-save status: non-blocking indicator fed by the debounced
              auto-save in useConfigForm. -->
         <span v-if="saveStatus !== 'idle'" class="save-status" :data-status="saveStatus">
@@ -17,8 +11,8 @@
         <!-- Liveness marker for the 10s poll (RENG-52): the only signal left
              now that the manual Refresh button is gone. -->
         <LastUpdated :updated-at="lastUpdated" :failed="pollFailed" />
-      </div>
-    </div>
+      </template>
+    </PageHeader>
 
     <!-- Loading Skeleton -->
     <div v-if="loading" class="skeleton-container">
@@ -245,6 +239,7 @@ import type { GitPlatformConfig } from '../types/config'
 import type { StorageBackendKind } from '../types/dashboard'
 import GitPlatformsSection from '../components/Config/GitPlatformsSection.vue'
 import LastUpdated from '../components/common/LastUpdated.vue'
+import PageHeader from '../components/common/PageHeader.vue'
 
 // --- Composables ---
 const { t } = useI18n()
@@ -411,40 +406,6 @@ onUnmounted(() => {
   }
 }
 
-.page-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 24px;
-  flex-wrap: wrap;
-  gap: 12px;
-}
-
-.header-left {
-  flex: 1;
-  min-width: 0;
-}
-
-.page-title {
-  font-size: 24px;
-  font-weight: 600;
-  letter-spacing: -0.02em;
-  line-height: 1.3;
-  color: var(--text-primary);
-  margin-bottom: 4px;
-}
-
-.page-subtitle {
-  font-size: 14px;
-  color: var(--text-secondary);
-}
-
-.header-actions {
-  display: flex;
-  gap: 10px;
-  align-items: center;
-}
-
 /* Skeleton */
 .skeleton-container {
   display: flex;
@@ -600,11 +561,6 @@ onUnmounted(() => {
      signal now that the manual Refresh button is gone (RENG-52). */
   .save-status {
     display: none;
-  }
-
-  .page-header {
-    flex-direction: column;
-    align-items: flex-start;
   }
 
   .config-page {

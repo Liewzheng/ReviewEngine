@@ -71,14 +71,42 @@ export function useLlmStatus() {
   /**
    * Stable identity of the provider behind a runtime id.
    *
-   * `LlmProvider.name` and the config echo's `providers[].provider` are the
-   * same string — the page resolves a card's runtime entry with
-   * `name === card.provider` — so the name survives any reindexing of the
-   * runtime list. Falls back to the id when the provider is not in the list
-   * (the caller only ever passes ids taken from it).
+   * The config echo's `providers[].provider` and the health payload's `name`
+   * are the same string — but RENG-75 made that string a DISPLAY LABEL, and
+   * two cards may share it (two accounts, or one account × two models), so it
+   * cannot key a result on its own. The key is the visible
+   * `(name, apiBaseUrl, defaultModel)` triple, which the page joins the two
+   * lists on as well; it survives any reindexing of the runtime list, which
+   * the server composes as `<provider>-<position>`. Falls back to the id when
+   * the provider is not in the list (the caller only ever passes ids taken
+   * from it) or when the payload predates the base/model echo.
    */
   function resultKey(id: string): string {
-    return providers.value.find((p) => p.id === id)?.name ?? id;
+    const provider = providers.value.find((p) => p.id === id);
+    if (!provider) return id;
+    const triple = [provider.name, provider.apiBaseUrl ?? '', provider.defaultModel ?? ''].join('\u0000');
+    return triple === '\u0000\u0000' ? id : triple;
+  }
+
+  /**
+   * Deterministic provider surface for visual work (`VITE_USE_LLM_MOCKS`).
+   * The flag is a build-time constant, so in a normal build this branch and
+   * the dynamic import behind it are dropped entirely — mock data can never
+   * reach a real deployment.
+   * @returns True when the mock list was installed.
+   */
+  async function loadMockProviders(): Promise<boolean> {
+    if (import.meta.env.VITE_USE_LLM_MOCKS !== 'true') return false;
+    const { MOCK_PROVIDERS } = await import('../dev-mocks/llm-providers.mock');
+    reconcileProviders(MOCK_PROVIDERS.map((p) => ({ ...p })));
+    usageWindowDays.value = 7;
+    usageSince.value = null;
+    usageAvailable.value = true;
+    usageTotal.value = MOCK_PROVIDERS.reduce((sum, p) => sum + (p.requestCount ?? 0), 0);
+    latencyWindowDays.value = 7;
+    latencySince.value = null;
+    latencyAvailable.value = true;
+    return true;
   }
 
   /**
@@ -95,9 +123,9 @@ export function useLlmStatus() {
       error.value = null;
     }
     try {
+      if (await loadMockProviders()) return;
       const response = await getProviders();
-      reconcileProviders(response.items);
-      // RENG-56: the window travels with the numbers it describes, and so
+      reconcileProviders(response.items);      // RENG-56: the window travels with the numbers it describes, and so
       // does the window total the per-provider shares are taken against.
       usageWindowDays.value = response.usageWindowDays ?? null;
       usageSince.value = response.usageSince ?? null;

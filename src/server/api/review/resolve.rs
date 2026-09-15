@@ -80,14 +80,31 @@ impl std::fmt::Debug for ResolvedSource {
     }
 }
 
+/// Run the review for a resolved source.
+///
+/// `expert_overrides` carries the persisted WebUI expert edits (RENG-69):
+/// this path resolves its config from the request's inline TOML (or the config
+/// file), never from `AppState::app_config`, so the override map is re-applied
+/// here — otherwise disabling an expert in the WebUI would keep affecting
+/// nothing but the management page.
+///
+/// `llm_sink` (RENG-57) receives one latency sample per LLM call attempt and is
+/// forwarded to the orchestrator unchanged.
 pub(crate) async fn run_review(
     resolved: ResolvedSource,
     config_toml: Option<String>,
     llm_configs: Vec<crate::models::LLMConfig>,
     llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
+    expert_overrides: Arc<crate::config::ExpertOverrides>,
 ) -> anyhow::Result<(serde_json::Value, String)> {
     let config_source = config_toml.map(crate::models::ConfigSource::Inline);
-    let app_config = crate::config::resolve_config(config_source).await?;
+    let mut app_config = crate::config::resolve_config(config_source).await?;
+    // DB overrides win over the config file's `[review_experts]` (the file is
+    // the base/default), exactly as on startup.
+    let applied = expert_overrides.apply_to(&mut app_config);
+    if applied > 0 {
+        tracing::debug!(applied, "applied persisted expert overrides to the REST review config");
+    }
 
     let experts = app_config.build_expert_defs();
     // MR-based reviews reuse the freshly fetched metadata so prompts carry the
@@ -232,5 +249,71 @@ pub(crate) async fn resolve_source(
                 file_source: None,
             })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{ExpertOverride, ExpertOverrides};
+    use crate::models::ConfigSource;
+
+    /// Hermetic inline config: `resolve_config(Inline(_))` = the shipped
+    /// defaults + this TOML, with no config-file / `$HOME` read.
+    const INLINE: &str = "[commands]\nreview = true\n";
+
+    /// (RENG-69) The REST review path resolves its own config (request TOML,
+    /// else the config file) instead of reading `AppState::app_config`, so it
+    /// must re-apply the persisted expert overrides. Disabling EVERY shipped
+    /// expert through the override map leaves the review with an empty team —
+    /// observable as a review that runs no expert at all (and therefore needs
+    /// no LLM provider / network).
+    #[tokio::test]
+    async fn persisted_expert_overrides_apply_to_the_rest_review_config() {
+        // Control: without overrides the same inline config has a real team.
+        let plain = crate::config::resolve_config(Some(ConfigSource::Inline(INLINE.to_string())))
+            .await
+            .expect("inline config must resolve");
+        let plain_names: Vec<String> = plain.build_expert_defs().into_iter().map(|e| e.name).collect();
+        assert!(
+            !plain_names.is_empty(),
+            "the shipped defaults must provide experts, else this test proves nothing"
+        );
+
+        // The WebUI disabled every one of them.
+        let mut overrides = ExpertOverrides::default();
+        for name in plain.review_experts.keys() {
+            overrides.record(
+                name,
+                ExpertOverride {
+                    enabled: Some(false),
+                    weight: None,
+                },
+            );
+        }
+
+        let resolved = ResolvedSource {
+            diff: "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            mr_info: None,
+            agents_md: None,
+            file_source: None,
+        };
+        let (value, summary) = run_review(
+            resolved,
+            Some(INLINE.to_string()),
+            vec![],
+            // RENG-57: no store in this test → no latency samples to record.
+            None,
+            Arc::new(overrides),
+        )
+        .await
+        .expect("an empty expert team is a legitimate (empty) review");
+
+        assert_eq!(
+            value["reports"].as_array().map(Vec::len),
+            Some(0),
+            "every expert was disabled by the override: {value}"
+        );
+        assert_eq!(summary, "0 expert report(s), 0 finding(s)");
     }
 }

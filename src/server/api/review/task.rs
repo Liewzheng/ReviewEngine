@@ -286,6 +286,10 @@ pub(crate) async fn enqueue_review(
     };
     let webhook = request.webhook;
     let cfg = state.app_config.read().unwrap().clone();
+    // RENG-69: snapshot of the persisted WebUI expert overrides. `run_review`
+    // resolves its own config (request TOML / config file) and re-applies this
+    // map, so the edit reaches the review actually being enqueued.
+    let expert_overrides = state.expert_overrides_snapshot();
 
     // 0.10.0 §7.2: pre-review discussion tap, GitLab MR sources only. Built
     // synchronously before the spawn so the git_platforms RwLock guard never
@@ -378,6 +382,9 @@ pub(crate) async fn enqueue_review(
                     // from this instance's real history. `None` when no store
                     // is attached — nothing to write to.
                     store_clone.llm_sample_sink(task_id),
+                    // RENG-69: the persisted WebUI expert overrides, re-applied
+                    // over the config this review resolves for itself.
+                    expert_overrides,
                 )
                 .await
             }

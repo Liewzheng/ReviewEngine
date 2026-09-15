@@ -16,6 +16,8 @@ Configuration is merged from multiple sources. Later sources override earlier on
 
 Use this to keep secrets (API keys) in your user config and share project-specific expert settings in the repo.
 
+**Web UI layer (a running server).** `review-engine serve` also stores what the Web UI configures — LLM providers, git platforms, review rules, and per-expert `enabled` / `weight` edits — in its configuration database (`review.db` by default). On startup that stored state is applied **over** the config file: `config files / env / CLI < database`. The file stays the base/default; a stored value wins where it exists, and everything the Web UI never touched keeps its file value. See [Web UI](#web-ui).
+
 ---
 
 ## Minimal config
@@ -251,6 +253,26 @@ There is no edit mode: every field is editable as soon as the page loads and eac
 `PUT /api/v1/config` is a **partial update**: the request JSON is deep-merged over the stored config, so omitted fields keep their current values. Inline validation warnings do not block saving, because empty/unchanged secret fields are interpreted as "keep the stored value" server-side.
 
 Provider deletes deserve care: provider IDs are derived from list position (`{provider}-{index}`), so deleting an entry renumbers everything after it. The page deletes highest-index-first and re-fetches the list before applying remaining updates; if the list changed underneath, the save aborts with an error instead of updating the wrong provider. A `404` on delete is treated as success (already gone).
+
+### Experts page (`/#/experts`)
+
+The Experts page edits the live expert team: `GET /api/v1/system/experts` lists every expert defined under `[review_experts]` (disabled ones included, so a card can be switched back on) and `PUT /api/v1/system/experts/{id}` changes one expert's `enabled` / `weight`. Each card's switch and weight slider save themselves.
+
+**Precedence: the database wins over the config file.** An edit made here is stored as an *override* (just the fields you changed, keyed by expert name) in the configuration database, and that override is applied over the file's `[review_experts]` on every startup and on every review dispatch — REST-submitted reviews, webhook-triggered reviews, and repo scans all run the overridden values. The config file stays the base/default:
+
+- an override patches an expert that exists in the file; it never adds a new expert,
+- a field the override does not carry keeps the file's value, so editing one expert does not freeze the others,
+- removing an expert from the config file also retires its override (the orphaned entry is skipped with a debug log).
+
+The `sum to 100` weight rule is a config-file validation (`review-engine validate`); the slider stores whatever value you set (0–100 — a higher value is rejected with `422`), exactly like editing the file by hand does not re-validate itself at runtime.
+
+What the PUT response means:
+
+- `"persisted": true` — the change is stored and survives a restart;
+- `"persisted": false` — no configuration database is attached (`REVIEW_DISABLE_DB=1`, or an embedded instance without a data dir), so the change is **memory-only and lost on restart**. The page shows a warning notification (naming what to do: run with a data directory) instead of a success one, and the server logs a warning;
+- a failed write answers `500` and the page reports the failure — a change is never silently reported as saved when it was not. The write happens **before** the change takes effect, so a `500` also means the running configuration is untouched.
+
+A hand-edited `experts` row cannot break startup and cannot inject a value the schema forbids: a row that is not an override map, or a `weight` outside 0–100, is logged as a warning and ignored, leaving the config file's `[review_experts]` values in force.
 
 ---
 

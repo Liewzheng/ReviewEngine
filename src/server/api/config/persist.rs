@@ -35,6 +35,7 @@ use anyhow::Context as _;
 use serde::{Deserialize, Serialize};
 
 use crate::config::secrets::{self, ENC_PREFIX};
+use crate::config::ExpertOverrides;
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::AppState;
 use crate::store::traits::ConfigStore;
@@ -499,6 +500,66 @@ pub async fn load_and_apply_ui_state_from_db(
     }
     apply_replay(state, &file, overrides, "the database UI state")?;
     Ok(true)
+}
+
+/// RENG-69: `app_settings` row holding the WebUI expert overrides. A key of
+/// its own (next to `ui` / `gitlab`) — see [`crate::config::ExpertOverrides`]
+/// for why the overrides are not folded into the `ui` projection.
+pub const EXPERT_OVERRIDES_KEY: &str = "experts";
+
+/// Read the persisted expert overrides. A missing row is the empty map
+/// (nothing was ever overridden).
+///
+/// `Err` is reserved for a store-level failure (unreachable database, a row
+/// whose text is not valid JSON). A row that parses but is not an
+/// override map never reaches here as an error:
+/// [`ExpertOverrides::from_setting`] degrades it to "no overrides" with a WARN,
+/// so a hand-edited row cannot fail a startup.
+pub async fn load_expert_overrides(store: &SqlxStore) -> anyhow::Result<ExpertOverrides> {
+    match store.load_setting(EXPERT_OVERRIDES_KEY).await? {
+        Some(value) => Ok(ExpertOverrides::from_setting(&value)),
+        None => Ok(ExpertOverrides::default()),
+    }
+}
+
+/// Persist the whole override map (one `app_settings` upsert): the endpoint
+/// that edits an expert always writes the merged map, exactly like
+/// `PUT /config` persists the whole resolved config rather than a delta.
+pub async fn save_expert_overrides(store: &SqlxStore, overrides: &ExpertOverrides) -> anyhow::Result<()> {
+    store.save_setting(EXPERT_OVERRIDES_KEY, &overrides.to_setting()).await
+}
+
+/// Startup: load the persisted expert overrides, publish them on
+/// [`AppState`], and apply them over the file-resolved `[review_experts]`.
+///
+/// Precedence is DB over file — the config file stays the base/default, the
+/// same rule the other config surfaces follow. Returns the number of experts
+/// actually patched so the caller can log the replay. `0` covers "no overrides
+/// stored", "every stored name is gone from the file", "the stored row is
+/// unusable" and "the store could not be read".
+///
+/// **This step can never fail** (RENG-69 review): a row that is not valid JSON,
+/// a row that is not an override map, and a store-level read error are each
+/// logged as a WARN and treated as "no overrides", leaving the file's
+/// `[review_experts]` values in force. A `serve` that refused to boot on a
+/// hand-edited settings row could not even be fixed through the Web UI, which
+/// is why the fallback (not the error) is the contract here.
+pub async fn load_and_apply_expert_overrides(state: &AppState, store: &SqlxStore) -> usize {
+    let overrides = match load_expert_overrides(store).await {
+        Ok(overrides) => overrides,
+        Err(e) => {
+            // Field named `reason`, not `error`: the log collector infers a
+            // plain-text line's level by substring (`infer_level_from_line`),
+            // and an `error=…` field would file this WARN as an ERROR.
+            tracing::warn!(
+                reason = %format!("{e:#}"),
+                "ignoring the persisted expert overrides: the settings row could not be read; \
+                 the config file's [review_experts] values stand"
+            );
+            return 0;
+        }
+    };
+    state.set_expert_overrides(overrides)
 }
 
 /// Build the `PUT /config`-equivalent JSON payload from the persisted file,
@@ -1841,5 +1902,148 @@ webhook_secret = "legacy-wh-plain"
         assert!(!db_disabled_flag(Some("0")));
         assert!(!db_disabled_flag(Some("no")));
         assert!(!db_disabled_flag(Some("random")));
+    }
+
+    // ── RENG-69: expert overrides (app_settings key `experts`) ──
+
+    /// Fresh state as `serve` seeds it *before* the expert-override replay:
+    /// `app_config` holds the config-file (`[review_experts]`) values.
+    fn fresh_expert_state() -> AppState {
+        let mut app: crate::models::AppConfig =
+            serde_json::from_value(serde_json::json!({ "llm": [] })).expect("minimal AppConfig must deserialize");
+        for (name, enabled, weight) in [("security", true, 30u8), ("lead", true, 50u8)] {
+            app.review_experts.insert(
+                name.to_string(),
+                crate::models::ExpertTomlDef {
+                    enabled,
+                    weight,
+                    role: format!("{name} lead"),
+                    ..Default::default()
+                },
+            );
+        }
+        let state = AppState::new(vec![]);
+        *state.ui_config.write().unwrap() = crate::server::api::config::UiConfig::from_app_config(&app);
+        *state.app_config.write().unwrap() = Some(Arc::new(app));
+        state
+    }
+
+    fn expert_field(state: &AppState, name: &str) -> (bool, u8) {
+        let cfg = state.app_config.read().unwrap();
+        let expert = cfg
+            .as_ref()
+            .expect("app_config seeded")
+            .review_experts
+            .get(name)
+            .unwrap_or_else(|| panic!("expert '{name}' missing"));
+        (expert.enabled, expert.weight)
+    }
+
+    /// The startup step `cli/app.rs` runs: the DB-resident overrides are
+    /// applied over the file-resolved `[review_experts]`, so the config the
+    /// review paths read after a restart matches what the Web UI last showed.
+    #[tokio::test]
+    async fn expert_overrides_replay_at_startup_applies_db_over_file() {
+        let store = fresh_db().await;
+        let mut overrides = ExpertOverrides::default();
+        overrides.record(
+            "security",
+            crate::config::ExpertOverride {
+                enabled: Some(false),
+                weight: None,
+            },
+        );
+        save_expert_overrides(&store, &overrides).await.unwrap();
+
+        // Startup order, exactly as `serve` does it: the UI-state replay first
+        // (it never touches `review_experts`), then this step.
+        let state = Arc::new(fresh_expert_state());
+        assert!(
+            !load_and_apply_ui_state_from_db(&state, &store, &UiStateEnvOverrides::default())
+                .await
+                .unwrap(),
+            "the store holds no UI state here"
+        );
+        assert_eq!(
+            expert_field(&state, "security"),
+            (true, 30),
+            "file value before the replay"
+        );
+
+        let applied = load_and_apply_expert_overrides(&state, &store).await;
+        assert_eq!(applied, 1, "exactly the stored override is patched");
+        assert_eq!(
+            expert_field(&state, "security"),
+            (false, 30),
+            "DB wins, untouched field keeps the file value"
+        );
+        assert_eq!(
+            expert_field(&state, "lead"),
+            (true, 50),
+            "an unedited expert keeps the file value"
+        );
+        assert!(
+            state.expert_overrides_snapshot().get("security").is_some(),
+            "the snapshot the review dispatches take is published too"
+        );
+    }
+
+    /// A stored row that is not an override map — or whose entries are
+    /// unusable — degrades to "no overrides": the file values stand, nothing
+    /// is applied, and the step still reports success (startup is unaffected).
+    #[tokio::test]
+    async fn unusable_expert_overrides_row_degrades_to_no_overrides() {
+        for row in [
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!("not an override map"),
+            serde_json::json!(7),
+            serde_json::json!({ "security": "disabled" }),
+            serde_json::json!({ "security": { "weight": 200 } }),
+        ] {
+            let store = fresh_db().await;
+            store.save_setting(EXPERT_OVERRIDES_KEY, &row).await.unwrap();
+
+            let state = Arc::new(fresh_expert_state());
+            let applied = load_and_apply_expert_overrides(&state, &store).await;
+
+            assert_eq!(applied, 0, "row {row} must apply nothing");
+            assert_eq!(
+                expert_field(&state, "security"),
+                (true, 30),
+                "row {row} must leave the config-file values in force"
+            );
+            assert!(state.expert_overrides_snapshot().is_empty(), "row {row}");
+        }
+    }
+
+    /// A row whose TEXT is not valid JSON is a store-level read error, not a
+    /// crash: `load_expert_overrides` reports it and the startup step logs it
+    /// (WARN) and continues with no overrides, leaving the state untouched and
+    /// ready for the next boot to retry.
+    #[tokio::test]
+    async fn unreadable_expert_overrides_row_is_reported_not_fatal() {
+        let store = fresh_db().await;
+        sqlx::query("INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)")
+            .bind(EXPERT_OVERRIDES_KEY)
+            .bind("this is = not [ valid json")
+            .bind("2026-09-15T00:00:00Z")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        assert!(
+            load_expert_overrides(&store).await.is_err(),
+            "a non-JSON row must be reported, naming the key"
+        );
+
+        let state = Arc::new(fresh_expert_state());
+        let applied = load_and_apply_expert_overrides(&state, &store).await;
+        assert_eq!(applied, 0, "nothing is applied from an unreadable row");
+        assert_eq!(
+            expert_field(&state, "security"),
+            (true, 30),
+            "the state is untouched, so a caller that logs and continues has a usable config"
+        );
+        assert!(state.expert_overrides_snapshot().is_empty());
     }
 }

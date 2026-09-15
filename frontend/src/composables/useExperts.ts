@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue';
 import { getExperts, updateExpert } from '../services/experts';
 import { i18n } from '../i18n';
-import type { Expert } from '../types/expert';
+import type { Expert, ExpertUpdateResult } from '../types/expert';
 
 /**
  * Composable for managing expert definitions and their configurations.
@@ -69,11 +69,18 @@ export function useExperts() {
 
   /**
    * Update a single expert's configuration.
+   *
+   * The server persists the change (RENG-69); the returned `persisted` flag
+   * says whether that succeeded durably. A rejected promise means the update
+   * did not take effect server-side (the caller rolls back its optimistic
+   * value); `persisted === false` means it took effect but is memory-only, so
+   * the caller should warn instead of reporting a clean success.
+   *
    * @param id - Expert identifier.
    * @param data - Fields to update (enabled, weight).
    * @returns The updated expert definition.
    */
-  async function update(id: string, data: { enabled?: boolean; weight?: number }) {
+  async function update(id: string, data: { enabled?: boolean; weight?: number }): Promise<ExpertUpdateResult> {
     error.value = null;
     try {
       const updated = await updateExpert(id, data);

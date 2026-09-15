@@ -123,6 +123,14 @@ impl WebhookHandler for GitHubWebhookHandler {
                 .and_then(|w| w.upgrade())
                 .map(|s| s.ordered_llm_configs())
         };
+        // RENG-69: the matching snapshot of the WebUI-managed expert overrides.
+        // Also lazy, and also `None` without an AppState (CLI/legacy paths).
+        let server_expert_overrides = || {
+            self.app_state
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .map(|s| s.expert_overrides_snapshot())
+        };
 
         let result = match event {
             "ping" => {
@@ -135,6 +143,7 @@ impl WebhookHandler for GitHubWebhookHandler {
                 &self.token,
                 self.task_store.clone(),
                 server_llm_configs(),
+                server_expert_overrides(),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -144,6 +153,7 @@ impl WebhookHandler for GitHubWebhookHandler {
                 &self.token,
                 self.task_store.clone(),
                 server_llm_configs(),
+                server_expert_overrides(),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -261,7 +271,9 @@ pub(crate) fn source_meta_from_pr_payload(payload: &PrHookPayload) -> SourceMeta
 /// lifecycle in the task store when one is available.
 ///
 /// `server_llm_configs` is the handler's snapshot of the server's hot-applied
-/// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]).
+/// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]);
+/// `server_expert_overrides` the matching snapshot of the WebUI-managed expert
+/// overrides (RENG-69). Both `None` without a server `AppState`.
 ///
 /// `gate` controls the RENG-62 unchanged-content check: [`ContentGate::Enabled`]
 /// for PR push/update events, [`ContentGate::Bypassed`] for an explicit
@@ -277,6 +289,7 @@ async fn run_webhook_pr_review(
     pr_number: u64,
     source_meta: SourceMeta,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
     gate: ContentGate,
 ) {
     // Resolve the PR metadata + diff up front: the diff doubles as the content
@@ -330,6 +343,7 @@ async fn run_webhook_pr_review(
             diff,
             server_llm_configs,
             llm_sink,
+            server_expert_overrides,
         )
         .await
     }
@@ -351,6 +365,7 @@ async fn handle_pull_request(
     github_token: &str,
     task_store: Option<Arc<TaskStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_pr_hook_payload(body)?;
 
@@ -384,6 +399,7 @@ async fn handle_pull_request(
                         note_iid,
                         source_meta,
                         server_llm_configs,
+                        server_expert_overrides,
                         ContentGate::Enabled,
                     )
                     .await;
@@ -417,6 +433,7 @@ async fn handle_pull_request(
                                 note_iid,
                                 source_meta,
                                 server_llm_configs,
+                                server_expert_overrides,
                                 ContentGate::Enabled,
                             )
                             .await;
@@ -453,6 +470,7 @@ async fn handle_issue_comment(
     github_token: &str,
     task_store: Option<Arc<TaskStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse issue_comment webhook: {}", e);
@@ -502,6 +520,7 @@ async fn handle_issue_comment(
                             pr_number,
                             source_meta,
                             server_llm_configs,
+                            server_expert_overrides,
                             // An explicit `/review` / `/describe` command is
                             // user intent: it always reviews, even when the
                             // content is unchanged (RENG-62).

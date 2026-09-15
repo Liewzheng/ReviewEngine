@@ -94,13 +94,19 @@ const handleToggle = async (id: string, enabled: boolean) => {
   expert.enabled = enabled
   savesInFlight.value++
   try {
-    await expertsStore.update(id, { enabled })
-    ElNotification({
-      title: enabled ? t('experts.toggle.enabledTitle') : t('experts.toggle.disabledTitle'),
-      message: enabled ? t('experts.toggle.enabledMessage', { name: expert.name }) : t('experts.toggle.disabledMessage', { name: expert.name }),
-      type: enabled ? 'success' : 'warning',
-      duration: 2000,
-    })
+    const updated = await expertsStore.update(id, { enabled })
+    if (updated.persisted === false) {
+      // RENG-69: the server applied the change but has no store attached, so
+      // it dies with the container. Never report that as a clean success.
+      notifyMemoryOnly(expert.name)
+    } else {
+      ElNotification({
+        title: enabled ? t('experts.toggle.enabledTitle') : t('experts.toggle.disabledTitle'),
+        message: enabled ? t('experts.toggle.enabledMessage', { name: expert.name }) : t('experts.toggle.disabledMessage', { name: expert.name }),
+        type: enabled ? 'success' : 'warning',
+        duration: 2000,
+      })
+    }
   } catch (e) {
     expert.enabled = previous
     notifyUpdateFailed(expert.name, e)
@@ -140,7 +146,12 @@ const commitWeight = async (id: string) => {
   if (!expert || previous === undefined || expert.weight === previous) return
   savesInFlight.value++
   try {
-    await expertsStore.update(id, { weight: expert.weight })
+    const updated = await expertsStore.update(id, { weight: expert.weight })
+    if (updated.persisted === false) {
+      // Same honesty rule as the toggle: the slider committed, but without a
+      // store the value will not survive a restart.
+      notifyMemoryOnly(expert.name)
+    }
   } catch (e) {
     expert.weight = previous
     notifyUpdateFailed(expert.name, e)
@@ -155,6 +166,18 @@ function notifyUpdateFailed(name: string, error: unknown) {
     title: t('common.error'),
     message: t('experts.updateFailed', { name }),
     type: 'error',
+    duration: 5000,
+  })
+}
+
+/* RENG-69: the server applied the edit but could not (or would not) store it,
+ * so it is lost on restart. A warning, not a success — the user must not
+ * believe the configuration is durable. */
+function notifyMemoryOnly(name: string) {
+  ElNotification({
+    title: t('experts.memoryOnlyTitle'),
+    message: t('experts.memoryOnlyMessage', { name }),
+    type: 'warning',
     duration: 5000,
   })
 }

@@ -609,7 +609,7 @@ VSCode Extension 可用此接口展示可选专家、让用户开关。
 
 #### `PUT /api/v1/system/experts/{id}`
 
-更新单个专家的启用状态与权重（`{id}` 为专家名 slug，如 `security`）。
+更新单个专家的启用状态与权重（`{id}` 为专家名 slug，如 `security`）。请求体字段都是可选的，只提交需要改的字段。
 
 ```
 Request:
@@ -618,9 +618,32 @@ Request:
   "weight": 20
 }
 
-Response 200: 更新后的专家对象（结构同 GET）
+Response 200: 更新后的专家对象（结构同 GET），额外带一个 `persisted` 字段：
+{
+  "id": "security",
+  "enabled": false,
+  "weight": 20,
+  ...,
+  "persisted": true
+}
 Response 404: { "error": "expert not found" }
+Response 422: { "error": "invalid weight 200: an expert's weight must be between 0 and 100" }
+Response 500: { "error": "failed to persist the expert change to the database: ..." }
 ```
+
+请求体字段都可选，`{}` 表示「不改任何字段」，不会写入空的 override（专家的 `enabled`/`weight` 保持原值）。
+
+`weight` 的合法范围是 **0–100**（与配置文件 `[review_experts.*]` 的 `weight` 一致），超出范围返回 `422` —— 与 `PUT /config` 对非法值的处理一致；之所以拒绝而不是静默截断，是因为 UI 的滑杆不可能产生越界值，能产生的只有手写客户端，静默存一个与请求不同的值会让接口的返回变成假话。
+
+`persisted` 的语义（RENG-69）：
+
+- `true` — 改动已写入配置数据库，重启后仍生效；
+- `false` — 服务没有挂数据库（`REVIEW_DISABLE_DB=1`、嵌入式使用），改动只在内存里生效，重启即丢失。前端据此显示警告而不是成功提示；
+- 写库失败时返回 `500`，调用方不得当作保存成功。
+
+**顺序：先落库、再生效。** 写库（`await`）发生在改动运行态之前，所以 `500` 意味着这次请求什么都没改：运行中的 `app_config`、`GET /system/experts`、数据库都还是旧值（与 `PUT /config` 的「先内存后落库 + 失败留痕」不同，这里不需要回滚）。延迟不变——接口本来就要等写库完成才回响应，只是内存变更的时点后移；没有数据库时没有可等的事情，直接生效并返回 `persisted: false`。
+
+改动生效后同时作用于 REST 提交的 review、webhook 触发的 review 与仓库扫描——这些路径各自重新解析配置文件，服务会把已持久化的 override 叠加到它们解析出的 `[review_experts]` 上（数据库覆盖配置文件，见 [configuration.md](configuration.md#experts-page-experts)）。
 
 #### `GET /api/v1/system/version`
 

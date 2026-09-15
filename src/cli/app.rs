@@ -420,6 +420,28 @@ pub async fn run(cli: Cli) -> Result<()> {
                     }
                 }
             }
+            // RENG-69: replay the WebUI expert overrides (app_settings key
+            // `experts`) over the file-resolved `[review_experts]`. DB over
+            // file, the same precedence the other config surfaces use — the
+            // config file stays the base/default. Runs AFTER the UI-state
+            // replay above, which never touches `review_experts`, so nothing
+            // can overwrite it. The step cannot fail: an unreadable or unusable
+            // row is logged (WARN) inside the helper and the file values stand,
+            // so a hand-edited settings row can never keep the server from
+            // booting. Without a DB there is nothing to load and expert edits
+            // stay memory-only (the pre-0.10.24 behaviour).
+            if let Some(store) = state.db.clone() {
+                let applied =
+                    review_engine::server::api::config::persist::load_and_apply_expert_overrides(&state, &store).await;
+                if applied > 0 {
+                    tracing::info!("applied {applied} persisted expert override(s) from the database");
+                }
+            } else {
+                tracing::warn!(
+                    "expert configuration changes from the Web UI will not persist: \
+                     no database is attached (REVIEW_DISABLE_DB=1 or no config dir)"
+                );
+            }
             // Mount /webhook/gitlab unconditionally: verification is resolved
             // per-request — `verify` matches the payload's instance URL against
             // the hot-configured `state.git_platforms` (UI「Git 平台」), so a

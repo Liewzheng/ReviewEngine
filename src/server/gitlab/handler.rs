@@ -372,6 +372,7 @@ impl GitLabWebhookHandler {
         task_store: Option<Arc<crate::server::task_queue::TaskStore>>,
         db: Option<Arc<crate::store::SqlxStore>>,
         server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+        server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         let event_name = system_hook_event_name(body);
         match event_name.as_str() {
@@ -383,6 +384,7 @@ impl GitLabWebhookHandler {
                 task_store.clone(),
                 db.clone(),
                 server_llm_configs,
+                server_expert_overrides,
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -394,6 +396,7 @@ impl GitLabWebhookHandler {
                 task_store.clone(),
                 db,
                 server_llm_configs,
+                server_expert_overrides,
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -490,6 +493,10 @@ impl WebhookHandler for GitLabWebhookHandler {
         // i.e. the authoritative chain (persisted primary first), so a
         // webhook-triggered review runs the provider the user selected
         // (RENG-55). `None` without an AppState → config-file/env only.
+        //
+        // RENG-69: the WebUI-managed expert overrides travel the same way
+        // (`AppState::expert_overrides_snapshot`), so an expert disabled in
+        // the WebUI is skipped by webhook-triggered reviews too.
         match event {
             "Merge Request Hook" => super::handle_mr_hook(
                 body,
@@ -499,6 +506,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 task_store.clone(),
                 db.clone(),
                 app_state.as_ref().map(|s| s.ordered_llm_configs()),
+                app_state.as_ref().map(|s| s.expert_overrides_snapshot()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -510,6 +518,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 task_store.clone(),
                 db.clone(),
                 app_state.as_ref().map(|s| s.ordered_llm_configs()),
+                app_state.as_ref().map(|s| s.expert_overrides_snapshot()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -520,8 +529,17 @@ impl WebhookHandler for GitLabWebhookHandler {
                 // Snapshot lazily here (not at handler entry): system hooks
                 // route to review dispatch only for merge_request/note events.
                 let server_llm_configs = app_state.as_ref().map(|s| s.ordered_llm_configs());
-                self.handle_system_hook(body, &token, platform, task_store, db, server_llm_configs)
-                    .await
+                let server_expert_overrides = app_state.as_ref().map(|s| s.expert_overrides_snapshot());
+                self.handle_system_hook(
+                    body,
+                    &token,
+                    platform,
+                    task_store,
+                    db,
+                    server_llm_configs,
+                    server_expert_overrides,
+                )
+                .await
             }
             _ => {
                 tracing::debug!("Ignoring unsupported GitLab event: {}", event);

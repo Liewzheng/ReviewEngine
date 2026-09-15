@@ -23,6 +23,19 @@ export interface LlmProvidersResponse {
    * card's `usageShare`. `null` when unavailable.
    */
   usageTotal: number | null
+  /**
+   * RENG-57: length of the latency window the per-call numbers cover (rolling
+   * days, server-side `LATENCY_WINDOW_DAYS`). Reported separately from the
+   * usage window so the client never assumes the two agree; both are 7 today.
+   */
+  latencyWindowDays: number
+  /** RENG-57: ISO 8601 start of that window (inclusive). */
+  latencySince: string
+  /**
+   * RENG-57: false when the server has no call-sample history to read — every
+   * latency metric is `null` then and the page shows `—` instead of a series.
+   */
+  latencyAvailable: boolean
 }
 
 export async function getProviders(): Promise<LlmProvidersResponse> {

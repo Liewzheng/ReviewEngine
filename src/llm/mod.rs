@@ -12,6 +12,7 @@ pub mod client;
 pub mod probe;
 pub mod provider;
 pub mod rate_limiter;
+pub mod sampling;
 
 use crate::models::{ExpertDef, LLMConfig};
 

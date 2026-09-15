@@ -53,12 +53,41 @@ over a rolling window (7 days; the payload carries `usageWindowDays` /
 `usageSince` and the UI labels the numbers with them). Four real values per
 card — `requestCount` (reviews that used the provider), `usageShare` (its
 slice of all usage in the window), `successRate` (over the reviews that used
-it and finished) and `lastUsedAt` — plus the live probe's latency.
+it and finished) and `lastUsedAt` — plus the recorded call latency of §2.3.
 
 Anything without a basis is `null` on the wire and `—` on the page: there is
-no capacity concept (`usagePercent` is gone) and no call-level time series
-(`sparkline` is gone until RENG-57 records one). The card shows `0` only when
-the window was really read and really held no usage.
+no capacity concept (`usagePercent` is gone) and no fabricated series. The card
+shows `0` only when the window was really read and really held no usage.
+
+### 2.3 Recorded call latency (RENG-57)
+
+The card's latency number is the mean round-trip time of the **calls the
+reviews actually made**, not the probe's instantaneous value: every LLM call
+attempt on the review path records a row in `llm_call_samples` (timestamp,
+provider, model, `latency_ms`, success/failure + error, chain position,
+attempt, review id), and `GET /api/v1/llm/providers` folds the window's rows
+into `avgLatencyMs` / `latencySampleCount` / `latencyFailureCount` /
+`latencyLastSampleAt` / `latencySparkline` over the reported
+`latencyWindowDays` (7, same length as the usage window but reported
+separately).
+
+Two rules make the number trustworthy:
+
+- **Failed attempts are counted, not averaged.** A 401 answered in 5 ms and a
+  120 s timeout measure the failure, not the provider; mixing them would make
+  the average reflect the error mix. The failure count is shown next to the
+  average (`{n} calls · {k} failed`) so the exclusion is visible.
+- **Unknown is `—`.** No successful call in the window (or no readable sample
+  table at all) → no average. Only the counts, which are measured, may be `0`.
+
+The probe stays visible and separate: `lastProbeLatencyMs` renders as
+`Probe {n} ms` next to "Last checked", and the historical average is the
+metric-row value. RENG-53's complaint was precisely that the two were
+indistinguishable.
+
+Retention is bounded by the write path (`RETENTION_DAYS = 30`), which prunes
+once per review inside the sink's first write — the table cannot grow with the
+whole history, so the window query stays a bounded index range scan.
 
 ## 3. Component Breakdown
 
@@ -73,14 +102,15 @@ the window was really read and really held no usage.
 ┌────────────────────────────────────────┐
 │ [Logo]  Provider Name    [StatusBadge] │  → header row
 │                                        │
-│ Latency    Usages (7d)   Success Rate  │  → metrics row (3 columns)
-│ 234 ms        12            91.7%      │
-│                                        │
+│ Avg latency  Usages (7d)  Success Rate │  → metrics row (3 columns)
+│ 812 ms          12           91.7%     │     + "46 calls · 3 failed"
+│  ╱╲__╱╲___╱╲                           │  → recorded latency series (RENG-57)
+│  Call latency · last 7 days            │
 │ ██████████████████████░░░░░░░░░░░░░░░░  │  → usage-share bar (window)
 │ 75% of usage (last 7 days)             │
 │                                        │
 │                    Last used: 09-14…   │  → recorded-use timestamp
-│                    Last checked: …     │  → probe timestamp
+│     Probe 320 ms · Last checked: …     │  → probe round trip + probe time
 │ [Test Connection]  [Edit] […]          │  → action row
 └────────────────────────────────────────┘
 ```
@@ -93,12 +123,22 @@ the window was really read and really held no usage.
 - 3 equal columns, `text-align: center`.
 - Label: `font-size: 11px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em;`.
 - Value: `font-family: JetBrains Mono; font-size: 18px; font-weight: 500; color: var(--text-primary);`.
-- Latency color: < 500ms = green, 500–1500ms = amber, > 1500ms = red.
+- Avg-latency color: < 500ms = green, 500–1500ms = amber, > 1500ms = red.
 - Success-rate color: ≥ 99% = green, 95–99% = amber, < 95% = red (forced red
   while the probe reports `error`).
 - Every value is `—` when the server has no number for it. The usage metrics
   are independent of the probe: an `offline` provider that served last week's
-  reviews still shows them.
+  reviews still shows them; the latency average is independent of it too (it
+  is history, not a live probe).
+
+**Recorded latency series (RENG-57):**
+- 28 six-hour buckets over the window, drawn by
+  `components/common/Sparkline.vue` as SVG polylines under the metrics row.
+- Buckets with no call are gaps (the line breaks); the component renders
+  nothing at all with fewer than two real points, so a single event is never
+  dressed up as a trend.
+- Caption `Call latency · last {days} days` labels the metric above it with
+  the window the server reported.
 
 **Usage-share bar:**
 - Rendered only when the payload reports an usage window (`usageAvailable`).
@@ -120,7 +160,7 @@ the window was really read and really held no usage.
 | error | red | Not responding or auth failure |
 | offline | gray | Not configured or disabled |
 
-**Where the status comes from (0.10.18, RENG-36):** `healthy` / `error` are the verdict of a real `GET {apiBase}/models` probe, cached per provider for 60 s (`src/server/api/llm_health.rs`); they are never inferred from "a key is stored", which is what used to leave a card green after its key was broken. `offline` means no key is stored (nothing is probed) and its `lastChecked` is `null` — a probe that never ran has no time to show. Editing a provider's credentials or endpoint — or deleting it — drops that provider's cached verdict, so the next read re-probes it; the dashboard's `health.llmProviders` section reads the same cache. `degraded` is not produced by the backend today, and `latencyMs` is the probe's own round-trip time (not a recorded average — call-level latency is RENG-57).
+**Where the status comes from (0.10.18, RENG-36):** `healthy` / `error` are the verdict of a real `GET {apiBase}/models` probe, cached per provider for 60 s (`src/server/api/llm_health.rs`); they are never inferred from "a key is stored", which is what used to leave a card green after its key was broken. `offline` means no key is stored (nothing is probed) and its `lastChecked` is `null` — a probe that never ran has no time to show. Editing a provider's credentials or endpoint — or deleting it — drops that provider's cached verdict, so the next read re-probes it; the dashboard's `health.llmProviders` section reads the same cache. `degraded` is not produced by the backend today. The probe's round-trip time is `lastProbeLatencyMs`, rendered as `Probe {n} ms` beside "Last checked" — it is NOT the card's latency metric (that is the recorded average, §2.3).
 
 **Usage statistics (0.10.21, RENG-56):** every usage number is a read of
 `reviews.llm_summary` (§8.2 of `src/store/traits.rs`), aggregated over the
@@ -151,11 +191,16 @@ interface LlmProvider {
   name: string;
   logo: string; // SVG asset path
   status: 'healthy' | 'degraded' | 'error' | 'offline';
-  latencyMs: number;          // probe round-trip (RENG-36)
+  lastProbeLatencyMs: number;   // probe round-trip (RENG-36; renamed in RENG-57)
   requestCount: number | null;  // RENG-56, window
   usageShare: number | null;    // RENG-56, 0–1
   successRate: number | null;   // RENG-56, 0–1
   lastUsedAt: string | null;    // RENG-56, ISO 8601
+  avgLatencyMs: number | null;         // RENG-57, window, successful calls only
+  latencySampleCount: number | null;   // RENG-57, the average's denominator
+  latencyFailureCount: number | null;  // RENG-57, excluded from the average
+  latencyLastSampleAt: string | null;  // RENG-57, newest recorded call
+  latencySparkline: (number | null)[] | null; // RENG-57, 28 buckets, null = gap
   lastChecked: string | null;   // probe time, null when never probed
   configured: boolean;
 }
@@ -172,14 +217,23 @@ interface LlmProvider {
 
 **No bulk test.** There is no "Test all providers" / "Refresh All" action, no `POST /llm/test-all` endpoint, and no card skeleton state driven by a test: the page header's only action is **Add provider**, and the cards refresh from the page's 30 s auto-refresh.
 
-### 3.3 Latency Sparkline — not shipped (RENG-57)
+### 3.3 Latency Sparkline — shipped (RENG-57)
 
-There is no sparkline on these cards, and none may be faked: a per-provider
-latency series needs call-level history that nothing records yet (the
-`reviews.llm_summary` snapshot names the provider/model per review but carries
-no latency). The metric stays absent until RENG-57 records the series; the
-card's latency is the live probe's round-trip time (RENG-36) with `—` when
-nothing was probed.
+The card draws a real per-provider latency series: `latencySparkline` is the
+mean of the successful calls in each 6-hour bucket of the window (28 points,
+oldest first), read from `llm_call_samples` — the per-call rows the review path
+records. `components/common/Sparkline.vue` renders it as SVG polylines.
+
+Two rules keep it honest, and both are enforced in the component rather than
+left to the caller:
+
+- **No series, no line.** `latencySparkline` is `null` when nothing was
+  recorded, and the component renders nothing with fewer than two real points
+  (one call is an event, not a trend). The metrics row already shows `—` for
+  the unknown average in that case.
+- **Gaps stay gaps.** A bucket with no calls is `null` and breaks the line
+  instead of being interpolated, so a quiet hour can never be read as a
+  measured value.
 
 ## 4. Interactions & State Changes
 
@@ -215,7 +269,7 @@ nothing was probed.
 
 - Only CSS transitions shipped on these cards: `transition: border-color/box-shadow/transform 0.2s ease` on the card and `transition: color 0.2s ease` on the metric values.
 - Test result line (RENG-54): appears inline above the card's action row, no auto-dismiss — it stays until the user dismisses it.
-- Not implemented on these cards: a page-enter transition, a staggered card fade-in, a status-change `flash-border`, a latency count-up, and the latency sparkline (§3.3, needs the call-level history of RENG-57).
+- Not implemented on these cards: a page-enter transition, a staggered card fade-in, a status-change `flash-border` and a latency count-up.
 
 ## 7. Data Structures
 
@@ -242,6 +296,8 @@ PUT    /api/v1/llm/providers/{id}      → update a provider
 DELETE /api/v1/llm/providers/{id}      → remove a provider
 POST   /api/v1/llm/providers/{id}/test → TestResult
 
-// No bulk-test, per-provider latency-history or llm.status SSE endpoint
-// exists; health comes from the 30 s poll of GET /llm/providers.
+// No bulk-test or llm.status SSE endpoint exists; health comes from the 30 s
+// poll of GET /llm/providers. The per-provider latency history RENG-57 draws
+// is server-recorded (`llm_call_samples`, written by the review path) and
+// arrives inside the same poll — there is no separate history endpoint.
 ```

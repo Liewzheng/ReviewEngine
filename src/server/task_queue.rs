@@ -199,6 +199,23 @@ impl TaskStore {
         self.db = Some(db);
     }
 
+    /// The sink a review attaches to its LLM client so every call it makes is
+    /// recorded (RENG-57), or `None` when no persistence is attached — which
+    /// is exactly when there is nowhere to write (`REVIEW_DISABLE_DB=1`, the
+    /// legacy in-memory startup), so the page reports `null` latency instead
+    /// of pretending.
+    ///
+    /// Built from the write-through store this queue already holds, so every
+    /// review path that creates its task here (the API, the GitLab and GitHub
+    /// webhooks) can bind a sink to its task id without a second DB handle.
+    pub fn llm_sample_sink(&self, task_id: Uuid) -> Option<Arc<dyn crate::llm::sampling::LlmCallSink>> {
+        let db = self.db.clone()?;
+        Some(crate::store::llm_samples::StoreLlmCallSink::shared(
+            db,
+            Some(task_id.to_string()),
+        ))
+    }
+
     pub async fn cleanup_expired(&self) {
         let cutoff = chrono::Utc::now() - chrono::Duration::minutes(30);
         let mut map = self.inner.write().await;
@@ -1314,6 +1331,22 @@ mod tests {
                 &self,
                 _: chrono::DateTime<chrono::Utc>,
             ) -> anyhow::Result<Vec<crate::store::traits::ProviderUsageStats>> {
+                anyhow::bail!("db down")
+            }
+            async fn insert_llm_sample(
+                &self,
+                _: Option<&str>,
+                _: &crate::llm::sampling::LlmCallSample,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+            async fn llm_samples_since(
+                &self,
+                _: chrono::DateTime<chrono::Utc>,
+            ) -> anyhow::Result<Vec<crate::store::traits::LlmCallSampleRow>> {
+                anyhow::bail!("db down")
+            }
+            async fn prune_llm_samples(&self, _: chrono::DateTime<chrono::Utc>) -> anyhow::Result<u64> {
                 anyhow::bail!("db down")
             }
         }

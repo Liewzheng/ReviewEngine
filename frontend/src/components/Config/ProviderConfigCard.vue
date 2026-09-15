@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Connection, Edit, Delete, Star } from '@element-plus/icons-vue'
 import TestResultLine from '../common/TestResultLine.vue'
+import Sparkline from '../common/Sparkline.vue'
 import type { LlmProvider, LlmProviderStatus, TestResult } from '../../types/llm'
 import type { TransientResult } from '../../composables/useTransientResult'
 import { providerDisplayName, type ProviderCardState } from '../../composables/llmPayload'
@@ -34,6 +35,13 @@ const props = defineProps<{
    * usage history, in which case the usage row is not rendered at all.
    */
   usageWindowDays?: number | null
+  /**
+   * RENG-57: length of the LATENCY window the recorded call numbers cover
+   * (days). Reported by the payload separately from the usage window;
+   * `null`/absent = the server had no call samples, in which case the average
+   * is `—` and no series is drawn.
+   */
+  latencyWindowDays?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -80,23 +88,66 @@ const hasLiveMetrics = computed(() => {
   return !!h && h.configured && h.status !== 'offline'
 })
 
-const formattedLatency = computed(() => {
-  const h = props.health
-  if (!h || !hasLiveMetrics.value) return '—'
-  return `${h.latencyMs} ms`
+/**
+ * The RECORDED average latency of the window (RENG-57) — the card's headline
+ * metric. `—` when the server has no number for it (no successful call in the
+ * window, or no samples readable at all): an unknown average is never shown as
+ * `0 ms`.
+ *
+ * This is deliberately NOT the probe's round trip: the probe measures one
+ * `GET /models` right now (RENG-36) and stays visible, separately labelled,
+ * in the check line below.
+ */
+const formattedAvgLatency = computed(() => {
+  const avg = props.health?.avgLatencyMs
+  if (avg === null || avg === undefined) return '—'
+  return `${avg} ms`
 })
 
-const latencyColor = computed(() => {
-  const h = props.health
-  if (!h || !hasLiveMetrics.value || h.latencyMs === 0) return ''
-  if (h.latencyMs < 500) return 'var(--success)'
-  if (h.latencyMs <= 1500) return 'var(--warning)'
+const avgLatencyColor = computed(() => {
+  const avg = props.health?.avgLatencyMs
+  if (avg === null || avg === undefined) return ''
+  if (avg < 500) return 'var(--success)'
+  if (avg <= 1500) return 'var(--warning)'
   return 'var(--error)'
 })
 
-const latencyStyle = computed(() => {
-  if (formattedLatency.value === '—') return {}
-  return { color: latencyColor.value }
+const avgLatencyStyle = computed(() => {
+  if (formattedAvgLatency.value === '—') return {}
+  return { color: avgLatencyColor.value }
+})
+
+/** True when the payload reported a latency window (samples are readable). */
+const hasLatencyWindow = computed(
+  () => props.latencyWindowDays !== null && props.latencyWindowDays !== undefined
+)
+
+/** Call count + failures behind the average, as a quiet sub-line ('' when the
+ *  sample table could not be read at all). */
+const latencySampleSummary = computed(() => {
+  const total = props.health?.latencySampleCount
+  const failed = props.health?.latencyFailureCount
+  if (total === null || total === undefined) return ''
+  return t('llm.latencySamples', { n: total, failed: failed ?? 0 })
+})
+
+/** The recorded series, drawn only when it has at least two real points — a
+ *  single point is an event, not a trend, and a flat zero line would claim a
+ *  measurement that does not exist. */
+const sparklinePoints = computed(() => {
+  const series = props.health?.latencySparkline
+  if (!series || series.filter((v) => v !== null).length < 2) return null
+  return series
+})
+
+const sparklineLabel = computed(() => t('llm.sparkline.label', { days: props.latencyWindowDays ?? '' }))
+
+/** The probe's own round trip (RENG-36), kept distinguishable from the
+ *  recorded average above. */
+const formattedProbeLatency = computed(() => {
+  const h = props.health
+  if (!h || !hasLiveMetrics.value) return '—'
+  return t('llm.probeLatency', { n: h.lastProbeLatencyMs })
 })
 
 /* ------------------------------------------------------------------ */
@@ -224,18 +275,26 @@ const testResultText = computed(() => {
       </div>
     </div>
 
-    <!-- Metrics Row: latency = the live probe (RENG-36); requests and
-         success rate = recorded usage of the window (RENG-56). '—' whenever
-         the server has no number, never a stand-in 0. -->
+    <!-- Metrics Row: average latency = the RECORDED calls of the window
+         (RENG-57); requests and success rate = recorded usage of the window
+         (RENG-56). '—' whenever the server has no number, never a stand-in 0.
+         The probe's own round trip (RENG-36) is shown separately below, so
+         the two measurements can never be mistaken for one another. -->
     <div class="metrics-row">
       <div class="metric">
-        <div class="metric-label">{{ $t('llm.metrics.latency') }}</div>
-        <div class="metric-value" :style="latencyStyle">
-          {{ formattedLatency }}
+        <div
+          class="metric-label"
+          :title="hasLatencyWindow ? $t('llm.windowLabel', { days: latencyWindowDays }) : undefined"
+        >
+          {{ $t('llm.metrics.avgLatency') }}
         </div>
+        <div class="metric-value" :style="avgLatencyStyle">
+          {{ formattedAvgLatency }}
+        </div>
+        <div class="metric-sub">{{ latencySampleSummary }}</div>
       </div>
       <div class="metric">
-        <div class="metric-label" :title="hasUsageWindow ? $t('llm.usageWindow', { days: usageWindowDays }) : undefined">
+        <div class="metric-label" :title="hasUsageWindow ? $t('llm.windowLabel', { days: usageWindowDays }) : undefined">
           {{ $t('llm.metrics.requests') }}
         </div>
         <div class="metric-value">{{ formattedRequestsDisplay }}</div>
@@ -253,6 +312,14 @@ const testResultText = computed(() => {
       </div>
     </div>
 
+    <!-- Recorded latency series (RENG-57): one point per 6-hour bucket over
+         the window, gaps left as gaps. Rendered only from real samples — no
+         series means no line, and the page never draws a made-up one. -->
+    <div v-if="sparklinePoints && hasLatencyWindow" class="sparkline-block">
+      <Sparkline :points="sparklinePoints" :label="sparklineLabel" :height="28" />
+      <div class="sparkline-caption">{{ $t('llm.sparkline.caption', { days: latencyWindowDays }) }}</div>
+    </div>
+
     <!-- Usage share over the window (RENG-56) — this provider's slice of all
          recorded usage. Rendered only when the server could read the window
          AND holds usage to divide by; otherwise there is no bar to draw. -->
@@ -266,11 +333,14 @@ const testResultText = computed(() => {
       <span class="usage-label">{{ usageShareLabel }}</span>
     </div>
 
-    <!-- Last used / last checked: both real timestamps, '—' when unknown -->
+    <!-- Last used / last checked: both real timestamps, '—' when unknown.
+         The probe's round-trip time rides here, next to "last checked",
+         because it describes exactly that probe (RENG-36/RENG-57). -->
     <div v-if="hasUsageWindow" class="usage-meta">
       {{ $t('llm.lastUsed', { date: lastUsedDisplay }) }}
     </div>
     <div v-if="health" class="last-checked">
+      <span v-if="hasLiveMetrics">{{ formattedProbeLatency }} ·</span>
       {{ $t('llm.lastChecked', { date: lastCheckedDisplay }) }}
     </div>
 
@@ -459,6 +529,26 @@ const testResultText = computed(() => {
   font-weight: 500;
   color: var(--text-primary);
   transition: color 0.2s ease;
+}
+
+/* RENG-57: the sample counts behind the average (kept tiny — it qualifies
+   the number above it, it is not a metric of its own). */
+.metric-sub {
+  font-size: 10px;
+  color: var(--text-secondary);
+  margin-top: 2px;
+  min-height: 12px;
+}
+
+/* RENG-57: recorded latency series + its window caption */
+.sparkline-block {
+  margin-bottom: 12px;
+}
+
+.sparkline-caption {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-top: 2px;
 }
 
 .usage-bar {

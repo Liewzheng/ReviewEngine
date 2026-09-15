@@ -140,12 +140,15 @@ fn parse_severity_label(value: &str) -> Option<Severity> {
 /// server-side reviews); when neither exists the pass keeps every candidate
 /// and warns. It never fails: on any LLM, fetch or parsing error the affected
 /// findings are kept.
+///
+/// `llm_sink` (RENG-57) records the latency of the calls this pass makes.
 pub(crate) async fn adjudicate_findings(
     findings: &mut Vec<Finding>,
     project_path: &str,
     remote_source: Option<Arc<dyn FileSource>>,
     llm_configs: &[LLMConfig],
     min_severity: &Severity,
+    llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> Vec<DroppedFinding> {
     if llm_configs.is_empty() {
         tracing::warn!("Adjudication pass enabled but no LLM configs available; skipping");
@@ -153,7 +156,7 @@ pub(crate) async fn adjudicate_findings(
     }
 
     let source = crate::team::file_source::resolve_ground_truth(project_path, remote_source);
-    let client = LLMClient::new();
+    let client = LLMClient::new().with_sink(llm_sink);
     let configs = llm_configs.to_vec();
     adjudicate_with_llm(findings, project_path, source.as_deref(), min_severity, move |user| {
         let client = client.clone();

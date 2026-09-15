@@ -465,9 +465,18 @@ pub async fn run_repo_review(
                     llm_provider: None,
                     llm_model: None,
                 }];
-                let dropped =
-                    crate::team::verifier::verify_findings(&mut reports, &[], local_path, llm_configs, max_file_bytes)
-                        .await;
+                let dropped = crate::team::verifier::verify_findings(
+                    &mut reports,
+                    &[],
+                    local_path,
+                    llm_configs,
+                    max_file_bytes,
+                    // RENG-57: the repo-scan path has no review-scoped sample
+                    // store behind it (its reports carry no provider identity
+                    // either), so it records nothing.
+                    None,
+                )
+                .await;
                 let kept = reports.into_iter().next().map(|r| r.findings).unwrap_or_default();
                 tracing::info!(
                     "Verification pass: checked {} findings, dropped {}",

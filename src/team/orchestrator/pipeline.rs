@@ -133,6 +133,7 @@ async fn build_lead_overview(
     llm_configs: &[LLMConfig],
     project_config: Option<&crate::models::ProjectConfig>,
     project_context: &crate::context::ProjectContext,
+    llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> Option<GlobalReviewContext> {
     let lead_expert = non_aggregators
         .iter()
@@ -147,7 +148,7 @@ async fn build_lead_overview(
     let overview_diff = processor::render_diff_text(files);
     let overview_config = select_llm_config(lead, llm_configs);
     let prompt_engine = PromptEngine::new();
-    let llm_client = LLMClient::new();
+    let llm_client = LLMClient::new().with_sink(llm_sink);
 
     let (system, user) =
         match prompt_engine.build_overview_prompt(mr_info, project_config, project_context, &overview_diff) {
@@ -267,6 +268,7 @@ fn create_expert_task(
     review_id: String,
     global_context: Option<GlobalReviewContext>,
     dump_dir: Option<std::path::PathBuf>,
+    llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> Task {
     Box::pin(async move {
         let task_start = std::time::Instant::now();
@@ -281,7 +283,7 @@ fn create_expert_task(
         }
 
         let prompt_engine = PromptEngine::new();
-        let llm_client = LLMClient::new();
+        let llm_client = LLMClient::new().with_sink(llm_sink);
         let (system, user) = prompt_engine.build_review_prompt(
             &expert,
             &mr_info,
@@ -402,6 +404,10 @@ fn collect_expert_results(
 /// provider at the reviewed SHA. Local reviews pass `None` and the pass reads
 /// the checkout.
 ///
+/// `llm_sink` (RENG-57) is handed to every LLM call this pass makes — the lead
+/// overview, each expert task, the verification pass and the adjudicator — so
+/// one review's samples all land under one review id.
+///
 /// Returns (reports, per-expert metrics, total_tokens, error_messages, global_context,
 /// dropped_findings, consolidated).
 #[allow(clippy::type_complexity)]
@@ -417,6 +423,7 @@ pub(crate) async fn run_experts_inner(
     head_ref: Option<&str>,
     dump_dir: Option<std::path::PathBuf>,
     remote_files: Option<Arc<dyn crate::team::file_source::FileSource>>,
+    llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Vec<ExpertMetrics>,
@@ -450,6 +457,7 @@ pub(crate) async fn run_experts_inner(
         llm_configs,
         config.project.as_ref(),
         &project_context,
+        llm_sink.clone(),
     )
     .await;
 
@@ -529,6 +537,7 @@ pub(crate) async fn run_experts_inner(
                 review_id.to_string(),
                 global_context.clone(),
                 dump_dir.clone(),
+                llm_sink.clone(),
             ));
         }
     } else {
@@ -557,6 +566,7 @@ pub(crate) async fn run_experts_inner(
                 review_id.to_string(),
                 global_context.clone(),
                 dump_dir.clone(),
+                llm_sink.clone(),
             ));
         }
     }
@@ -634,6 +644,7 @@ pub(crate) async fn run_experts_inner(
             &mr_info.project_path,
             llm_configs,
             config.report.verification_max_file_bytes,
+            llm_sink.clone(),
         )
         .await;
         // Log unconditionally so a run that dropped nothing is still visible.
@@ -708,6 +719,7 @@ pub(crate) async fn run_experts_inner(
             remote_files.clone(),
             &adjudication_configs,
             &min_severity,
+            llm_sink.clone(),
         )
         .await;
         info!(

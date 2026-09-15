@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use crate::llm::sampling::LlmCallSample;
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
 use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
@@ -156,6 +157,55 @@ pub trait ReviewStore: Send + Sync {
     /// failed-before-any-report reviews, pre-0.10.2 records) are filtered in
     /// the same scan.
     async fn llm_usage_since(&self, since: DateTime<Utc>) -> Result<Vec<ProviderUsageStats>>;
+
+    /// RENG-57: append one per-call latency sample (`llm_call_samples`).
+    ///
+    /// ONE SAMPLE = one LLM call attempt on the review path, successful or
+    /// not, written by [`crate::store::llm_samples::StoreLlmCallSink`] — the
+    /// only writer. `review_id` attributes it to the review whose runtime
+    /// produced it, and is `None` only for a caller with no review identity.
+    /// There is no uniqueness constraint: a retried or fallback-advanced call
+    /// legitimately produces several rows.
+    ///
+    /// Best-effort by contract, like the review write-through (§5): callers
+    /// log a failure and continue, because a statistics gap must never fail a
+    /// review.
+    async fn insert_llm_sample(&self, review_id: Option<&str>, sample: &LlmCallSample) -> Result<()>;
+
+    /// RENG-57: every sample recorded at or after `since`, oldest first.
+    ///
+    /// Cost: one index range scan over `llm_call_samples(created_at, provider)`
+    /// — rows are pruned to [`crate::store::llm_samples::RETENTION_DAYS`] by
+    /// the write path, and the page's window is shorter still, so the scan is
+    /// bounded by the calls actually made in the window. There is no
+    /// per-provider query: the page folds one window scan by provider in Rust
+    /// (same reasoning as [`Self::llm_usage_since`] — no dialect split).
+    async fn llm_samples_since(&self, since: DateTime<Utc>) -> Result<Vec<LlmCallSampleRow>>;
+
+    /// RENG-57: delete samples older than the retention cutoff, returning how
+    /// many rows went. Used by the write path's retention sweep; a sample
+    /// table that grows without bound would eventually make the window scan
+    /// proportional to the whole history instead of the window.
+    async fn prune_llm_samples(&self, before: DateTime<Utc>) -> Result<u64>;
+}
+
+/// RENG-57: one recorded call sample, as read back for the latency aggregate.
+///
+/// Only the fields the aggregate needs: who served the call, when, how long it
+/// took and whether it worked. `success == false` rows are returned too — the
+/// page counts them separately (they are excluded from the average, see
+/// `src/server/api/llm_latency.rs`) and they are the call-level failure data
+/// RENG-56 could not provide.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LlmCallSampleRow {
+    /// Provider the attempt was made against (`llm_call_samples.provider`).
+    pub provider: String,
+    /// When the attempt ran (UTC).
+    pub created_at: DateTime<Utc>,
+    /// Round-trip time of the attempt, in milliseconds.
+    pub latency_ms: i64,
+    /// Whether the attempt produced a completion.
+    pub success: bool,
 }
 
 /// RENG-56: recorded LLM usage of one provider inside a query window.

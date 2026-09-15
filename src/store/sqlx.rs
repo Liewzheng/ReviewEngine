@@ -14,12 +14,15 @@ use anyhow::{Context, Result};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
+use crate::llm::sampling::LlmCallSample;
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
 use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 use super::rows;
-use super::traits::{ConfigStore, DiscussionNote, DiscussionStore, ProviderUsageStats, ReviewListQuery, ReviewStore};
+use super::traits::{
+    ConfigStore, DiscussionNote, DiscussionStore, LlmCallSampleRow, ProviderUsageStats, ReviewListQuery, ReviewStore,
+};
 use super::{adapt_sql, encode_ts, BackendKind, SqlxStore};
 
 const LEGACY_GITLAB_KEY: &str = "gitlab";
@@ -579,6 +582,68 @@ impl ReviewStore for SqlxStore {
             .await
             .context("aggregate llm usage")?;
         Ok(rows::aggregate_llm_usage(rows))
+    }
+
+    async fn insert_llm_sample(&self, review_id: Option<&str>, sample: &LlmCallSample) -> Result<()> {
+        // The row's surrogate key is Rust-side (0001: no RETURNING); the
+        // natural identity of a sample — review, provider, attempt, time —
+        // cannot be a PK because `review_id` is nullable.
+        let sql = self.sql(
+            "INSERT INTO llm_call_samples \
+             (id, review_id, provider, model, latency_ms, success, error, chain_position, attempt, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        );
+        ::sqlx::query(&sql)
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(review_id)
+            .bind(&sample.provider)
+            .bind(&sample.model)
+            .bind(i64::try_from(sample.latency_ms).unwrap_or(i64::MAX))
+            .bind(i64::from(sample.success))
+            .bind(sample.error.as_deref())
+            .bind(i64::from(sample.chain_position))
+            .bind(i64::from(sample.attempt))
+            .bind(encode_ts(&sample.at))
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("insert llm_call_sample for provider {}", sample.provider))?;
+        Ok(())
+    }
+
+    async fn llm_samples_since(&self, since: DateTime<Utc>) -> Result<Vec<LlmCallSampleRow>> {
+        // One index range scan over `llm_call_samples(created_at, provider)`.
+        // `success` stays an INTEGER in SQL and is converted in Rust, matching
+        // the dialect rule of 0001/0003 (booleans are 0/1, never BOOLEAN).
+        let sql = self.sql(
+            "SELECT provider, created_at, latency_ms, success FROM llm_call_samples \
+             WHERE created_at >= ? ORDER BY created_at",
+        );
+        let rows = ::sqlx::query_as::<_, (String, String, i64, i64)>(&sql)
+            .bind(encode_ts(&since))
+            .fetch_all(self.pool())
+            .await
+            .context("list llm call samples")?;
+        rows.into_iter()
+            .map(|(provider, created_at, latency_ms, success)| {
+                Ok(LlmCallSampleRow {
+                    provider,
+                    created_at: super::decode_ts(&created_at)
+                        .with_context(|| format!("llm_call_samples.created_at: {created_at:?}"))?,
+                    latency_ms,
+                    success: success != 0,
+                })
+            })
+            .collect()
+    }
+
+    async fn prune_llm_samples(&self, before: DateTime<Utc>) -> Result<u64> {
+        let sql = self.sql("DELETE FROM llm_call_samples WHERE created_at < ?");
+        let result = ::sqlx::query(&sql)
+            .bind(encode_ts(&before))
+            .execute(self.pool())
+            .await
+            .context("prune llm call samples")?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -1464,6 +1529,118 @@ mod tests {
         seed_usage(&store, TaskState::Pending, since, None).await;
         let stats = ReviewStore::llm_usage_since(&store, since).await.unwrap();
         assert!(stats.is_empty(), "a NULL summary records no provider: {stats:?}");
+    }
+
+    // ─── RENG-57: per-call LLM latency samples ───
+
+    /// One recorded attempt, as the sink writes it.
+    fn call_sample(provider: &str, at: DateTime<Utc>, latency_ms: u64, success: bool) -> LlmCallSample {
+        LlmCallSample {
+            at,
+            provider: provider.to_string(),
+            model: format!("{provider}-model"),
+            latency_ms,
+            success,
+            error: (!success).then(|| "HTTP 401 Unauthorized".to_string()),
+            chain_position: 1,
+            attempt: 1,
+        }
+    }
+
+    /// The store round-trips every field the aggregate and the row reader
+    /// need, and the window bound is inclusive: a sample one microsecond
+    /// before it is not read.
+    #[tokio::test]
+    async fn llm_samples_since_round_trips_and_holds_the_window_boundary() {
+        let store = fresh_store().await;
+        let since =
+            (Utc.with_ymd_and_hms(2026, 9, 8, 0, 0, 0).unwrap() + chrono::Duration::nanoseconds(500)).trunc_subsecs(6);
+
+        ReviewStore::insert_llm_sample(&store, Some("review-1"), &call_sample("xiaomi", since, 120, true))
+            .await
+            .unwrap();
+        ReviewStore::insert_llm_sample(
+            &store,
+            Some("review-1"),
+            &call_sample("xiaomi", since + chrono::Duration::minutes(5), 480, false),
+        )
+        .await
+        .unwrap();
+        ReviewStore::insert_llm_sample(
+            &store,
+            Some("review-2"),
+            &call_sample("deepseek", since + chrono::Duration::hours(1), 90, true),
+        )
+        .await
+        .unwrap();
+        // One microsecond before the window: excluded.
+        ReviewStore::insert_llm_sample(
+            &store,
+            None,
+            &call_sample("old", since - chrono::Duration::microseconds(1), 5, true),
+        )
+        .await
+        .unwrap();
+
+        let rows = ReviewStore::llm_samples_since(&store, since).await.unwrap();
+        let providers: Vec<&str> = rows.iter().map(|r| r.provider.as_str()).collect();
+        assert_eq!(providers, vec!["xiaomi", "xiaomi", "deepseek"], "oldest first");
+
+        assert_eq!(rows[0].latency_ms, 120);
+        assert!(rows[0].success);
+        assert_eq!(rows[1].latency_ms, 480);
+        assert!(!rows[1].success, "a failed attempt is a row too");
+        assert_eq!(rows[0].created_at, since, "the timestamp round-trips exactly");
+
+        // The review attribution is stored (and NULL is allowed).
+        let review_ids: Vec<Option<String>> =
+            ::sqlx::query_scalar("SELECT review_id FROM llm_call_samples WHERE created_at >= ? ORDER BY created_at")
+                .bind(encode_ts(&since))
+                .fetch_all(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(
+            review_ids,
+            vec![
+                Some("review-1".to_string()),
+                Some("review-1".to_string()),
+                Some("review-2".to_string())
+            ]
+        );
+
+        let rows = ReviewStore::llm_samples_since(&store, Utc::now()).await.unwrap();
+        assert!(rows.is_empty(), "no sample was made after now: {rows:?}");
+    }
+
+    /// Retention deletes exactly what is older than the cutoff and reports how
+    /// many rows went (the write path logs it).
+    #[tokio::test]
+    async fn prune_llm_samples_deletes_only_rows_past_the_cutoff() {
+        let store = fresh_store().await;
+        let now = Utc::now();
+        let cutoff = crate::store::llm_samples::retention_cutoff(now);
+        ReviewStore::insert_llm_sample(
+            &store,
+            None,
+            &call_sample("old", cutoff - chrono::Duration::seconds(1), 10, true),
+        )
+        .await
+        .unwrap();
+        ReviewStore::insert_llm_sample(&store, None, &call_sample("kept", cutoff, 10, true))
+            .await
+            .unwrap();
+        ReviewStore::insert_llm_sample(&store, None, &call_sample("fresh", now, 10, true))
+            .await
+            .unwrap();
+
+        assert_eq!(ReviewStore::prune_llm_samples(&store, cutoff).await.unwrap(), 1);
+        let survivors: Vec<String> = ::sqlx::query_scalar("SELECT provider FROM llm_call_samples ORDER BY provider")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(survivors, vec!["fresh", "kept"], "the cutoff row is kept");
+        // Pruning again finds nothing.
+        assert_eq!(ReviewStore::prune_llm_samples(&store, cutoff).await.unwrap(), 0);
     }
 
     // ─── DiscussionStore (step 6a) ───

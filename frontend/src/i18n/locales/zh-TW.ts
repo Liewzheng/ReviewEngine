@@ -481,16 +481,23 @@ export default {
     stats: {
       providers: '提供者',
       avgLatency: '平均延遲',
+      avgLatencyWindow: '平均延遲（過去 {days} 天）',
       totalRequests: '使用總數',
       totalRequestsWindow: '已記錄使用（過去 {days} 天）',
     },
     metrics: {
-      latency: '延遲',
+      avgLatency: '平均延遲',
       requests: '使用次數',
       successRate: '成功率',
     },
+    latencySamples: '{n} 次呼叫 · {failed} 次失敗',
+    probeLatency: '探測 {n} ms',
+    sparkline: {
+      caption: '呼叫延遲 · 過去 {days} 天',
+      label: '過去 {days} 天已記錄的呼叫延遲',
+    },
     usageShare: '佔比 {percent}%（過去 {days} 天）',
-    usageWindow: '過去 {days} 天',
+    windowLabel: '過去 {days} 天',
     lastUsed: '最近使用：{date}',
     lastChecked: '上次檢查：{date}',
     recentUsage: {

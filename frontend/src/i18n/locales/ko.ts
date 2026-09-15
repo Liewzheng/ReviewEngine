@@ -486,16 +486,23 @@ export default {
     stats: {
       providers: '제공자',
       avgLatency: '평균 지연 시간',
+      avgLatencyWindow: '평균 지연 시간(최근 {days}일)',
       totalRequests: '총 사용 횟수',
       totalRequestsWindow: '기록된 사용 횟수(최근 {days}일)',
     },
     metrics: {
-      latency: '지연 시간',
+      avgLatency: '평균 지연 시간',
       requests: '사용 횟수',
       successRate: '성공률',
     },
+    latencySamples: '{n}회 호출 · 실패 {failed}회',
+    probeLatency: '프로브 {n} ms',
+    sparkline: {
+      caption: '호출 지연 시간 · 최근 {days}일',
+      label: '최근 {days}일 동안 기록된 호출 지연 시간',
+    },
     usageShare: '사용 비중 {percent}%(최근 {days}일)',
-    usageWindow: '최근 {days}일',
+    windowLabel: '최근 {days}일',
     lastUsed: '마지막 사용: {date}',
     lastChecked: '마지막 확인: {date}',
     recentUsage: {

@@ -131,6 +131,9 @@ pub async fn run_review(
         &review_id,
         dump_dir,
         remote_files,
+        // RENG-57: the CLI has no sample store to write to (only `serve`
+        // owns one), so no LLM call latency is recorded here.
+        None,
     )
     .await?;
 
@@ -145,6 +148,7 @@ pub async fn run_review(
                     global_context.as_ref(),
                     Some(progress_map.clone()),
                     &review_id,
+                    None,
                 )
                 .await?;
                 ReviewOutput::with_aggregated(findings, aggregated_report)

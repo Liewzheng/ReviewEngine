@@ -28,6 +28,7 @@
 //! boundary in [`rows`]). `ReviewStore` / `DiscussionStore` land in later
 //! steps.
 
+pub mod llm_samples;
 pub mod placeholders;
 pub mod rows;
 pub mod sqlx;
@@ -240,6 +241,9 @@ mod tests {
     use ::sqlx::Row;
     use chrono::TimeZone;
 
+    use crate::server::task_queue::TaskEntry;
+    use uuid::Uuid;
+
     /// URL discrimination per §4.3: `postgres://` / `postgresql://` →
     /// PostgreSQL, everything else → SQLite. Pure-function-level coverage of
     /// the `"postgresql"` wire value (a live PG is not available in unit
@@ -317,6 +321,7 @@ mod tests {
             "app_settings",
             "expert_reports",
             "git_platforms",
+            "llm_call_samples",
             "llm_providers",
             "mr_discussions",
             "review_contexts",
@@ -335,8 +340,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            applied, 3,
-            "0001_init + 0002_llm_snapshot + 0003_participant_meta should be recorded"
+            applied, 4,
+            "0001_init + 0002_llm_snapshot + 0003_participant_meta + 0004_llm_call_samples should be recorded"
         );
 
         // 0002 (RENG-38): the snapshot columns exist on both history tables.
@@ -372,6 +377,83 @@ mod tests {
                 "mr_discussions missing {expected}, got {d_cols:?}"
             );
         }
+
+        // 0004 (RENG-57): the call-sample table has the columns the recorder
+        // and the aggregate read, and its window index.
+        let s_cols: Vec<String> = ::sqlx::query_scalar("SELECT name FROM pragma_table_info('llm_call_samples')")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        for expected in [
+            "id",
+            "review_id",
+            "provider",
+            "model",
+            "latency_ms",
+            "success",
+            "error",
+            "chain_position",
+            "attempt",
+            "created_at",
+        ] {
+            assert!(
+                s_cols.iter().any(|c| c == expected),
+                "llm_call_samples missing {expected}, got {s_cols:?}"
+            );
+        }
+        let s_idx: Vec<String> = ::sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index'")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            s_idx.iter().any(|i| i == "idx_llm_call_samples_window"),
+            "the window index is what keeps the aggregate a range scan: {s_idx:?}"
+        );
+    }
+
+    /// RENG-57 (c): 0004 is additive — an instance that already holds review
+    /// history keeps every row when the upgraded binary re-runs its embedded
+    /// migrator at startup, and no historical sample is invented (a review
+    /// that ran before 0.10.23 has no call-level timing to backfill).
+    #[tokio::test]
+    async fn llm_call_samples_migration_leaves_existing_rows_alone() {
+        let store = SqlxStore::new_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+
+        // A review as the pre-RENG-57 schema held it (llm_summary is the
+        // review-level snapshot RENG-38 wrote; there was no sample table).
+        let entry = TaskEntry {
+            task_id: Uuid::new_v4(),
+            state: crate::server::task_queue::TaskState::Completed,
+            created_at: Utc::now(),
+            started_at: None,
+            completed_at: None,
+            result: None,
+            error: None,
+            request: None,
+            source_meta: Default::default(),
+            progress: None,
+            expert_name: None,
+            llm_summary: Some(r#"[{"provider":"xiaomi","model":"mimo"}]"#.to_string()),
+        };
+        crate::store::traits::ReviewStore::create(&store, &entry).await.unwrap();
+
+        // What a restart of the upgraded binary does: run the migrator again.
+        store.migrate().await.unwrap();
+
+        let (state, summary): (String, Option<String>) =
+            ::sqlx::query_as("SELECT state, llm_summary FROM reviews WHERE task_id = ?")
+                .bind(entry.task_id.to_string())
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(state, "completed");
+        assert_eq!(summary.as_deref(), Some(r#"[{"provider":"xiaomi","model":"mimo"}]"#));
+        let samples: i64 = ::sqlx::query_scalar("SELECT COUNT(*) FROM llm_call_samples")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(samples, 0, "no sample can be backfilled for past calls");
     }
 
     /// 验证点 A(b): `?` placeholder INSERT + SELECT round trip on SQLite

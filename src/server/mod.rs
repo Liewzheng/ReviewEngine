@@ -162,6 +162,11 @@ pub(crate) async fn gate_unchanged_content(
 /// time); see [`resolve_webhook_llm_configs`] for the precedence. `None` is
 /// the CLI/legacy path (no server state) and keeps the pre-0.10.1
 /// config-file → env behavior.
+///
+/// `llm_sink` (RENG-57) receives one latency sample per LLM call attempt this
+/// review makes. The webhook handlers build it from the task store
+/// ([`crate::server::task_queue::TaskStore::llm_sample_sink`]) once they have
+/// created the task; a caller without a store passes `None`.
 pub(crate) async fn run_review_common(
     url: &str,
     token: &str,
@@ -171,6 +176,7 @@ pub(crate) async fn run_review_common(
     mr_info: crate::models::MRInfo,
     diff: String,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
+    llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> anyhow::Result<crate::models::ReviewOutput> {
     use crate::config;
     use crate::team::orchestrator;
@@ -236,6 +242,7 @@ pub(crate) async fn run_review_common(
         &review_id,
         None,
         remote_files,
+        llm_sink.clone(),
     )
     .await?;
 
@@ -250,6 +257,7 @@ pub(crate) async fn run_review_common(
                 global_context.as_ref(),
                 Some(progress_map.clone()),
                 &review_id,
+                llm_sink,
             )
             .await
             {

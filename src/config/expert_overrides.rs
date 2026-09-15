@@ -26,18 +26,26 @@
 
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::models::AppConfig;
+
+/// Highest expert weight the schema defines: `ExpertTomlDef::weight` is
+/// documented as 0–100 and the config-file validator enforces the enabled
+/// weights summing to exactly 100. The WebUI slider is bounded by it too, so
+/// anything above it can only come from a hand-written client or a hand-edited
+/// database row — both handled below (rejected at the API boundary, dropped
+/// when read back).
+pub const MAX_EXPERT_WEIGHT: u8 = 100;
 
 /// The fields `PUT /api/v1/system/experts/{id}` lets the UI change. Every
 /// field is optional: a `None` means "this request did not touch it", so a
 /// partially-specified override never clobbers the other field.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct ExpertOverride {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub weight: Option<u8>,
 }
 
@@ -53,8 +61,11 @@ impl ExpertOverride {
 /// the config file itself uses, so the two never drift).
 ///
 /// Serializes as a bare JSON object (`{"<name>": {"enabled": false}}`) — this
-/// is the value of the `app_settings` row.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// is the value of the `app_settings` row. Only [`Serialize`] is derived:
+/// deserialization goes through [`ExpertOverrides::from_setting`] alone, which
+/// is the one place that can drop an out-of-range weight instead of storing it
+/// (a derived `Deserialize` would happily accept `{"weight": 200}`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct ExpertOverrides {
     entries: BTreeMap<String, ExpertOverride>,
@@ -84,7 +95,8 @@ impl ExpertOverrides {
     /// Merge one UI edit into the map. Fields the request omitted
     /// (`None`) leave the stored value untouched, and a patch that clears
     /// both fields removes the entry entirely — "no override" and "an
-    /// override that changes nothing" are the same state.
+    /// override that changes nothing" are the same state, so an entry is never
+    /// stored empty (see [`Self::to_setting`]).
     pub fn record(&mut self, name: &str, patch: ExpertOverride) {
         let entry = self.entries.entry(name.to_string()).or_default();
         if patch.enabled.is_some() {
@@ -127,18 +139,103 @@ impl ExpertOverrides {
     }
 
     /// The overrides as a storage value (`app_settings` row payload).
+    ///
+    /// Empty entries are pruned defensively: `record` and [`Self::from_setting`]
+    /// both avoid creating one, and a stored `{}` would be indistinguishable
+    /// from noise on a later read.
     pub fn to_setting(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
+        let mut pruned = self.clone();
+        pruned.entries.retain(|_, over| !over.is_empty());
+        serde_json::to_value(&pruned).unwrap_or_else(|_| serde_json::json!({}))
     }
 
-    /// Parse a stored `app_settings` value. Tolerant of a hand-edited row:
-    /// unknown fields are ignored, a missing/`null` value is the empty map.
-    pub fn from_setting(value: &serde_json::Value) -> anyhow::Result<Self> {
+    /// Parse a stored `app_settings` value.
+    ///
+    /// This is the ONLY way into the type, and it is deliberately lenient and
+    /// infallible: the row may have been hand-edited (or written by an older
+    /// build), and a bad row must degrade to "no overrides" with a WARN rather
+    /// than take the server down at startup — a `serve` that cannot boot even
+    /// has no Web UI left to fix the row from.
+    ///
+    /// Dropped, each with a WARN: a value that is not a JSON object at all, an
+    /// entry that is not an object, an `enabled` that is not a bool, and a
+    /// `weight` that is not an integer in `0..=MAX_EXPERT_WEIGHT` (so a
+    /// hand-edited row cannot inject a weight the schema forbids). An entry
+    /// left with no valid field is dropped entirely — "no override" must not be
+    /// stored as `{}`.
+    ///
+    /// A dropped field is NOT a silent loss of the effective value: the
+    /// override simply stops covering it, so the config file's value stands —
+    /// the same "unset is unset" rule the other surfaces follow.
+    pub fn from_setting(value: &serde_json::Value) -> Self {
         if value.is_null() {
-            return Ok(Self::default());
+            return Self::default();
         }
-        serde_json::from_value(value.clone())
-            .map_err(|e| anyhow::anyhow!("app_settings row is not an expert-override map: {e}"))
+        let Some(entries) = value.as_object() else {
+            tracing::warn!(
+                found = json_kind(value),
+                "ignoring the persisted expert overrides: the app_settings row 'experts' must be \
+                 a JSON object of expert name → override; the config file's [review_experts] \
+                 values stand"
+            );
+            return Self::default();
+        };
+
+        let mut overrides = Self::default();
+        for (name, raw) in entries {
+            let Some(fields) = raw.as_object() else {
+                tracing::warn!(
+                    expert = %name,
+                    "ignoring malformed persisted expert override: not a JSON object"
+                );
+                continue;
+            };
+
+            let mut patch = ExpertOverride::default();
+            if let Some(enabled) = fields.get("enabled") {
+                match enabled.as_bool() {
+                    Some(b) => patch.enabled = Some(b),
+                    None => tracing::warn!(
+                        expert = %name,
+                        "ignoring persisted expert override field 'enabled': expected a boolean"
+                    ),
+                }
+            }
+            if let Some(weight) = fields.get("weight") {
+                match weight
+                    .as_u64()
+                    .and_then(|w| u8::try_from(w).ok())
+                    .filter(|w| *w <= MAX_EXPERT_WEIGHT)
+                {
+                    Some(w) => patch.weight = Some(w),
+                    None => tracing::warn!(
+                        expert = %name,
+                        value = %weight,
+                        max = MAX_EXPERT_WEIGHT,
+                        "ignoring persisted expert override 'weight': expected an integer 0–{}; \
+                         the config file's value stands",
+                        MAX_EXPERT_WEIGHT
+                    ),
+                }
+            }
+            // A patch with no valid field leaves no entry behind: "no override"
+            // must not be stored as an empty object.
+            overrides.record(name, patch);
+        }
+        overrides
+    }
+}
+
+/// The JSON kind of a value, for error messages that say what arrived instead
+/// of only what was expected.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
     }
 }
 
@@ -240,16 +337,16 @@ mod tests {
         assert_eq!(entry.enabled, Some(false), "the earlier field survives");
         assert_eq!(entry.weight, Some(40));
 
+        // An all-`None` patch changes nothing (the earlier fields survive)…
         overrides.record("security", ExpertOverride::default());
-        assert!(!overrides.is_empty(), "the merged entry is not empty yet");
-        let mut clear = ExpertOverride {
-            enabled: None,
-            weight: None,
-        };
-        clear.enabled = Some(true);
-        clear.weight = Some(40);
-        overrides.record("security", clear);
-        assert_eq!(overrides.get("security"), Some(&clear));
+        let entry = overrides.get("security").expect("entry keeps its fields");
+        assert_eq!(entry.enabled, Some(false));
+        assert_eq!(entry.weight, Some(40));
+
+        // …and on a name with no entry it must not create an empty one.
+        overrides.record("ghost", ExpertOverride::default());
+        assert_eq!(overrides.get("ghost"), None, "an empty patch stores nothing");
+        assert_eq!(overrides.len(), 1, "no empty entry was created");
     }
 
     #[test]
@@ -266,10 +363,109 @@ mod tests {
         let value = overrides.to_setting();
         assert_eq!(value["security"]["enabled"], false);
         assert_eq!(value["security"]["weight"], 15);
-        assert_eq!(ExpertOverrides::from_setting(&value).unwrap(), overrides);
+        assert_eq!(ExpertOverrides::from_setting(&value), overrides);
         assert_eq!(
-            ExpertOverrides::from_setting(&serde_json::json!(null)).unwrap(),
+            ExpertOverrides::from_setting(&serde_json::json!(null)),
             ExpertOverrides::default()
         );
+    }
+
+    /// A hand-edited row cannot inject a weight the schema does not allow: the
+    /// field is dropped (the config file's value stands) instead of being
+    /// applied, and the rest of the entry survives.
+    #[test]
+    fn from_setting_drops_an_out_of_range_weight() {
+        let value = serde_json::json!({
+            "security": { "enabled": false, "weight": 200 },
+            "docs": { "weight": 101 },
+            "quality": { "weight": 100 }
+        });
+        let overrides = ExpertOverrides::from_setting(&value);
+
+        let security = overrides.get("security").expect("enabled survives");
+        assert_eq!(security.enabled, Some(false));
+        assert_eq!(security.weight, None, "the out-of-range weight is dropped");
+        assert_eq!(
+            overrides.get("docs"),
+            None,
+            "an entry whose only field was invalid leaves no entry behind"
+        );
+        assert_eq!(
+            overrides.get("quality").and_then(|o| o.weight),
+            Some(MAX_EXPERT_WEIGHT),
+            "the last valid weight is kept"
+        );
+
+        // The dropped weight leaves the file's value in force.
+        let mut cfg = config_with(&[("security", true, 50), ("docs", true, 50)]);
+        assert_eq!(overrides.apply_to(&mut cfg), 1);
+        assert_eq!(cfg.review_experts["security"].weight, 50);
+        assert!(!cfg.review_experts["security"].enabled);
+        assert_eq!(cfg.review_experts["docs"].weight, 50);
+    }
+
+    /// Wrong types (and entries that are not objects) are dropped field by
+    /// field: one bad field must not discard the whole row, and one bad entry
+    /// must not discard the others.
+    #[test]
+    fn from_setting_ignores_malformed_entries() {
+        let value = serde_json::json!({
+            "scalar-entry": 5,
+            "string-entry": "disabled",
+            "stringly-typed": { "enabled": "yes", "weight": "30" },
+            "mixed": { "enabled": true, "weight": "30" },
+            "negative": { "weight": -5 },
+            "fractional": { "weight": 12.5 }
+        });
+        let overrides = ExpertOverrides::from_setting(&value);
+
+        for name in [
+            "scalar-entry",
+            "string-entry",
+            "stringly-typed",
+            "negative",
+            "fractional",
+        ] {
+            assert_eq!(overrides.get(name), None, "'{name}' must be dropped, not applied");
+        }
+        assert_eq!(
+            overrides.get("mixed"),
+            Some(&ExpertOverride {
+                enabled: Some(true),
+                weight: None,
+            }),
+            "a valid field survives its invalid sibling"
+        );
+        assert_eq!(overrides.len(), 1);
+    }
+
+    /// A row that is not an override map at all degrades to "no overrides"
+    /// with a WARN — never a panic, never a half-applied map, and never a
+    /// startup failure (the WARN is asserted in the persist-level test, which
+    /// is where the startup path is exercised).
+    #[test]
+    fn from_setting_ignores_a_non_object_row() {
+        for value in [
+            serde_json::json!([1, 2]),
+            serde_json::json!("nope"),
+            serde_json::json!(7),
+        ] {
+            assert_eq!(
+                ExpertOverrides::from_setting(&value),
+                ExpertOverrides::default(),
+                "{value} must degrade to no overrides"
+            );
+        }
+    }
+
+    /// "No override" is never stored as an empty object — neither for a row
+    /// the UI emptied nor for a hand-written `{}` entry.
+    #[test]
+    fn to_setting_never_carries_an_empty_entry() {
+        let value = serde_json::json!({ "emptied": {}, "invalid": { "weight": 200 } });
+        let overrides = ExpertOverrides::from_setting(&value);
+
+        assert_eq!(overrides.to_setting(), serde_json::json!({}));
+        assert!(overrides.is_empty());
     }
 }

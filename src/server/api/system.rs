@@ -242,29 +242,67 @@ fn expert_view(id: &str, name: &str, expert: &crate::models::ExpertTomlDef) -> s
 /// `PUT /api/v1/system/experts/{id}` — enable/disable an expert or change its
 /// weight.
 ///
-/// The edit is applied to the running config immediately AND persisted before
-/// success is reported (RENG-69 — pre-0.10.24 it was memory-only, so every
-/// container recreate silently reverted it to the config file's value):
+/// The edit is persisted AND applied to the running config (RENG-69 —
+/// pre-0.10.24 it was memory-only, so every container recreate silently
+/// reverted it to the config file's value):
 ///
 /// - **DB attached** → the whole override map is upserted into `app_settings`
 ///   (key `experts`, see [`super::config::persist::save_expert_overrides`]) and
-///   the response carries `"persisted": true`. A failed write is answered with
-///   `500` — the caller must not report success (the in-memory value stays
-///   applied, exactly like a failed `PUT /config`).
+///   the response carries `"persisted": true`.
 /// - **No DB** (`REVIEW_DISABLE_DB=1`, tests, embedded use) → memory-only, the
 ///   pre-0.10.24 behaviour, reported honestly as `"persisted": false` plus a
 ///   warning log; the response never implies the edit survives a restart.
 ///
-/// The override is published on [`AppState::expert_overrides`] so every review
-/// dispatch re-applies it: neither `run_review` (REST) nor `run_review_common`
-/// (webhooks) reads `app_config` — both re-resolve the config file — so the
-/// override is threaded to them instead of living only in memory.
+/// **Ordering: persist, then apply** (RENG-69 review). The store write is
+/// awaited BEFORE the runtime is touched, so a `500` means the request changed
+/// nothing anywhere — the API's answer, `GET /system/experts`, the running
+/// `app_config` and the database all still hold the previous value. The
+/// alternative (`PUT /config`'s apply-then-persist-with-rollback) would need
+/// the previous map kept aside and re-applied on failure; persist-then-apply
+/// needs no rollback at all. Latency is unchanged: the handler already awaited
+/// the write before answering, so only the point at which the in-memory
+/// mutation happens moved. With no DB there is nothing to await, so that path
+/// moves straight to the apply (and reports `persisted: false`).
+///
+/// **Weight validation** (RENG-69 review): a weight above
+/// [`crate::config::MAX_EXPERT_WEIGHT`] is rejected with `422` — the same
+/// status `PUT /config` uses for its invalid values (unsupported platform
+/// type, non-http base URL), and a value the config-file schema
+/// (`ExpertTomlDef::weight` 0–100, enabled weights summing to 100) can never
+/// express. Rejected rather than clamped: the UI slider cannot produce one, so
+/// the only callers that can are hand-written clients, and silently storing a
+/// different weight than requested would make the API's answer a lie. The
+/// message reaches the user — the API client renders the JSON `error` field
+/// into the notification.
+///
+/// The applied override is published on [`AppState::expert_overrides`] so every
+/// review dispatch re-applies it: neither `run_review` (REST) nor
+/// `run_review_common` (webhooks) reads `app_config` — both re-resolve the
+/// config file — so the override is threaded to them instead of living only in
+/// memory.
 async fn update_expert(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<UpdateExpertRequest>,
 ) -> impl IntoResponse {
-    // Locate the expert first (read snapshot, never a guard held across the
+    // Validate before touching anything: an out-of-range weight is refused
+    // outright (see the doc comment above).
+    if let Some(weight) = body.weight {
+        if weight > crate::config::MAX_EXPERT_WEIGHT {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid weight {weight}: an expert's weight must be between 0 and {}",
+                        crate::config::MAX_EXPERT_WEIGHT
+                    )
+                })),
+            )
+                .into_response();
+        }
+    }
+
+    // Locate the expert (read snapshot, never a guard held across the
     // persistence await below).
     let name = {
         let cfg_opt = state.app_config.read().unwrap();
@@ -291,21 +329,22 @@ async fn update_expert(
     };
 
     // Merge this request into the persisted override map (fields the body
-    // omitted keep their stored value) and apply + publish it: the running
-    // `app_config`, `GET /system/experts` and every subsequent review dispatch
-    // all see the edit immediately.
+    // omitted keep their stored value). Nothing is applied yet.
     let patch = crate::config::ExpertOverride {
         enabled: body.enabled,
         weight: body.weight,
     };
     let mut overrides = (*state.expert_overrides_snapshot()).clone();
     overrides.record(&name, patch);
-    state.set_expert_overrides(overrides.clone());
 
+    // Persist FIRST. A failure here returns before the runtime is mutated, so
+    // there is no rollback to get wrong and no window in which the API's answer
+    // and the process state disagree.
     let persisted = match state.db.as_ref() {
         Some(db) => {
             if overrides.is_empty() {
-                // Nothing was ever overridden: the volatile state equals the
+                // Nothing was ever overridden (an all-optional body after the
+                // previous entry was emptied): the volatile state equals the
                 // durable state, so a restart cannot lose anything and there is
                 // no row to write.
                 true
@@ -316,13 +355,14 @@ async fn update_expert(
                         tracing::error!(
                             expert = %name,
                             error = %format!("{e:#}"),
-                            "failed to persist expert override to the database"
+                            "failed to persist expert override to the database; \
+                             the running configuration is unchanged"
                         );
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(serde_json::json!({
                                 "error": format!(
-                                    "expert updated in memory but failed to persist to the database: {e}"
+                                    "failed to persist the expert change to the database: {e}"
                                 )
                             })),
                         )
@@ -340,6 +380,11 @@ async fn update_expert(
             false
         }
     };
+
+    // Durable (or deliberately volatile): apply + publish, so the running
+    // `app_config`, `GET /system/experts` and every subsequent review dispatch
+    // see the edit immediately.
+    state.set_expert_overrides(overrides);
 
     // Echo the effective expert back (read after the apply, so the response is
     // the value the server will use, not the request echo).
@@ -671,9 +716,7 @@ mod tests {
             "the file value is the base before the replay"
         );
 
-        let applied = crate::server::api::config::persist::load_and_apply_expert_overrides(&restarted, &db)
-            .await
-            .expect("override replay must succeed");
+        let applied = crate::server::api::config::persist::load_and_apply_expert_overrides(&restarted, &db).await;
         assert_eq!(applied, 1, "exactly the edited expert is patched");
 
         let effective = effective_experts(&restarted);
@@ -704,12 +747,20 @@ mod tests {
         assert_eq!(names.len(), 3, "Lead + Performance + Docs: {names:?}");
     }
 
-    /// (c) A failing store write is answered with 500 and never reports
-    /// success — the UI must be able to tell that nothing was persisted.
+    /// (c) A failing store write is answered with 500, never reports success,
+    /// AND leaves the process state untouched — the runtime config, the
+    /// published override snapshot and the endpoint's own listing all still
+    /// hold the previous value, so the answer and the state agree.
     #[tokio::test]
     async fn update_expert_surfaces_a_failed_store_write() {
         let db = fresh_store().await;
         let state = expert_state_with_db(Some(db.clone()));
+        // A first, successful edit: the failed one below must leave THIS value
+        // in place, not the file's.
+        assert_eq!(
+            put_expert(&state, "security", Some(false), None).await.status(),
+            StatusCode::OK
+        );
         // Break the store's schema out from under it: every subsequent write
         // fails, exactly like an unreachable database.
         ::sqlx::query("DROP TABLE app_settings")
@@ -717,7 +768,7 @@ mod tests {
             .await
             .expect("dropping the settings table must succeed");
 
-        let resp = put_expert(&state, "security", Some(false), None).await;
+        let resp = put_expert(&state, "security", None, Some(99)).await;
         assert_eq!(
             resp.status(),
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -733,6 +784,101 @@ mod tests {
             body["persisted"], true,
             "a failed write must not report success: {body}"
         );
+
+        // Persist-then-apply: nothing was applied, so the previous edit (and
+        // the file's weight) are what the server now runs.
+        let effective = effective_experts(&state);
+        assert!(!effective["Security"].enabled, "the earlier successful edit stands");
+        assert_eq!(
+            effective["Security"].weight, 30,
+            "the weight of the failed request must not have been applied: {body}"
+        );
+        assert_eq!(
+            state.expert_overrides_snapshot().get("Security").and_then(|o| o.weight),
+            None,
+            "the published snapshot must not carry the failed request either"
+        );
+        let listed = experts_body(state).await;
+        assert_eq!(expert_by_id(&listed, "security")["weight"], 30, "{listed}");
+    }
+
+    /// A weight outside the schema's 0–100 range is rejected at the boundary
+    /// with 422 (the status `PUT /config` uses for its invalid values) and
+    /// nothing is stored or applied.
+    #[tokio::test]
+    async fn update_expert_rejects_an_out_of_range_weight() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+
+        for weight in [101u16, 200, 255] {
+            let resp = put_expert(&state, "security", None, Some(weight as u8)).await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "weight {weight} must be refused"
+            );
+            let body = body_json(resp).await;
+            let error = body["error"].as_str().unwrap_or_default();
+            assert!(
+                error.contains("between 0 and 100"),
+                "the error must state the accepted range: {body}"
+            );
+        }
+
+        // Nothing was stored and nothing was applied.
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .unwrap();
+        assert!(stored.is_empty(), "a rejected weight must not be stored: {stored:?}");
+        assert!(state.expert_overrides_snapshot().is_empty());
+        assert_eq!(
+            effective_experts(&state)["Security"].weight,
+            30,
+            "the file value stands"
+        );
+
+        // The boundary itself is accepted.
+        let resp = put_expert(&state, "security", None, Some(100)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(body_json(resp).await["weight"], 100);
+        assert_eq!(effective_experts(&state)["Security"].weight, 100);
+    }
+
+    /// A body with no field (`{}`) expresses no change: it must not invent an
+    /// empty override entry, and it reports success because there is nothing
+    /// that could be lost.
+    #[tokio::test]
+    async fn update_expert_with_an_empty_patch_stores_nothing() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+
+        let resp = put_expert(&state, "security", None, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["persisted"], true, "nothing to lose: {body}");
+        assert_eq!(body["weight"], 30, "the expert is echoed unchanged: {body}");
+
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .unwrap();
+        assert!(stored.is_empty(), "an empty patch must not store an entry: {stored:?}");
+        assert!(state.expert_overrides_snapshot().is_empty());
+
+        // …and after a real edit, an empty patch keeps the stored override
+        // instead of wiping it (the fields it omits are untouched).
+        assert_eq!(
+            put_expert(&state, "security", Some(false), None).await.status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            put_expert(&state, "security", None, None).await.status(),
+            StatusCode::OK
+        );
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .unwrap();
+        assert_eq!(stored.get("Security").and_then(|o| o.enabled), Some(false));
+        assert!(!effective_experts(&state)["Security"].enabled);
     }
 
     /// (d) Without a store (REVIEW_DISABLE_DB=1, embedded use) the endpoint

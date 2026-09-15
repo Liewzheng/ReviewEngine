@@ -387,7 +387,8 @@ export default {
       advanced: '進階設定',
       deleteTitle: '刪除供應商',
       deleteConfirm: '刪除供應商「{name}」？此操作將立即儲存。',
-      deletePrimaryConfirm: '「{name}」是目前的主要供應商，刪除後將自動把「{next}」設為主要供應商。繼續？',
+      deletePrimaryRequiresSelection:
+        '「{name}」是目前的主要供應商，無法直接刪除——請先把其他供應商設為主要供應商，再刪除它。',
       deleted: '已刪除供應商「{name}」',
       saved: '供應商已儲存',
       saveFailed: '儲存供應商失敗',

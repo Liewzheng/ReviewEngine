@@ -37,6 +37,27 @@ export interface ProviderCardState {
   retryAttempts: number;
 }
 
+/** A sparse `llm` section of a PUT /config payload: `providers` is always
+ *  present (the array replaces the stored set), every other key is optional —
+ *  an omitted key keeps the stored value (the backend deep-merges). */
+export type LlmConfigPatch = Partial<LLMConfig> & Pick<LLMConfig, 'providers'>;
+
+/** Options for {@link buildLlmPayload}. */
+export interface LlmPayloadOptions {
+  /**
+   * True when this save EXPRESSES the user's primary choice (set-as-primary,
+   * the first card of an empty page, or the deletion of the last provider).
+   * False for an ordinary add/edit, which then omits `primaryProvider` — and,
+   * unless the legacy scalar path is how the primary is applied (`openai`),
+   * its scalar mirror too — so the server keeps the stored primary.
+   *
+   * Without this an unrelated save from a view that predates a primary change
+   * (a second tab, a page opened earlier) carried the stale primary back and
+   * silently rewrote the user's choice (RENG-72).
+   */
+  assertPrimary?: boolean;
+}
+
 /** Defaults applied to provider numeric fields (mirrors the backend's). */
 export const PROVIDER_FIELD_DEFAULTS = {
   maxTokens: 4096,
@@ -107,11 +128,18 @@ export function cardsFromLlmConfig(llm: LLMConfig | null | undefined): {
  * A load→save round-trip with zero user edits re-emits the GET /config echo
  * field-for-field (masked keys included), so an unchanged config changes
  * nothing server-side.
+ *
+ * `options.assertPrimary` (default true) decides whether the payload speaks
+ * for the primary provider — see {@link LlmPayloadOptions.assertPrimary}.
+ * Everything in `providers[]` is sent on every save; only the primary fields
+ * are made conditional, so an ordinary add/edit still applies its own card.
  */
 export function buildLlmPayload(
   cards: ProviderCardState[],
   primaryProvider: string,
-): { llm: LLMConfig } {
+  options: LlmPayloadOptions = {},
+): { llm: LlmConfigPatch } {
+  const assertPrimary = options.assertPrimary ?? true;
   const providers = cards.map((c) => ({
     provider: c.provider,
     apiKey: c.apiKey,
@@ -136,23 +164,29 @@ export function buildLlmPayload(
       },
     };
   }
-  return {
-    llm: {
-      primaryProvider: primary.provider,
-      // The scalar key echoes the PRIMARY provider's key with masked-keep
-      // semantics. A live typed key is only sent here when the primary IS
-      // `openai`; for a non-openai primary it would be relabeled `openai` by
-      // the backend's legacy scalar path, so it rides in providers[] instead
-      // and the scalar stays masked (`***` when the primary has a key).
-      openaiApiKey:
-        primary.provider === 'openai' ? primary.apiKey : primary.apiKey ? '***' : '',
-      apiBaseUrl: primary.apiBaseUrl,
-      defaultModel: primary.defaultModel,
-      maxTokens: primary.maxTokens,
-      temperature: primary.temperature,
-      timeoutSeconds: primary.timeoutSeconds,
-      retryAttempts: primary.retryAttempts,
-      providers,
-    },
-  };
+  const patch: LlmConfigPatch = { providers };
+  if (assertPrimary) {
+    patch.primaryProvider = primary.provider;
+  }
+  // The scalar fields mirror the PRIMARY provider, so they follow the same
+  // rule: only a save that speaks for the primary may rewrite them — except
+  // when the primary IS `openai`, where the legacy scalars are the only path
+  // the backend applies that provider through, so omitting them would drop
+  // the edit the user just made to its card.
+  if (assertPrimary || primary.provider === 'openai') {
+    // The scalar key echoes the PRIMARY provider's key with masked-keep
+    // semantics. A live typed key is only sent here when the primary IS
+    // `openai`; for a non-openai primary it would be relabeled `openai` by
+    // the backend's legacy scalar path, so it rides in providers[] instead
+    // and the scalar stays masked (`***` when the primary has a key).
+    patch.openaiApiKey =
+      primary.provider === 'openai' ? primary.apiKey : primary.apiKey ? '***' : '';
+    patch.apiBaseUrl = primary.apiBaseUrl;
+    patch.defaultModel = primary.defaultModel;
+    patch.maxTokens = primary.maxTokens;
+    patch.temperature = primary.temperature;
+    patch.timeoutSeconds = primary.timeoutSeconds;
+    patch.retryAttempts = primary.retryAttempts;
+  }
+  return { llm: patch };
 }

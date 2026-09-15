@@ -348,6 +348,60 @@ fn test_render_lead_summary_no_adjudications_skips_section() {
     assert!(!md.contains("Adjudicated Away"));
 }
 
+/// RENG-73: an empty published list is not "zero findings" — every finding was
+/// reported and then removed by adjudication. The lead summary must say which
+/// of the two happened instead of implying the experts found nothing.
+#[test]
+fn test_render_lead_summary_all_adjudicated_away_label() {
+    let mut consolidated = make_consolidated(
+        45,
+        RiskLevel::Medium,
+        "every reported finding was removed by the final adjudication pass as a false positive",
+    );
+    consolidated.assessment.unverified = true;
+    consolidated.adjudicated_removed = vec![crate::team::verifier::DroppedFinding {
+        finding: make_test_finding(Severity::High, "src/session.rs"),
+        reason: "guard present at lines 1099-1134".to_string(),
+    }];
+    let md = render_lead_summary(&consolidated);
+    assert!(
+        md.contains("all findings adjudicated away"),
+        "risk label must name adjudication, got: {md}"
+    );
+    assert!(
+        !md.contains("zero findings"),
+        "adjudicated-away is not zero-findings, got: {md}"
+    );
+    assert!(
+        md.contains("adjudication pass as a false positive"),
+        "the warning must explain the empty list, got: {md}"
+    );
+    assert!(md.contains("Adjudicated Away"), "the drop list must still render");
+    assert!(
+        !md.contains("Risk Level: medium"),
+        "an unverified result must not carry its risk band, got: {md}"
+    );
+}
+
+/// The third branch is keyed on `adjudicated_removed` being non-empty AND the
+/// result being unverified without coverage insufficiency — a non-unverified
+/// report with drops keeps the ordinary risk band (see
+/// `test_render_lead_summary_lists_adjudicated_removed`), and a coverage-driven
+/// unverified result keeps its own label.
+#[test]
+fn test_render_lead_summary_coverage_insufficient_beats_adjudicated_away() {
+    let mut consolidated = make_consolidated(45, RiskLevel::Medium, "bilingual unverified note");
+    consolidated.assessment.unverified = true;
+    consolidated.assessment.coverage_insufficient = true;
+    consolidated.adjudicated_removed = vec![crate::team::verifier::DroppedFinding {
+        finding: make_test_finding(Severity::High, "src/session.rs"),
+        reason: "guard present".to_string(),
+    }];
+    let md = render_lead_summary(&consolidated);
+    assert!(md.contains("insufficient coverage"), "got: {md}");
+    assert!(!md.contains("all findings adjudicated away"), "got: {md}");
+}
+
 // ── render_expert_section (parse error + raw dump) ─────────────
 
 #[test]

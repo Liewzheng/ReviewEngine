@@ -1,6 +1,7 @@
 use super::validation::*;
 use super::*;
 use crate::team::lead_consolidator::FileCoverage;
+use crate::test_util::parse_tldr_count;
 use std::collections::HashSet;
 
 fn make_finding(severity: Severity, confidence: u8, file: &str, line: Option<u32>, title: &str) -> Finding {
@@ -136,6 +137,44 @@ async fn test_run_experts_returns_consolidated_report() {
     assert!(consolidated.conflicts.is_empty());
     assert!(consolidated.findings.is_empty());
     assert!(!consolidated.assessment.tl_dr.is_empty());
+}
+
+// ─── RENG-73: the consolidated TL;DR counts describe the published findings ───
+
+#[test]
+fn test_build_consolidated_report_tldr_matches_findings() {
+    // Default config: `min_confidence = 6`, `drop_low_confidence = false`, so
+    // the confidence-4 High is downgraded to Medium and the published list has
+    // no High. Before RENG-73 the prose counted the raw reports instead and
+    // claimed a High the shipped list did not contain.
+    let config = test_config();
+    let reports = vec![make_report(
+        "security",
+        vec![
+            make_finding(Severity::High, 9, "a.rs", Some(1), "Confident high"),
+            make_finding(Severity::High, 4, "b.rs", Some(2), "Shaky high"),
+        ],
+    )];
+    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None);
+    let tl_dr = &consolidated.assessment.tl_dr;
+
+    assert_eq!(consolidated.findings.len(), 2);
+    let count = |severity: Severity| consolidated.findings.iter().filter(|f| f.severity == severity).count();
+    assert_eq!(count(Severity::High), 1, "the confidence-4 High was downgraded");
+    assert_eq!(count(Severity::Medium), 1);
+
+    assert_eq!(
+        parse_tldr_count(tl_dr, "critical"),
+        count(Severity::Critical),
+        "got: {tl_dr}"
+    );
+    assert_eq!(parse_tldr_count(tl_dr, "high"), count(Severity::High), "got: {tl_dr}");
+    assert_eq!(
+        parse_tldr_count(tl_dr, "other"),
+        count(Severity::Medium) + count(Severity::Low) + count(Severity::Note),
+        "got: {tl_dr}"
+    );
+    assert!(tl_dr.contains("found by 1 reviewers"), "got: {tl_dr}");
 }
 
 // ─── feedback-driven filtering ───────────────

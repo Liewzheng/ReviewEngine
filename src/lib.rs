@@ -56,6 +56,12 @@ pub mod upgrade;
 #[cfg(feature = "python")]
 pub mod python;
 
+/// Helpers shared by the crate's own unit tests. Test-only: absent from the
+/// shipped library and invisible to the `tests/` integration crate, which sees
+/// the library built without `cfg(test)`.
+#[cfg(test)]
+mod test_util;
+
 use anyhow::{Context, Result};
 pub use models::AppConfig;
 use models::*;

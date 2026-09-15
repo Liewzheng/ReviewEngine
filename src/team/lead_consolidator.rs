@@ -177,15 +177,20 @@ impl ConsolidatorConfig {
             |s| s.consensus_threshold,
         );
         let consensus_reached = score >= consensus_threshold;
-        let mut tl_dr = self.generate_tldr(reports, &risk_level, all_findings.len());
-        if coverage_capped {
-            tl_dr.push_str(&format!(
-                "\n\n⚠️ Coverage: {}/{} files reviewed; {} file(s) not covered by any expert — score capped.",
-                coverage.reviewed_files,
-                coverage.total_files,
-                coverage.unreviewed_files.len()
-            ));
-        }
+        let coverage_summary = ledger.map(|l| l.summary());
+        let coverage_insufficient = coverage_summary.as_ref().map(|s| !s.is_sufficient()).unwrap_or(false);
+        // The TL;DR counts are taken from the consolidated findings — the same
+        // set the report publishes — so the prose can never disagree with the
+        // shipped list. `score` / `risk_level` / `consensus_reached` above stay
+        // derived from the raw per-expert reports (the pre-adjudication signal).
+        let mut tl_dr = generate_tldr(&risk_level, &all_findings, reports.len(), false);
+        append_coverage_banners(
+            &mut tl_dr,
+            coverage.total_files,
+            coverage.reviewed_files,
+            coverage.unreviewed_files.len(),
+            coverage_summary.as_ref(),
+        );
         // Zero consolidated findings across every expert: the perfect score is
         // NOT evidence of quality — it may mean low coverage or a systemic
         // miss. Flag the assessment as unverified so the report never reads
@@ -194,22 +199,12 @@ impl ConsolidatorConfig {
         // also makes the result unverified — even when findings exist, a
         // review that demonstrably examined only part of the diff is not a
         // trustworthy overall verdict.
-        let coverage_summary = ledger.map(|l| l.summary());
-        let coverage_insufficient = coverage_summary.as_ref().map(|s| !s.is_sufficient()).unwrap_or(false);
-        if coverage_insufficient {
-            if let Some(s) = &coverage_summary {
-                tl_dr.push_str(&format!(
-                    "\n\n⚠️ 审查覆盖不足：{}/{} 行改动可追溯被审查（{} 处 hunk 未覆盖）——结果标记为不可信。\n\
-                     ⚠️ Insufficient review coverage: {}/{} changed lines demonstrably reviewed ({} uncovered range(s)) — result marked unverified.",
-                    s.covered_changed_lines,
-                    s.total_changed_lines,
-                    s.debt.len(),
-                    s.covered_changed_lines,
-                    s.total_changed_lines,
-                    s.debt.len(),
-                ));
-            }
-        }
+        //
+        // This is the pre-adjudication snapshot: the pipeline calls
+        // [`ConsolidatedReport::refresh_assessment`] after the adjudication
+        // pass, which re-derives `tl_dr`/`unverified` from the findings that
+        // actually ship (a review whose findings were all rejected as false
+        // positives is unverified too — see [`generate_tldr`]).
         let unverified = all_findings.is_empty() || coverage_insufficient;
 
         let assessment = OverallAssessment {
@@ -343,48 +338,135 @@ impl ConsolidatorConfig {
             }
         }
     }
+}
 
-    /// Generate TL;DR summary.
-    fn generate_tldr(&self, reports: &[ExpertReport], risk: &RiskLevel, total_findings: usize) -> String {
-        let total_critical: usize = reports
-            .iter()
-            .flat_map(|r| r.findings.iter())
-            .filter(|f| f.severity == Severity::Critical)
-            .count();
-        let total_high: usize = reports
-            .iter()
-            .flat_map(|r| r.findings.iter())
-            .filter(|f| f.severity == Severity::High)
-            .count();
-        let expert_count = reports.len();
-
-        if total_findings == 0 {
-            return format!(
-                "{} 位专家均未发现问题，但全零发现可能意味着审查覆盖率不足或系统性漏报，请谨慎对待（结果标记为“未验证/不可信”）。\n\n\
-                 {} experts reported no issues — this may indicate low coverage or a systemic issue; treat with caution (result marked unverified).",
-                expert_count, expert_count,
-            );
-        }
-
-        let mut parts = Vec::new();
-        if total_critical > 0 {
-            parts.push(format!("{} critical", total_critical));
-        }
-        if total_high > 0 {
-            parts.push(format!("{} high", total_high));
-        }
-        let remaining = total_findings.saturating_sub(total_critical + total_high);
-        if remaining > 0 {
-            parts.push(format!("{} other issues", remaining));
-        }
-
-        format!(
-            "Risk Level: {:?}. {} found by {} reviewers.",
-            risk,
-            parts.join(", "),
+impl ConsolidatedReport {
+    /// Recompute the assessment prose from the findings this report actually
+    /// publishes.
+    ///
+    /// [`ConsolidatorConfig::consolidate_with_coverage`] computes the TL;DR
+    /// before the adjudication pass mutates [`ConsolidatedReport::findings`]
+    /// (downgrades and removals), so without this refresh the prose can state
+    /// severity counts for findings that were never shipped. Called
+    /// unconditionally after adjudication — including when `adjudicate` is
+    /// disabled — so the counts always describe the published list.
+    ///
+    /// `expert_count` is the number of expert reports the consolidation ran
+    /// over; it is a parameter rather than a struct field so the serialized
+    /// payload keeps its shape. `score` / `risk_level` / `consensus_reached`
+    /// are deliberately NOT recomputed: they remain the pre-adjudication
+    /// signal (see `design/` notes in `pipeline.rs`).
+    pub fn refresh_assessment(&mut self, expert_count: usize) {
+        let coverage_insufficient = self.assessment.coverage_insufficient;
+        let all_removed_by_adjudication = self.findings.is_empty() && !self.adjudicated_removed.is_empty();
+        let mut tl_dr = generate_tldr(
+            &self.assessment.risk_level,
+            &self.findings,
             expert_count,
-        )
+            all_removed_by_adjudication,
+        );
+        append_coverage_banners(
+            &mut tl_dr,
+            self.total_files,
+            self.reviewed_files,
+            self.unreviewed_files.len(),
+            self.coverage.as_ref(),
+        );
+        self.assessment.tl_dr = tl_dr;
+        // An empty published list is never evidence of quality, whether it is
+        // empty because no expert reported anything or because adjudication
+        // removed everything that was reported.
+        self.assessment.unverified = self.findings.is_empty() || coverage_insufficient;
     }
+}
+
+/// Append the coverage banners (file-coverage score cap and hunk-level
+/// coverage insufficiency) to a TL;DR.
+///
+/// Shared by consolidation and [`ConsolidatedReport::refresh_assessment`] so
+/// both call sites emit byte-identical banners. The insufficiency banner is
+/// emitted whenever a ledger summary is present and its demonstrated-touch
+/// ratio is below [`crate::coverage::COVERAGE_THRESHOLD`].
+fn append_coverage_banners(
+    tl_dr: &mut String,
+    total_files: usize,
+    reviewed_files: usize,
+    unreviewed_files: usize,
+    coverage: Option<&crate::coverage::CoverageSummary>,
+) {
+    if total_files > 0 && reviewed_files < total_files {
+        tl_dr.push_str(&format!(
+            "\n\n⚠️ Coverage: {}/{} files reviewed; {} file(s) not covered by any expert — score capped.",
+            reviewed_files, total_files, unreviewed_files
+        ));
+    }
+    if let Some(s) = coverage {
+        if !s.is_sufficient() {
+            tl_dr.push_str(&format!(
+                "\n\n⚠️ 审查覆盖不足：{}/{} 行改动可追溯被审查（{} 处 hunk 未覆盖）——结果标记为不可信。\n\
+                 ⚠️ Insufficient review coverage: {}/{} changed lines demonstrably reviewed ({} uncovered range(s)) — result marked unverified.",
+                s.covered_changed_lines,
+                s.total_changed_lines,
+                s.debt.len(),
+                s.covered_changed_lines,
+                s.total_changed_lines,
+                s.debt.len(),
+            ));
+        }
+    }
+}
+
+/// Generate the TL;DR summary for the *published* findings.
+///
+/// Every count is taken from `findings` — the consolidated, deduplicated,
+/// adjudicated set that ships — and the reviewer count from `expert_count`, so
+/// a single sentence can never mix two different sets.
+/// `all_reported_removed_by_adjudication` selects dedicated wording for the
+/// case where adjudication removed everything: "no issues found" would be a
+/// lie there, because issues *were* found and then rejected as false
+/// positives.
+fn generate_tldr(
+    risk: &RiskLevel,
+    findings: &[Finding],
+    expert_count: usize,
+    all_reported_removed_by_adjudication: bool,
+) -> String {
+    if all_reported_removed_by_adjudication {
+        return format!(
+            "{} 位专家报告的问题全部在最终裁决中被判定为假阳性并移除，发布列表为空——这不代表代码库没有质量问题，请谨慎对待（结果标记为“未验证/不可信”）。\n\n\
+             Every finding reported by the {} experts was removed by the final adjudication pass as a false positive — an empty published list here is not evidence of a clean codebase; treat with caution (result marked unverified).",
+            expert_count, expert_count,
+        );
+    }
+
+    if findings.is_empty() {
+        return format!(
+            "{} 位专家均未发现问题，但全零发现可能意味着审查覆盖率不足或系统性漏报，请谨慎对待（结果标记为“未验证/不可信”）。\n\n\
+             {} experts reported no issues — this may indicate low coverage or a systemic issue; treat with caution (result marked unverified).",
+            expert_count, expert_count,
+        );
+    }
+
+    let total_critical = findings.iter().filter(|f| f.severity == Severity::Critical).count();
+    let total_high = findings.iter().filter(|f| f.severity == Severity::High).count();
+    let mut parts = Vec::new();
+    if total_critical > 0 {
+        parts.push(format!("{} critical", total_critical));
+    }
+    if total_high > 0 {
+        parts.push(format!("{} high", total_high));
+    }
+    let remaining = findings.len().saturating_sub(total_critical + total_high);
+    if remaining > 0 {
+        parts.push(format!("{} other issues", remaining));
+    }
+
+    format!(
+        "Risk Level: {:?}. {} found by {} reviewers.",
+        risk,
+        parts.join(", "),
+        expert_count,
+    )
 }
 
 /// Normalize a finding title for comparison (lowercase, trim, remove punctuation).

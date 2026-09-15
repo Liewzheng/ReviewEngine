@@ -674,8 +674,9 @@ mod tests {
     use super::*;
     use crate::models::Effort;
     use crate::team::file_source::LocalFileSource;
+    use std::cell::RefCell;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, Once};
 
     fn make_finding(file: &str, line: Option<u32>, severity: Severity, title: &str) -> Finding {
         Finding {
@@ -782,31 +783,102 @@ mod tests {
         }
     }
 
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLogs {
-        type Writer = CapturedLogs;
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
     impl CapturedLogs {
         fn text(&self) -> String {
             String::from_utf8_lossy(&self.0.lock().unwrap()).to_string()
         }
     }
 
-    /// Capture this thread's `tracing` output (the tests run on a
-    /// current-thread runtime, so the pass's logs land here).
-    fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+    thread_local! {
+        /// The sink `capture_logs` registered on this thread, if any. Every
+        /// other thread has none and its events are discarded.
+        static THREAD_SINK: RefCell<Option<CapturedLogs>> = const { RefCell::new(None) };
+    }
+
+    /// Writer handed to the global subscriber: the emitting thread's own sink,
+    /// or a black hole.
+    enum SinkWriter {
+        Capture(CapturedLogs),
+        Discard,
+    }
+
+    impl std::io::Write for SinkWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            match self {
+                SinkWriter::Capture(logs) => logs.write(buf),
+                SinkWriter::Discard => Ok(buf.len()),
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ThreadSink;
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for ThreadSink {
+        type Writer = SinkWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            THREAD_SINK
+                .try_with(|sink| sink.borrow().clone())
+                .ok()
+                .flatten()
+                .map_or(SinkWriter::Discard, SinkWriter::Capture)
+        }
+    }
+
+    /// Install the process-global subscriber the captures read from, once.
+    ///
+    /// It has to be global, not a per-test scoped subscriber (RENG-70).
+    /// `tracing` caches each callsite's `Interest` process-globally the first
+    /// time *any* thread executes that event, resolving it against the
+    /// *registering* thread's dispatcher. A scoped subscriber covers only the
+    /// thread that installed it, so the first sibling test thread (this module
+    /// runs its `#[tokio::test]`s in parallel) to reach an adjudicator callsite
+    /// has no dispatcher at all to be measured against — the callsite is cached
+    /// as `Interest::never()` for the rest of the process and every later event
+    /// there is skipped before it reaches a capture, including one that is
+    /// live at that moment. With an INFO-level global subscriber in place,
+    /// every thread registers those callsites as interesting and only the
+    /// per-thread sink decides what a test sees. `tests/llm/main.rs` sidesteps
+    /// the same cache by living in a process of its own; these tests cannot
+    /// (they drive the private adjudication loop), so they make the ambient
+    /// dispatcher permissive instead.
+    ///
+    /// `rebuild_interest_cache` heals any callsite that was already registered
+    /// as uninteresting before this ran: it is re-evaluated against this
+    /// thread's dispatcher, which is now the global subscriber.
+    fn install_global_subscriber() {
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_ansi(false)
+                    .with_writer(ThreadSink)
+                    .with_max_level(tracing::Level::INFO)
+                    .finish(),
+            );
+            tracing::callsite::rebuild_interest_cache();
+        });
+    }
+
+    /// Capture `tracing` output emitted by the calling thread until the guard
+    /// is dropped (the tests run on a current-thread runtime, so the pass's
+    /// logs land here).
+    fn capture_logs() -> (CapturedLogs, ThreadSinkGuard) {
+        install_global_subscriber();
         let logs = CapturedLogs::default();
-        let guard = tracing::subscriber::set_default(
-            tracing_subscriber::fmt()
-                .with_ansi(false)
-                .with_writer(logs.clone())
-                .with_max_level(tracing::Level::INFO)
-                .finish(),
-        );
-        (logs, guard)
+        THREAD_SINK.with(|sink| *sink.borrow_mut() = Some(logs.clone()));
+        (logs, ThreadSinkGuard)
+    }
+
+    /// Clears the calling thread's sink on drop.
+    struct ThreadSinkGuard;
+
+    impl Drop for ThreadSinkGuard {
+        fn drop(&mut self) {
+            let _ = THREAD_SINK.try_with(|sink| *sink.borrow_mut() = None);
+        }
     }
 
     // ─── severity helpers ────────────────────────
@@ -1445,5 +1517,33 @@ mod tests {
             logged.contains("Adjudication: source=local files=2 fetches=2 dropped=0 kept=8"),
             "{logged}"
         );
+    }
+
+    // ─── capture harness (RENG-70) ───────────────
+
+    fn probe_event() {
+        tracing::info!("RENG-70 probe");
+    }
+
+    /// The callsite's cached interest must not depend on which thread executes
+    /// the event first: a thread with no sink of its own hits it before the
+    /// capturing thread does, and the capture must still see the later event.
+    #[test]
+    fn test_capture_survives_a_first_hit_from_a_thread_without_a_sink() {
+        let (logs, _guard) = capture_logs();
+        std::thread::spawn(probe_event).join().unwrap();
+        probe_event();
+        assert!(logs.text().contains("RENG-70 probe"), "{}", logs.text());
+    }
+
+    /// A callsite registered before any capture existed was measured against
+    /// the no-op dispatcher; installing the global subscriber has to re-evaluate
+    /// it, or the capture would never see that event.
+    #[test]
+    fn test_capture_sees_a_callsite_registered_before_it() {
+        probe_event();
+        let (logs, _guard) = capture_logs();
+        probe_event();
+        assert!(logs.text().contains("RENG-70 probe"), "{}", logs.text());
     }
 }

@@ -1,5 +1,7 @@
 use super::*;
+use std::io::BufRead;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 // ─────────────────────────────────────────────────────────────────────
 // RENG-37: `serve --data-dir <path>` — every persisted artifact lands
@@ -31,6 +33,46 @@ fn free_port() -> u16 {
 struct Instance {
     data_dir: PathBuf,
     child: Option<std::process::Child>,
+    /// Everything the child wrote to the pipe so far; the readers below keep
+    /// appending while it runs, so a kill can never cut off a flushed line.
+    stdout: Arc<Mutex<Vec<u8>>>,
+    stderr: Arc<Mutex<Vec<u8>>>,
+    readers: Option<Vec<std::thread::JoinHandle<()>>>,
+}
+
+/// Drain one of the child's pipes into `sink` on its own thread.
+///
+/// Reading has to start as soon as the pipe exists and continue until EOF: the
+/// process is killed rather than asked to stop, so the only place its output
+/// survives is this buffer, and an unread pipe would eventually fill and block
+/// the child. `read_until` splits on newlines but keeps the bytes as written
+/// (a partial line is completed by the next read), so `sink` ends up holding
+/// exactly what the child flushed.
+fn drain(pipe: impl std::io::Read + Send + 'static, sink: &Arc<Mutex<Vec<u8>>>) -> std::thread::JoinHandle<()> {
+    let sink = Arc::clone(sink);
+    std::thread::spawn(move || {
+        let mut reader = std::io::BufReader::new(pipe);
+        let mut line = Vec::new();
+        while reader.read_until(b'\n', &mut line).unwrap_or(0) > 0 {
+            sink.lock().unwrap().extend_from_slice(&line);
+            line.clear();
+        }
+    })
+}
+
+/// The startup banner `serve` prints once its listener is bound; it ends with
+/// the resolved `logs.ndjson` path, which is what the callers assert on.
+const BANNER_PREFIX: &str = "review-engine listening on ";
+
+/// Whether the *complete* banner line is in `stdout` yet.
+///
+/// Only newline-terminated text counts: a half-read line would still carry a
+/// truncated log path, so declaring it arrived early would just move the race
+/// into the assertions.
+fn banner_is_complete(stdout: &[u8]) -> bool {
+    stdout
+        .split_inclusive(|byte| *byte == b'\n')
+        .any(|line| line.ends_with(b"\n") && String::from_utf8_lossy(line).starts_with(BANNER_PREFIX))
 }
 
 impl Instance {
@@ -50,9 +92,37 @@ impl Instance {
         }
         cmd.stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().expect("failed to spawn review-engine serve");
+
+        let stdout = Arc::new(Mutex::new(Vec::new()));
+        let stderr = Arc::new(Mutex::new(Vec::new()));
+        let readers = vec![
+            drain(child.stdout.take().expect("stdout is piped"), &stdout),
+            drain(child.stderr.take().expect("stderr is piped"), &stderr),
+        ];
+
         Self {
             data_dir: data_dir.to_path_buf(),
-            child: Some(cmd.spawn().expect("failed to spawn review-engine serve")),
+            child: Some(child),
+            stdout,
+            stderr,
+            readers: Some(readers),
+        }
+    }
+
+    fn stdout_text(&self) -> String {
+        String::from_utf8_lossy(&self.stdout.lock().unwrap()).into_owned()
+    }
+
+    fn stderr_text(&self) -> String {
+        String::from_utf8_lossy(&self.stderr.lock().unwrap()).into_owned()
+    }
+
+    /// Join the pipe readers. The child is gone by then, so both hit EOF and
+    /// the buffers are final.
+    fn join_readers(&mut self) {
+        for reader in self.readers.take().unwrap_or_default() {
+            let _ = reader.join();
         }
     }
 
@@ -64,20 +134,14 @@ impl Instance {
             if self.data_dir.join("review.db").exists() {
                 return;
             }
-            if let Some(child) = self.child.as_mut() {
-                if let Ok(Some(status)) = child.try_wait() {
-                    let output = self
-                        .child
-                        .take()
-                        .expect("child")
-                        .wait_with_output()
-                        .expect("collect output");
-                    panic!(
-                        "serve exited early ({status}) without writing {}/review.db\nstderr: {}",
-                        self.data_dir.display(),
-                        String::from_utf8_lossy(&output.stderr)
-                    );
-                }
+            if let Some(status) = self.child.as_mut().and_then(|child| child.try_wait().ok().flatten()) {
+                self.child = None;
+                self.join_readers();
+                panic!(
+                    "serve exited early ({status}) without writing {}/review.db\nstderr: {}",
+                    self.data_dir.display(),
+                    self.stderr_text()
+                );
             }
             assert!(
                 std::time::Instant::now() < deadline,
@@ -88,11 +152,50 @@ impl Instance {
         }
     }
 
+    /// Block until the complete startup banner has reached stdout, the child
+    /// exits, or 30s pass. Returns whether the banner arrived.
+    fn wait_for_banner(&mut self) -> bool {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if banner_is_complete(&self.stdout.lock().unwrap()) {
+                return true;
+            }
+            let exited = self
+                .child
+                .as_mut()
+                .and_then(|child| child.try_wait().ok().flatten())
+                .is_some();
+            if exited || std::time::Instant::now() >= deadline {
+                return false;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+    }
+
+    /// Kill the child and return what it wrote to stdout.
+    ///
+    /// `wait_for_db` only proves the database file exists; the banner naming
+    /// the log file is printed later, once the listener is bound. Killing
+    /// straight after the database appears raced that banner — under CI load
+    /// it was still unread in the pipe, so callers asserted against empty
+    /// stdout (RENG-74). Waiting for the banner here is safe to combine with
+    /// the kill because the readers have been draining the pipe since `start`,
+    /// i.e. every flushed line lands in the buffer either way.
     fn stop(mut self) -> String {
+        let banner = self.wait_for_banner();
         let mut child = self.child.take().expect("child");
-        let _ = child.kill();
-        let output = child.wait_with_output().expect("failed to collect output");
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        if child.try_wait().expect("poll review-engine serve").is_none() {
+            let _ = child.kill();
+        }
+        let _ = child.wait();
+        self.join_readers();
+        assert!(
+            banner,
+            "serve never printed its startup banner within 30s\nstdout: {}\nstderr: {}",
+            self.stdout_text(),
+            self.stderr_text()
+        );
+        self.stdout_text()
     }
 }
 

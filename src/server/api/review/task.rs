@@ -227,27 +227,37 @@ pub(crate) fn mask_request_llm_api_keys(request_json: &mut serde_json::Value) {
 ///
 /// A rerun replays the persisted request, whose keys are masked by
 /// [`mask_request_llm_api_keys`]. The mask sentinel means "the caller's key
-/// was never persisted", so it is resolved by falling back to the server-side
-/// config matching BOTH `provider` and `api_base`. The composite match is
-/// required: several providers may share one `api_base` (e.g. a self-hosted
-/// gateway fronting multiple providers), and a single-key `api_base` lookup
-/// would then return whichever config happens to sort first — silently
-/// swapping in an unrelated provider's key. There is deliberately no
-/// `api_base`-only fallback: a masked key with no composite match is kept
-/// as-is, so the provider call fails authentication explicitly. Real keys and
-/// empty keys (local providers) pass through untouched.
+/// was never persisted", so it is resolved against the live server-side
+/// configs on the CARD identity triple `(provider, api_base, model)` — the
+/// same tuple `apply_ui_config::stored_for` uses for the PUT keep:
+///
+///   - **Unique triple match** → use that card's key. A plain reorder moves
+///     the card; the key follows.
+///   - **Two or more matches** ("复制卡片": two same-named same-base
+///     same-model accounts) → keep the mask. The persisted request cannot
+///     distinguish them — taking either key would silently swap in the
+///     sibling's key. The provider call then fails authentication
+///     explicitly. A front-end that wants to rerun a specific card must
+///     carry an `entry_fp` it obtained from `GET /llm/providers` (the API
+///     response does not yet expose it; the resolver is intentionally
+///     permissive when fp is absent).
+///   - **No match** → keep the mask for the same reason: there is no safe
+///     default to fall back to.
+///   - **Real keys and empty keys** (normal submit path, local providers)
+///     pass through untouched — masking only touches the persisted JSON.
 fn resolve_masked_api_keys(
     mut configs: Vec<crate::models::LLMConfig>,
     server_configs: &[crate::models::LLMConfig],
 ) -> Vec<crate::models::LLMConfig> {
     for config in &mut configs {
-        if config.api_key == crate::models::API_KEY_MASK {
-            if let Some(matched) = server_configs
-                .iter()
-                .find(|c| c.provider == config.provider && c.api_base == config.api_base)
-            {
-                config.api_key = matched.api_key.clone();
-            }
+        if config.api_key != crate::models::API_KEY_MASK {
+            continue;
+        }
+        let mut matches = server_configs
+            .iter()
+            .filter(|c| c.provider == config.provider && c.api_base == config.api_base && c.model == config.model);
+        if let (Some(matched), None) = (matches.next(), matches.next()) {
+            config.api_key = matched.api_key.clone();
         }
     }
     configs
@@ -665,5 +675,21 @@ mod tests {
         );
         assert_eq!(resolved[0].api_key, "sk-live");
         assert_eq!(resolved[1].api_key, "");
+    }
+
+    /// RENG-75 follow-up: a "复制卡片" produces two server entries that
+    /// share the (provider, api_base, model) triple and differ only in
+    /// `api_key`. The rerun payload cannot tell them apart, so the mask
+    /// must be kept verbatim — taking either key would silently use the
+    /// sibling's account.
+    #[test]
+    fn resolve_masked_api_keys_keeps_mask_when_two_cards_share_the_triple() {
+        let request_configs = vec![llm_config(crate::models::API_KEY_MASK, "https://api.openai.com/v1")];
+        let server_configs = vec![
+            llm_config("sk-account-a", "https://api.openai.com/v1"),
+            llm_config("sk-account-b", "https://api.openai.com/v1"),
+        ];
+        let resolved = resolve_masked_api_keys(request_configs, &server_configs);
+        assert_eq!(resolved[0].api_key, crate::models::API_KEY_MASK);
     }
 }

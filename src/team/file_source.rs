@@ -147,6 +147,22 @@ impl ProviderFileSource {
             revision: revision.to_string(),
         })
     }
+
+    /// [`github`](Self::github) over an already-constructed client, so a
+    /// caller (or a test pointing the client's API base at a mock server)
+    /// does not have to re-derive the provider from a URL.
+    pub fn github_from_client(
+        client: &crate::git_provider::github::client::Client,
+        revision: &str,
+    ) -> anyhow::Result<Self> {
+        if revision.trim().is_empty() {
+            anyhow::bail!("the reviewed commit SHA is unknown");
+        }
+        Ok(Self {
+            client: ProviderClient::GitHub(Box::new(client.clone())),
+            revision: revision.to_string(),
+        })
+    }
 }
 
 #[async_trait]
@@ -323,6 +339,40 @@ mod tests {
         assert_eq!(source.kind(), "provider-api");
         assert_eq!(source.revision(), Some("sha123"));
         assert_eq!(source.read_file("src/main.rs").await.unwrap(), "fn main() {}\n");
+    }
+
+    /// The GitHub arm of the same seam: contents API at the reviewed SHA, and
+    /// the status mapping that decides fail-open behaviour.
+    #[tokio::test]
+    async fn provider_source_reads_github_files_and_maps_statuses() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/contents/src/main.rs"))
+            .and(query_param("ref", "sha123"))
+            .and(wiremock::matchers::header("Accept", "application/vnd.github.raw+json"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("fn main() {}\n"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/repos/owner/repo/contents/src/denied.rs"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("{\"message\":\"Forbidden\"}"))
+            .mount(&server)
+            .await;
+
+        let client = crate::git_provider::github::client::Client::new_test(
+            "token",
+            "https://github.com/owner/repo/pull/3",
+            &server.uri(),
+        )
+        .unwrap();
+        let source = ProviderFileSource::github_from_client(&client, "sha123").unwrap();
+        assert_eq!(source.kind(), "provider-api");
+        assert_eq!(source.read_file("src/main.rs").await.unwrap(), "fn main() {}\n");
+        assert!(matches!(
+            source.read_file("src/denied.rs").await,
+            Err(FileReadError::Unauthorized(_))
+        ));
     }
 
     #[tokio::test]

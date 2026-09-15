@@ -217,6 +217,8 @@ pub async fn run_local(
         dump_dir,
         // Local diff review: the adjudicator reads this checkout directly.
         None,
+        // RENG-57: no store in the CLI path → nothing to record.
+        None,
     )
     .await?;
 
@@ -310,6 +312,8 @@ pub async fn run_local_repo(
         dump_dir,
         // Local repo review: the adjudicator reads this checkout directly.
         None,
+        // RENG-57: no store in the CLI path → nothing to record.
+        None,
     )
     .await?;
 
@@ -387,6 +391,8 @@ pub async fn run_local_path(
         review_id,
         dump_dir,
         // Full-content path review over a local checkout: no provider source.
+        None,
+        // RENG-57: no store in the CLI path → nothing to record.
         None,
     )
     .await?;

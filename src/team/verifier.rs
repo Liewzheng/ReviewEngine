@@ -17,6 +17,7 @@ use crate::llm::client::LLMClient;
 use crate::models::{DiffFile, ExpertReport, Finding, LLMConfig};
 use crate::prompt::templates::VERIFIER_SYSTEM_TEMPLATE;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 /// Maximum number of findings sent to the verifier in a single LLM call.
 const MAX_FINDINGS_PER_BATCH: usize = 10;
@@ -36,19 +37,23 @@ pub struct DroppedFinding {
 /// [`MAX_FINDINGS_PER_BATCH`]. Dropped findings are removed from their report
 /// (the pre-rendered `markdown` is left untouched) and returned. The pass never
 /// fails: on any error the affected batch is kept in full.
+///
+/// `llm_sink` (RENG-57) records the latency of the calls this pass makes; the
+/// repo-scan path has no store behind it and passes `None`.
 pub(crate) async fn verify_findings(
     reports: &mut [ExpertReport],
     files: &[DiffFile],
     project_path: &str,
     llm_configs: &[LLMConfig],
     max_file_bytes: usize,
+    llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> Vec<DroppedFinding> {
     if llm_configs.is_empty() {
         tracing::warn!("Verification pass enabled but no LLM configs available; skipping");
         return Vec::new();
     }
 
-    let client = LLMClient::new();
+    let client = LLMClient::new().with_sink(llm_sink);
     let configs = llm_configs.to_vec();
     verify_with_llm(reports, files, project_path, max_file_bytes, move |system, user| {
         let client = client.clone();

@@ -176,6 +176,13 @@ async fn run_webhook_review(
     } else {
         None
     };
+    // RENG-57: bind the review's LLM call samples to its task id. Built from
+    // the store the task was just recorded in, so it is `None` exactly when
+    // there is no persistence to write to.
+    let llm_sink = match (task_store.as_ref(), task_id) {
+        (Some(store), Some(id)) => store.llm_sample_sink(id),
+        _ => None,
+    };
 
     let outcome = async {
         if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
@@ -212,6 +219,7 @@ async fn run_webhook_review(
             info,
             diff,
             server_llm_configs,
+            llm_sink,
         )
         .await
     }

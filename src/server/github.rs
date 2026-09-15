@@ -307,6 +307,12 @@ async fn run_webhook_pr_review(
     } else {
         None
     };
+    // RENG-57: bind this review's LLM call samples to its task id, from the
+    // same store the task row was written through.
+    let llm_sink = match (task_store.as_ref(), task_id) {
+        (Some(store), Some(id)) => store.llm_sample_sink(id),
+        _ => None,
+    };
 
     let outcome = async {
         if let (Some(store), Some(id)) = (task_store.as_ref(), task_id) {
@@ -323,6 +329,7 @@ async fn run_webhook_pr_review(
             info,
             diff,
             server_llm_configs,
+            llm_sink,
         )
         .await
     }

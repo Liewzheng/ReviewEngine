@@ -369,7 +369,17 @@ pub(crate) async fn enqueue_review(
                         }
                     }
                 }
-                super::resolve::run_review(resolved, config_toml, llm_configs).await
+                super::resolve::run_review(
+                    resolved,
+                    config_toml,
+                    llm_configs,
+                    // RENG-57: every LLM call this review makes is recorded
+                    // against the task id, so the LLM page's latency is built
+                    // from this instance's real history. `None` when no store
+                    // is attached — nothing to write to.
+                    store_clone.llm_sample_sink(task_id),
+                )
+                .await
             }
             Err(e) => Err(e),
         };

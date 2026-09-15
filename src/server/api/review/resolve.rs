@@ -84,6 +84,7 @@ pub(crate) async fn run_review(
     resolved: ResolvedSource,
     config_toml: Option<String>,
     llm_configs: Vec<crate::models::LLMConfig>,
+    llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> anyhow::Result<(serde_json::Value, String)> {
     let config_source = config_toml.map(crate::models::ConfigSource::Inline);
     let app_config = crate::config::resolve_config(config_source).await?;
@@ -114,6 +115,7 @@ pub(crate) async fn run_review(
             "",
             None,
             resolved.file_source,
+            llm_sink,
         ),
     )
     .await;

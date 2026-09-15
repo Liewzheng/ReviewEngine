@@ -13,6 +13,7 @@ use std::time::Instant;
 use crate::actions::registry::CommandRegistry;
 use crate::actions::registry::ExpertSelection;
 use crate::llm::client::LLMClient;
+use crate::llm::sampling::LlmCallSink;
 use crate::llm::select_llm_config;
 use crate::models::*;
 use crate::progress::{ProgressMap, ReviewProgress, StageWeight};
@@ -33,6 +34,10 @@ pub struct DefaultOrchestrator {
     pub max_concurrent_llm_calls: usize,
     pub progress_map: Option<ProgressMap>,
     pub review_id: String,
+    /// RENG-57: where this review's LLM call samples go, when it has a store
+    /// to write them to. `None` records nothing (see
+    /// [`crate::llm::sampling`]).
+    pub llm_sink: Option<Arc<dyn LlmCallSink>>,
 }
 
 impl DefaultOrchestrator {
@@ -42,7 +47,14 @@ impl DefaultOrchestrator {
             max_concurrent_llm_calls: 6,
             progress_map: None,
             review_id: String::new(),
+            llm_sink: None,
         }
+    }
+
+    /// Attach the review's call-sample sink (RENG-57).
+    pub fn with_llm_sink(mut self, sink: Option<Arc<dyn LlmCallSink>>) -> Self {
+        self.llm_sink = sink;
+        self
     }
 }
 
@@ -161,6 +173,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
                 // inputs are rejected below), so the adjudicator reads the
                 // working tree and needs no provider source.
                 None,
+                self.llm_sink.clone(),
             )
             .await?;
 
@@ -169,7 +182,7 @@ impl TeamOrchestrator for DefaultOrchestrator {
         let aggregated = if config.report.aggregated && experts.iter().any(|e| e.name == "aggregator") {
             if let Some(aggregator) = experts.iter().find(|e| e.name == "aggregator") {
                 let prompt_engine = PromptEngine::new();
-                let llm_client = LLMClient::new();
+                let llm_client = LLMClient::new().with_sink(self.llm_sink.clone());
                 let (system, user) =
                     prompt_engine.build_aggregator_prompt(&reports, &mr_info, _global_context.as_ref(), "en")?;
                 let llm_config = select_llm_config(aggregator, llm_configs);
@@ -231,6 +244,12 @@ impl TeamOrchestrator for DefaultOrchestrator {
 /// `remote_files` is the provider-API file source the adjudication pass uses
 /// when the review has no local checkout (server-side webhook/API reviews);
 /// see [`crate::team::file_source`]. Local reviews pass `None`.
+///
+/// `llm_sink` (RENG-57) receives one latency sample per LLM call attempt this
+/// review makes — expert calls, retries, the lead overview, the verification
+/// and adjudication passes and the aggregator. The review path passes the sink
+/// [`crate::server::task_queue::TaskStore::llm_sample_sink`] built for its
+/// task; the CLI and tests pass `None` (there is no store to write to).
 pub async fn run_experts(
     experts: &[ExpertDef],
     mr_info: &MRInfo,
@@ -241,6 +260,7 @@ pub async fn run_experts(
     review_id: &str,
     dump_dir: Option<std::path::PathBuf>,
     remote_files: Option<Arc<dyn crate::team::file_source::FileSource>>,
+    llm_sink: Option<Arc<dyn LlmCallSink>>,
 ) -> anyhow::Result<(
     Vec<ExpertReport>,
     Option<GlobalReviewContext>,
@@ -275,6 +295,7 @@ pub async fn run_experts(
         Some(&mr_info.source_branch),
         dump_dir,
         remote_files,
+        llm_sink,
     )
     .await?;
 
@@ -301,6 +322,10 @@ pub async fn run_experts(
 /// optional global context), calls the LLM, and parses the result
 /// into a consolidated [`AggregatedReport`]. Updates progress tracking
 /// along the way.
+///
+/// `llm_sink` records this call's latency too (RENG-57): the aggregator is an
+/// LLM call the review paid for, and leaving it unrecorded would understate
+/// both the provider's sample count and its average.
 pub async fn run_aggregator(
     aggregator: &ExpertDef,
     reports: &[ExpertReport],
@@ -309,9 +334,10 @@ pub async fn run_aggregator(
     global_context: Option<&GlobalReviewContext>,
     progress_map: Option<ProgressMap>,
     review_id: &str,
+    llm_sink: Option<Arc<dyn LlmCallSink>>,
 ) -> anyhow::Result<AggregatedReport> {
     let prompt_engine = PromptEngine::new();
-    let llm_client = LLMClient::new();
+    let llm_client = LLMClient::new().with_sink(llm_sink);
 
     let (system, user) = prompt_engine.build_aggregator_prompt(reports, mr_info, global_context, "en")?;
     let config = select_llm_config(aggregator, llm_configs);

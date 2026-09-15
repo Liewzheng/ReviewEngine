@@ -66,6 +66,7 @@ When a review finishes, review-engine publishes the results back to the PR:
 - It creates (or updates) a top-level review discussion titled `# CodeReview Board`.
 - It posts inline comments on files and lines, chosen by the **inline-note delivery policy** (below). The candidate set is the **consolidated** finding set — deduplicated across experts and filtered by the adjudication pass — and a comment is only posted when its line is part of the reviewed diff. Each comment opens with its `` `path:line` `` anchor.
 - A single failing comment no longer stops the batch: permanent rejections are logged and skipped, transient provider errors (transport failure, 408/429/5xx) are retried up to three attempts, and the run logs a `posted / rolled up / policy-excluded / anchor-ineligible / skipped / failed` summary.
+- **A rejected comment logs its cause** (RENG-71): one `WARN` per failure, naming the finding's `file:line`, the line that was submitted, the HTTP status and GitHub's response body — truncated to 512 characters by the same helper the LLM error samples use — so a rejected position is distinguishable from a `403`, a `404` or a transport failure without reproducing it.
 - The dispatcher tracks the latest commit SHA to avoid duplicate reviews.
 
 ### Inline-note delivery policy

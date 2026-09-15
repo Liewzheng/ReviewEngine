@@ -257,11 +257,22 @@ pub async fn publish_planned_inline_notes(
             Ok(()) => summary.posted += 1,
             Err(err) => {
                 summary.failed += 1;
+                let (status, detail) = inline_note_failure_detail(&err);
+                // One WARN per failure. The cause goes into the *message*, not
+                // only into the fields: the Logs page keeps `fields.message`
+                // and drops everything else (log_collector::parse_line), so a
+                // fields-only report is invisible where the operator looks.
                 tracing::warn!(
                     file = %finding.file,
                     line,
-                    error = %err,
-                    "Inline note failed — continuing with the remaining findings"
+                    status = status,
+                    "Inline note failed — continuing with the remaining findings: \
+                     finding={} new_path={} new_line={} status={} error={}",
+                    inline_anchor(finding),
+                    finding.file,
+                    line,
+                    status.map_or_else(|| "none".to_string(), |code| code.to_string()),
+                    detail,
                 );
             }
         }
@@ -284,6 +295,34 @@ pub async fn publish_planned_inline_notes(
         },
     );
     summary
+}
+
+/// What a failed inline post carries for the operator: the HTTP status of the
+/// provider's verdict (`None` when the failure had no HTTP answer) and the
+/// cause, truncated to one log line.
+///
+/// Prefers the provider's own [`InlineNoteError`](crate::git_provider::InlineNoteError)
+/// — the status and the response body are then structural rather than parsed
+/// out of the rendered message. A provider that reports a plain `anyhow` error
+/// (a transport failure, a rejected path, the mocks the publisher's tests use)
+/// still yields its status when the message carries one, through the same
+/// helper [`is_transient_error`] classifies with.
+///
+/// The RENG-71 deployment log had neither: the cause was dropped at this call
+/// site, so a `400 position is invalid` was indistinguishable from a 403, a 404
+/// or a broken connection.
+fn inline_note_failure_detail(err: &anyhow::Error) -> (Option<u16>, String) {
+    for cause in err.chain() {
+        if let Some(verdict) = cause.downcast_ref::<crate::git_provider::InlineNoteError>() {
+            // The typed message already renders status, endpoint and body.
+            return (verdict.status, crate::llm::sampling::truncate_error(&verdict.message));
+        }
+        let message = cause.to_string();
+        if let Some(status) = http_status_code(&message) {
+            return (Some(status), crate::llm::sampling::truncate_error(&message));
+        }
+    }
+    (None, crate::llm::sampling::truncate_error(&format!("{err:#}")))
 }
 
 /// POST one inline note, retrying transient failures with a bounded backoff.
@@ -846,6 +885,110 @@ mod tests {
         assert_eq!(summary.skipped, 0);
         // A 4xx verdict is permanent: exactly one attempt, never retried.
         assert_eq!(provider.attempts_for("two.rs"), 1);
+    }
+
+    // ── RENG-71: the cause of a rejected inline note ─────────────────────────
+
+    /// The provider's own verdict is used structurally: the status and the
+    /// response body are carried by the error, not parsed back out of the
+    /// rendered message.
+    #[test]
+    fn test_inline_note_failure_detail_uses_the_provider_verdict() {
+        let body = r#"{"message":"400 Bad request - Note {:position=>[\"new_line is not part of the diff\"]}}"#;
+        let err = anyhow::Error::new(crate::git_provider::InlineNoteError {
+            status: Some(400),
+            body: body.to_string(),
+            message: format!("GitLab API returned 400 Bad Request for POST merge_requests/54/discussions: {body}"),
+        });
+
+        let (status, detail) = inline_note_failure_detail(&err);
+        assert_eq!(status, Some(400));
+        assert!(
+            detail.contains("400 Bad Request for POST merge_requests/54/discussions"),
+            "the detail names the endpoint: {detail}"
+        );
+        assert!(
+            detail.contains("new_line is not part of the diff"),
+            "the detail carries GitLab's response body: {detail}"
+        );
+    }
+
+    /// A provider that only renders a message still reports its status (the
+    /// pre-RENG-71 shape, and every mock in these tests), and a failure with no
+    /// HTTP answer is reported as such instead of being guessed at.
+    #[test]
+    fn test_inline_note_failure_detail_falls_back_to_the_rendered_message() {
+        let rendered = anyhow::Error::msg(
+            "GitLab API returned 403 Forbidden for POST merge_requests/1/discussions: \
+             {\"message\":\"403 Forbidden\"}",
+        );
+        let (status, detail) = inline_note_failure_detail(&rendered);
+        assert_eq!(status, Some(403));
+        assert!(detail.contains("403 Forbidden"), "{detail}");
+
+        let transport =
+            anyhow::Error::msg("error sending request for url (http://gitlab.islet.space/api/v4): connection refused");
+        let (status, detail) = inline_note_failure_detail(&transport);
+        assert_eq!(status, None, "a transport failure has no HTTP verdict");
+        assert!(detail.contains("connection refused"), "{detail}");
+    }
+
+    /// A provider body can be arbitrarily long; the WARN is one line, and the
+    /// status at the head of the message survives the cut.
+    #[test]
+    fn test_inline_note_failure_detail_truncates_a_long_response_body() {
+        let long = format!(
+            "GitLab API returned 400 Bad Request for POST merge_requests/1/discussions: {{\"message\":\"{}\"}}",
+            "x".repeat(crate::llm::sampling::ERROR_MAX_CHARS * 2)
+        );
+        let (status, detail) = inline_note_failure_detail(&anyhow::Error::msg(long));
+
+        assert_eq!(status, Some(400));
+        assert_eq!(
+            detail.chars().count(),
+            crate::llm::sampling::ERROR_MAX_CHARS + 1,
+            "the detail is the LLM-error bound plus the clip marker"
+        );
+        assert!(detail.ends_with('…'), "a clipped body is marked as clipped: {detail}");
+        assert!(
+            detail.starts_with("GitLab API returned 400 Bad Request"),
+            "the status must not be cut off: {detail}"
+        );
+    }
+
+    /// The batch survives a rejected position and posts the next note: the
+    /// RENG-60 isolation is unchanged by the RENG-71 reporting.
+    #[tokio::test]
+    async fn test_publish_inline_notes_reports_the_rejected_anchor_and_continues() {
+        let findings = vec![
+            make_finding("ux", "bad.rs", 7, Severity::High),
+            make_finding("lead", "good.rs", 9, Severity::High),
+        ];
+        let provider = RecordingProvider::new(&[(
+            "bad.rs",
+            1,
+            "GitLab API returned 400 Bad Request for POST merge_requests/54/discussions: \
+             {\"message\":\"400 Bad request - Note {:position=>[\\\"new_line is not part of the diff\\\"]}\"}",
+        )]);
+
+        let summary = publish(&provider, &findings, &unlimited_policy()).await;
+
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.posted, 1);
+        assert_eq!(
+            provider
+                .posted()
+                .into_iter()
+                .map(|(file, _, _)| file)
+                .collect::<Vec<_>>(),
+            vec!["good.rs"],
+            "the note after the rejected one is still posted"
+        );
+        assert_eq!(provider.attempts_for("bad.rs"), 1, "a 4xx verdict is permanent");
+
+        // What the WARN says about this failure — the status, the anchor and
+        // the truncated body — is asserted end to end (real client, real log)
+        // by `tests/publish/main.rs::test_rejected_inline_note_logs_its_cause_and_the_batch_continues`.
     }
 
     /// Transient transport/5xx failures are retried, and a recovered batch is a

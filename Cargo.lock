@@ -2134,11 +2134,7 @@ dependencies = [
 
 [[package]]
 name = "review-engine"
-<<<<<<< HEAD
-version = "0.10.21"
-=======
 version = "0.10.22"
->>>>>>> 2ca7161 (chore(release): 0.10.22 — server-side reviews adjudicate (RENG-31))
 dependencies = [
  "anyhow",
  "async-trait",

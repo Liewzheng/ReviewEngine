@@ -2,7 +2,27 @@ import { request } from './api';
 import type { LlmProvider, TestResult } from '../types/llm';
 
 export interface LlmProvidersResponse {
-  items: LlmProvider[];
+  items: LlmProvider[]
+  /**
+   * RENG-56: length of the usage window the per-provider statistics cover
+   * (rolling days, server-side `USAGE_WINDOW_DAYS`). The UI labels the
+   * numbers with it so nothing shows an unlabelled window.
+   */
+  usageWindowDays: number
+  /** RENG-56: ISO 8601 start of that window (inclusive). */
+  usageSince: string
+  /**
+   * RENG-56: false when the server has no usage history to read
+   * (`REVIEW_DISABLE_DB=1` or the aggregate failed) — every usage metric is
+   * `null` then, and the page shows `—` instead of a window.
+   */
+  usageAvailable: boolean
+  /**
+   * RENG-56: total usages recorded in the window, across EVERY provider name
+   * (including ones no longer configured), i.e. the denominator of each
+   * card's `usageShare`. `null` when unavailable.
+   */
+  usageTotal: number | null
 }
 
 export async function getProviders(): Promise<LlmProvidersResponse> {

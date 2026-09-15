@@ -19,6 +19,22 @@ export function useLlmStatus() {
   const error = ref<string | null>(null);
   /** ID of the provider currently being tested (null when idle). */
   const testingId = ref<string | null>(null);
+  /**
+   * RENG-56: usage window the per-provider statistics cover, as reported by
+   * the server with the list (`usageWindowDays` / `usageSince` /
+   * `usageAvailable`). Kept alongside the providers because the numbers are
+   * meaningless without it: the page labels "过去 7 天" from here, and hides
+   * the usage row entirely when the server has no history to read.
+   */
+  const usageWindowDays = ref<number | null>(null);
+  const usageSince = ref<string | null>(null);
+  const usageAvailable = ref(false);
+  /**
+   * RENG-56: every usage recorded in the window, across all provider names —
+   * the share denominator the cards are a breakdown of. `null` when the
+   * server could not read the history.
+   */
+  const usageTotal = ref<number | null>(null);
 
   /**
    * Last connectivity-test result per provider identity (RENG-54).
@@ -72,6 +88,12 @@ export function useLlmStatus() {
     try {
       const response = await getProviders();
       reconcileProviders(response.items);
+      // RENG-56: the window travels with the numbers it describes, and so
+      // does the window total the per-provider shares are taken against.
+      usageWindowDays.value = response.usageWindowDays ?? null;
+      usageSince.value = response.usageSince ?? null;
+      usageAvailable.value = response.usageAvailable === true;
+      usageTotal.value = response.usageTotal ?? null;
       if (silent) {
         error.value = null;
       }
@@ -79,6 +101,9 @@ export function useLlmStatus() {
       if (!silent) {
         error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
         providers.value = [];
+        // No list means no usage to show either: report unknown, not stale.
+        usageAvailable.value = false;
+        usageTotal.value = null;
       }
     } finally {
       if (!silent) {
@@ -150,6 +175,10 @@ export function useLlmStatus() {
     error,
     testingId,
     testResults,
+    usageWindowDays,
+    usageSince,
+    usageAvailable,
+    usageTotal,
     healthyCount,
     degradedCount,
     errorCount,

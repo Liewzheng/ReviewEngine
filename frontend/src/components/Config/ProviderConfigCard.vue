@@ -28,6 +28,12 @@ const props = defineProps<{
    * the server's values, so the two never overwrite each other.
    */
   testResult?: TransientResult<TestResult> | null
+  /**
+   * RENG-56: length of the usage window the recorded numbers cover (days),
+   * from the payload that carries them. `null`/absent = the server had no
+   * usage history, in which case the usage row is not rendered at all.
+   */
+  usageWindowDays?: number | null
 }>()
 
 const emit = defineEmits<{
@@ -93,33 +99,71 @@ const latencyStyle = computed(() => {
   return { color: latencyColor.value }
 })
 
+/* ------------------------------------------------------------------ */
+/*  Recorded usage (RENG-56)                                           */
+/*                                                                     */
+/*  These numbers come from the reviews that actually ran on this      */
+/*  provider (`reviews.llm_summary`), aggregated over the window the    */
+/*  payload reports. They are independent of the probe: a provider     */
+/*  that is offline right now still has last week's usage. `null`      */
+/*  means the server has no number for it — the card then shows `—`,   */
+/*  never a stand-in 0.                                                */
+/* ------------------------------------------------------------------ */
+
+/** True when the server could read usage history for this payload. */
+const hasUsageWindow = computed(
+  () => props.usageWindowDays !== null && props.usageWindowDays !== undefined
+)
+
 const formattedRequestsDisplay = computed(() => {
-  const h = props.health
-  if (!h || !hasLiveMetrics.value) return '—'
-  return new Intl.NumberFormat('en-US').format(h.requestCount)
+  const count = props.health?.requestCount
+  if (count === null || count === undefined) return '—'
+  return new Intl.NumberFormat('en-US').format(count)
 })
 
-const errorRateColor = computed(() => {
+const formattedSuccessRateDisplay = computed(() => {
+  const rate = props.health?.successRate
+  if (rate === null || rate === undefined) return '—'
+  return `${(rate * 100).toFixed(1)}%`
+})
+
+const successRateColor = computed(() => {
   const h = props.health
-  if (!h) return ''
-  // When status is error, force red regardless of error rate value
+  if (!h || h.successRate === null || h.successRate === undefined) return ''
   if (h.status === 'error') return 'var(--error)'
-  if (h.errorRate < 0.01) return 'var(--success)'
-  if (h.errorRate <= 0.05) return 'var(--warning)'
+  if (h.successRate >= 0.99) return 'var(--success)'
+  if (h.successRate >= 0.95) return 'var(--warning)'
   return 'var(--error)'
 })
 
-const formattedErrorRateDisplay = computed(() => {
-  const h = props.health
-  if (!h || !hasLiveMetrics.value) return '—'
-  return `${(h.errorRate * 100).toFixed(1)}%`
+/** Share of the window's usage as a 0–100 percentage, or null when unknown. */
+const usageSharePercent = computed(() => {
+  const share = props.health?.usageShare
+  if (share === null || share === undefined) return null
+  return Math.round(share * 1000) / 10
 })
 
-const usagePercent = computed(() => props.health?.usagePercent ?? 0)
+const usageShareLabel = computed(() => {
+  if (usageSharePercent.value === null) return '—'
+  return t('llm.usageShare', {
+    // One decimal so every card reads the same way (8.0 %, not 8 %).
+    percent: usageSharePercent.value.toFixed(1),
+    days: props.usageWindowDays,
+  })
+})
 
-const showUsage = computed(() => {
-  const h = props.health
-  return !!h && h.usagePercent !== undefined && h.configured
+const lastUsedDisplay = computed(() => {
+  const at = props.health?.lastUsedAt
+  if (!at) return '—'
+  const d = new Date(at)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString()
+})
+
+const lastCheckedDisplay = computed(() => {
+  const at = props.health?.lastChecked
+  if (!at) return '—'
+  const d = new Date(at)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleString()
 })
 
 /* ------------------------------------------------------------------ */
@@ -180,7 +224,9 @@ const testResultText = computed(() => {
       </div>
     </div>
 
-    <!-- Metrics Row (runtime health; '—' when unconfigured or offline) -->
+    <!-- Metrics Row: latency = the live probe (RENG-36); requests and
+         success rate = recorded usage of the window (RENG-56). '—' whenever
+         the server has no number, never a stand-in 0. -->
     <div class="metrics-row">
       <div class="metric">
         <div class="metric-label">{{ $t('llm.metrics.latency') }}</div>
@@ -189,36 +235,43 @@ const testResultText = computed(() => {
         </div>
       </div>
       <div class="metric">
-        <div class="metric-label">{{ $t('llm.metrics.requests') }}</div>
+        <div class="metric-label" :title="hasUsageWindow ? $t('llm.usageWindow', { days: usageWindowDays }) : undefined">
+          {{ $t('llm.metrics.requests') }}
+        </div>
         <div class="metric-value">{{ formattedRequestsDisplay }}</div>
       </div>
       <div class="metric">
-        <div class="metric-label">{{ $t('llm.metrics.errors') }}</div>
+        <div class="metric-label">{{ $t('llm.metrics.successRate') }}</div>
         <div
           class="metric-value"
           :style="{
-            color: formattedErrorRateDisplay !== '—' ? errorRateColor : undefined,
+            color: formattedSuccessRateDisplay !== '—' ? successRateColor : undefined,
           }"
         >
-          {{ formattedErrorRateDisplay }}
+          {{ formattedSuccessRateDisplay }}
         </div>
       </div>
     </div>
 
-    <!-- Usage Bar -->
-    <div v-if="showUsage" class="usage-bar">
+    <!-- Usage share over the window (RENG-56) — this provider's slice of all
+         recorded usage. Rendered only when the server could read the window
+         AND holds usage to divide by; otherwise there is no bar to draw. -->
+    <div v-if="hasUsageWindow && usageSharePercent !== null" class="usage-bar">
       <el-progress
-        :percentage="usagePercent"
+        :percentage="usageSharePercent"
         :stroke-width="6"
         :color="'var(--brand)'"
         :show-text="false"
       />
-      <span class="usage-label">{{ $t('llm.usage', { percent: usagePercent }) }}</span>
+      <span class="usage-label">{{ usageShareLabel }}</span>
     </div>
 
-    <!-- Last checked -->
+    <!-- Last used / last checked: both real timestamps, '—' when unknown -->
+    <div v-if="hasUsageWindow" class="usage-meta">
+      {{ $t('llm.lastUsed', { date: lastUsedDisplay }) }}
+    </div>
     <div v-if="health" class="last-checked">
-      {{ $t('llm.lastChecked', { date: new Date(health.lastChecked).toLocaleString() }) }}
+      {{ $t('llm.lastChecked', { date: lastCheckedDisplay }) }}
     </div>
 
     <!-- Last manual test (RENG-54): kept as page-session state so the next
@@ -409,7 +462,7 @@ const testResultText = computed(() => {
 }
 
 .usage-bar {
-  margin-bottom: 12px;
+  margin-bottom: 8px;
 }
 
 .usage-label {
@@ -417,6 +470,14 @@ const testResultText = computed(() => {
   font-size: 12px;
   color: var(--text-secondary);
   margin-top: 4px;
+}
+
+/* RENG-56: the newest recorded use, next to the "last checked" probe time */
+.usage-meta {
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: 4px;
+  text-align: right;
 }
 
 .last-checked {

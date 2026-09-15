@@ -11,10 +11,12 @@
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 use crate::config::secrets::{decrypt_secret, encrypt_secret};
 use crate::models::{GitPlatformConfig, LLMConfig};
 use crate::server::api::config::persist::PersistedGitlabConfig;
+use crate::store::traits::ProviderUsageStats;
 
 /// At-rest form of one `git_platforms` row.
 #[derive(Debug)]
@@ -236,6 +238,72 @@ pub(crate) fn llm_summary_json(result: &Value) -> Option<String> {
 /// DB vocabulary can never drift from the SSE / API vocabulary (§5.3).
 pub(crate) fn task_state_str(state: &TaskState) -> &'static str {
     crate::server::api::review::task_status_str(state)
+}
+
+/// One aggregated input row of [`aggregate_llm_usage`]:
+/// `(task_id, state, created_at, llm_summary)` as selected by
+/// [`ReviewStore::llm_usage_since`](super::traits::ReviewStore::llm_usage_since).
+pub(crate) type LlmUsageRowTuple = (String, String, String, Option<String>);
+
+/// RENG-56: fold `(task_id, state, created_at, llm_summary)` rows into
+/// per-provider usage, ordered by provider name.
+///
+/// Review-level granularity: a provider is counted once per review that
+/// recorded it, regardless of how many models that review used it for (the
+/// model dimension lives in `expert_reports`, not in the history contract the
+/// page is cross-checked against). `cancelled` / `pending` / `running` rows
+/// count as usage but land in neither outcome bucket — a user-cancelled
+/// review is not a provider failure.
+///
+/// Rows without a summary, with a blank provider, or with unparsable JSON are
+/// skipped (the latter logged): a single unreadable row must not take the
+/// whole LLM page down, and the write path guarantees the JSON shape.
+pub(crate) fn aggregate_llm_usage(rows: impl IntoIterator<Item = LlmUsageRowTuple>) -> Vec<ProviderUsageStats> {
+    let mut by_provider: BTreeMap<String, ProviderUsageStats> = BTreeMap::new();
+    for (task_id, state, created_at, summary) in rows {
+        let Some(summary) = summary else { continue };
+        let usages: Vec<crate::models::LlmUsage> = match serde_json::from_str(&summary) {
+            Ok(usages) => usages,
+            Err(e) => {
+                tracing::warn!("review {task_id}: unreadable llm_summary JSON ({e}); skipped in the usage aggregate");
+                continue;
+            }
+        };
+        // One review contributes at most one usage per provider.
+        let mut providers: Vec<&str> = Vec::new();
+        for usage in &usages {
+            if usage.provider.is_empty() {
+                continue;
+            }
+            if !providers.contains(&usage.provider.as_str()) {
+                providers.push(usage.provider.as_str());
+            }
+        }
+        let used_at = super::decode_ts(&created_at).ok();
+        for provider in providers {
+            let entry = by_provider
+                .entry(provider.to_string())
+                .or_insert_with(|| ProviderUsageStats {
+                    provider: provider.to_string(),
+                    usage_count: 0,
+                    completed_count: 0,
+                    failed_count: 0,
+                    last_used_at: None,
+                });
+            entry.usage_count += 1;
+            match state.as_str() {
+                "completed" => entry.completed_count += 1,
+                "failed" => entry.failed_count += 1,
+                _ => {}
+            }
+            if let Some(ts) = used_at {
+                if entry.last_used_at.is_none_or(|prev| ts > prev) {
+                    entry.last_used_at = Some(ts);
+                }
+            }
+        }
+    }
+    by_provider.into_values().collect()
 }
 
 pub(crate) fn task_state_from_str(s: &str) -> Result<TaskState> {
@@ -560,5 +628,122 @@ mod tests {
             entry.source_meta.repository.is_none(),
             "blank column must not back-fill"
         );
+    }
+
+    // ─── RENG-56: llm usage aggregation ─────────────────────────────
+
+    fn usage_row(task: &str, state: &str, created_at: &str, summary: Option<&str>) -> LlmUsageRowTuple {
+        (
+            task.to_string(),
+            state.to_string(),
+            created_at.to_string(),
+            summary.map(str::to_string),
+        )
+    }
+
+    /// Several providers/models and mixed states aggregate into per-provider
+    /// counts, outcome buckets and the newest timestamp each provider was used.
+    #[test]
+    fn aggregate_llm_usage_counts_reviews_per_provider() {
+        let stats = aggregate_llm_usage(vec![
+            usage_row(
+                "t1",
+                "completed",
+                "2026-09-08T10:00:00.000000Z",
+                Some(r#"[{"provider":"xiaomi","model":"mimo-v2.5"}]"#),
+            ),
+            usage_row(
+                "t2",
+                "completed",
+                "2026-09-09T10:00:00.000000Z",
+                // Same provider twice with different models: ONE usage.
+                Some(
+                    r#"[{"provider":"xiaomi","model":"mimo-v2.5"},{"provider":"deepseek","model":"deepseek-v4"},{"provider":"xiaomi","model":"mimo-v2-pro"}]"#,
+                ),
+            ),
+            usage_row(
+                "t3",
+                "failed",
+                "2026-09-10T10:00:00.000000Z",
+                Some(r#"[{"provider":"deepseek","model":"deepseek-v4"}]"#),
+            ),
+            // No summary (failed before any report) — invisible, by design.
+            usage_row("t4", "failed", "2026-09-11T10:00:00.000000Z", None),
+            // Cancelled counts as usage but in neither outcome bucket.
+            usage_row(
+                "t5",
+                "cancelled",
+                "2026-09-12T10:00:00.000000Z",
+                Some(r#"[{"provider":"deepseek","model":"deepseek-v4"}]"#),
+            ),
+        ]);
+
+        assert_eq!(
+            stats.iter().map(|s| s.provider.as_str()).collect::<Vec<_>>(),
+            vec!["deepseek", "xiaomi"],
+            "providers come back in name order"
+        );
+        let deepseek = &stats[0];
+        assert_eq!(deepseek.usage_count, 3, "one usage per review, not per model");
+        assert_eq!(deepseek.completed_count, 1);
+        assert_eq!(deepseek.failed_count, 1);
+        assert_eq!(
+            deepseek.last_used_at.unwrap().to_rfc3339(),
+            "2026-09-12T10:00:00+00:00",
+            "the newest usage wins, cancelled reviews included"
+        );
+
+        let xiaomi = &stats[1];
+        assert_eq!(xiaomi.usage_count, 2);
+        assert_eq!(xiaomi.completed_count, 2);
+        assert_eq!(xiaomi.failed_count, 0);
+        assert_eq!(xiaomi.last_used_at.unwrap().to_rfc3339(), "2026-09-09T10:00:00+00:00");
+    }
+
+    /// Rows the aggregate must not invent usage from: no summary, empty
+    /// array, blank provider names, and unreadable JSON.
+    #[test]
+    fn aggregate_llm_usage_skips_rows_without_a_usable_provider() {
+        let stats = aggregate_llm_usage(vec![
+            usage_row("t1", "completed", "2026-09-08T10:00:00.000000Z", None),
+            usage_row("t2", "completed", "2026-09-08T10:00:00.000000Z", Some("[]")),
+            usage_row(
+                "t3",
+                "completed",
+                "2026-09-08T10:00:00.000000Z",
+                Some(r#"[{"provider":"","model":"m"}]"#),
+            ),
+            usage_row("t4", "completed", "2026-09-08T10:00:00.000000Z", Some("not json")),
+        ]);
+        assert!(stats.is_empty(), "no provider was recorded: {stats:?}");
+    }
+
+    /// A row whose `created_at` cannot be decoded still counts as usage; it
+    /// simply cannot claim the `last_used_at` slot.
+    #[test]
+    fn aggregate_llm_usage_keeps_counts_with_an_undecodable_timestamp() {
+        let stats = aggregate_llm_usage(vec![
+            usage_row(
+                "t1",
+                "completed",
+                "not-a-timestamp",
+                Some(r#"[{"provider":"xiaomi","model":"m"}]"#),
+            ),
+            usage_row(
+                "t2",
+                "completed",
+                "2026-09-09T10:00:00.000000Z",
+                Some(r#"[{"provider":"xiaomi","model":"m"}]"#),
+            ),
+        ]);
+        assert_eq!(stats.len(), 1);
+        assert_eq!(stats[0].usage_count, 2);
+        assert_eq!(stats[0].last_used_at.unwrap().to_rfc3339(), "2026-09-09T10:00:00+00:00");
+    }
+
+    /// An empty window yields no providers at all — never a fabricated entry.
+    #[test]
+    fn aggregate_llm_usage_empty_window_is_empty() {
+        assert!(aggregate_llm_usage(Vec::new()).is_empty());
     }
 }

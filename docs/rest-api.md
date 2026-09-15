@@ -770,6 +770,10 @@ Web UI 和 Desktop App 通过 `EventSource` 监听，无需轮询。
 ```
 Response 200:
 {
+  "usageWindowDays": 7,
+  "usageSince": "2026-09-08T02:00:00Z",
+  "usageAvailable": true,
+  "usageTotal": 88,
   "items": [
     {
       "id": "openai-0",
@@ -785,10 +789,10 @@ Response 200:
       "chainPosition": 1,
       "isPrimary": true,
       "latencyMs": 320,
-      "errorRate": 0.0,
-      "requestCount": 0,
-      "usagePercent": 0,
-      "sparkline": [],
+      "requestCount": 12,
+      "usageShare": 0.75,
+      "successRate": 0.9167,
+      "lastUsedAt": "2026-09-14T08:30:00+00:00",
       "lastChecked": "2026-07-18T02:00:00Z"
     }
   ]
@@ -801,11 +805,26 @@ API key 永远不会在响应中返回。
 
 - `healthy` —— 最近一次探测成功（`message: Configured`），`latencyMs` 是该次探测的往返耗时，`lastChecked` 是探测时刻；
 - `error` —— 最近一次探测失败（key 被改坏 / 被吊销、地址不可达、401/403 等），`message` 是具体错误；
-- `offline` —— 没有存储 key，**不做探测**，`latencyMs` 为 0。
+- `offline` —— 没有存储 key，**不做探测**，`latencyMs` 为 0；`lastChecked` 为 `null`（没有任何一次探测发生过，不再回填当前时间）。
 
 改 key、改 `apiBase`、改 provider 名、删除 provider（`PUT /api/v1/config` 的 `llm` 段，或本节的 `POST` / `PUT` / `DELETE /providers`）都会**丢弃该 provider 缓存的健康状态**，下一次读取重新探测后才给出状态 —— 因此「在 WebUI 改坏 key、不重启服务」不会再显示成 `healthy`。失效粒度是**按 provider**（缓存键是 `provider + model + api_base + api_key` 的 SHA-256 指纹）：只动一个 provider 时，其他 provider 的状态与徽标不受影响，也不会被连带重新探测。缓存未命中时读取会等待该次探测（最长即探测自身的 10s 超时）；只是超过 TTL 的条目会立即返回并**在后台**刷新一次，所以正常轮询不会因为探测而变慢。
 
 0.10.11 起（RENG-55）每个 provider 额外返回链序信息：`position` 为它在**存储列表**中的下标（0 起，与 `llm_providers.raw.position` 及 UI 卡片顺序一致，不受“首选”选择影响），`chainPosition` 为它在**运行时链**中的 1 起名次（首选 provider 为 1，其后按存储顺序排列），`isPrimary` 标识链首（即评审实际首先使用的 provider）。运行时链的规则见 [configuration.md](configuration.md#chain-order-and-the-primary-provider)。
+
+0.10.21 起（RENG-56）每个 provider 额外返回**真实使用统计**，数据源是评审记录本身（`reviews.llm_summary`，RENG-38 起每次评审写入的 `[{provider, model}]` 快照）而不是任何估算值：
+
+- 窗口：`usageWindowDays`（当前恒为 7）与 `usageSince`（滚动窗口起点，含端点）随列表一起返回 —— UI 用它标注「过去 7 天」，不自行假设窗口。
+- `usageTotal`：窗口内**全部**已记录使用数（所有 provider 名，含已不再配置的），即每个 `usageShare` 的分母。因此它可以大于各卡片 `requestCount` 之和：卡片只统计当前配置里的 provider。`null` 表示读不到历史。
+- `requestCount`：该 provider 在窗口内被记录到的**评审数**（评审级粒度：一次评审无论用几个模型，都只给该 provider 记一次）。可直接用 `GET /api/v1/reviews` 的 `llmSummary` 逐条核对。
+- `usageShare`：该 provider 占窗口内**全部**已记录使用（含已不再配置的 provider 名）的比例，0–1。
+- `successRate`：使用过该 provider 且已终态的评审中 `completed / (completed + failed)`，0–1。
+- `lastUsedAt`：窗口内最近一次使用该 provider 的时刻。
+
+**不知道就是 `null`，绝不填 0**：窗口内没有任何记录的 provider，`requestCount` 是实测的 `0`，而 `usageShare` / `successRate` / `lastUsedAt` 为 `null`（没有分母 / 没有终态 / 从未使用）。`usageAvailable` 为 `false`（`REVIEW_DISABLE_DB=1`、聚合查询失败）时四项全为 `null`。`successRate` 的固有局限：`llm_summary` 只在评审完成写回时落库，因此「还没产出任何报告就失败的评审」不带快照、也无法归因到某个 provider —— 该比率是「用过它并且跑完的评审里有多少成功」，是 provider 自身调用成功率的**上界**，逐次调用的成功率需要 RENG-57 的调用级历史。
+
+`usagePercent`（限额容量）与 `sparkline`（时间序列）已从响应中**删除**：不存在限额概念，也不存在调用级时间序列（RENG-57），原先恒为 `0` / `[]` 的占位字段与硬编码的 `errorRate` 一并移除，避免页面展示假数据。
+
+成本：每次读取一次聚合查询，走 `reviews(created_at)` 索引的范围扫描，代价与窗口内评审数成正比（窗口外与 `llm_summary IS NULL` 的行在同一次扫描中被过滤），JSON 快照在 Rust 侧解析（SQLite / PostgreSQL 两端无需 JSON 方言分叉）。
 
 #### `POST /api/v1/llm/providers`
 

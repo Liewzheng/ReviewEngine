@@ -31,16 +31,34 @@ export interface LlmProvider {
    * `GET /api/v1/llm/providers` reports from its probe cache (RENG-36).
    */
   latencyMs: number
-  /** Error rate as a fraction (0.0–1.0). */
-  errorRate: number
-  /** Total request count in the current window. */
-  requestCount: number
-  /** Token usage as a percentage of the quota (if available). */
-  usagePercent?: number
-  /** Sparkline data points for the usage chart. */
-  sparkline?: number[]
-  /** ISO 8601 timestamp of the last health check. */
-  lastChecked: string
+  /**
+   * RENG-56: reviews that recorded this provider inside the usage window
+   * (`usageWindowDays`), or `null` when the server could not read the usage
+   * history (no store attached / aggregate failed) — `null` means unknown,
+   * never zero. The count is review-level: one review counts once per
+   * provider, whatever model it used.
+   */
+  requestCount: number | null
+  /**
+   * RENG-56: this provider's share of all usage recorded in the window, as a
+   * fraction (0.0–1.0); `null` when the window holds no usage at all.
+   */
+  usageShare: number | null
+  /**
+   * RENG-56: `completed / (completed + failed)` over the reviews that used
+   * this provider in the window, as a fraction (0.0–1.0); `null` when none of
+   * them reached an outcome. Reviews that failed before recording any usage
+   * carry no snapshot and are invisible here, so this is an upper bound on
+   * the provider's call success.
+   */
+  successRate: number | null
+  /** RENG-56: ISO 8601 timestamp of the newest recorded use, or `null`. */
+  lastUsedAt: string | null
+  /**
+   * ISO 8601 timestamp of the probe behind `status`; `null` when the provider
+   * was never probed (no report entry) — not "now".
+   */
+  lastChecked: string | null
   /** Editable config echoed back by GET /llm/providers (the API key is never returned). */
   apiBaseUrl?: string
   /** Default model for this provider. */

@@ -497,14 +497,17 @@ export default {
     stats: {
       providers: 'Providers',
       avgLatency: 'Avg Latency',
-      totalRequests: 'Total Requests',
+      totalRequests: 'Total Usages',
+      totalRequestsWindow: 'Recorded usages (last {days} days)',
     },
     metrics: {
       latency: 'Latency',
-      requests: 'Requests',
-      errors: 'Errors',
+      requests: 'Usages',
+      successRate: 'Success Rate',
     },
-    usage: '{percent}% capacity',
+    usageShare: '{percent}% of usage (last {days} days)',
+    usageWindow: 'last {days} days',
+    lastUsed: 'Last used: {date}',
     lastChecked: 'Last checked: {date}',
     recentUsage: {
       title: 'Recent Usage',

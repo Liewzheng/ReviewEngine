@@ -19,7 +19,7 @@ use crate::server::api::config::persist::{PersistedGitlabConfig, UiStateFile};
 use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 use super::rows;
-use super::traits::{ConfigStore, DiscussionNote, DiscussionStore, ReviewListQuery, ReviewStore};
+use super::traits::{ConfigStore, DiscussionNote, DiscussionStore, ProviderUsageStats, ReviewListQuery, ReviewStore};
 use super::{adapt_sql, encode_ts, BackendKind, SqlxStore};
 
 const LEGACY_GITLAB_KEY: &str = "gitlab";
@@ -560,6 +560,25 @@ impl ReviewStore for SqlxStore {
             .await
             .with_context(|| format!("upsert review_context {kind} for {task_id}"))?;
         Ok(())
+    }
+
+    async fn llm_usage_since(&self, since: DateTime<Utc>) -> Result<Vec<ProviderUsageStats>> {
+        // One index range scan over `reviews.created_at` (idx_reviews_created_at);
+        // `llm_summary IS NOT NULL` drops the rows that cannot name a provider
+        // in the same scan. The JSON is decoded in Rust rather than by the
+        // backend's JSON functions: SQLite (`json_each`) and PostgreSQL
+        // (`jsonb_array_elements`) would need two dialects, and the window is
+        // small by construction.
+        let sql = self.sql(
+            "SELECT task_id, state, created_at, llm_summary FROM reviews \
+             WHERE created_at >= ? AND llm_summary IS NOT NULL",
+        );
+        let rows = ::sqlx::query_as::<_, rows::LlmUsageRowTuple>(&sql)
+            .bind(encode_ts(&since))
+            .fetch_all(self.pool())
+            .await
+            .context("aggregate llm usage")?;
+        Ok(rows::aggregate_llm_usage(rows))
     }
 }
 
@@ -1326,6 +1345,125 @@ mod tests {
         .unwrap();
         assert!(provider.is_none(), "legacy report must keep llm_provider NULL");
         assert!(summary.is_none(), "legacy review must keep llm_summary NULL");
+    }
+
+    // ─── RENG-56: per-provider LLM usage over a window ───
+
+    /// Seed one `reviews` row carrying an LLM summary at a chosen timestamp.
+    /// `summary` is stored verbatim: `None` = the row records no provider.
+    async fn seed_usage(
+        store: &SqlxStore,
+        state: TaskState,
+        created_at: DateTime<Utc>,
+        summary: Option<String>,
+    ) -> uuid::Uuid {
+        let entry = TaskEntry {
+            task_id: uuid::Uuid::new_v4(),
+            state,
+            created_at,
+            started_at: None,
+            completed_at: None,
+            result: None,
+            error: None,
+            request: None,
+            source_meta: Default::default(),
+            progress: None,
+            expert_name: None,
+            llm_summary: summary,
+        };
+        ReviewStore::create(store, &entry).await.unwrap();
+        entry.task_id
+    }
+
+    /// The `llm_summary` TEXT one review records for a provider.
+    fn summary(provider: &str) -> String {
+        format!(r#"[{{"provider":"{provider}","model":"{provider}-model"}}]"#)
+    }
+
+    /// RENG-56: `llm_usage_since` counts the reviews that recorded a provider
+    /// inside the window, splits their outcomes, and keeps the newest use.
+    /// The window bound is included, the microsecond before it is not.
+    #[tokio::test]
+    async fn llm_usage_since_aggregates_the_window_and_holds_the_boundary() {
+        let store = fresh_store().await;
+        let since =
+            (Utc.with_ymd_and_hms(2026, 9, 8, 0, 0, 0).unwrap() + chrono::Duration::nanoseconds(500)).trunc_subsecs(6);
+
+        // Inside the window.
+        seed_usage(&store, TaskState::Completed, since, Some(summary("xiaomi"))).await;
+        seed_usage(
+            &store,
+            TaskState::Failed,
+            since + chrono::Duration::hours(1),
+            Some(summary("xiaomi")),
+        )
+        .await;
+        seed_usage(
+            &store,
+            TaskState::Completed,
+            since + chrono::Duration::hours(2),
+            Some(summary("deepseek")),
+        )
+        .await;
+        // Cancelled: usage yes, outcome bucket no.
+        seed_usage(
+            &store,
+            TaskState::Cancelled,
+            since + chrono::Duration::hours(3),
+            Some(summary("deepseek")),
+        )
+        .await;
+        // A review that failed before recording anything: no summary, so it
+        // cannot name a provider.
+        seed_usage(&store, TaskState::Failed, since + chrono::Duration::hours(4), None).await;
+        // Exactly on the bound → included; one microsecond earlier → excluded.
+        seed_usage(&store, TaskState::Completed, since, Some(summary("boundary-in"))).await;
+        seed_usage(
+            &store,
+            TaskState::Completed,
+            since - chrono::Duration::microseconds(1),
+            Some(summary("boundary-out")),
+        )
+        .await;
+
+        let stats = ReviewStore::llm_usage_since(&store, since).await.unwrap();
+        let names: Vec<&str> = stats.iter().map(|s| s.provider.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["boundary-in", "deepseek", "xiaomi"],
+            "the row one microsecond before the window must be excluded"
+        );
+
+        let xiaomi = stats.iter().find(|s| s.provider == "xiaomi").unwrap();
+        assert_eq!(xiaomi.usage_count, 2);
+        assert_eq!(xiaomi.completed_count, 1);
+        assert_eq!(xiaomi.failed_count, 1);
+        assert_eq!(
+            xiaomi.last_used_at.unwrap(),
+            since + chrono::Duration::hours(1),
+            "the newest use of the provider, not the window end"
+        );
+
+        let deepseek = stats.iter().find(|s| s.provider == "deepseek").unwrap();
+        assert_eq!(deepseek.usage_count, 2);
+        assert_eq!(deepseek.completed_count, 1);
+        assert_eq!(deepseek.failed_count, 0, "a cancelled review is not a provider failure");
+        assert_eq!(deepseek.last_used_at.unwrap(), since + chrono::Duration::hours(3));
+    }
+
+    /// An existing store with no recorded usage yields an empty aggregate —
+    /// no fabricated provider rows (the handler turns this into null fields).
+    #[tokio::test]
+    async fn llm_usage_since_is_empty_without_recorded_usage() {
+        let store = fresh_store().await;
+        let since = Utc.with_ymd_and_hms(2026, 9, 8, 0, 0, 0).unwrap();
+        assert!(ReviewStore::llm_usage_since(&store, since).await.unwrap().is_empty());
+
+        // A review without a summary (pending / failed-before-any-report)
+        // records no provider either.
+        seed_usage(&store, TaskState::Pending, since, None).await;
+        let stats = ReviewStore::llm_usage_since(&store, since).await.unwrap();
+        assert!(stats.is_empty(), "a NULL summary records no provider: {stats:?}");
     }
 
     // ─── DiscussionStore (step 6a) ───

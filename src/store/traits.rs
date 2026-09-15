@@ -138,6 +138,47 @@ pub trait ReviewStore: Send + Sync {
         content_hash: &str,
         token_estimate: i64,
     ) -> Result<()>;
+
+    /// RENG-56: per-provider LLM usage over the window `created_at >= since`,
+    /// aggregated from `reviews.llm_summary` (written since 0.10.2 by
+    /// RENG-38) plus `reviews.state`.
+    ///
+    /// ONE USAGE = one review that recorded this provider. `llm_summary` is
+    /// the deduplicated `[{provider, model}]` set a review ran on, so a review
+    /// that used one provider for two models still counts ONCE for that
+    /// provider, and the individual expert calls are not recorded. That is
+    /// the granularity the history list shows, so the number is
+    /// cross-checkable against `GET /api/v1/reviews`.
+    ///
+    /// Cost: one index range scan over `reviews.created_at` (the window) plus
+    /// a JSON parse per matching row. Rows outside the window are never read,
+    /// and rows without a summary (`llm_summary IS NULL`: pending / running /
+    /// failed-before-any-report reviews, pre-0.10.2 records) are filtered in
+    /// the same scan.
+    async fn llm_usage_since(&self, since: DateTime<Utc>) -> Result<Vec<ProviderUsageStats>>;
+}
+
+/// RENG-56: recorded LLM usage of one provider inside a query window.
+///
+/// Produced by [`ReviewStore::llm_usage_since`] and consumed by
+/// `GET /api/v1/llm/providers`; the derived metrics (share, success rate) are
+/// computed by the API layer, which also knows the window's total.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderUsageStats {
+    /// Provider name exactly as recorded in `llm_summary` at review time.
+    pub provider: String,
+    /// Reviews that recorded this provider in the window.
+    pub usage_count: u64,
+    /// Of those, the ones that ended `completed`.
+    pub completed_count: u64,
+    /// Of those, the ones that ended `failed`. NOTE: a review that failed
+    /// before producing any report has no `llm_summary` and therefore cannot
+    /// appear here, so this counts "used the provider, then failed", not
+    /// "the provider call failed".
+    pub failed_count: u64,
+    /// Newest `reviews.created_at` among those reviews; `None` only when a
+    /// row's timestamp failed to decode.
+    pub last_used_at: Option<DateTime<Utc>>,
 }
 
 /// Handler-normalized history-list parameters (design/persistence.md §8.1 —

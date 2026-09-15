@@ -1,10 +1,14 @@
 #[cfg(test)]
+mod sampling_tests;
+#[cfg(test)]
 mod tests;
 
 use anyhow::{Context, Result};
+use chrono::Utc;
 use std::sync::Arc;
 
 use super::provider::{CompletionParams, CompletionResult, Message, ProviderRegistry};
+use super::sampling::{truncate_error, LlmCallSample, LlmCallSink};
 use crate::models::*;
 
 /// Client for LLM completion requests with multi-provider support.
@@ -12,6 +16,11 @@ use crate::models::*;
 pub struct LLMClient {
     inner: reqwest::Client,
     provider_registry: Option<Arc<ProviderRegistry>>,
+    /// RENG-57: where every attempt's latency is recorded, when the caller
+    /// has a place to put it. `None` (the default) records nothing — the CLI
+    /// and unit tests keep working unchanged, and only the review path (which
+    /// owns a store) attaches one.
+    sink: Option<Arc<dyn LlmCallSink>>,
 }
 
 /// What the retry loop should do with a failed completion (RENG-35).
@@ -51,12 +60,24 @@ impl LLMClient {
                 .build()
                 .expect("Failed to create HTTP client"),
             provider_registry: None,
+            sink: None,
         }
     }
 
     /// Set a provider registry for provider-based routing.
     pub fn with_registry(mut self, registry: Arc<ProviderRegistry>) -> Self {
         self.provider_registry = Some(registry);
+        self
+    }
+
+    /// Attach the sink every attempt's latency is recorded to (RENG-57).
+    ///
+    /// A review owns one sink bound to its id
+    /// ([`crate::store::llm_samples::StoreLlmCallSink`]); the client only
+    /// reports what it did. Without a sink no sample is written anywhere —
+    /// which is the CLI's case, where no store exists to write to.
+    pub fn with_sink(mut self, sink: Option<Arc<dyn LlmCallSink>>) -> Self {
+        self.sink = sink;
         self
     }
 
@@ -173,12 +194,48 @@ impl LLMClient {
     }
 
     /// Complete using a specific LLM config (backward-compatible API).
+    ///
+    /// The single-config entry point: there is no chain here, so a recorded
+    /// sample (RENG-57) carries `chain_position = 1` / `attempt = 1`.
     pub async fn complete(
         &self,
         config: &LLMConfig,
         system_prompt: &str,
         user_prompt: &str,
     ) -> Result<CompletionResult> {
+        self.complete_attempt(config, system_prompt, user_prompt, 1, 1).await
+    }
+
+    /// One attempt of one config — the body of [`Self::complete`], plus the
+    /// RENG-57 latency sample.
+    ///
+    /// `chain_position` / `attempt` are the caller's bookkeeping for the
+    /// recorded row ([`Self::complete_with_fallback`] passes the real ones);
+    /// they do not change what is sent to the provider.
+    ///
+    /// The sample is written for BOTH outcomes, after the request returns and
+    /// before the result is handed back: a failed attempt is recorded by the
+    /// same path that records a successful one, which is what gives the page
+    /// the call-level failure history the review-level snapshot cannot.
+    async fn complete_attempt(
+        &self,
+        config: &LLMConfig,
+        system_prompt: &str,
+        user_prompt: &str,
+        chain_position: u32,
+        attempt: u32,
+    ) -> Result<CompletionResult> {
+        let started = std::time::Instant::now();
+        let result = self.dispatch(config, system_prompt, user_prompt).await;
+        self.record_sample(config, started.elapsed(), &result, chain_position, attempt)
+            .await;
+        result
+    }
+
+    /// The provider call itself: registry routing when the provider is known,
+    /// the direct OpenAI-compatible HTTP path otherwise. Records the
+    /// Prometheus metric and attributes the result to the hitting config.
+    async fn dispatch(&self, config: &LLMConfig, system_prompt: &str, user_prompt: &str) -> Result<CompletionResult> {
         // If we have a provider registry, use it for better routing
         if let Some(ref registry) = self.provider_registry {
             if let Some(provider) = registry.get(&config.provider) {
@@ -200,6 +257,33 @@ impl LLMClient {
         let result = self.complete_direct(config, system_prompt, user_prompt).await;
         Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
         result.map(|r| Self::attribute_provider(r, config, false))
+    }
+
+    /// Hand one attempt's latency to the sink, if one is attached (RENG-57).
+    ///
+    /// Best-effort by contract: the sink logs its own write failure, and a
+    /// recording problem never turns a successful completion into an error or
+    /// hides the provider's own failure from the caller.
+    async fn record_sample(
+        &self,
+        config: &LLMConfig,
+        elapsed: std::time::Duration,
+        result: &Result<CompletionResult>,
+        chain_position: u32,
+        attempt: u32,
+    ) {
+        let Some(sink) = &self.sink else { return };
+        sink.record(&LlmCallSample {
+            at: Utc::now(),
+            provider: config.provider.clone(),
+            model: config.model.clone(),
+            latency_ms: elapsed.as_millis() as u64,
+            success: result.is_ok(),
+            error: result.as_ref().err().map(|e| truncate_error(&format!("{e:#}"))),
+            chain_position,
+            attempt,
+        })
+        .await;
     }
 
     /// Direct HTTP-based completion (backward compat, OpenAI-compatible only).
@@ -342,7 +426,12 @@ impl LLMClient {
         for (i, config) in configs.iter().enumerate() {
             for attempt in 0..max_retries {
                 let _attempt_start = std::time::Instant::now();
-                let result = self.complete(config, system_prompt, user_prompt).await;
+                // RENG-57: the sample this attempt produces must name where in
+                // the chain it happened and which retry it was, so a failed
+                // primary attempt is distinguishable from a retry of it.
+                let result = self
+                    .complete_attempt(config, system_prompt, user_prompt, i as u32 + 1, attempt + 1)
+                    .await;
                 let attempt_dur = _attempt_start.elapsed();
 
                 match result {

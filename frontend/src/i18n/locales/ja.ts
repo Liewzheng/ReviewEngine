@@ -593,6 +593,9 @@ export default {
       disabledMessage: '{name} を無効にしました',
     },
     updateFailed: '{name} の更新に失敗しました。変更を元に戻しました',
+    memoryOnlyTitle: 'メモリ上のみに適用されました',
+    memoryOnlyMessage:
+      '{name} を更新しましたが、このサーバーには設定データベースが接続されていません。サーバーの再起動時に変更は失われます。',
   },
   upgrade: {
     title: 'Review Engine をアップグレード',

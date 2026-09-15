@@ -603,6 +603,9 @@ export default {
       disabledMessage: '{name} is now disabled',
     },
     updateFailed: 'Failed to update {name}. Change reverted.',
+    memoryOnlyTitle: 'Applied in memory only',
+    memoryOnlyMessage:
+      '{name} was updated, but this server has no configuration database attached — the change will be lost when the server restarts.',
   },
   upgrade: {
     title: 'Upgrade Review Engine',

@@ -587,6 +587,8 @@ export default {
       disabledMessage: '{name} 已禁用',
     },
     updateFailed: '更新 {name} 失败，已还原更改',
+    memoryOnlyTitle: '仅在内存中生效',
+    memoryOnlyMessage: '{name} 已更新，但该服务未连接配置数据库，服务重启后该修改将丢失。',
   },
   upgrade: {
     title: '升级 Review Engine',

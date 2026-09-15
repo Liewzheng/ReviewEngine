@@ -35,6 +35,19 @@ export interface Expert {
   lastReviews: ExpertReviewSummary[]
 }
 
+/**
+ * Response of `PUT /system/experts/{id}`: the expert as the server now holds
+ * it, plus whether that state is durable.
+ *
+ * `persisted === false` means the server has no configuration store attached
+ * (`REVIEW_DISABLE_DB=1`, embedded use): the edit took effect in memory but is
+ * LOST when the server restarts. The page must say so instead of showing a
+ * plain success.
+ */
+export interface ExpertUpdateResult extends Expert {
+  persisted?: boolean
+}
+
 /** Maps each expert category to its display color (hex). */
 export const categoryColorMap: Record<ExpertCategory, string> = {
   security: '#ef4444',

@@ -29,9 +29,9 @@ withDefaults(defineProps<Props>(), {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 24px;
+  margin-bottom: var(--space-5);
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .page-header__title {
@@ -40,7 +40,7 @@ withDefaults(defineProps<Props>(), {
   letter-spacing: -0.01em;
   line-height: 1.3;
   color: var(--text-primary);
-  margin: 0 0 4px;
+  margin: 0 0 var(--space-1);
 }
 
 .page-header__subtitle {
@@ -52,7 +52,7 @@ withDefaults(defineProps<Props>(), {
 .page-header__right {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 

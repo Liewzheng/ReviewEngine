@@ -135,7 +135,7 @@ async function submit() {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 24px;
+  padding: var(--space-5);
   background-color: var(--bg-primary);
   /* Soft entrance; disabled for reduced-motion users. */
   animation: fade-in 0.18s ease-out;
@@ -159,17 +159,17 @@ async function submit() {
 .bootstrap-card {
   width: 100%;
   max-width: 420px;
-  padding: 32px 28px;
+  padding: var(--space-6) 28px;
   background-color: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-lg);
-  box-shadow: var(--shadow-card, 0 8px 30px rgba(0, 0, 0, 0.18));
+  box-shadow: var(--shadow-card);
 }
 
 .brand {
   font-size: 32px;
   text-align: center;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-3);
 }
 
 .title {
@@ -177,7 +177,7 @@ async function submit() {
   font-weight: 600;
   color: var(--text-primary);
   text-align: center;
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
 }
 
 .intro {
@@ -192,7 +192,7 @@ async function submit() {
   font-size: 13px;
   font-weight: 500;
   color: var(--text-primary);
-  margin: 14px 0 6px;
+  margin: var(--space-4) 0 6px;
 }
 
 .field-hint {
@@ -205,7 +205,7 @@ async function submit() {
 .error {
   font-size: 13px;
   color: var(--error);
-  margin: 12px 0 0;
+  margin: var(--space-3) 0 0;
 }
 
 .submit {

@@ -15,7 +15,7 @@ import {
   WarningFilled,
 } from '@element-plus/icons-vue'
 import type { Expert } from '../../types/expert'
-import { categoryColorMap, categoryLabelMap } from '../../types/expert'
+import { categoryLabelMap } from '../../types/expert'
 
 const props = defineProps<{
   expert: Expert
@@ -34,11 +34,9 @@ const cardStyle = computed(() => ({
 }))
 
 const iconStyle = computed(() => ({
-  filter: props.expert.enabled ? 'none' : 'grayscale(100%)',
-  color: categoryColorMap[props.expert.category],
+  color: props.expert.enabled ? 'var(--accent-primary)' : 'var(--text-secondary)',
 }))
 
-const categoryColor = computed(() => categoryColorMap[props.expert.category])
 const categoryLabel = computed(() => categoryLabelMap[props.expert.category])
 
 const iconComponents: Record<string, Component> = {
@@ -84,7 +82,7 @@ const handleViewDetails = () => {
         <div class="expert-info">
           <h3 class="expert-name">{{ expert.name }}</h3>
           <div class="expert-tags">
-            <el-tag :color="categoryColor" effect="dark" size="small" class="category-tag">
+            <el-tag size="small" effect="plain" class="category-tag">
               {{ categoryLabel }}
             </el-tag>
             <el-tag v-if="!expert.enabled" type="info" size="small" effect="plain" class="status-tag">
@@ -100,7 +98,7 @@ const handleViewDetails = () => {
             :aria-label="expert.enabled ? $t('common.enabled') : $t('common.disabled')"
             :model-value="expert.enabled"
             @update:model-value="handleToggle"
-            :active-color="'var(--success)'"
+            :active-color="'var(--accent-success)'"
             :inactive-color="'var(--offline)'"
           />
         </el-tooltip>
@@ -158,7 +156,7 @@ const handleViewDetails = () => {
   height: 100%;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
   animation: cardEnter 0.3s ease both;
   animation-delay: calc(v-bind('index') * 60ms);
 }
@@ -183,20 +181,20 @@ const handleViewDetails = () => {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .header-left {
   display: flex;
   align-items: flex-start;
-  gap: 12px;
+  gap: var(--space-3);
   flex: 1;
   min-width: 0;
 }
 
 .expert-icon {
   flex-shrink: 0;
-  transition: filter 0.2s ease;
+  transition: color 0.2s ease;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -226,7 +224,11 @@ const handleViewDetails = () => {
   flex-wrap: wrap;
 }
 
+/* R1.5: a muted surface, not one of the nine category colours — the icon
+   already carries the category through its glyph. */
 .category-tag {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
   border: none;
   font-weight: 500;
 }
@@ -234,7 +236,7 @@ const handleViewDetails = () => {
 .status-tag {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   border-color: var(--offline);
   color: var(--offline);
 }
@@ -247,7 +249,7 @@ const handleViewDetails = () => {
 .weight-section {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .weight-label {
@@ -274,11 +276,11 @@ const handleViewDetails = () => {
 }
 
 :deep(.weight-slider .el-slider__bar) {
-  background-color: var(--brand);
+  background-color: var(--accent-primary);
 }
 
 :deep(.weight-slider .el-slider__button) {
-  border-color: var(--brand);
+  border-color: var(--accent-primary);
   transition: all 0.1s ease;
 }
 
@@ -300,9 +302,9 @@ const handleViewDetails = () => {
 
 .card-actions {
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   margin-top: auto;
-  padding-top: 8px;
+  padding-top: var(--space-2);
   border-top: 1px solid var(--border-color);
 }
 
@@ -318,8 +320,8 @@ const handleViewDetails = () => {
 
 @keyframes flashBorder {
   0% {
-    border-color: var(--success);
-    box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.3);
+    border-color: var(--accent-success);
+    box-shadow: 0 0 0 2px var(--accent-success-ring);
   }
   100% {
     border-color: var(--border-color);

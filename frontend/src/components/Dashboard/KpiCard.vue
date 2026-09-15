@@ -97,14 +97,14 @@ const trendText = computed(() => {
 .kpi-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 12px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
 }
 
 .kpi-icon {
   color: var(--brand);
   background: var(--bg-active);
-  padding: 8px;
+  padding: var(--space-2);
   border-radius: var(--radius-sm);
 }
 
@@ -118,7 +118,7 @@ const trendText = computed(() => {
   font-size: 28px;
   font-weight: 600;
   color: var(--text-primary);
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
@@ -131,7 +131,7 @@ const trendText = computed(() => {
 .kpi-trend {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   font-size: 12px;
   font-weight: 500;
   color: var(--text-secondary);

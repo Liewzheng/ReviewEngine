@@ -29,6 +29,7 @@ import {
 } from 'lightweight-charts'
 import { useDashboard } from '../composables/useDashboard'
 import { useTheme } from '../composables/useTheme'
+import { CHART_PALETTE_FALLBACKS, CHART_SERIES_FALLBACK } from '../chartPalette'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
@@ -136,14 +137,14 @@ function headerCellStyle(): Record<string, string> {
     fontSize: '12px',
     textTransform: 'uppercase',
     letterSpacing: '0.5px',
-    padding: '12px 16px',
+    padding: 'var(--space-3) var(--space-4)',
     borderBottom: '1px solid var(--border-color)',
   }
 }
 
 function cellStyle(): Record<string, string> {
   return {
-    padding: '0 12px',
+    padding: '0 var(--space-3)',
     borderBottom: '1px solid var(--border-color)',
   }
 }
@@ -198,19 +199,11 @@ function floorAutoscale(): (base: () => AutoscaleInfo | null) => AutoscaleInfo |
  * `var(--…)` references — invalid strings are silently dropped and the chart
  * renders with near-black defaults. Resolve the theme vars through
  * getComputedStyle whenever the palette is applied (chart init and every
- * theme switch), falling back to the dark palette constants.
+ * theme switch), falling back to the dark palette mirrored in `chartPalette.ts`.
  */
-const CHART_COLOR_FALLBACKS: Record<string, string> = {
-  '--chart-grid': 'rgba(148, 163, 184, 0.28)',
-  '--chart-text': '#cbd5e1',
-  '--chart-line': '#818cf8',
-  '--chart-bar': '#a78bfa',
-  '--bg-primary': '#121314',
-}
-
 function resolveChartColor(varName: string): string {
   const value = getComputedStyle(document.documentElement).getPropertyValue(varName).trim()
-  return value || CHART_COLOR_FALLBACKS[varName] || '#a78bfa'
+  return value || CHART_PALETTE_FALLBACKS[varName] || CHART_SERIES_FALLBACK
 }
 
 /**
@@ -474,8 +467,8 @@ onUnmounted(() => {
       <template v-if="loading">
         <el-skeleton v-for="i in 4" :key="i" animated class="kpi-skeleton">
           <template #template>
-            <el-skeleton-item variant="circle" style="width: 40px; height: 40px; margin-bottom: 12px;" />
-            <el-skeleton-item variant="text" style="width: 60%; height: 20px; margin-bottom: 8px;" />
+            <el-skeleton-item variant="circle" style="width: 40px; height: 40px; margin-bottom: var(--space-3);" />
+            <el-skeleton-item variant="text" style="width: 60%; height: 20px; margin-bottom: var(--space-2);" />
             <el-skeleton-item variant="text" style="width: 40%; height: 14px;" />
           </template>
         </el-skeleton>
@@ -721,8 +714,8 @@ onUnmounted(() => {
 .kpi-grid {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 
 .kpi-skeleton {
@@ -737,8 +730,8 @@ onUnmounted(() => {
 .row-two {
   display: grid;
   grid-template-columns: 7fr 3fr;
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 
 /* Card Header */
@@ -751,7 +744,7 @@ onUnmounted(() => {
 .card-header-left {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-weight: 600;
   font-size: 14px;
   color: var(--text-primary);
@@ -760,7 +753,7 @@ onUnmounted(() => {
 .view-all-link {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   font-size: 12px;
   font-weight: 500;
   color: var(--brand);
@@ -772,7 +765,7 @@ onUnmounted(() => {
 
 /* Trend Chart */
 .trend-body {
-  padding: 16px 20px 20px;
+  padding: var(--space-4) 20px 20px;
 }
 
 .chart-wrap {
@@ -791,9 +784,9 @@ onUnmounted(() => {
   transform: translate(-50%, -100%);
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 6px 12px;
-  background: rgba(26, 28, 30, 0.95);
+  gap: var(--space-3);
+  padding: 6px var(--space-3);
+  background: var(--bg-tooltip);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-card);
@@ -825,16 +818,16 @@ onUnmounted(() => {
   --el-segmented-item-hover-bg-color: var(--bg-hover);
   --el-segmented-item-hover-color: var(--text-primary);
   --el-segmented-item-selected-bg-color: var(--brand);
-  --el-segmented-item-selected-color: #ffffff;
-  border-radius: 999px;
+  --el-segmented-item-selected-color: var(--text-on-accent);
+  border-radius: var(--radius-pill);
 }
 
 .trend-mode-switch :deep(.el-segmented__item-selected) {
-  border-radius: 999px;
+  border-radius: var(--radius-pill);
 }
 
 .trend-summary {
-  margin-top: 12px;
+  margin-top: var(--space-3);
   text-align: center;
   font-size: 12px;
   color: var(--text-secondary);
@@ -848,7 +841,7 @@ onUnmounted(() => {
   justify-content: center;
   padding: 40px 20px;
   color: var(--text-secondary);
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .trend-empty p, .recent-empty p {
@@ -858,11 +851,11 @@ onUnmounted(() => {
 
 /* Health Card */
 .health-body {
-  padding: 12px 20px 16px;
+  padding: var(--space-3) 20px var(--space-4);
 }
 
 .health-section {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .health-section-title {
@@ -871,8 +864,8 @@ onUnmounted(() => {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   color: var(--text-secondary);
-  margin-bottom: 4px;
-  padding-left: 4px;
+  margin-bottom: var(--space-1);
+  padding-left: var(--space-1);
 }
 
 .health-row {
@@ -911,10 +904,10 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 8px;
-  padding: 12px 0;
+  gap: var(--space-2);
+  padding: var(--space-3) 0;
   border-top: 1px solid var(--border-color);
-  margin-top: 4px;
+  margin-top: var(--space-1);
 }
 
 .health-overall-text {
@@ -950,7 +943,7 @@ onUnmounted(() => {
 .mr-title-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
   overflow: hidden;
 }
@@ -991,7 +984,7 @@ onUnmounted(() => {
 .author-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   font-size: 13px;
   color: var(--text-primary);
 }
@@ -1001,7 +994,7 @@ onUnmounted(() => {
   height: 24px;
   border-radius: 50%;
   background: var(--brand);
-  color: #fff;
+  color: var(--text-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;

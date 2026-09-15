@@ -52,7 +52,7 @@ const when = computed(() => new Date(props.at).toLocaleString())
 .test-result-line {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
 }
 

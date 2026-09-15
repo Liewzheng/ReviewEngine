@@ -791,7 +791,7 @@ watch(() => route.query, () => {
     <!-- Detail Drawer -->
     <el-drawer
       v-model="drawerOpen"
-      size="600px"
+      size="var(--modal-w-lg)"
       class="detail-drawer"
     >
       <template #header>
@@ -955,7 +955,7 @@ watch(() => route.query, () => {
 .history-page {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
   max-width: 1400px;
   margin: 0 auto;
 }
@@ -974,7 +974,7 @@ watch(() => route.query, () => {
 
 .history-table :deep(.el-table__cell) {
   height: 48px;
-  padding: 0 12px;
+  padding: 0 var(--space-3);
   vertical-align: middle;
 }
 
@@ -982,9 +982,9 @@ watch(() => route.query, () => {
 .filter-bar {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--space-3);
   align-items: center;
-  padding: 16px 20px;
+  padding: var(--space-4) 20px;
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -1048,14 +1048,14 @@ watch(() => route.query, () => {
 .title-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   height: 100%;
 }
 
 .title-text {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   min-width: 0;
   overflow: hidden;
 }
@@ -1081,8 +1081,8 @@ watch(() => route.query, () => {
   color: var(--text-secondary);
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
-  border-radius: 999px;
-  padding: 1px 8px;
+  border-radius: var(--radius-pill);
+  padding: 1px var(--space-2);
   font-family: var(--font-mono);
   line-height: 1.5;
   white-space: nowrap;
@@ -1092,7 +1092,7 @@ watch(() => route.query, () => {
 .author-cell {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .author-avatar {
@@ -1100,7 +1100,7 @@ watch(() => route.query, () => {
   height: 28px;
   border-radius: 50%;
   background: var(--brand);
-  color: white;
+  color: var(--text-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1142,7 +1142,7 @@ watch(() => route.query, () => {
 
 .participant-avatar + .participant-avatar,
 .participant-avatar + .participant-more {
-  margin-left: -8px;
+  margin-left: calc(var(--space-2) * -1);
 }
 
 /* Ring in the card's own colour so the overlap reads as a stack rather than a
@@ -1174,7 +1174,7 @@ watch(() => route.query, () => {
 .participants-tooltip-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .participants-tooltip-avatar {
@@ -1182,7 +1182,7 @@ watch(() => route.query, () => {
   height: 20px;
   border-radius: 50%;
   background: var(--brand);
-  color: white;
+  color: var(--text-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1208,8 +1208,8 @@ watch(() => route.query, () => {
 .participants-tooltip-role {
   margin-left: auto;
   font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 8px;
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-pill);
   background: var(--bg-hover);
   color: var(--text-secondary);
   white-space: nowrap;
@@ -1217,8 +1217,8 @@ watch(() => route.query, () => {
 
 .participants-tooltip-bot {
   font-size: 10px;
-  padding: 1px 5px;
-  border-radius: 8px;
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-pill);
   border: 1px solid var(--border-color);
   color: var(--text-secondary);
   white-space: nowrap;
@@ -1257,9 +1257,9 @@ watch(() => route.query, () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  padding: 12px 0;
+  padding: var(--space-3) 0;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .pagination-info {
@@ -1270,7 +1270,7 @@ watch(() => route.query, () => {
 .pagination-controls {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 /* Skeleton */
@@ -1285,14 +1285,14 @@ watch(() => route.query, () => {
 .drawer-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .drawer-title-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
 }
 
@@ -1314,14 +1314,14 @@ watch(() => route.query, () => {
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .meta-item {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--bg-surface);
   border-radius: var(--radius-md);
   border: 1px solid var(--border-color);
@@ -1355,7 +1355,7 @@ watch(() => route.query, () => {
   font-size: 14px;
   font-weight: 600;
   color: var(--text-primary);
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
 }
 
 .expert-title {
@@ -1363,7 +1363,7 @@ watch(() => route.query, () => {
   justify-content: space-between;
   align-items: center;
   width: 100%;
-  padding-right: 24px;
+  padding-right: var(--space-5);
   font-size: 13px;
   color: var(--text-primary);
 }
@@ -1371,7 +1371,7 @@ watch(() => route.query, () => {
 .expert-meta {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 /* Column alignment for the status + score badges on each expert row.
@@ -1418,10 +1418,10 @@ watch(() => route.query, () => {
 }
 
 .expert-content {
-  padding: 8px 0;
+  padding: var(--space-2) 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .expert-markdown {
@@ -1429,7 +1429,7 @@ watch(() => route.query, () => {
   color: var(--text-primary);
   line-height: 1.6;
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--bg-surface);
   border-radius: var(--radius-sm);
   border: 1px solid var(--border-color);
@@ -1444,7 +1444,7 @@ watch(() => route.query, () => {
 }
 
 .raw-toggle-summary {
-  padding: 6px 12px;
+  padding: 6px var(--space-3);
   font-size: 12px;
   color: var(--text-secondary);
   cursor: pointer;
@@ -1457,7 +1457,7 @@ watch(() => route.query, () => {
 
 .raw-response-block {
   margin: 0;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   border-top: 1px solid var(--border-color);
   font-family: var(--font-mono);
   font-size: 12px;
@@ -1470,7 +1470,7 @@ watch(() => route.query, () => {
 }
 
 .raw-panel {
-  padding: 8px 0;
+  padding: var(--space-2) 0;
 }
 
 .raw-text {
@@ -1481,7 +1481,7 @@ watch(() => route.query, () => {
 
 .comment-block {
   margin: 0;
-  padding: 12px;
+  padding: var(--space-3);
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
@@ -1504,7 +1504,7 @@ watch(() => route.query, () => {
 .drawer-badges {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-shrink: 0;
 }
 
@@ -1522,7 +1522,7 @@ watch(() => route.query, () => {
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  padding: 12px;
+  padding: var(--space-3);
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-primary);
@@ -1534,8 +1534,8 @@ watch(() => route.query, () => {
 
 .drawer-footer {
   display: flex;
-  gap: 8px;
-  padding-top: 16px;
+  gap: var(--space-2);
+  padding-top: var(--space-4);
   border-top: 1px solid var(--border-color);
   margin-top: auto;
   flex-wrap: wrap;
@@ -1569,7 +1569,7 @@ watch(() => route.query, () => {
   .page-header {
     flex-direction: column;
     align-items: flex-start;
-    gap: 12px;
+    gap: var(--space-3);
   }
 
   .history-table :deep(.el-table__cell:not(.el-table-column--selection):not(.is-fixed-right)) {

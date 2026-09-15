@@ -45,7 +45,7 @@ describe('PageHeader', () => {
   });
 
   it('keeps the title at 20px inside a 24px-spaced header row', () => {
-    expect(source).toMatch(/\.page-header\s*\{[^}]*margin-bottom:\s*24px/);
+    expect(source).toMatch(/\.page-header\s*\{[^}]*margin-bottom:\s*var\(--space-5\)/);
     expect(source).toMatch(/\.page-header__title\s*\{[^}]*font-size:\s*20px/);
     expect(source).toMatch(/\.page-header__title\s*\{[^}]*font-weight:\s*600/);
     expect(source).toMatch(/\.page-header__subtitle\s*\{[^}]*font-size:\s*13px/);

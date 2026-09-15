@@ -21,17 +21,17 @@ const props = withDefaults(defineProps<Props>(), {
 const { t } = useI18n()
 
 const statusConfigMap: Record<string, { type: string; textKey: string; color: string; effect?: string }> = {
-  success:    { type: 'success', textKey: 'common.status.operational', color: 'var(--success)' },
-  running:    { type: 'success', textKey: 'common.status.inProgress',  color: 'var(--success)' },
-  completed:  { type: 'success', textKey: 'common.status.completed',   color: 'var(--success)' },
-  warning:    { type: 'warning', textKey: 'common.status.degraded',    color: 'var(--warning)' },
+  success:    { type: 'success', textKey: 'common.status.operational', color: 'var(--accent-success)' },
+  running:    { type: 'success', textKey: 'common.status.inProgress',  color: 'var(--accent-success)' },
+  completed:  { type: 'success', textKey: 'common.status.completed',   color: 'var(--accent-success)' },
+  warning:    { type: 'warning', textKey: 'common.status.degraded',    color: 'var(--accent-warning)' },
   queued:     { type: 'info',    textKey: 'common.status.queued',      color: 'var(--info)' },
   info:       { type: 'info',    textKey: 'common.status.info',        color: 'var(--info)' },
-  error:      { type: 'danger',  textKey: 'common.status.error',       color: 'var(--error)' },
-  failed:     { type: 'danger',  textKey: 'common.status.failed',      color: 'var(--error)' },
+  error:      { type: 'danger',  textKey: 'common.status.error',       color: 'var(--accent-error)' },
+  failed:     { type: 'danger',  textKey: 'common.status.failed',      color: 'var(--accent-error)' },
   offline:    { type: 'info',    textKey: 'common.status.offline',     color: 'var(--offline)' },
-  cancelled:  { type: 'info',    textKey: 'common.status.cancelled',   color: 'var(--text-secondary)', effect: 'plain' },
-  skipped:    { type: 'info',    textKey: 'common.status.skipped',     color: 'var(--text-secondary)', effect: 'plain' },
+  cancelled:  { type: 'info',    textKey: 'common.status.cancelled',   color: 'var(--text-tertiary)', effect: 'plain' },
+  skipped:    { type: 'info',    textKey: 'common.status.skipped',     color: 'var(--text-tertiary)', effect: 'plain' },
 }
 
 const config = computed(() => {
@@ -135,7 +135,7 @@ const isRunning = computed(() => props.status === 'running')
 .status-badge-tag {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .is-loading {

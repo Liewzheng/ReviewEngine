@@ -16,7 +16,6 @@
       v-if="task.progress != null"
       :percentage="task.progress"
       :color="statusColor"
-      :stroke-width="6"
       :show-text="true"
       class="task-progress"
     />
@@ -96,10 +95,10 @@ const emit = defineEmits<{
 
 const statusColor = computed(() => {
   switch (props.task.status) {
-    case 'running': return 'var(--brand)'
+    case 'running': return 'var(--accent-primary)'
     case 'queued': return 'var(--info)'
-    case 'failed': return 'var(--error)'
-    case 'completed': return 'var(--success)'
+    case 'failed': return 'var(--accent-error)'
+    case 'completed': return 'var(--accent-success)'
     case 'cancelled': return 'var(--text-secondary)'
     default: return 'var(--text-secondary)'
   }
@@ -193,8 +192,8 @@ const handleViewLogs = () => {
 .task-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  margin-bottom: 8px;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
 }
 
 .status-dot {
@@ -226,21 +225,11 @@ const handleViewLogs = () => {
 .task-subtitle {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-bottom: 12px;
+  margin-bottom: var(--space-3);
 }
 
 .task-progress {
-  margin-bottom: 8px;
-}
-
-.task-progress :deep(.el-progress-bar__outer) {
-  background-color: var(--bg-surface);
-  border-radius: 3px;
-}
-
-.task-progress :deep(.el-progress-bar__inner) {
-  border-radius: 3px;
-  transition: width 0.3s ease;
+  margin-bottom: var(--space-2);
 }
 
 .task-progress :deep(.el-progress__text) {
@@ -255,9 +244,9 @@ const handleViewLogs = () => {
   font-size: 12px;
   color: var(--text-secondary);
   display: flex;
-  gap: 8px;
+  gap: var(--space-2);
   align-items: center;
-  margin-bottom: 12px;
+  margin-bottom: var(--space-3);
 }
 
 .meta-sep {
@@ -269,9 +258,9 @@ const handleViewLogs = () => {
   color: var(--error);
   border: 1px solid var(--error);
   background-color: var(--bg-surface);
-  padding: 8px;
+  padding: var(--space-2);
   border-radius: var(--radius-sm);
-  margin-bottom: 12px;
+  margin-bottom: var(--space-3);
   word-break: break-word;
 }
 
@@ -283,13 +272,13 @@ const handleViewLogs = () => {
 .task-actions .el-button {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
 }
 
 .pause-overlay {
   position: absolute;
   inset: 0;
-  background: rgba(0, 0, 0, 0.3);
+  background: var(--bg-scrim);
   border-radius: var(--radius-md);
   display: flex;
   align-items: center;
@@ -300,7 +289,7 @@ const handleViewLogs = () => {
 .pause-content {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   color: var(--text-primary);
   font-size: 14px;
   font-weight: 600;

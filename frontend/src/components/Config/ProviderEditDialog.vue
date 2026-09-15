@@ -256,7 +256,7 @@ async function confirm() {
   <el-dialog
     v-model="dialogVisible"
     :title="mode === 'add' ? $t('config.providerCards.addTitle') : $t('config.providerCards.editTitle')"
-    width="640px"
+    width="var(--modal-w-lg)"
     append-to-body
     :close-on-click-modal="false"
   >
@@ -422,7 +422,7 @@ async function confirm() {
 
 <style scoped>
 .catalog-fallback-alert {
-  margin-bottom: 16px;
+  margin-bottom: var(--space-4);
 }
 
 .form-item-help {
@@ -433,14 +433,14 @@ async function confirm() {
 }
 
 .form-item-help.error-text {
-  color: var(--danger, var(--error));
+  color: var(--accent-error);
 }
 
 .provider-option {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .provider-option-meta {
@@ -453,7 +453,7 @@ async function confirm() {
    a mismatched gray block. Make the collapse fully transparent/borderless and
    keep only the subtle top divider as a visual separator. */
 .advanced-collapse {
-  margin-top: 4px;
+  margin-top: var(--space-1);
   border-top: 1px solid var(--border-color);
   border-bottom: none;
 }
@@ -467,7 +467,7 @@ async function confirm() {
 .slider-with-value {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
   width: 100%;
 }
 
@@ -488,23 +488,19 @@ async function confirm() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
 }
 
 .footer-test {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .footer-actions {
   display: flex;
   align-items: center;
   gap: 10px;
-}
-
-:deep(.el-dialog__body) {
-  padding-top: 12px;
 }
 </style>

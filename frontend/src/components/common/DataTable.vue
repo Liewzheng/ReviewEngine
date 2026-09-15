@@ -38,12 +38,12 @@ const headerCellStyle = (): CSSProperties => ({
   fontSize: '12px',
   textTransform: 'uppercase',
   letterSpacing: '0.5px',
-  padding: '12px 16px',
+  padding: 'var(--space-3) var(--space-4)',
   borderBottom: '1px solid var(--border-color)',
 })
 
 const cellStyle = (): CSSProperties => ({
-  padding: '12px 16px',
+  padding: 'var(--space-3) var(--space-4)',
   borderBottom: '1px solid var(--border-color)',
 })
 </script>

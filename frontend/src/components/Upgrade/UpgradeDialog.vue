@@ -162,7 +162,7 @@ async function copy(text: string) {
   <el-dialog
     v-model="visible"
     :title="$t('upgrade.title')"
-    width="560px"
+    width="var(--modal-w-md)"
     align-center
     @closed="stopPolling"
   >
@@ -229,7 +229,7 @@ async function copy(text: string) {
         <!-- download progress: byte counters, speed and ETA (only while
              the backend reports download progress) -->
         <div v-if="downloadInfo" class="download-progress">
-          <el-progress :percentage="downloadPercent" :stroke-width="10" class="download-bar" />
+          <el-progress :percentage="downloadPercent" class="download-bar" />
           <div class="download-stats">
             <span :title="downloadTotalTitle">
               {{ formatBytes(downloadInfo.downloadedBytes) }} / {{ formatBytes(downloadInfo.totalBytes) }}
@@ -304,13 +304,13 @@ async function copy(text: string) {
 .upgrade-content {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .version-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   flex-wrap: wrap;
 }
 
@@ -319,7 +319,7 @@ async function copy(text: string) {
   font-family: var(--font-mono);
   font-size: 13px;
   font-weight: 600;
-  padding: 3px 10px;
+  padding: var(--space-1) 10px;
   border-radius: var(--radius-sm);
 }
 
@@ -330,9 +330,9 @@ async function copy(text: string) {
 }
 
 .version-chip-to {
-  color: var(--success);
-  background: rgba(34, 197, 94, 0.12);
-  border: 1px solid rgba(34, 197, 94, 0.35);
+  color: var(--accent-success);
+  background: var(--accent-success-soft);
+  border: 1px solid var(--accent-success-border);
 }
 
 .version-arrow {
@@ -342,7 +342,7 @@ async function copy(text: string) {
 .release-link {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: var(--space-1);
   margin-left: auto;
   font-size: 13px;
   font-weight: 500;
@@ -358,7 +358,7 @@ async function copy(text: string) {
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  padding: 12px 16px;
+  padding: var(--space-3) var(--space-4);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -374,11 +374,11 @@ async function copy(text: string) {
 .command-block {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   background: var(--bg-surface);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
-  padding: 6px 8px 6px 12px;
+  padding: 6px var(--space-2) 6px var(--space-3);
 }
 
 .command-block code {
@@ -393,7 +393,7 @@ async function copy(text: string) {
 .form-section {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: var(--space-3);
 }
 
 .section-label {
@@ -404,7 +404,7 @@ async function copy(text: string) {
 }
 
 .upgrade-steps {
-  padding: 4px 0;
+  padding: var(--space-1) 0;
 }
 
 .step-message {
@@ -417,7 +417,7 @@ async function copy(text: string) {
 .download-progress {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .download-bar :deep(.el-progress-bar__outer) {
@@ -432,7 +432,7 @@ async function copy(text: string) {
 .download-stats {
   display: flex;
   justify-content: center;
-  gap: 12px;
+  gap: var(--space-3);
   flex-wrap: wrap;
   font-size: 12px;
   color: var(--text-secondary);
@@ -443,7 +443,7 @@ async function copy(text: string) {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 8px;
+  gap: var(--space-2);
 }
 
 .confirm-hint {

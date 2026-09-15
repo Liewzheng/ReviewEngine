@@ -10,7 +10,7 @@ import {
 import { ElNotification } from 'element-plus'
 import { useI18n } from 'vue-i18n'
 import type { Expert, ExpertCategory, ExpertReviewSummary } from '../types/expert'
-import { categoryColorMap, categoryLabelMap } from '../types/expert'
+import { categoryLabelMap } from '../types/expert'
 import { useExperts } from '../composables/useExperts'
 import { useAutoRefresh } from '../composables/useAutoRefresh'
 import ExpertCard from '../components/ExpertsManagement/ExpertCard.vue'
@@ -288,10 +288,10 @@ onBeforeUnmount(() => {
       >
         <template #template>
           <div style="padding: 20px">
-            <el-skeleton-item variant="circle" style="width: 40px; height: 40px; margin-bottom: 16px" />
-            <el-skeleton-item variant="h3" style="width: 60%; margin-bottom: 12px" />
-            <el-skeleton-item variant="text" style="width: 40%; margin-bottom: 16px" />
-            <el-skeleton-item variant="p" style="width: 100%; margin-bottom: 8px" />
+            <el-skeleton-item variant="circle" style="width: 40px; height: 40px; margin-bottom: var(--space-4)" />
+            <el-skeleton-item variant="h3" style="width: 60%; margin-bottom: var(--space-3)" />
+            <el-skeleton-item variant="text" style="width: 40%; margin-bottom: var(--space-4)" />
+            <el-skeleton-item variant="p" style="width: 100%; margin-bottom: var(--space-2)" />
             <el-skeleton-item variant="p" style="width: 80%" />
           </div>
         </template>
@@ -329,7 +329,7 @@ onBeforeUnmount(() => {
     <el-dialog
       v-model="detailModalVisible"
       :title="$t('experts.detailsTitle')"
-      width="600px"
+      width="var(--modal-w-lg)"
       class="expert-dialog"
       :aria-label="$t('experts.detailsAria')"
       destroy-on-close
@@ -337,11 +337,7 @@ onBeforeUnmount(() => {
       <div v-if="selectedExpert" class="detail-content">
         <div class="detail-header">
           <h2 class="detail-name">{{ selectedExpert.name }}</h2>
-          <el-tag
-            :color="categoryColorMap[selectedExpert.category]"
-            effect="dark"
-            size="small"
-          >
+          <el-tag size="small" effect="plain" class="category-tag">
             {{ categoryLabelMap[selectedExpert.category] }}
           </el-tag>
           <el-tag v-if="!selectedExpert.enabled" type="info" size="small" effect="plain">
@@ -449,13 +445,13 @@ onBeforeUnmount(() => {
 .stats-bar {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
-  gap: 16px;
-  margin-bottom: 24px;
+  gap: var(--space-4);
+  margin-bottom: var(--space-5);
 }
 
 .stat-card {
   text-align: center;
-  padding: 8px;
+  padding: var(--space-2);
   background-color: var(--bg-card);
   border-color: var(--border-color);
 }
@@ -466,7 +462,7 @@ onBeforeUnmount(() => {
   color: var(--brand);
   font-family: var(--font-mono);
   line-height: 1.2;
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .stat-label {
@@ -478,8 +474,8 @@ onBeforeUnmount(() => {
 /* Filters */
 .filters-bar {
   display: flex;
-  gap: 12px;
-  margin-bottom: 24px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-5);
   flex-wrap: wrap;
 }
 
@@ -497,7 +493,7 @@ onBeforeUnmount(() => {
 .skeleton-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 .skeleton-card {
@@ -519,12 +515,12 @@ onBeforeUnmount(() => {
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   grid-auto-rows: 1fr;
   align-items: stretch;
-  gap: 16px;
+  gap: var(--space-4);
 }
 
 /* Detail Dialog */
 .detail-content {
-  padding: 0 4px;
+  padding: 0 var(--space-1);
 }
 
 .detail-header {
@@ -532,7 +528,16 @@ onBeforeUnmount(() => {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
+  margin-bottom: var(--space-2);
+}
+
+/* R1.5: the category is a muted chip — the nine-colour category palette is
+   gone, so a card grid reads as one surface instead of a rainbow. */
+.category-tag {
+  background: var(--bg-hover);
+  color: var(--text-secondary);
+  border: none;
+  font-weight: 500;
 }
 
 .detail-name {
@@ -562,7 +567,7 @@ onBeforeUnmount(() => {
 .detail-row {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: var(--space-4);
   margin-bottom: 10px;
 }
 

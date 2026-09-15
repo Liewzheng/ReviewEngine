@@ -56,41 +56,41 @@ const displayText = computed(() => {
 }
 
 .status-dot.status-success {
-  background: var(--success);
-  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+  background: var(--accent-success);
+  box-shadow: 0 0 0 2px var(--accent-success-ring);
 }
 .status-dot.status-warning {
-  background: var(--warning);
-  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
+  background: var(--accent-warning);
+  box-shadow: 0 0 0 2px var(--accent-warning-ring);
 }
 .status-dot.status-error {
-  background: var(--error);
-  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+  background: var(--accent-error);
+  box-shadow: 0 0 0 2px var(--accent-error-ring);
 }
 .status-dot.status-offline {
   background: var(--offline);
-  box-shadow: 0 0 0 2px rgba(107, 114, 128, 0.2);
+  box-shadow: 0 0 0 2px var(--accent-offline-ring);
 }
 .status-dot.status-running {
-  background: var(--success);
-  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+  background: var(--accent-success);
+  box-shadow: 0 0 0 2px var(--accent-success-ring);
   animation: pulse-dot 2s infinite;
 }
 .status-dot.status-queued {
   background: var(--text-secondary);
-  box-shadow: 0 0 0 2px rgba(148, 163, 184, 0.2);
+  box-shadow: 0 0 0 2px var(--text-secondary-ring);
 }
 .status-dot.status-failed {
-  background: var(--error);
-  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.2);
+  background: var(--accent-error);
+  box-shadow: 0 0 0 2px var(--accent-error-ring);
 }
 .status-dot.status-completed {
-  background: var(--success);
-  box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.2);
+  background: var(--accent-success);
+  box-shadow: 0 0 0 2px var(--accent-success-ring);
 }
 .status-dot.status-cancelled {
   background: var(--text-secondary);
-  box-shadow: 0 0 0 2px rgba(148, 163, 184, 0.2);
+  box-shadow: 0 0 0 2px var(--text-secondary-ring);
 }
 
 .status-text {

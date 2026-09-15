@@ -14,7 +14,6 @@
     <el-progress
       :percentage="percentage"
       :color="color"
-      :stroke-width="8"
       :show-text="false"
       class="stats-progress"
     />
@@ -83,8 +82,8 @@ const valueStyle = computed(() => ({
 .stats-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  margin-bottom: 12px;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
 }
 
 .stats-icon {
@@ -100,7 +99,7 @@ const valueStyle = computed(() => ({
 .stats-label {
   font-size: 12px;
   color: var(--text-secondary);
-  margin-bottom: 4px;
+  margin-bottom: var(--space-1);
 }
 
 .stats-value {
@@ -113,15 +112,5 @@ const valueStyle = computed(() => ({
 
 .stats-value.is-flashing {
   color: var(--warning) !important;
-}
-
-.stats-progress :deep(.el-progress-bar__outer) {
-  background-color: var(--bg-surface);
-  border-radius: 4px;
-}
-
-.stats-progress :deep(.el-progress-bar__inner) {
-  border-radius: 4px;
-  transition: width 0.3s ease;
 }
 </style>

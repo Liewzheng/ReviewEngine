@@ -38,7 +38,7 @@ const html = computed(() =>
 }
 
 .markdown-view :deep(p) {
-  margin: 0 0 8px;
+  margin: 0 0 var(--space-2);
 }
 
 .markdown-view :deep(h1),
@@ -47,7 +47,7 @@ const html = computed(() =>
 .markdown-view :deep(h4),
 .markdown-view :deep(h5),
 .markdown-view :deep(h6) {
-  margin: 14px 0 6px;
+  margin: var(--space-4) 0 6px;
   font-weight: 600;
   line-height: 1.35;
   color: var(--text-primary);
@@ -73,7 +73,7 @@ const html = computed(() =>
 
 .markdown-view :deep(ul),
 .markdown-view :deep(ol) {
-  margin: 4px 0 8px;
+  margin: var(--space-1) 0 var(--space-2);
   padding-left: 20px;
 }
 
@@ -82,16 +82,16 @@ const html = computed(() =>
 }
 
 .markdown-view :deep(code) {
-  padding: 1px 4px;
+  padding: 1px var(--space-1);
   background: var(--bg-card);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .markdown-view :deep(pre) {
   margin: 6px 0 10px;
-  padding: 8px 12px;
+  padding: var(--space-2) var(--space-3);
   background: var(--bg-card);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-sm);
@@ -110,7 +110,7 @@ const html = computed(() =>
 
 .markdown-view :deep(blockquote) {
   margin: 6px 0 10px;
-  padding: 2px 12px;
+  padding: 2px var(--space-3);
   border-left: 3px solid var(--border-color);
   border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
   background: var(--bg-hover);
@@ -129,7 +129,7 @@ const html = computed(() =>
 
 .markdown-view :deep(th),
 .markdown-view :deep(td) {
-  padding: 4px 8px;
+  padding: var(--space-1) var(--space-2);
   border: 1px solid var(--border-color);
   text-align: left;
 }
@@ -140,7 +140,7 @@ const html = computed(() =>
 }
 
 .markdown-view :deep(hr) {
-  margin: 12px 0;
+  margin: var(--space-3) 0;
   border: none;
   border-top: 1px solid var(--border-color);
 }

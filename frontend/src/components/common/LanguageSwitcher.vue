@@ -54,8 +54,8 @@ const onCommand = (command: string | number | object) => {
 .language-switcher-trigger {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 5px 8px;
+  gap: var(--space-1);
+  padding: var(--space-1) var(--space-2);
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;

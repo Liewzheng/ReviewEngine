@@ -107,17 +107,17 @@ function select(item: ContextMenuItem) {
   position: fixed;
   z-index: 3000;
   min-width: 148px;
-  padding: 4px;
-  background: var(--bg-elevated, var(--bg-card));
-  border: 1px solid var(--border-color);
+  padding: var(--space-1);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
   border-radius: var(--radius-md);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-float);
 }
 
 .provider-menu__item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: var(--space-2);
   width: 100%;
   padding: 7px 10px;
   background: transparent;
@@ -150,7 +150,7 @@ function select(item: ContextMenuItem) {
 
 .provider-menu__divider {
   height: 1px;
-  margin: 4px 6px;
+  margin: var(--space-1) 6px;
   background: var(--border-color);
 }
 </style>

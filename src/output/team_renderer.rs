@@ -286,12 +286,18 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
     let assessment = &consolidated.assessment;
     let mut out = String::from("## Lead Summary\n\n");
 
-    // Zero findings across every expert, or demonstrably insufficient hunk
-    // coverage: never present the result as "healthy". The risk band is
-    // replaced by an explicit "unverified" marker and a bilingual warning.
+    // Zero findings across every expert, demonstrably insufficient hunk
+    // coverage, or an empty published list because adjudication removed
+    // everything: never present the result as "healthy". The risk band is
+    // replaced by an explicit "unverified" marker and a bilingual warning
+    // naming which of the three applies.
+    let all_adjudicated_away =
+        assessment.unverified && !assessment.coverage_insufficient && !consolidated.adjudicated_removed.is_empty();
     let risk_label = if assessment.unverified {
         if assessment.coverage_insufficient {
             "unverified（审查覆盖不足 / insufficient coverage）".to_string()
+        } else if all_adjudicated_away {
+            "unverified（裁决移除全部发现 / all findings adjudicated away）".to_string()
         } else {
             "unverified（全零发现 / zero findings）".to_string()
         }
@@ -308,6 +314,13 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                 "> ⚠️ **Unverified result**: demonstrated review coverage is below the \
                  threshold — most of the diff was not demonstrably examined, so the verdict \
                  is not trustworthy. / 审查覆盖不足：大部分改动未被可追溯地审查，结果不可信。\n\n",
+            );
+        } else if all_adjudicated_away {
+            out.push_str(
+                "> ⚠️ **Unverified result**: every reported finding was removed by the final \
+                 adjudication pass as a false positive — the published list is empty because \
+                 of that, not because the codebase is clean. / 裁决将全部发现判定为假阳性并移除，\
+                 发布列表为空并非代码库干净，结果未验证。\n\n",
             );
         } else {
             out.push_str(

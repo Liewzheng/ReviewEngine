@@ -677,6 +677,10 @@ pub(crate) async fn run_experts_inner(
     // under-covered run is scored honestly (capped), never inflated. The
     // hunk-level ledger (changed vs. demonstrably-touched ranges) feeds the
     // coverage-insufficient / unverified marking.
+    //
+    // The assessment it produces is a pre-adjudication snapshot: `score` /
+    // `risk_level` / `consensus_reached` stay that way by design (D2/RENG-73),
+    // while `tl_dr` / `unverified` are re-derived after adjudication.
     let coverage_ledger = build_coverage_ledger(&diff_files, &reports);
     let mut consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger));
 
@@ -693,6 +697,11 @@ pub(crate) async fn run_experts_inner(
     // `project_path` is a directory (CLI reviews), otherwise the provider-API
     // source the caller plumbed in for server-side reviews — which never
     // clone, so before RENG-31 every such pass skipped wholesale.
+    //
+    // This pass mutates `consolidated.findings` (downgrades in place, removals
+    // recorded in `adjudicated_removed`), so the assessment written during
+    // consolidation is stale afterwards — `refresh_assessment` below is what
+    // makes the prose describe the shipped list (RENG-73).
     if config.report.adjudicate && !llm_configs.is_empty() {
         let min_severity = adjudicator::parse_min_severity(&config.report.adjudicate_min_severity);
         let candidates = consolidated
@@ -730,6 +739,15 @@ pub(crate) async fn run_experts_inner(
         );
         consolidated.adjudicated_removed = removed;
     }
+
+    // The assessment prose was written during consolidation, i.e. before
+    // adjudication could downgrade or remove findings. Recompute it from the
+    // findings that actually ship — unconditionally, so runs with
+    // `adjudicate = false` also get a single-source summary (consolidation's
+    // own confidence downgrades/dedup would otherwise leave the counts
+    // disagreeing with the published list). `score` / `risk_level` /
+    // `consensus_reached` stay the pre-adjudication signal (D2).
+    consolidated.refresh_assessment(reports.len());
 
     // Adjudication stage is done (ran, skipped, or disabled — the static
     // stage list must still reach 100%).

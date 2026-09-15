@@ -98,12 +98,18 @@ pub struct OverallAssessment {
     pub risk_level: RiskLevel,
     /// Lead reviewer's override assessment (optional).
     pub lead_override: Option<String>,
-    /// Summary of key findings.
+    /// Summary of key findings. Describes the report's **published** findings:
+    /// every count in it is a histogram of [`ConsolidatedReport::findings`],
+    /// recomputed by [`ConsolidatedReport::refresh_assessment`] after the
+    /// adjudication pass. (The score / risk band it sits next to are the
+    /// pre-adjudication signal.)
     pub tl_dr: String,
-    /// True when every expert reported zero findings. A perfect score with no
-    /// findings is NOT evidence of quality — it may mean low coverage or a
-    /// systemic miss — so reports must flag the result as **unverified**
-    /// instead of presenting it as healthy.
+    /// True when the result must not be presented as healthy: the published
+    /// findings are empty — either every expert reported zero findings (a
+    /// perfect score is NOT evidence of quality, it may mean low coverage or a
+    /// systemic miss) or adjudication removed every finding as a false
+    /// positive — or `coverage_insufficient` is set. In both empty cases the
+    /// reports say WHY instead of claiming a clean codebase.
     #[serde(default)]
     pub unverified: bool,
     /// True when demonstrated hunk coverage fell below the threshold (or zero

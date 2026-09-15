@@ -235,6 +235,26 @@ Response 200:
 - 数据来源为 best-effort：provider 的 participants 接口失败、或某来源查不到时，只是列表变短，绝不会让评审失败。
 - **兼容性**：0.10.6 之前的旧记录没有该字段，返回 `[]`（不是 `null`、不报错）。旧字段 `author{name, avatarUrl}` 保留不删。
 
+**`rawApiResponse.consolidated`（RENG-73）**
+
+`rawApiResponse` 是整份 `ReviewOutput`；团队评审中 `consolidated` 是报文里唯一陈述"高级别发现计数"的地方（`report.aggregated` 默认 `false`，因此 `rawComment` 默认就是 `consolidated.assessment.tl_dr`）。各字段的口径：
+
+| 字段 | 口径 |
+| --- | --- |
+| `findings[]` | **实际发布的发现**：专家原始发现 → 置信度过滤（`min_confidence`，默认 6；`drop_low_confidence=false` 时降级而非删除）→ 去重 → **最终裁决**（降级就地改写、假阳性删除）之后的集合 |
+| `assessment.tl_dr` | 只描述上面这个集合：`N critical` / `M high` / `K other issues` 是 `findings` 的等级直方图，`found by N reviewers` 是参与评审的专家报告数。裁决结束后由 `refresh_assessment` 重算，因此**计数与发布列表恒等**；`adjudicate = false` 也不例外 |
+| `assessment.score` / `assessment.risk_level` | **裁决前的信号**：由专家原始发现经评分推导，裁决的降级/删除**不会**改变它们（历史分数趋势因此连续）。报文里可能出现 "Risk Level: high" 而列表只有 Medium——这是有意保留的口径 |
+| `assessment.unverified` | 发布列表为空——没有任何专家报告发现，**或裁决把所有发现都判为假阳性**——或 `coverage_insufficient` 时为 `true`。裁决删空时文案会写明"全部在最终裁决中被判定为假阳性"，不会使用"专家未发现问题"的措辞（那会与事实相反） |
+| `assessment.coverage_insufficient` | 可追溯审查的改动行比例低于阈值（裁决前的 hunk 账本） |
+| `adjudicated_removed[]` | 最终裁决删除的发现（`{finding, reason}`）。**降级不进报文**，只写 INFO 日志 |
+| `low_confidence_removed` / `duplicates_merged` | 只有计数；`drop_low_confidence = true` 时被丢弃的低置信发现不入报文 |
+
+同一份记录里还有三处**故意不跟随裁决**的口径，读报文时不要与 `tl_dr` 混为一谈：
+
+- 逐专家段落（`output.reports[].findings`，以及 MR 评论里 `### [HIGH] …` 的标题）保留专家**原始**等级（D6）；
+- `aggregated = true` 时 `rawComment` 是聚合器基于**原始 reports** 生成的 markdown，不受本修复影响（D4）；
+- hunk 覆盖率账本仍按裁决前集合记账，裁决删除的发现也算作"已触及"（D3）。
+
 #### `GET /api/v1/reviews`
 
 分页列出历史 reviews。这是唯一的 review 历史列表端点（前端 History 页的数据源）；不存在 `/api/v1/reviews/history` 子路径——该请求会命中 `/:task_id` 路由并因 `history` 不是 UUID 而返回 400。

@@ -32,7 +32,7 @@
 
 - `src/server/api/review/task.rs:24-46` `task_to_status`、48-104 `build_review_detail`、106-124 `build_review_list_item`：`TaskEntry → API 响应` 的唯一转换点，入库后改造面集中在这三个函数与 `handlers.rs` 的 `list_reviews`（298 行）/`get_review`（207 行）。
 - 分页参数结构 `ListParams` 已含 `status/page/per_page/q/project/repository/date_from/date_to`（task.rs:155-165），0.10.0 不需要新增参数，只需要换数据源。
-- **搭车 bug 确认**：task.rs:75 `raw_comment` 只取 `output.aggregated.markdown`；团队评审 `aggregated=None` 时详情「完整评论」tab 空态。可用的 fallback 是 `output.consolidated.assessment.tl_dr`（`src/models/mod.rs:102`，`ConsolidatedReport` 结构见 `src/team/lead_consolidator.rs:62-80`）。
+- **搭车 bug 确认**：task.rs:75 `raw_comment` 只取 `output.aggregated.markdown`；团队评审 `aggregated=None` 时详情「完整评论」tab 空态。可用的 fallback 是 `output.consolidated.assessment.tl_dr`（`src/models/mod.rs:102`，`ConsolidatedReport` 结构见 `src/team/lead_consolidator.rs:62-80`）。该 fallback 文案在裁决（adjudication）结束后由 `ConsolidatedReport::refresh_assessment` 重算，描述的是**发布集合**（RENG-73）。
 
 ### 2.3 配置持久化
 
@@ -332,7 +332,7 @@ output.aggregated.map(|a| a.markdown)
     .filter(|s| !s.is_empty())
 ```
 
-`tl_dr` 字段已确认存在（`src/models/mod.rs:102`）。加一条 `aggregated=None + consolidated=Some` 的单测。
+`tl_dr` 字段已确认存在（`src/models/mod.rs:102`）。加一条 `aggregated=None + consolidated=Some` 的单测。该 `tl_dr` 是裁决后重算的版本（`refresh_assessment`，RENG-73）——「完整评论」页签显示的计数与发布 findings 一致。
 
 ## 9. 风险与回退
 

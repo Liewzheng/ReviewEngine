@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
 use super::{
-    bootstrap_authed_client, find_free_port, spawn_server, spawn_server_inner_with_env, wait_for_server, API_TOKEN,
+    bootstrap_authed_client, find_free_port, spawn_server, spawn_server_inner_with_env, wait_for_server, ServerGuard,
+    API_TOKEN,
 };
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 // ─── llm_configs 回退语义 (defect fix: state.llm_configs) ─────────
@@ -745,5 +746,301 @@ async fn completed_review_history_carries_llm_snapshot() {
         serde_json::json!([{ "provider": "xiaomi", "model": "mimo-v2.5-pro" }]),
         "list item must carry the deduplicated llmSummary: {:?}",
         item
+    );
+}
+
+// ─── RENG-73: the assessment prose describes the published findings ───────
+
+/// One expert answer for the mock provider: a single `severity: high,
+/// confidence: 9` finding on `a.rs`. Confidence 9 is above the default
+/// `min_confidence` 6, so consolidation keeps it as a High, and the default
+/// `adjudicate_min_severity = high` puts it in front of the adjudicator.
+const RENG73_EXPERT_FINDINGS: &str = "review:\n  findings:\n    - file: a.rs\n      line: 1\n      severity: high\n      confidence: 9\n      category: security\n      title: Missing authorization check\n      detail: The handler never checks the caller's role.\n      evidence: g()\n      impact: Any caller can read the record.\n      recommendation: Check the role before reading the record.\n";
+
+/// `mount_mock_llm` with a caller-chosen completion content, so the expert
+/// calls can answer with a findings body while a body-matched mock answers the
+/// adjudicator.
+async fn mount_mock_llm_content(mock: &MockServer, content: &str) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": content}}],
+            "usage": {"total_tokens": 8},
+            "model": "gpt-4o"
+        })))
+        .mount(mock)
+        .await;
+}
+
+/// Answer the adjudication pass (and only it) with `verdicts`. The matcher is
+/// the adjudicator's own user prompt header; mocks of equal priority are tried
+/// in registration order (wiremock sorts stably by priority), so mounting this
+/// BEFORE the blanket expert mock gives it precedence.
+async fn mount_mock_adjudicator(mock: &MockServer, verdicts: &str) {
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .and(body_string_contains("File under adjudication"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": verdicts}}],
+            "usage": {"total_tokens": 24},
+            "model": "gpt-4o"
+        })))
+        .mount(mock)
+        .await;
+}
+
+/// Mock GitLab serving `group/proj!7`: one 1-line diff on `a.rs`, the raw file
+/// the adjudicator reads as full-file ground truth at the reviewed SHA, and the
+/// discussion/notes endpoints the publisher calls.
+///
+/// A `gitlab_mr` source (unlike `static_diff`) has adjudication ground truth,
+/// which is what makes the downgrade/false-positive verdicts reachable.
+async fn mount_mock_gitlab_review(gitlab: &MockServer) {
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "title": "Fix login bug",
+            "description": "",
+            "source_branch": "feature/login",
+            "target_branch": "main",
+            "author": {"id": 1, "username": "alice", "name": "Alice"},
+            "diff_refs": {"base_sha": "base1", "head_sha": "abc123", "start_sha": "base1"}
+        })))
+        .mount(gitlab)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/raw_diffs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/a.rs b/a.rs\n@@ -1 +1 @@\n-f()\n+g()\n"))
+        .mount(gitlab)
+        .await;
+    // Full-file ground truth for the adjudicator (RENG-31 provider source).
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/repository/files/a.rs/raw"))
+        .and(query_param("ref", "abc123"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("let f = 1;\nlet g = 2;\n"))
+        .mount(gitlab)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/discussions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(gitlab)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/notes"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+        .mount(gitlab)
+        .await;
+}
+
+/// The MR URL submitted by the test. Its host is deliberately NOT the mock's
+/// loopback address: the review server rejects a loopback `gitlab_mr` URL that
+/// no configured platform claims (RENG-33), so the mock GitLab is registered as
+/// a platform whose server-reachable base is rewritten in — the deployed flow.
+const RENG73_MR_URL: &str = "http://gitlab.reng73.invalid:8929/group/proj/-/merge_requests/7";
+
+/// POST a `gitlab_mr` review and poll `GET /api/v1/reviews/{task_id}` until it
+/// settles, returning the final body.
+async fn post_gitlab_mr_review_and_poll(base: &str, client: &reqwest::Client, mr_url: &str) -> serde_json::Value {
+    let resp = client
+        .post(format!("{}/api/v1/reviews", base))
+        .header("X-Gitlab-Token", "glpat-test")
+        .json(&serde_json::json!({"source": {"type": "gitlab_mr", "url": mr_url}}))
+        .send()
+        .await
+        .expect("failed to POST /api/v1/reviews");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::ACCEPTED,
+        "POST /api/v1/reviews returned {}",
+        resp.status()
+    );
+    let created: serde_json::Value = resp.json().await.expect("POST response body is not JSON");
+    let task_id = created["task_id"].as_str().expect("POST response missing task_id");
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let resp = client
+            .get(format!("{}/api/v1/reviews/{}", base, task_id))
+            .send()
+            .await
+            .expect("failed to GET /api/v1/reviews/{task_id}");
+        let body: serde_json::Value = resp.json().await.expect("GET response body is not JSON");
+        match body["status"].as_str().unwrap_or("") {
+            "completed" => return body,
+            "failed" => return body,
+            _ if Instant::now() > deadline => panic!("review did not settle within 60s: {:?}", body),
+            _ => tokio::time::sleep(Duration::from_millis(200)).await,
+        }
+    }
+}
+
+/// Parse the count that precedes `unit` in the assessment prose
+/// (`"Risk Level: Low. 2 critical, 1 high found by 2 reviewers."`).
+fn parse_tldr_count(tl_dr: &str, unit: &str) -> usize {
+    for part in tl_dr.split([',', '.']) {
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        if let Some(pos) = tokens.iter().position(|t| *t == unit) {
+            if pos > 0 {
+                if let Ok(n) = tokens[pos - 1].parse::<usize>() {
+                    return n;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Spawn a server + mocks for the RENG-73 pair of cases.
+async fn spawn_reng73_review(verdicts: &str) -> (ServerGuard, serde_json::Value, MockServer) {
+    let gitlab = MockServer::start().await;
+    mount_mock_gitlab_review(&gitlab).await;
+
+    let llm = MockServer::start().await;
+    mount_mock_adjudicator(&llm, verdicts).await;
+    mount_mock_llm_content(&llm, RENG73_EXPERT_FINDINGS).await;
+
+    let llm_config_env = serde_json::json!([mock_llm_provider(&llm.uri())]).to_string();
+    let port = find_free_port();
+    let guard = spawn_server_inner_with_env(
+        port,
+        None,
+        &[("LLM_CONFIG", &llm_config_env), ("GITLAB_TOKEN", "glpat-test")],
+    );
+    wait_for_server(port).await;
+
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{}", port);
+
+    // Register the mock GitLab as a git platform: `baseUrl` is the address the
+    // caller browses to (must be non-loopback, see `RENG73_MR_URL`), and
+    // `internalBaseUrl` is the address the server reaches — the mock. The
+    // submitted MR URL is rewritten onto it before the review runs.
+    let resp = client
+        .put(format!("{}/api/v1/config", base))
+        .json(&serde_json::json!({
+            "gitPlatforms": [{
+                "name": "reng73-mock",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.reng73.invalid:8929",
+                "internalBaseUrl": gitlab.uri(),
+                "token": "glpat-test"
+            }]
+        }))
+        .send()
+        .await
+        .expect("failed to PUT /api/v1/config");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "the mock GitLab must be registered as a git platform, got {}",
+        resp.status()
+    );
+
+    let body = post_gitlab_mr_review_and_poll(&base, &client, RENG73_MR_URL).await;
+    (guard, body, llm)
+}
+
+/// RENG-73 end-to-end: the published findings and the assessment prose must
+/// agree after adjudication. Here the adjudicator downgrades the only High to
+/// Medium, so the shipped list holds no High at all — before the fix the prose
+/// still reported the pre-adjudication `1 high`.
+#[tokio::test]
+async fn assessment_prose_matches_published_findings_after_adjudication() {
+    let verdicts = "verdicts:\n  - index: 0\n    verdict: downgrade\n    new_severity: medium\n    reason: \"The impact requires an unlikely precondition visible in the file.\"\n    cited_lines: \"1-2\"\n";
+    let (_guard, body, llm) = spawn_reng73_review(verdicts).await;
+    assert_eq!(
+        body["status"].as_str(),
+        Some("completed"),
+        "review must complete, got {:?}",
+        body
+    );
+
+    // The adjudicator must actually have been asked (otherwise the case would
+    // pass vacuously: an un-downgraded High matches its own prose).
+    let adjudicator_calls = llm
+        .received_requests()
+        .await
+        .expect("received requests")
+        .iter()
+        .filter(|r| String::from_utf8_lossy(&r.body).contains("File under adjudication"))
+        .count();
+    assert!(adjudicator_calls >= 1, "the adjudication pass must have run");
+
+    let consolidated = &body["rawApiResponse"]["consolidated"];
+    let findings = consolidated["findings"].as_array().expect("consolidated.findings");
+    let tl_dr = consolidated["assessment"]["tl_dr"]
+        .as_str()
+        .expect("consolidated.assessment.tl_dr");
+    let severity_of = |f: &serde_json::Value| f["severity"].as_str().unwrap_or("").to_ascii_lowercase();
+    let histogram = |severity: &str| findings.iter().filter(|f| severity_of(f) == severity).count();
+
+    assert_eq!(
+        histogram("high"),
+        0,
+        "the adjudicated downgrade must reach the published list: {findings:?}"
+    );
+    assert!(histogram("medium") >= 1, "the downgraded finding must survive");
+    assert_eq!(
+        parse_tldr_count(tl_dr, "critical"),
+        histogram("critical"),
+        "got: {tl_dr}"
+    );
+    assert_eq!(parse_tldr_count(tl_dr, "high"), histogram("high"), "got: {tl_dr}");
+    assert_eq!(
+        parse_tldr_count(tl_dr, "other"),
+        histogram("medium") + histogram("low") + histogram("note"),
+        "got: {tl_dr}"
+    );
+    assert!(tl_dr.contains("found by"), "the reviewer count still renders: {tl_dr}");
+}
+
+/// The sibling case: the adjudicator rejects the only finding as a false
+/// positive, so the publisher ships an empty list. The prose must say that —
+/// "no expert reported any issue" would be a lie — and the assessment must be
+/// marked unverified.
+#[tokio::test]
+async fn assessment_prose_names_adjudication_when_every_finding_is_dropped() {
+    let verdicts = "verdicts:\n  - index: 0\n    verdict: false_positive\n    reason: \"Line 2 already enforces the check.\"\n    cited_lines: \"1-2\"\n";
+    let (_guard, body, _llm) = spawn_reng73_review(verdicts).await;
+    assert_eq!(
+        body["status"].as_str(),
+        Some("completed"),
+        "review must complete, got {:?}",
+        body
+    );
+
+    let consolidated = &body["rawApiResponse"]["consolidated"];
+    let findings = consolidated["findings"].as_array().expect("consolidated.findings");
+    assert!(
+        findings.is_empty(),
+        "the false_positive verdict must empty the published list: {findings:?}"
+    );
+    assert_eq!(
+        consolidated["adjudicated_removed"].as_array().map(std::vec::Vec::len),
+        Some(1),
+        "the drop must be recorded: {:?}",
+        consolidated["adjudicated_removed"]
+    );
+
+    let tl_dr = consolidated["assessment"]["tl_dr"]
+        .as_str()
+        .expect("consolidated.assessment.tl_dr");
+    assert!(
+        tl_dr.contains("removed by the final adjudication pass as a false positive"),
+        "the prose must name adjudication, got: {tl_dr}"
+    );
+    assert!(
+        !tl_dr.contains("reported no issues"),
+        "the prose must not claim the experts found nothing, got: {tl_dr}"
+    );
+    assert!(
+        !tl_dr.contains("found by"),
+        "no reviewer-count sentence may survive an empty published list, got: {tl_dr}"
+    );
+    assert_eq!(
+        consolidated["assessment"]["unverified"],
+        serde_json::json!(true),
+        "an empty published list is never verified: {:?}",
+        consolidated["assessment"]
     );
 }

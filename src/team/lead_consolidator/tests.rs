@@ -415,3 +415,194 @@ fn test_non_zero_findings_not_unverified() {
     assert!(result.assessment.score < 100);
     assert!(!result.assessment.tl_dr.contains("treat with caution"));
 }
+
+// ─── RENG-73: the summary counts must describe the published findings ───
+
+/// Parse the count that precedes `unit` in a consolidator TL;DR, e.g.
+/// `parse_tldr_count("Risk Level: Low. 2 critical, 3 high found by 1 reviewers.", "high") == 3`.
+fn parse_tldr_count(tl_dr: &str, unit: &str) -> usize {
+    for part in tl_dr.split([',', '.']) {
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        if let Some(pos) = tokens.iter().position(|t| *t == unit) {
+            if pos > 0 {
+                if let Ok(n) = tokens[pos - 1].parse::<usize>() {
+                    return n;
+                }
+            }
+        }
+    }
+    0
+}
+
+/// The TL;DR's severity counts must be the histogram of `findings` — the set
+/// the report actually publishes. Regression guard for RENG-73, where the
+/// critical/high counts came from the raw per-expert reports while the total
+/// came from the consolidated list, so the prose named severities the shipped
+/// list did not contain.
+fn assert_tldr_counts_match(findings: &[Finding], tl_dr: &str) {
+    let count = |severity: Severity| findings.iter().filter(|f| f.severity == severity).count();
+    assert_eq!(
+        parse_tldr_count(tl_dr, "critical"),
+        count(Severity::Critical),
+        "critical count must match the published findings, got: {tl_dr}"
+    );
+    assert_eq!(
+        parse_tldr_count(tl_dr, "high"),
+        count(Severity::High),
+        "high count must match the published findings, got: {tl_dr}"
+    );
+    assert_eq!(
+        parse_tldr_count(tl_dr, "other"),
+        count(Severity::Medium) + count(Severity::Low) + count(Severity::Note),
+        "other-issues count must match the published findings, got: {tl_dr}"
+    );
+}
+
+#[test]
+fn test_tldr_counts_match_findings_without_adjudication() {
+    // Default config, no adjudication involved: one duplicate (deduped) and one
+    // High with confidence 4 (downgraded to Medium by min_confidence). Before
+    // the fix the prose counted the raw reports — "1 critical, 3 high" — while
+    // the published list held 1 critical + 1 high + 1 medium.
+    let config = ConsolidatorConfig::default();
+    let mut duplicate = make_finding(Severity::High, 9, "b.rs", Some(2), "Duplicate issue");
+    duplicate.expert_name = "bob".to_string();
+    let reports = vec![
+        make_report(
+            "alice",
+            vec![
+                make_finding(Severity::Critical, 9, "a.rs", Some(1), "Critical issue"),
+                make_finding(Severity::High, 9, "b.rs", Some(2), "Duplicate issue"),
+                make_finding(Severity::High, 4, "c.rs", Some(3), "Shaky high issue"),
+            ],
+        ),
+        make_report("bob", vec![duplicate]),
+    ];
+    let result = config.consolidate(&reports, None);
+
+    assert_eq!(result.findings.len(), 3, "dedup drops the duplicate, downgrade keeps");
+    assert_eq!(result.duplicates_merged, 1);
+    assert_eq!(result.low_confidence_removed, 0);
+    assert!(
+        result
+            .findings
+            .iter()
+            .all(|f| f.severity != Severity::High || f.confidence == 9),
+        "the confidence-4 High must have been downgraded"
+    );
+    assert_tldr_counts_match(&result.findings, &result.assessment.tl_dr);
+    assert_eq!(parse_tldr_count(&result.assessment.tl_dr, "high"), 1);
+    assert_eq!(parse_tldr_count(&result.assessment.tl_dr, "other"), 1);
+    assert!(result.assessment.tl_dr.contains("found by 2 reviewers"));
+}
+
+#[test]
+fn test_refresh_assessment_after_downgrade() {
+    // B2: adjudication downgraded the only High — nothing was removed, only
+    // logged, so the refresh has to notice the in-place severity change.
+    let config = ConsolidatorConfig::default();
+    let reports = vec![make_report(
+        "security",
+        vec![make_finding(Severity::High, 9, "a.rs", Some(1), "Overstated issue")],
+    )];
+    let mut consolidated = config.consolidate(&reports, None);
+    assert_eq!(parse_tldr_count(&consolidated.assessment.tl_dr, "high"), 1);
+
+    let score_before = consolidated.assessment.score;
+    let risk_before = consolidated.assessment.risk_level.clone();
+    for finding in consolidated.findings.iter_mut() {
+        if finding.severity == Severity::High {
+            finding.severity = Severity::Medium;
+        }
+    }
+    consolidated.refresh_assessment(reports.len());
+
+    assert!(
+        consolidated.adjudicated_removed.is_empty(),
+        "a downgrade is not a removal"
+    );
+    assert_eq!(parse_tldr_count(&consolidated.assessment.tl_dr, "high"), 0);
+    assert_tldr_counts_match(&consolidated.findings, &consolidated.assessment.tl_dr);
+    assert!(!consolidated.assessment.unverified, "a surviving finding is verified");
+    // D2: score / risk are the pre-adjudication signal and must not move.
+    assert_eq!(consolidated.assessment.score, score_before);
+    assert_eq!(consolidated.assessment.risk_level, risk_before);
+}
+
+#[test]
+fn test_refresh_assessment_after_partial_removal() {
+    let config = ConsolidatorConfig::default();
+    let reports = vec![make_report(
+        "security",
+        vec![
+            make_finding(Severity::Critical, 9, "a.rs", Some(1), "Real critical"),
+            make_finding(Severity::Critical, 9, "b.rs", Some(2), "False critical"),
+        ],
+    )];
+    let mut consolidated = config.consolidate(&reports, None);
+    assert_eq!(parse_tldr_count(&consolidated.assessment.tl_dr, "critical"), 2);
+
+    let removed = consolidated.findings.pop().expect("two findings consolidated");
+    consolidated
+        .adjudicated_removed
+        .push(crate::team::verifier::DroppedFinding {
+            finding: removed,
+            reason: "guard present at line 2".to_string(),
+        });
+    consolidated.refresh_assessment(reports.len());
+
+    assert_eq!(consolidated.findings.len(), 1);
+    assert_eq!(parse_tldr_count(&consolidated.assessment.tl_dr, "critical"), 1);
+    assert_tldr_counts_match(&consolidated.findings, &consolidated.assessment.tl_dr);
+    assert!(!consolidated.assessment.unverified);
+}
+
+#[test]
+fn test_refresh_assessment_after_full_removal() {
+    // B1: adjudication removed every finding. "Experts reported no issues"
+    // would be a lie — issues were reported and then rejected — so the refresh
+    // must use dedicated wording, flip `unverified`, and keep the coverage
+    // banner it derived from the report's own coverage fields.
+    let config = ConsolidatorConfig::default();
+    let coverage = FileCoverage {
+        total_files: 10,
+        reviewed_files: 4,
+        unreviewed_files: vec!["f5.rs".to_string()],
+    };
+    let reports = vec![make_report(
+        "security",
+        vec![make_finding(Severity::High, 9, "a.rs", Some(1), "False positive")],
+    )];
+    let mut consolidated = config.consolidate_with_coverage(&reports, None, &coverage, None);
+    assert!(consolidated.assessment.tl_dr.contains("4/10 files reviewed"));
+    assert!(!consolidated.assessment.unverified);
+
+    let removed = consolidated.findings.pop().expect("one finding consolidated");
+    consolidated
+        .adjudicated_removed
+        .push(crate::team::verifier::DroppedFinding {
+            finding: removed,
+            reason: "code contradicts the claim".to_string(),
+        });
+    consolidated.refresh_assessment(reports.len());
+
+    let tl_dr = &consolidated.assessment.tl_dr;
+    assert!(consolidated.findings.is_empty());
+    assert!(
+        consolidated.assessment.unverified,
+        "an empty published list is never verified"
+    );
+    assert!(
+        tl_dr.contains("removed by the final adjudication pass as a false positive"),
+        "dedicated wording required, got: {tl_dr}"
+    );
+    assert!(
+        !tl_dr.contains("reported no issues"),
+        "must not claim the experts found nothing, got: {tl_dr}"
+    );
+    assert!(
+        tl_dr.contains("4/10 files reviewed"),
+        "coverage banner must survive the refresh, got: {tl_dr}"
+    );
+    assert_tldr_counts_match(&consolidated.findings, tl_dr);
+}

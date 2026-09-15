@@ -605,7 +605,7 @@ export default {
     updateFailed: 'Failed to update {name}. Change reverted.',
     memoryOnlyTitle: 'Applied in memory only',
     memoryOnlyMessage:
-      '{name} was updated, but this server has no configuration database attached — the change will be lost when the server restarts.',
+      '{name} was updated, but this server has no configuration database, so the change will be lost when the server restarts. Start the server with a data directory (and without REVIEW_DISABLE_DB=1) to keep expert settings.',
   },
   upgrade: {
     title: 'Upgrade Review Engine',

@@ -594,7 +594,7 @@ export default {
     updateFailed: '{name} 업데이트 실패 — 변경 사항을 되돌렸습니다',
     memoryOnlyTitle: '메모리에만 적용됨',
     memoryOnlyMessage:
-      '{name}이(가) 업데이트되었지만 이 서버에는 설정 데이터베이스가 연결되어 있지 않습니다. 서버를 다시 시작하면 변경 사항이 사라집니다.',
+      '{name}이(가) 업데이트되었지만 이 서버에는 설정 데이터베이스가 연결되어 있지 않아 다시 시작하면 변경 사항이 사라집니다. 전문가 설정을 유지하려면 데이터 디렉터리를 지정하고 REVIEW_DISABLE_DB=1 없이 서버를 시작하세요.',
   },
   upgrade: {
     title: 'Review Engine 업그레이드',

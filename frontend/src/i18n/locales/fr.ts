@@ -600,7 +600,7 @@ export default {
     updateFailed: 'Échec de la mise à jour de {name}. Modification annulée.',
     memoryOnlyTitle: 'Appliqué en mémoire uniquement',
     memoryOnlyMessage:
-      '{name} a été mis à jour, mais ce serveur n’a pas de base de configuration — la modification sera perdue au redémarrage du serveur.',
+      '{name} a été mis à jour, mais ce serveur n’a pas de base de configuration : la modification sera perdue au redémarrage. Démarrez le serveur avec un répertoire de données (sans REVIEW_DISABLE_DB=1) pour conserver les réglages des experts.',
   },
   upgrade: {
     title: 'Mettre à niveau Review Engine',

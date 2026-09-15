@@ -126,7 +126,7 @@ Last 5 Reviews:
 - Drag slider → value updates in real time with debounced `PUT /api/v1/system/experts/{id}` (debounce: 500ms after drag ends).
 - On save: subtle green flash on the card; a memory-only (`persisted: false`) commit shows the same warning as the toggle instead.
 - Weight affects how much the expert's opinion contributes to the final review score.
-- The `sum to 100` rule is validated for config files (`review-engine validate`); the slider stores the value as-is.
+- The `sum to 100` rule is validated for config files (`review-engine validate`); the slider stores the value as-is within the schema's 0–100 range (the API refuses anything higher with `422`).
 
 ## 4. Interactions & State Changes
 

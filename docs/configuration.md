@@ -264,13 +264,15 @@ The Experts page edits the live expert team: `GET /api/v1/system/experts` lists 
 - a field the override does not carry keeps the file's value, so editing one expert does not freeze the others,
 - removing an expert from the config file also retires its override (the orphaned entry is skipped with a debug log).
 
-The `sum to 100` weight rule is a config-file validation (`review-engine validate`); the slider stores whatever value you set, exactly like editing the file by hand does not re-validate itself at runtime.
+The `sum to 100` weight rule is a config-file validation (`review-engine validate`); the slider stores whatever value you set (0–100 — a higher value is rejected with `422`), exactly like editing the file by hand does not re-validate itself at runtime.
 
 What the PUT response means:
 
 - `"persisted": true` — the change is stored and survives a restart;
-- `"persisted": false` — no configuration database is attached (`REVIEW_DISABLE_DB=1`, or an embedded instance without a data dir), so the change is **memory-only and lost on restart**. The page shows a warning notification instead of a success one, and the server logs a warning;
-- a failed write answers `500` and the page reports the failure — a change is never silently reported as saved when it was not.
+- `"persisted": false` — no configuration database is attached (`REVIEW_DISABLE_DB=1`, or an embedded instance without a data dir), so the change is **memory-only and lost on restart**. The page shows a warning notification (naming what to do: run with a data directory) instead of a success one, and the server logs a warning;
+- a failed write answers `500` and the page reports the failure — a change is never silently reported as saved when it was not. The write happens **before** the change takes effect, so a `500` also means the running configuration is untouched.
+
+A hand-edited `experts` row cannot break startup and cannot inject a value the schema forbids: a row that is not an override map, or a `weight` outside 0–100, is logged as a warning and ignored, leaving the config file's `[review_experts]` values in force.
 
 ---
 

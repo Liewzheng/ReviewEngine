@@ -481,14 +481,17 @@ export default {
     stats: {
       providers: '提供者',
       avgLatency: '平均延遲',
-      totalRequests: '請求總數',
+      totalRequests: '使用總數',
+      totalRequestsWindow: '使用總數（過去 {days} 天）',
     },
     metrics: {
       latency: '延遲',
-      requests: '請求數',
-      errors: '錯誤數',
+      requests: '使用次數',
+      successRate: '成功率',
     },
-    usage: '容量 {percent}%',
+    usageShare: '佔比 {percent}%（過去 {days} 天）',
+    usageWindow: '過去 {days} 天',
+    lastUsed: '最近使用：{date}',
     lastChecked: '上次檢查：{date}',
     recentUsage: {
       title: '最近使用',

@@ -27,14 +27,26 @@ const degradedCount = computed(() => llm.degradedCount.value)
 const errorCount = computed(() => llm.errorCount.value)
 const offlineCount = computed(() => llm.offlineCount.value)
 
+/** Probe round-trip time of the active providers, or null when none is
+ *  probed — `—` beats a fabricated `0 ms` (RENG-56). */
 const avgLatency = computed(() => {
   const active = providers.value.filter(p => p.configured && p.status !== 'offline' && p.latencyMs > 0)
-  if (!active.length) return 0
+  if (!active.length) return null
   return Math.round(active.reduce((sum, p) => sum + p.latencyMs, 0) / active.length)
 })
 
-const totalRequests = computed(() =>
-  providers.value.reduce((sum, p) => sum + p.requestCount, 0)
+/** RENG-56: usage window the per-provider numbers cover; null when the
+ *  server could not read the usage history, which hides the usage row. */
+const usageWindowDays = computed(() => (llm.usageAvailable.value ? llm.usageWindowDays.value : null))
+
+/** Recorded usages across all providers in the window; null when unknown. */
+const totalRequests = computed(() => {
+  if (!llm.usageAvailable.value) return null
+  return providers.value.reduce((sum, p) => sum + (p.requestCount ?? 0), 0)
+})
+
+const totalRequestsDisplay = computed(() =>
+  totalRequests.value === null ? '—' : new Intl.NumberFormat('en-US').format(totalRequests.value)
 )
 
 /* ------------------------------------------------------------------ */
@@ -303,7 +315,9 @@ onUnmounted(() => {
         <div class="stat-content">
           <el-icon class="stat-icon" :size="24"><RefreshRight /></el-icon>
           <div class="stat-body">
-            <div class="stat-value">{{ avgLatency }} ms</div>
+            <div class="stat-value">
+              {{ avgLatency === null ? '—' : `${avgLatency} ms` }}
+            </div>
             <div class="stat-label">{{ $t('llm.stats.avgLatency') }}</div>
           </div>
         </div>
@@ -312,8 +326,12 @@ onUnmounted(() => {
         <div class="stat-content">
           <el-icon class="stat-icon" :size="24"><Cpu /></el-icon>
           <div class="stat-body">
-            <div class="stat-value">{{ new Intl.NumberFormat('en-US').format(totalRequests) }}</div>
-            <div class="stat-label">{{ $t('llm.stats.totalRequests') }}</div>
+            <div class="stat-value">{{ totalRequestsDisplay }}</div>
+            <div class="stat-label">
+              {{ usageWindowDays === null
+                ? $t('llm.stats.totalRequests')
+                : $t('llm.stats.totalRequestsWindow', { days: usageWindowDays }) }}
+            </div>
           </div>
         </div>
       </el-card>
@@ -353,6 +371,7 @@ onUnmounted(() => {
         :primary="card.provider === primaryName"
         :health="healthByName.get(card.provider)"
         :chain-position="healthByName.get(card.provider)?.chainPosition"
+        :usage-window-days="usageWindowDays"
         :testing="isCardTesting(card)"
         :saving="cardsSaving"
         :test-result="cardTestResult(card)"

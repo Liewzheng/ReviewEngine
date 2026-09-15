@@ -486,14 +486,17 @@ export default {
     stats: {
       providers: '제공자',
       avgLatency: '평균 지연 시간',
-      totalRequests: '총 요청 수',
+      totalRequests: '총 사용 횟수',
+      totalRequestsWindow: '총 사용 횟수(최근 {days}일)',
     },
     metrics: {
       latency: '지연 시간',
-      requests: '요청 수',
-      errors: '오류 수',
+      requests: '사용 횟수',
+      successRate: '성공률',
     },
-    usage: '용량 {percent}%',
+    usageShare: '사용 비중 {percent}%(최근 {days}일)',
+    usageWindow: '최근 {days}일',
+    lastUsed: '마지막 사용: {date}',
     lastChecked: '마지막 확인: {date}',
     recentUsage: {
       title: '최근 사용',

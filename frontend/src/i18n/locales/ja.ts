@@ -487,14 +487,17 @@ export default {
     stats: {
       providers: 'プロバイダー',
       avgLatency: '平均レイテンシー',
-      totalRequests: 'リクエスト総数',
+      totalRequests: '使用回数',
+      totalRequestsWindow: '使用回数（過去 {days} 日間）',
     },
     metrics: {
       latency: 'レイテンシー',
-      requests: 'リクエスト数',
-      errors: 'エラー数',
+      requests: '使用回数',
+      successRate: '成功率',
     },
-    usage: '容量 {percent}%',
+    usageShare: '使用シェア {percent}%（過去 {days} 日間）',
+    usageWindow: '過去 {days} 日間',
+    lastUsed: '最終使用：{date}',
     lastChecked: '最終チェック：{date}',
     recentUsage: {
       title: '最近の使用',

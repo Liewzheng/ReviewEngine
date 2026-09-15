@@ -774,6 +774,9 @@ Response 200:
   "usageSince": "2026-09-08T02:00:00Z",
   "usageAvailable": true,
   "usageTotal": 88,
+  "latencyWindowDays": 7,
+  "latencySince": "2026-09-08T02:00:00Z",
+  "latencyAvailable": true,
   "items": [
     {
       "id": "openai-0",
@@ -788,12 +791,17 @@ Response 200:
       "position": 0,
       "chainPosition": 1,
       "isPrimary": true,
-      "latencyMs": 320,
+      "lastProbeLatencyMs": 320,
       "requestCount": 12,
       "usageShare": 0.75,
       "successRate": 0.9167,
       "lastUsedAt": "2026-09-14T08:30:00+00:00",
-      "lastChecked": "2026-07-18T02:00:00Z"
+      "avgLatencyMs": 812,
+      "latencySampleCount": 46,
+      "latencyFailureCount": 3,
+      "latencyLastSampleAt": "2026-09-15T01:58:00+00:00",
+      "latencySparkline": [780, null, 812, 940, null, 760],
+      "lastChecked": "2026-09-15T02:00:00Z"
     }
   ]
 }
@@ -801,13 +809,15 @@ Response 200:
 
 API key 永远不会在响应中返回。
 
-`status` / `latencyMs` / `lastChecked` 来自**真实探测**（0.10.18 起，RENG-36）：服务端对每个已配置 provider 发一次 `GET {api_base}/models`（与 `POST …/{id}/test`、CLI `reng config provider test` 同一探测路径），并把结果按 provider 缓存 60s。取值：
+`status` / `lastProbeLatencyMs` / `lastChecked` 来自**真实探测**（0.10.18 起，RENG-36；字段名 0.10.23 起由 `latencyMs` 改为 `lastProbeLatencyMs`，见下）：服务端对每个已配置 provider 发一次 `GET {api_base}/models`（与 `POST …/{id}/test`、CLI `reng config provider test` 同一探测路径），并把结果按 provider 缓存 60s。取值：
 
-- `healthy` —— 最近一次探测成功（`message: Configured`），`latencyMs` 是该次探测的往返耗时，`lastChecked` 是探测时刻；
+- `healthy` —— 最近一次探测成功（`message: Configured`），`lastProbeLatencyMs` 是该次探测的往返耗时，`lastChecked` 是探测时刻；
 - `error` —— 最近一次探测失败（key 被改坏 / 被吊销、地址不可达、401/403 等），`message` 是具体错误；
-- `offline` —— 没有存储 key，**不做探测**，`latencyMs` 为 0；`lastChecked` 为 `null`（没有任何一次探测发生过，不再回填当前时间）。
+- `offline` —— 没有存储 key，**不做探测**，`lastProbeLatencyMs` 为 0；`lastChecked` 为 `null`（没有任何一次探测发生过，不再回填当前时间）。
 
 改 key、改 `apiBase`、改 provider 名、删除 provider（`PUT /api/v1/config` 的 `llm` 段，或本节的 `POST` / `PUT` / `DELETE /providers`）都会**丢弃该 provider 缓存的健康状态**，下一次读取重新探测后才给出状态 —— 因此「在 WebUI 改坏 key、不重启服务」不会再显示成 `healthy`。失效粒度是**按 provider**（缓存键是 `provider + model + api_base + api_key` 的 SHA-256 指纹）：只动一个 provider 时，其他 provider 的状态与徽标不受影响，也不会被连带重新探测。缓存未命中时读取会等待该次探测（最长即探测自身的 10s 超时）；只是超过 TTL 的条目会立即返回并**在后台**刷新一次，所以正常轮询不会因为探测而变慢。
+
+`POST /api/v1/llm/providers/{id}/test` 的响应仍然叫 `latencyMs`：那是**用户刚发起的那一次**手工测试自己的往返耗时（RENG-54 的会话内结果行），与列表里的探测缓存是两个不同的测量，不共用字段名。
 
 0.10.11 起（RENG-55）每个 provider 额外返回链序信息：`position` 为它在**存储列表**中的下标（0 起，与 `llm_providers.raw.position` 及 UI 卡片顺序一致，不受“首选”选择影响），`chainPosition` 为它在**运行时链**中的 1 起名次（首选 provider 为 1，其后按存储顺序排列），`isPrimary` 标识链首（即评审实际首先使用的 provider）。运行时链的规则见 [configuration.md](configuration.md#chain-order-and-the-primary-provider)。
 
@@ -820,11 +830,27 @@ API key 永远不会在响应中返回。
 - `successRate`：使用过该 provider 且已终态的评审中 `completed / (completed + failed)`，0–1。
 - `lastUsedAt`：窗口内最近一次使用该 provider 的时刻。
 
-**不知道就是 `null`，绝不填 0**：窗口内没有任何记录的 provider，`requestCount` 是实测的 `0`，而 `usageShare` / `successRate` / `lastUsedAt` 为 `null`（没有分母 / 没有终态 / 从未使用）。`usageAvailable` 为 `false`（`REVIEW_DISABLE_DB=1`、聚合查询失败）时四项全为 `null`。`successRate` 的固有局限：`llm_summary` 只在评审完成写回时落库，因此「还没产出任何报告就失败的评审」不带快照、也无法归因到某个 provider —— 该比率是「用过它并且跑完的评审里有多少成功」，是 provider 自身调用成功率的**上界**，逐次调用的成功率需要 RENG-57 的调用级历史。
+**不知道就是 `null`，绝不填 0**：窗口内没有任何记录的 provider，`requestCount` 是实测的 `0`，而 `usageShare` / `successRate` / `lastUsedAt` 为 `null`（没有分母 / 没有终态 / 从未使用）。`usageAvailable` 为 `false`（`REVIEW_DISABLE_DB=1`、聚合查询失败）时四项全为 `null`。`successRate` 的固有局限：`llm_summary` 只在评审完成写回时落库，因此「还没产出任何报告就失败的评审」不带快照、也无法归因到某个 provider —— 该比率是「用过它并且跑完的评审里有多少成功」，是 provider 自身调用成功率的**上界**；逐次调用的成功率/延迟见下面 RENG-57 的 `llm_call_samples`。
 
-`usagePercent`（限额容量）与 `sparkline`（时间序列）已从响应中**删除**：不存在限额概念，也不存在调用级时间序列（RENG-57），原先恒为 `0` / `[]` 的占位字段与硬编码的 `errorRate` 一并移除，避免页面展示假数据。
+`usagePercent`（限额容量）已从响应中**删除**：不存在限额概念，原先恒为 `0` 的占位字段与硬编码的 `errorRate` 一并移除，避免页面展示假数据。
 
 成本：每次读取一次聚合查询，走 `reviews(created_at)` 索引的范围扫描，代价与窗口内评审数成正比（窗口外与 `llm_summary IS NULL` 的行在同一次扫描中被过滤），JSON 快照在 Rust 侧解析（SQLite / PostgreSQL 两端无需 JSON 方言分叉）。
+
+0.10.23 起（RENG-57）额外返回**逐次调用的真实延迟统计**，数据源是评审路径每次 LLM 调用落库的采样表 `llm_call_samples`（迁移 `0004_llm_call_samples.sql`）。此前页面的「平均延迟」只有探测的瞬时值可用（RENG-53 的困惑点正是这两种测量被混为一谈）：
+
+- 窗口：`latencyWindowDays`（当前恒为 7）与 `latencySince`（滚动窗口起点，含端点）**独立于 usage 窗口单独返回**，客户端不假设两者一致（当前实现两者同为 7 天）。
+- `avgLatencyMs`：窗口内该 provider **成功调用**的平均往返耗时（整数毫秒）。失败调用**不计入**均值（一次 401 可能 5ms 返回、一次超时可能 120s，混入会让均值反映错误分布而非 provider 速度），失败次数单独给出。
+- `latencySampleCount` / `latencyFailureCount`：窗口内的成功 / 失败调用次数（采样表的行数口径，逐次尝试计数：重试与 fallback 的每一次失败尝试都各占一行）。`latencySampleCount` 是均值的分母。
+- `latencyLastSampleAt`：窗口内最近一次调用（成功或失败）的时刻。
+- `latencySparkline`：窗口按 6 小时切成 28 桶、每桶成功调用的平均耗时（整数毫秒），最旧桶在前；桶内无调用为 `null`（折线断开，不画假值）。**没有采样就是 `null`**（没有可画的序列，也不会画一条零线）。
+- `lastProbeLatencyMs`：探测的瞬时往返耗时（RENG-36），与上面的历史均值是**不同字段**，页面也分开显示（卡片指标行显示历史均值，探测值显示在「Last checked」一行的 `Probe {n} ms`）。
+- `latencyAvailable`：`false` 表示采样表读不到（无 DB / 查询失败），此时六个延迟字段全为 `null`。
+
+**不知道就是 `null`**：窗口内没有成功调用的 provider，`avgLatencyMs` 为 `null`（页面显示 `—`），`latencySampleCount` / `latencyFailureCount` 是实测的 `0`（实测计数可以是 0，均值不能）。
+
+写入路径（best-effort，绝不影响评审）：`LLMClient` 每次调用尝试结束后把一行交给 `StoreLlmCallSink`，它写 `llm_call_samples` 并在**每个 sink 的第一次写入**时顺带做一次保留期清理（删除 30 天前的行，`src/store/llm_samples.rs` 的 `RETENTION_DAYS = 30`）。写失败只记 WARN（与 `llm_summary` 写穿一致）；无 DB 时不挂 sink，什么都不写。Repo 扫描类评审（`/api/v1/repo/*`）不在覆盖范围内：它的报告不带 provider 归因（`llm_provider: None`），RENG-56 的 usage 统计同样看不到它。
+
+成本：每次读取一次 `llm_call_samples(created_at, provider)` 索引的窗口范围扫描，行数按窗口内实际调用数计（典型规模见 `docs/configuration.md`），在 Rust 侧折叠为每 provider 的均值与分桶（同 RENG-56 的理由：不做 SQLite / PostgreSQL 的日期分桶方言分叉）。
 
 #### `POST /api/v1/llm/providers`
 

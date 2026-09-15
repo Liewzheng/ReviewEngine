@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use reqwest::Client as HttpClient;
 use tracing::{error, info};
 
-use crate::git_provider::FileFetchError;
+use crate::git_provider::{FileFetchError, InlineNoteError};
 use crate::models::*;
 
 /// GitLab REST API client for MR operations.
@@ -783,10 +783,52 @@ impl Client {
             },
         };
 
-        self.post_json(&format!("merge_requests/{}/discussions", self.mr_iid), &discussion_body)
+        self.post_inline_discussion(&format!("merge_requests/{}/discussions", self.mr_iid), &discussion_body)
             .await?;
 
         info!("Inline note posted successfully");
+        Ok(())
+    }
+
+    /// POST an inline discussion, keeping GitLab's verdict when it is rejected.
+    ///
+    /// [`Self::post_json`] flattens a non-2xx answer into a message string, so
+    /// the status and the response body are only readable by parsing that
+    /// string. The publish pass reports a rejected inline note to the operator
+    /// (RENG-71) and needs both on their own, so a rejection here carries an
+    /// [`InlineNoteError`]. The rendered message is unchanged; the success path
+    /// is [`Self::post_json`]'s, including its parse of the response.
+    async fn post_inline_discussion<T: serde::Serialize>(&self, path: &str, body: &T) -> Result<()> {
+        let url = format!(
+            "{}/projects/{}/{}",
+            self.base_url.trim_end_matches('/'),
+            self.encoded_project_path(),
+            path,
+        );
+
+        let resp = self
+            .http
+            .post(&url)
+            .header("PRIVATE-TOKEN", &self.gitlab_token)
+            .header("Content-Type", "application/json")
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("Failed to send POST to {path}"))?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow::Error::new(InlineNoteError {
+                status: Some(status.as_u16()),
+                body: text.clone(),
+                message: format!("GitLab API returned {status} for POST {path}: {text}"),
+            }));
+        }
+
+        resp.json::<serde_json::Value>()
+            .await
+            .with_context(|| format!("Failed to parse response from {path}"))?;
         Ok(())
     }
 
@@ -1748,6 +1790,54 @@ mod tests {
             discussion_posts(&server).await.len(),
             3,
             "three bounded attempts (initial + two retries)"
+        );
+    }
+
+    /// A rejected inline note keeps GitLab's verdict: the status and the
+    /// response body are structural, not merely rendered into the message the
+    /// publish pass would otherwise have to parse (RENG-71).
+    #[tokio::test]
+    async fn test_inline_note_rejection_carries_the_status_and_body() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 1, "name": "Alice"},
+                "diff_refs": {"base_sha": "b1", "start_sha": "s1", "head_sha": "h1"}
+            })))
+            .mount(&server)
+            .await;
+        let body = r#"{"message":"400 Bad request - Note {:position=>[\"new_line is not part of the diff\"]}}"#;
+        Mock::given(method("POST"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/discussions"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        let err = client
+            .post_inline_note("bad.rs", 1, "body")
+            .await
+            .expect_err("a rejected position must fail");
+
+        let verdict = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<crate::git_provider::InlineNoteError>())
+            .expect("the rejection must carry the provider verdict");
+        assert_eq!(verdict.status, Some(400));
+        assert_eq!(verdict.body, body, "the response body is kept verbatim");
+        assert_eq!(
+            verdict.to_string(),
+            err.to_string(),
+            "the rendered message is unchanged"
+        );
+        assert!(
+            err.to_string()
+                .contains("GitLab API returned 400 Bad Request for POST merge_requests/1/discussions:"),
+            "{err}"
         );
     }
 

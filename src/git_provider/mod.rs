@@ -58,6 +58,36 @@ impl std::fmt::Display for FileFetchError {
 
 impl std::error::Error for FileFetchError {}
 
+/// A rejected inline-comment post, keeping the provider's verdict.
+///
+/// A flattened `anyhow::Error` string does not expose the HTTP status, and the
+/// publish pass needs to tell "the provider refused this anchor" (GitLab's 400
+/// on the position — RENG-71) from a permission or transport failure, and to
+/// report what the provider actually answered. [`FileFetchError`] keeps the
+/// same information for repository-file reads; this is its inline-post
+/// counterpart. Transport failures, and failures raised before the request is
+/// sent (a rejected path, a missing SHA ref), are plain `anyhow` errors with no
+/// verdict — the publish pass falls back to the rendered message for those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineNoteError {
+    /// HTTP status of the provider response, when there was one.
+    pub status: Option<u16>,
+    /// The provider's response body, verbatim (callers truncate it for the
+    /// log).
+    pub body: String,
+    /// Human-readable failure, identical to the message the `anyhow` variant
+    /// of the same call produces.
+    pub message: String,
+}
+
+impl std::fmt::Display for InlineNoteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for InlineNoteError {}
+
 /// Run an async provider call from a synchronous context.
 ///
 /// [`RepoBrowser`] is a synchronous trait while the provider HTTP clients are

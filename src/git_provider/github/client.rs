@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{error, info};
 
-use crate::git_provider::FileFetchError;
+use crate::git_provider::{FileFetchError, InlineNoteError};
 use crate::models::{aggregate_participants, MRInfo, ParticipantInput, ParticipantRole};
 
 use super::types::{GitHubUser, PrReview, PrUser, PullRequest, ReviewComment};
@@ -275,7 +275,13 @@ impl Client {
         if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("GitHub API returned {status} for POST comment: {text}");
+            // The publish pass reports a rejected anchor — keep the status and
+            // the response body alongside the unchanged message (RENG-71).
+            return Err(anyhow::Error::new(InlineNoteError {
+                status: Some(status.as_u16()),
+                body: text.clone(),
+                message: format!("GitHub API returned {status} for POST comment: {text}"),
+            }));
         }
         info!("Inline comment posted");
         Ok(())

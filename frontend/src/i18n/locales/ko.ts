@@ -391,8 +391,8 @@ export default {
       advanced: '고급 설정',
       deleteTitle: '공급자 삭제',
       deleteConfirm: '공급자 "{name}"을(를) 삭제하시겠습니까? 즉시 저장됩니다.',
-      deletePrimaryConfirm:
-        '"{name}"은(는) 현재 기본 공급자입니다. 삭제하면 "{next}"이(가) 자동으로 기본 공급자로 설정됩니다. 계속하시겠습니까?',
+      deletePrimaryRequiresSelection:
+        '"{name}"은(는) 현재 기본 공급자입니다. 바로 삭제할 수 없습니다. 다른 공급자를 먼저 기본 공급자로 설정한 뒤 삭제하세요.',
       deleted: '공급자 "{name}"을(를) 삭제했습니다',
       saved: '공급자가 저장되었습니다',
       saveFailed: '공급자 저장에 실패했습니다',

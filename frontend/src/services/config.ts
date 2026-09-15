@@ -1,5 +1,5 @@
 import { request } from './api';
-import type { AppConfig } from '../types/config';
+import type { AppConfig, ConfigUpdate } from '../types/config';
 import type { TestResult } from '../types/llm';
 
 /**
@@ -13,14 +13,15 @@ export async function getConfig(): Promise<AppConfig> {
 /**
  * Update the application configuration on the server.
  *
- * The backend treats the payload as a PARTIAL (sparse) update: top-level
- * sections omitted from `config` keep their stored values, so callers may
- * send a single section (e.g. `{ llm: ... }`) without touching the rest.
+ * The backend treats the payload as a PARTIAL (sparse) update: keys omitted
+ * from `config` keep their stored values — sections (`rules`, `advanced`, …)
+ * and, inside `llm`, the individual provider-card fields — so a caller may
+ * send a single card's `providers` array without touching the stored primary.
  * Masked (`***`) or blank secrets keep the stored values.
- * @param config - The configuration (or section subset) to apply.
+ * @param config - The configuration (or subset) to apply.
  * @returns Status confirmation on success.
  */
-export async function updateConfig(config: Partial<AppConfig>): Promise<{ status: string }> {
+export async function updateConfig(config: ConfigUpdate): Promise<{ status: string }> {
   return request('/config', {
     method: 'PUT',
     body: JSON.stringify(config),

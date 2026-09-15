@@ -1,7 +1,7 @@
 import { ref } from 'vue';
 import { getConfig, updateConfig } from '../services/config';
 import { i18n } from '../i18n';
-import type { AppConfig } from '../types/config';
+import type { AppConfig, ConfigUpdate } from '../types/config';
 
 /**
  * Composable for managing application configuration state.
@@ -65,17 +65,24 @@ export function useConfig() {
    * @returns The server response on success.
    * @throws On failure, sets `error.value` and re-throws.
    */
-  async function save(updated: Partial<AppConfig>) {
+  async function save(updated: ConfigUpdate) {
     saving.value = true;
     error.value = null;
     try {
       const result = await updateConfig(updated);
       // Shallow-merge so a sparse save doesn't discard the cached sections
-      // the caller didn't send. (Save-before-load is not a real flow; when
+      // the caller didn't send — with `llm` merged one level deeper, since a
+      // section patch may itself be sparse (a provider-card save sends
+      // `providers` alone). (Save-before-load is not a real flow; when
       // nothing is cached yet, keep the payload as-is.)
-      config.value = config.value
-        ? { ...config.value, ...updated }
-        : (updated as AppConfig);
+      const merged = config.value
+        ? {
+            ...config.value,
+            ...updated,
+            llm: updated.llm ? { ...config.value.llm, ...updated.llm } : config.value.llm,
+          }
+        : updated;
+      config.value = merged as AppConfig;
       return result;
     } catch (e) {
       error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');

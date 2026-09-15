@@ -38,6 +38,14 @@ existing payloads (no new data source):
   in the same payload stays the stored index, which is what the card order
   encodes. The grid keeps the stored order — the marker, not a re-sort,
   expresses the chain.
+- **Who may move the primary (RENG-72)** — only a save that carries the
+  user's choice: **Set as Primary**, the first card of an empty page, or the
+  deletion of the last provider. An add/edit omits `llm.primaryProvider`
+  from its `PUT {llm}` so the backend keeps the stored selection, and the
+  primary card cannot be deleted while another provider remains (the
+  successor would be the array head, not a choice) — the alert says so and
+  the card stays. The chain head the runtime uses is therefore always a
+  selection someone made.
 - **What actually ran** — the Recent Usage card lists the newest reviews'
   `reviews.llm_summary` `provider/model` pairs (via the existing
   `GET /api/v1/reviews` list endpoint, 8 rows). A row whose usages contain

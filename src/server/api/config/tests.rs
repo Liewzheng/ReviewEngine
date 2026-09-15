@@ -186,6 +186,148 @@ async fn put_config_sparse_llm_patch_keeps_key_and_providers() {
     assert_eq!(stored_openai_key(&state), "sk-primary");
 }
 
+/// Seed an `AppState` with the two-provider shape the RENG-72 regression was
+/// measured on: two keyed providers, no `openai` among them — so the primary
+/// is expressed by `ui.llm.primaryProvider` alone, never by the legacy
+/// scalar path.
+fn state_with_two_providers() -> Arc<AppState> {
+    let app: crate::models::AppConfig = serde_json::from_value(serde_json::json!({
+        "llm": [
+            {
+                "provider": "xiaomi-token-plan-cn",
+                "model": "mimo",
+                "api_key": "sk-xiaomi",
+                "api_base": "http://xiaomi.invalid/v1",
+                "max_tokens": 4096,
+                "temperature": 0.7
+            },
+            {
+                "provider": "deepseek",
+                "model": "deepseek-flash",
+                "api_key": "sk-deepseek",
+                "api_base": "https://api.deepseek.com/v1",
+                "max_tokens": 4096,
+                "temperature": 0.7
+            }
+        ]
+    }))
+    .expect("two-provider AppConfig must deserialize");
+    let state = Arc::new(AppState::new(app.llm.clone()));
+    *state.app_config.write().unwrap() = Some(Arc::new(app.clone()));
+    *state.ui_config.write().unwrap() = UiConfig::from_app_config(&app);
+    state
+}
+
+/// The payload the provider-card UI sends for an ordinary add/edit: every
+/// card (masked keys) and NO `primaryProvider` — an edit does not speak for
+/// the primary (RENG-72). `deepseek` is the card being edited here.
+fn card_edit_payload(max_tokens: u32) -> serde_json::Value {
+    serde_json::json!({
+        "llm": {
+            "providers": [
+                {
+                    "provider": "xiaomi-token-plan-cn",
+                    "apiKey": API_KEY_MASK,
+                    "apiBaseUrl": "http://xiaomi.invalid/v1",
+                    "defaultModel": "mimo",
+                    "maxTokens": 4096,
+                    "temperature": 0.7,
+                    "timeoutSeconds": 60,
+                    "retryAttempts": 3
+                },
+                {
+                    "provider": "deepseek",
+                    "apiKey": API_KEY_MASK,
+                    "apiBaseUrl": "https://api.deepseek.com/v1",
+                    "defaultModel": "deepseek-v4-flash",
+                    "maxTokens": max_tokens,
+                    "temperature": 0.7,
+                    "timeoutSeconds": 60,
+                    "retryAttempts": 3
+                }
+            ]
+        }
+    })
+}
+
+/// RENG-72 regression: an ordinary card edit must not move the primary. The
+/// measured failure was a card save re-asserting the primary its (older) view
+/// held, dropping the user's choice back to the array head — the UI now omits
+/// `primaryProvider` from such a save, and an omitted key keeps the stored
+/// value. The edited card itself still applies, live key included.
+#[tokio::test]
+async fn put_config_card_edit_without_primary_keeps_the_stored_primary() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_providers();
+    // The user's explicit choice: deepseek becomes primary.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "llm": { "primaryProvider": "deepseek" } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.ui_config.read().unwrap().llm.primary_provider, "deepseek");
+
+    let resp = put_config(State(state.clone()), Json(card_edit_payload(2048)))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let ui = state.ui_config.read().unwrap();
+    assert_eq!(
+        ui.llm.primary_provider, "deepseek",
+        "a card edit must not drag the primary back to the array head"
+    );
+    let deepseek = ui
+        .llm
+        .providers
+        .iter()
+        .find(|p| p.provider == "deepseek")
+        .expect("deepseek card survives the save");
+    assert_eq!(deepseek.max_tokens, 2048, "the edit is applied");
+    assert_eq!(deepseek.default_model, "deepseek-v4-flash");
+    assert_eq!(deepseek.api_key, API_KEY_MASK, "masked-keep, never a live key");
+    drop(ui);
+
+    let live = state.llm_configs.read().unwrap();
+    let entry = live
+        .iter()
+        .find(|c| c.provider == "deepseek")
+        .expect("deepseek stays configured");
+    assert_eq!(entry.max_tokens, 2048);
+    assert_eq!(entry.model, "deepseek-v4-flash");
+    assert_eq!(entry.api_key, "sk-deepseek", "stored key kept across the save");
+}
+
+/// The other half of the contract: a save that DOES carry the primary choice
+/// still moves it — omitting the primary on ordinary saves must not turn
+/// "set as primary" into a silent no-op, and the persisted primary is what
+/// leads the runtime chain (RENG-55).
+#[tokio::test]
+async fn put_config_explicit_primary_choice_still_wins() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_providers();
+    assert_eq!(
+        state.ui_config.read().unwrap().llm.primary_provider,
+        "xiaomi-token-plan-cn"
+    );
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "llm": { "primaryProvider": "deepseek" } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(state.ui_config.read().unwrap().llm.primary_provider, "deepseek");
+    assert_eq!(
+        state.ordered_llm_configs()[0].provider,
+        "deepseek",
+        "the persisted primary leads the runtime chain"
+    );
+}
+
 /// An empty object `{}` is the degenerate sparse case: a no-op save that
 /// keeps every field, never a wipe.
 #[tokio::test]

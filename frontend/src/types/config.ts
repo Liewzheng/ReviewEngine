@@ -131,6 +131,14 @@ export interface AppConfig {
   maxConcurrentLlmCalls?: number
 }
 
+/**
+ * A PUT /config payload: any subset of the configuration, one level deep —
+ * the backend deep-merges it over the stored config, so an omitted key keeps
+ * its stored value (including inside `llm`, where a provider-card save sends
+ * `providers` alone and the stored primary is preserved, RENG-72).
+ */
+export type ConfigUpdate = { [K in keyof AppConfig]?: Partial<AppConfig[K]> }
+
 /** Result of an LLM connection test. */
 export interface TestResult {
   /** Whether the connection test succeeded. */

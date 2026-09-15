@@ -396,8 +396,8 @@ export default {
       advanced: 'Paramètres avancés',
       deleteTitle: 'Supprimer le fournisseur',
       deleteConfirm: 'Supprimer le fournisseur « {name} » ? L’enregistrement est immédiat.',
-      deletePrimaryConfirm:
-        '« {name} » est le fournisseur principal. Le supprimer fera de « {next} » le nouveau fournisseur principal. Continuer ?',
+      deletePrimaryRequiresSelection:
+        '« {name} » est le fournisseur principal. Vous ne pouvez pas le supprimer — désignez d’abord un autre fournisseur comme principal, puis supprimez celui-ci.',
       deleted: 'Fournisseur « {name} » supprimé',
       saved: 'Fournisseur enregistré',
       saveFailed: 'Échec de l’enregistrement du fournisseur',

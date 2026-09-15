@@ -387,7 +387,8 @@ export default {
       advanced: '高级设置',
       deleteTitle: '删除供应商',
       deleteConfirm: '删除供应商“{name}”？此操作将立即保存。',
-      deletePrimaryConfirm: '“{name}”是当前主提供商，删除后将自动把“{next}”设为主提供商。继续？',
+      deletePrimaryRequiresSelection:
+        '“{name}”是当前主提供商，无法直接删除——请先把其他提供商设为主提供商，再删除它。',
       deleted: '已删除供应商“{name}”',
       saved: '供应商已保存',
       saveFailed: '保存供应商失败',

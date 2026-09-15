@@ -402,8 +402,8 @@ export default {
       advanced: 'Advanced Settings',
       deleteTitle: 'Delete Provider',
       deleteConfirm: 'Delete provider "{name}"? This saves immediately.',
-      deletePrimaryConfirm:
-        '"{name}" is the primary provider. Deleting it will make "{next}" the new primary provider. Continue?',
+      deletePrimaryRequiresSelection:
+        '"{name}" is the primary provider. You cannot delete it — set another provider as primary first, then delete this one.',
       deleted: 'Provider "{name}" deleted',
       saved: 'Provider saved',
       saveFailed: 'Failed to save provider',

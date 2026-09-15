@@ -392,8 +392,8 @@ export default {
       advanced: '詳細設定',
       deleteTitle: 'プロバイダーを削除',
       deleteConfirm: 'プロバイダー「{name}」を削除しますか？すぐに保存されます。',
-      deletePrimaryConfirm:
-        '「{name}」は現在のプライマリプロバイダーです。削除すると「{next}」が自動的にプライマリに設定されます。続行しますか？',
+      deletePrimaryRequiresSelection:
+        '「{name}」は現在のプライマリプロバイダーです。直接削除できません。先にほかのプロバイダーをプライマリに設定してから削除してください。',
       deleted: 'プロバイダー「{name}」を削除しました',
       saved: 'プロバイダーを保存しました',
       saveFailed: 'プロバイダーの保存に失敗しました',

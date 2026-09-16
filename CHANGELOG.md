@@ -1,3 +1,12 @@
+## [0.10.33] - 2026-09-16
+
+### Fixed
+- **"复制卡片" now opens the dialog prefilled with the source card, and warns when you save an untouched copy (RENG-83)**: right-clicking a card and choosing 复制卡片 opened a **blank** 「添加供应商」 form — every parameter had to be typed again, which made the action pointless. The duplicate path had been passing the source card all along (`dialogForDuplicate` → `initial`), but the dialog only read `initial` in `edit` mode; an `add`-mode open always reset to the empty form, so the data was silently discarded. The dialog now distinguishes **three** modes (`add` / `edit` / `duplicate`), and a new pure `initialDialogForm(mode, initial)` builds the open-form: `add` → empty card; `edit`/`duplicate` → the source card's values over an empty card (so a previous session's `disabled`/`disableThinking` cannot leak into a card that omits them). A duplicate whose form is still **identical** to the moment it opened asks for confirmation before saving ("this card already exists") — a **warning the user may override**, not a block, because RENG-75's real identity is the triple **plus the API key** the client never sees, so two same-triple cards are legitimate. The key field opens blank with the existing "leave empty to keep the saved key" semantics (the mask sentinel is never placed in a password input); the backend's `stored_for` rule then resolves the blank against the source card, and the copy becomes a real sibling holding the same credential. (`frontend/src/components/Config/ProviderEditDialog.vue`, `frontend/src/components/Config/providerCardState.ts`, `frontend/src/views/LlmStatus.vue`, `frontend/src/i18n/locales/*`)
+
+### Notes
+- **The suite now catches this bug**: the fix was mutation-checked — temporarily restoring the old `props.mode === 'edit' && props.initial` branch makes the wiring test fail (1 failed / 146 passed); restoring the fix passes 147. The new tests cover the duplicate form's field-by-field equality with the source, the regression that `add` still opens empty *even when a card is handed in*, ten single-field edits each suppressing the unchanged-warning, and the new prompt string in all six locales. Frontend suite: **147 passed** (was 133).
+- **Known follow-up (RENG-85)**: editing only the model or URL of a duplicate currently saves **nothing** — the blank key can no longer be resolved by the triple rule and the backend drops the entry silently. Tracked separately; it needs a backend decision.
+
 ## [0.10.32] - 2026-09-16
 
 ### Fixed

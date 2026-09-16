@@ -598,6 +598,10 @@ describe('RENG-83 — the duplicate dialog', () => {
     const dialog = source('components/Config/ProviderEditDialog.vue');
     expect(dialog).toContain('duplicateUnchanged(duplicateSnapshot.value, submitted)');
     expect(dialog).toContain('DUPLICATE_UNCHANGED_KEY');
+  });
+});
+
+/**
  * RENG-87 — the KPI strip on the LLM Status page: it fills the row it sits in,
  * its numbers are legible, and its labels are readable in every locale.
  *

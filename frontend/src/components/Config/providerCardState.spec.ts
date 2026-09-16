@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { createEmptyProviderCard, type ProviderCardState } from '../../composables/llmPayload';
 import { createI18n } from 'vue-i18n';
-import type { ProviderCardState } from '../../composables/llmPayload';
+import { createEmptyProviderCard, type ProviderCardState } from '../../composables/llmPayload';
 import en from '../../i18n/locales/en';
 import zhCN from '../../i18n/locales/zh-CN';
 import zhTW from '../../i18n/locales/zh-TW';
@@ -585,6 +584,10 @@ describe('RENG-83 — the unchanged-copy prompt in every locale', () => {
     expect(message(zhCN, DUPLICATE_UNCHANGED_KEY)).toContain('已存在');
     expect(message(zhTW, DUPLICATE_UNCHANGED_KEY)).toContain('已存在');
     expect(message(fr, DUPLICATE_UNCHANGED_KEY)).toContain('existe déjà');
+  });
+});
+
+/**
  * RENG-87 — the KPI strip's label keys, resolved the way the strip resolves
  * them.
  *

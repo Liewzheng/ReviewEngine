@@ -882,7 +882,7 @@ watch(() => route.query, () => {
 
         <!-- Expert Results -->
         <h4 class="drawer-section-title">{{ $t('history.drawer.expertResults') }}</h4>
-        <el-collapse @change="handleExpertCollapseChange">
+        <el-collapse class="expert-collapse" @change="handleExpertCollapseChange">
           <el-collapse-item
             v-for="exp in selectedReview.experts"
             :key="exp.expertId"
@@ -1340,25 +1340,34 @@ watch(() => route.query, () => {
   justify-content: flex-end;
 }
 
+/* ── Metadata grid (RENG-84) ──
+   These six fields used to be six cards of their own: a `--bg-surface` fill
+   inside a `--border-color` frame each. R2.1 then lifted the drawer surface to
+   `--bg-elevated`, one step ABOVE `--bg-surface`, so each tile kept its darker
+   fill and its frame and the six of them read as dirty boxes floating on a
+   lighter panel — the intended contrast step inverted. The grid is flat now:
+   the icon, the label/value weight step and the spacing do the separating, and
+   nothing here is framed or filled. The wider column gap is what the frames
+   used to do — it is now the only thing telling the two columns apart. */
 .meta-grid {
   display: grid;
   grid-template-columns: repeat(2, 1fr);
-  gap: var(--space-3);
+  column-gap: var(--space-5);
+  row-gap: var(--space-3);
 }
 
 .meta-item {
   display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: var(--space-2) var(--space-3);
-  background: var(--bg-surface);
-  border-radius: var(--radius-md);
-  border: 1px solid var(--border-color);
+  align-items: flex-start;
+  gap: var(--space-2);
 }
 
+/* The icon is a quiet marker beside the label, not a tile glyph: a step below
+   the label's own grey, and small enough to leave the value the last word. */
 .meta-item .el-icon {
-  color: var(--text-secondary);
-  font-size: 16px;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  flex-shrink: 0;
 }
 
 .meta-label {
@@ -1387,12 +1396,57 @@ watch(() => route.query, () => {
   margin: 0 0 var(--space-2);
 }
 
+/* ── Expert results list (RENG-84) ──
+   Element Plus paints both the header and the expanded wrap from
+   `--el-collapse-header-bg-color` / `--el-collapse-content-bg-color`, which the
+   R1.3 bridge resolves to `--bg-surface` — the step BELOW the drawer's own
+   surface. Every expert row was therefore a dark block on the lighter panel,
+   and nine of them stacked into one slab that outweighed everything above it.
+   The rows sit on the drawer surface now: a 44px row, a hover tint and the
+   single hairline between neighbours carry the list, and the chevron stays as
+   the affordance. Same treatment, and the same reason, as the advanced-fields
+   collapse in ProviderEditDialog. */
+.expert-collapse {
+  --el-collapse-header-bg-color: transparent;
+  --el-collapse-content-bg-color: transparent;
+  --el-collapse-header-height: 44px;
+  /* EP brackets the list with a rule above the first row and another below the
+     last one; the drawer already closes the section with an `el-divider`, so
+     the list keeps the one rule that starts it and drops the other. */
+  border-top: 1px solid var(--border-color);
+  border-bottom: none;
+}
+
+/* A row is marked by a full-width tint, exactly like a table row in the list
+   view — no frame, no corner, no lift. */
+.expert-collapse :deep(.el-collapse-item__header:hover) {
+  background-color: var(--bg-hover);
+}
+
+/* The last row's hairline would sit 16px above the section's own divider. */
+.expert-collapse :deep(.el-collapse-item:last-child .el-collapse-item__header) {
+  border-bottom: none;
+}
+
+.expert-collapse :deep(.el-collapse-item__arrow) {
+  color: var(--text-tertiary);
+}
+
+/* EP reserves 25px under every expanded panel — off the spacing scale, and
+   more air than the panel's own 8px rhythm asks for. */
+.expert-collapse :deep(.el-collapse-item__content) {
+  padding-bottom: var(--space-2);
+}
+
+/* RENG-84: the chevron sits after this box, not inside it, so this is only the
+   breathing room between the score tag and that chevron — 24px was the air of a
+   tall row, and the row is 44px now. */
 .expert-title {
   display: flex;
   justify-content: space-between;
   align-items: center;
   width: 100%;
-  padding-right: var(--space-5);
+  padding-right: var(--space-2);
   font-size: 13px;
   color: var(--text-primary);
 }
@@ -1420,8 +1474,13 @@ watch(() => route.query, () => {
 }
 
 /* Row without a score tag: keep the status badge on the same line as rows
-   that do have a score by reserving the score column (42px) + the gap (8px). */
-.expert-meta > .el-tag:only-child {
+   that do have a score by reserving the score column (42px) + the gap (8px).
+   RENG-84: the selector used to be `.el-tag:only-child`, which is also true of a
+   row whose ONLY tag is the score — the usual row, since the badge is rendered
+   for non-success statuses only. Those rows were pushed 50px short of the row
+   edge while the score column they were supposed to line up with sat somewhere
+   else; the reservation belongs to the status badge and now names it. */
+.expert-meta > .status-badge:only-child {
   margin-right: 50px;
 }
 

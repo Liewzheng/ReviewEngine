@@ -16,5 +16,5 @@ pub mod resolver;
 pub mod secrets;
 
 pub use defaults::*;
-pub use expert_overrides::{ExpertOverride, ExpertOverrides, MAX_EXPERT_WEIGHT};
+pub use expert_overrides::{ExpertOverride, ExpertOverrides, MAX_EXPERT_PROMPT_CHARS, MAX_EXPERT_WEIGHT};
 pub use resolver::*;

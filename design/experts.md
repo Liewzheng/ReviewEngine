@@ -196,7 +196,8 @@ interface Expert {
   enabled: boolean;
   weight: number; // 0–100
   description: string;
-  promptPreview: string;
+  prompt: string; // full effective prompt (RENG-93): override > config file > default
+  promptOverride: boolean; // true when `prompt` was authored in the WebUI
   lastReviews: ExpertReviewSummary[];
 }
 
@@ -221,5 +222,5 @@ interface ExpertReviewSummary {
 // API endpoints (0.10.x: the toggle/weight POST endpoints were folded into
 // one PUT per expert; the response carries `persisted`, see §3.3)
 GET /api/v1/system/experts             → { experts: Expert[] }
-PUT /api/v1/system/experts/{id}        → Expert & { persisted: boolean }  // enabled and/or weight
+PUT /api/v1/system/experts/{id}        → Expert & { persisted: boolean }  // enabled and/or weight and/or prompt (RENG-93)
 ```

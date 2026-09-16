@@ -602,6 +602,42 @@ describe('RENG-83 — the duplicate dialog', () => {
 });
 
 /**
+ * RENG-93 — the editable expert prompt in the detail dialog. Every new key the
+ * drawer asks for must exist in all six locales: a missing key renders as the
+ * key path, which this project treats as a defect. The old read-only preview
+ * label is gone everywhere. The editor's behaviour lives in
+ * `views/ExpertsManagement.spec.ts`.
+ */
+describe('RENG-93 — the editable expert prompt', () => {
+  it('labels the prompt editor in all six locales', () => {
+    const keys = [
+      'prompt:',
+      'promptSave:',
+      'promptSaving:',
+      'promptSaved:',
+      'promptSaveFailed:',
+      'promptSourceConfig:',
+      'promptSourceOverride:',
+    ];
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr']) {
+      const file = source(`i18n/locales/${locale}.ts`);
+      for (const key of keys) {
+        expect(file, `${locale} is missing ${key}`).toContain(key);
+      }
+      expect(file, `${locale} still carries the old preview label`).not.toContain('promptPreview:');
+    }
+  });
+
+  it('binds the drawer to the editable label and source keys', () => {
+    const view = source('views/ExpertsManagement.vue');
+    expect(view).toContain("experts.detail.prompt'");
+    expect(view).not.toContain('experts.detail.promptPreview');
+    expect(view).toContain('promptSourceConfig');
+    expect(view).toContain('promptSourceOverride');
+  });
+});
+
+/**
  * RENG-87 — the KPI strip on the LLM Status page: it fills the row it sits in,
  * its numbers are legible, and its labels are readable in every locale.
  *

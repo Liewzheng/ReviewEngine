@@ -458,6 +458,7 @@ mod tests {
             crate::config::ExpertOverride {
                 enabled: Some(false),
                 weight: Some(15),
+                ..Default::default()
             },
         );
 

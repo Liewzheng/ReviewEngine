@@ -6,12 +6,13 @@
 //! store, and the resolved application configuration.
 
 use prometheus::Registry;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 
 use chrono::{DateTime, Utc};
 
 use crate::feedback::FeedbackStore;
-use crate::models::LLMConfig;
+use crate::models::{ExpertTomlDef, LLMConfig};
 use crate::server::api::config::UiConfig;
 use crate::server::log_collector::LogCollector;
 use crate::server::task_queue::TaskStore;
@@ -269,6 +270,15 @@ pub struct AppState {
     /// file). Empty when no DB is attached (`REVIEW_DISABLE_DB=1`, tests) —
     /// expert edits are then memory-only, exactly as before 0.10.24.
     pub expert_overrides: RwLock<Arc<crate::config::ExpertOverrides>>,
+    /// The `[review_experts]` team as the config file resolved it, captured
+    /// before any WebUI override was applied (RENG-93). [`Self::set_expert_overrides`]
+    /// re-applies the override map over THIS snapshot on every edit, so
+    /// removing an override (a cleared prompt) restores the file value instead
+    /// of leaving the previous override baked into the running `app_config`.
+    /// `None` until the first override application — at that point whatever
+    /// the state was seeded with IS the base (the startup replay runs before
+    /// any PUT, and tests seed the file values directly).
+    pub expert_base: RwLock<Option<HashMap<String, ExpertTomlDef>>>,
 }
 
 impl AppState {
@@ -300,6 +310,7 @@ impl AppState {
             catalog: CatalogStore::new(),
             llm_health: Arc::new(crate::server::api::llm_health::LlmHealthStore::new()),
             expert_overrides: RwLock::new(Arc::new(crate::config::ExpertOverrides::default())),
+            expert_base: RwLock::new(None),
         }
     }
 
@@ -332,14 +343,30 @@ impl AppState {
     /// `app_config`-consuming paths — repo scans, `inject_agents_md` — see the
     /// edited values immediately). Returns the number of experts patched.
     ///
-    /// Lock order is fixed here (`app_config` → `expert_overrides`) and this
-    /// is the only place both are written, so it cannot deadlock against the
-    /// readers of either lock.
+    /// The map is re-applied over [`Self::expert_base`] — the config-file
+    /// resolution captured on the first application — not over the previous
+    /// result, so removing a field from the map (a cleared prompt) restores the
+    /// file value instead of leaving the prior override baked in.
+    ///
+    /// Lock order is fixed here (`app_config` → `expert_base`, then
+    /// `expert_overrides` alone after the block) and this is the only place
+    /// the expert locks are written, so it cannot deadlock against the readers
+    /// of any of them.
     pub fn set_expert_overrides(&self, overrides: crate::config::ExpertOverrides) -> usize {
         let applied = {
             let mut cfg_opt = self.app_config.write().unwrap();
+            let mut base_opt = self.expert_base.write().unwrap();
             match cfg_opt.as_mut() {
-                Some(arc) => overrides.apply_to(Arc::make_mut(arc)),
+                Some(arc) => {
+                    let cfg = Arc::make_mut(arc);
+                    let base = base_opt.get_or_insert_with(|| cfg.review_experts.clone());
+                    // Re-apply over the base, never over the previous result:
+                    // a field the new map no longer covers (a cleared prompt)
+                    // must fall back to the config-file value, not keep the
+                    // previous override baked into the running config.
+                    cfg.review_experts = base.clone();
+                    overrides.apply_to(cfg)
+                }
                 None => 0,
             }
         };

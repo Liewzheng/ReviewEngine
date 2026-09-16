@@ -523,6 +523,10 @@ export default {
       // measurement the user reads, and only one of them is what the card
       // shows today.
       avgCommLatency: 'Avg comm. latency',
+      // RENG-87: the same name over the window, which the KPI strip asks for
+      // as `<key>Window`. It was missing here, so a probe reading made the
+      // strip print the key itself.
+      avgCommLatencyWindow: 'Avg comm. latency (last {days} days)',
       totalRequests: 'Total Usages',
       totalRequestsWindow: 'Recorded usages (last {days} days)',
     },

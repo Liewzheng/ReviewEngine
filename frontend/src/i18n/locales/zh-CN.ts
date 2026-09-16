@@ -503,6 +503,7 @@ export default {
       avgTtfb: '平均通信延迟',
       avgTtfbWindow: '平均通信延迟（过去 {days} 天）',
       avgCommLatency: '平均通信延迟',
+      avgCommLatencyWindow: '平均通信延迟（过去 {days} 天）',
       totalRequests: '使用总数',
       totalRequestsWindow: '已记录使用（过去 {days} 天）',
     },

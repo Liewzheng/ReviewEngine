@@ -208,6 +208,30 @@ export function stripLatency(providers: CardHealth[]): LatencyReading {
   }
 }
 
+/** The KPI strip's `llm.stats` labels for a reading. */
+export interface StripLatencyLabelKeys {
+  /** The measurement, without its window. */
+  label: string
+  /** The same measurement named over the window the samples cover. */
+  window: string
+}
+
+/**
+ * The i18n keys the strip labels its number with, for the reading it took.
+ *
+ * RENG-87: the pair is listed, never composed. The strip used to ask for
+ * `<key>Window` by concatenation, and for a probe reading that produced
+ * `llm.stats.avgCommLatencyWindow` — a key no locale carried, which vue-i18n
+ * renders as the key itself (`llm.stats.avgC…` on screen). Both keys are now
+ * named here, next to the reading that picks them, and pinned against every
+ * locale in `providerCardState.spec.ts`.
+ */
+export function stripLatencyLabelKeys(source: LatencySource | null): StripLatencyLabelKeys {
+  return source === 'probe'
+    ? { label: 'llm.stats.avgCommLatency', window: 'llm.stats.avgCommLatencyWindow' }
+    : { label: 'llm.stats.avgLatency', window: 'llm.stats.avgLatencyWindow' }
+}
+
 /** Recorded usages (review-level count) over the window. */
 export function formatRequests(count: number | null | undefined): string {
   if (count === null || count === undefined) return '—'

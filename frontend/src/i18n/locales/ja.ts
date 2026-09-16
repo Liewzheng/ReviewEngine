@@ -509,6 +509,7 @@ export default {
       avgTtfb: '平均通信レイテンシー',
       avgTtfbWindow: '平均通信レイテンシー（過去 {days} 日間）',
       avgCommLatency: '平均通信レイテンシー',
+      avgCommLatencyWindow: '平均通信レイテンシー（過去 {days} 日間）',
       totalRequests: '使用回数',
       totalRequestsWindow: '記録された使用回数（過去 {days} 日間）',
     },

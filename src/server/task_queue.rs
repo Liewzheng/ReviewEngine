@@ -601,6 +601,27 @@ impl TaskStore {
         transitioned
     }
 
+    /// RENG-82: cancel a task that only the database still knows about.
+    ///
+    /// After a restart the in-memory map is empty, so [`Self::delete`] has no
+    /// record to transition and answers `false` even though the `reviews` row
+    /// is still queued or running. This applies the same transition straight
+    /// to that row (state migration, record kept — never a physical delete),
+    /// with the same write-through failure handling: logged, reported as
+    /// `false`. `false` also when no DB is attached.
+    pub async fn cancel_persisted(&self, task_id: Uuid, completed_at: chrono::DateTime<chrono::Utc>) -> bool {
+        let Some(db) = &self.db else {
+            return false;
+        };
+        match db.mark_cancelled(task_id, completed_at).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!("failed to persist cancellation for task {task_id}: {e:#}");
+                false
+            }
+        }
+    }
+
     pub async fn retry(&self, task_id: Uuid) -> bool {
         let transitioned = {
             let mut map = self.inner.write().await;

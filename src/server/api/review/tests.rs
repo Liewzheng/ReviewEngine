@@ -1659,6 +1659,7 @@ async fn rerun_with_stored_request_llm_configs_passes_gate() {
 
 // ─── 0.10.0 history API reads the DB (design/persistence.md §8.1) ───
 
+use crate::store::traits::ReviewStore;
 use crate::store::SqlxStore;
 use std::collections::BTreeSet;
 
@@ -1673,6 +1674,19 @@ async fn state_with_db() -> (Arc<AppState>, Arc<SqlxStore>) {
     state.task_store = Some(Arc::new(store));
     state.db = Some(db.clone());
     (Arc::new(state), db)
+}
+
+/// RENG-82: the state every task-id endpoint is in right after a restart —
+/// the DB keeps the whole history, the in-memory store is empty. Built the way
+/// `cli/app.rs` builds it at startup (fresh `TaskStore`, same DB handle), not
+/// by clearing the old store, so this is the real restart wiring.
+fn state_after_restart(db: Arc<SqlxStore>) -> Arc<AppState> {
+    let mut store = TaskStore::new();
+    store.set_db(db.clone());
+    let mut state = AppState::new(vec![usable_llm_config()]);
+    state.task_store = Some(Arc::new(store));
+    state.db = Some(db);
+    Arc::new(state)
 }
 
 fn empty_params() -> ListParams {
@@ -2583,5 +2597,176 @@ async fn rerun_reapplies_the_mr_url_routing_gate() {
         store.get(original_id).await.unwrap().state,
         TaskState::Failed,
         "the original record must be untouched"
+    );
+}
+
+// ─── RENG-82: task-id endpoints fall back to the history row ─────
+
+/// RENG-82: after a restart the in-memory store is empty and only `reviews`
+/// holds the task, so `rerun` must replay the persisted `request` from there
+/// instead of 404ing on the memory miss — the UAT symptom was the history list
+/// still showing the review while 「重新评审」 answered 未找到该评审.
+#[tokio::test]
+async fn rerun_replays_history_request_when_memory_is_empty() {
+    let (state, db) = state_with_db().await;
+    let store = state.task_store.clone().unwrap();
+
+    // Created and finished through the create path (write-through INSERT +
+    // terminal UPDATE) — the row a restart leaves behind.
+    let request = static_diff_body();
+    let original_id = store
+        .create_with_request(Some(source_meta_with_commit()), Some(request))
+        .await;
+    store
+        .update(
+            original_id,
+            TaskState::Failed,
+            None,
+            Some("interrupted: server restarted".to_string()),
+        )
+        .await;
+
+    // Restart: same DB, a brand-new (empty) in-memory store.
+    let restarted = state_after_restart(db.clone());
+    let restarted_store = restarted.task_store.clone().unwrap();
+    assert!(
+        restarted_store.get(original_id).await.is_none(),
+        "the history row must not be in memory"
+    );
+    assert!(
+        db.get_review(original_id).await.unwrap().is_some(),
+        "the history row must be in the DB"
+    );
+
+    let resp = rerun_review(State(restarted.clone()), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a history-only task must rerun, got {json}"
+    );
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    assert_ne!(new_id, original_id, "rerun must create a fresh task id");
+
+    // The replayed request is the persisted one, and the rerun is a normal
+    // enqueue (in memory + written through).
+    let new_entry = restarted_store.get(new_id).await.expect("the rerun must be enqueued");
+    assert_eq!(
+        new_entry.request.as_ref().unwrap()["source"]["diff"],
+        "d",
+        "the rerun must replay the stored request"
+    );
+    assert!(
+        db.get_review(new_id).await.unwrap().is_some(),
+        "the rerun must be persisted like any other enqueue"
+    );
+
+    // The original record is untouched by the rerun.
+    assert_eq!(
+        db.get_review(original_id).await.unwrap().unwrap().state,
+        TaskState::Failed
+    );
+}
+
+/// RENG-82: the fallback replays only what the row carries — a history row
+/// without a persisted `request` keeps the actionable 409 instead of inventing
+/// a replay.
+#[tokio::test]
+async fn rerun_rejects_history_row_without_stored_request() {
+    let (_state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    seed_review_row(
+        &db,
+        id,
+        "failed",
+        "2026-09-02T09:00:00.000000Z",
+        Some("2026-09-02T09:01:00.000000Z"),
+        &source_meta_with_commit(),
+        None,
+    )
+    .await;
+
+    let resp = rerun_review(State(state_after_restart(db)), Path(id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "got {json}");
+    assert_eq!(json["error"], "original request parameters are not available");
+}
+
+/// RENG-82: a `pending`/`running` history row (queued when the server died) is
+/// cancellable with 200 — the same state migration the in-memory path performs,
+/// applied straight to the row.
+#[tokio::test]
+async fn delete_review_cancels_history_row_when_memory_is_empty() {
+    let (state, db) = state_with_db().await;
+    let store = state.task_store.clone().unwrap();
+    let id = store.create(Some(source_meta_with_commit())).await;
+    assert!(db.get_review(id).await.unwrap().is_some(), "the create path persists");
+
+    let restarted = state_after_restart(db.clone());
+    let restarted_store = restarted.task_store.clone().unwrap();
+    assert!(
+        restarted_store.get(id).await.is_none(),
+        "the history row must not be in memory"
+    );
+
+    let resp = delete_review(State(restarted.clone()), Path(id)).await.into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::OK, "a history-only task must cancel, got {json}");
+    assert_eq!(json["status"], "deleted");
+
+    // The row is migrated (record kept, related rows untouched), not removed,
+    // and nothing is resurrected in memory.
+    let row = db.get_review(id).await.unwrap().expect("the record must be kept");
+    assert_eq!(row.state, TaskState::Cancelled);
+    assert!(row.completed_at.is_some(), "the cancel must stamp completed_at");
+    assert!(restarted_store.get(id).await.is_none());
+
+    // Cancelled is terminal: the same migration is not repeatable.
+    let resp = delete_review(State(restarted), Path(id)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::CONFLICT);
+
+    // Unknown to BOTH sources stays the only 404.
+    let resp = delete_review(State(state_after_restart(db)), Path(Uuid::new_v4()))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+/// RENG-82: the cancel contract is a state migration, so a *terminal* history
+/// row is rejected with 409 exactly like its in-memory twin
+/// (`test_delete_review_409_when_terminal_state`) — the DB fallback adds a data
+/// source, not a second, looser rule. The row stays as it was.
+#[tokio::test]
+async fn delete_review_409_for_terminal_history_row() {
+    let (_state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    seed_review_row(
+        &db,
+        id,
+        "completed",
+        "2026-09-01T10:00:00.000000Z",
+        Some("2026-09-01T10:05:00.000000Z"),
+        &source_meta_with_commit(),
+        None,
+    )
+    .await;
+
+    let resp = delete_review(State(state_after_restart(db.clone())), Path(id))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "got {json}");
+    assert_eq!(
+        json["error"],
+        "task is already in a terminal state and cannot be cancelled"
+    );
+    assert_eq!(
+        db.get_review(id).await.unwrap().unwrap().state,
+        TaskState::Completed,
+        "a rejected cancel must leave the row untouched"
     );
 }

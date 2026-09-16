@@ -21,7 +21,7 @@ use uuid::Uuid;
 use crate::server::task_queue::{SourceMeta, TaskEntry, TaskState};
 use crate::server::AppState;
 
-use super::review::task_to_status;
+use super::review::{resolve_history_entry, task_to_status};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -170,13 +170,21 @@ async fn get_repo_scan(State(state): State<Arc<AppState>>, Path(task_id): Path<U
                 .into_response()
         }
     };
+    // RENG-82: scans are written through to `reviews` too, so one started
+    // before a restart still has a history row while the in-memory record is
+    // gone. Memory first (it carries the live progress/expert fields), the
+    // history row second — a memory miss is not a missing scan.
     match store.get(task_id).await {
         Some(entry) => (StatusCode::OK, Json(task_to_status(&entry))).into_response(),
-        None => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "task not found"})),
-        )
-            .into_response(),
+        None => match resolve_history_entry(&state, task_id).await {
+            Ok(Some(entry)) => (StatusCode::OK, Json(task_to_status(&entry))).into_response(),
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({"error": "task not found"})),
+            )
+                .into_response(),
+            Err(response) => *response,
+        },
     }
 }
 
@@ -217,5 +225,56 @@ mod tests {
     fn test_validate_scan_path_accepts_directory() {
         let dir = tempfile::tempdir().unwrap();
         assert!(validate_scan_path(dir.path().to_str().unwrap()).is_ok());
+    }
+
+    /// RENG-82: a scan started before a restart is still in the `reviews`
+    /// history, so its detail is served from there instead of 404ing on the
+    /// (now empty) in-memory store — memory first, history second.
+    #[tokio::test]
+    async fn get_repo_scan_falls_back_to_history_when_memory_is_empty() {
+        use crate::server::task_queue::TaskStore;
+
+        let db = Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap());
+        db.migrate().await.unwrap();
+
+        // Created and finished through the task store (write-through INSERT +
+        // terminal UPDATE), as submit_repo_scan does.
+        let mut store = TaskStore::new();
+        store.set_db(db.clone());
+        let id = store
+            .create(Some(SourceMeta {
+                project: Some("/tmp/repo".to_string()),
+                repository: Some("/tmp/repo".to_string()),
+                ..SourceMeta::default()
+            }))
+            .await;
+        store
+            .update(
+                id,
+                TaskState::Completed,
+                Some(serde_json::json!({"summary": "ok"})),
+                None,
+            )
+            .await;
+
+        // Restart wiring: same DB, brand-new (empty) in-memory store.
+        let mut restarted = TaskStore::new();
+        restarted.set_db(db.clone());
+        let mut state = AppState::new(vec![]);
+        state.task_store = Some(Arc::new(restarted));
+        state.db = Some(db);
+        let state = Arc::new(state);
+        assert!(
+            state.task_store.as_ref().unwrap().get(id).await.is_none(),
+            "the scan must not be in memory"
+        );
+
+        let resp = get_repo_scan(State(state), Path(id)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), 1024 * 1024).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["task_id"], id.to_string());
+        assert_eq!(json["status"], "completed");
+        assert_eq!(json["result"]["summary"], "ok");
     }
 }

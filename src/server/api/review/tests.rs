@@ -1042,16 +1042,17 @@ async fn gitlab_token_resolution_picks_platform_by_host_port() {
     );
 }
 
+/// RENG-90: a port no entry configures, but a host that uniquely identifies
+/// one, resolves the platform token through the host-only fold — the same
+/// fold that fixes the NAS `:8443`-vs-port-less-base rerun (a history row
+/// carries GitLab's own `external_url` port against a port-less entry).
 #[tokio::test]
-async fn gitlab_token_resolution_falls_back_to_legacy_when_no_platform_matches() {
+async fn gitlab_token_resolution_folds_unique_host_port() {
     let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
     let _guard = GitLabRuntimeGuard::new();
     crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-legacy".to_string();
     let platforms = vec![testbed_platform()];
 
-    // A port no entry configures, but a host that uniquely identifies one:
-    // the RENG-90 host-only fold resolves the platform token — the same fold
-    // that fixes the NAS `:8443`-vs-port-less-base rerun below.
     assert_eq!(
         resolve_gitlab_token(
             None,
@@ -1060,6 +1061,15 @@ async fn gitlab_token_resolution_falls_back_to_legacy_when_no_platform_matches()
         ),
         Some("glpat-platform".to_string())
     );
+}
+
+#[tokio::test]
+async fn gitlab_token_resolution_falls_back_to_legacy_when_no_platform_matches() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-legacy".to_string();
+    let platforms = vec![testbed_platform()];
+
     // Different host → no match → legacy token.
     assert_eq!(
         resolve_gitlab_token(

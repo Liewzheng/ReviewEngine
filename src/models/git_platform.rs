@@ -219,7 +219,7 @@ pub fn find_git_platform_for_review_url<'a>(
 ///
 /// URLs without a host (or that fail to parse) yield `None` and simply
 /// never match.
-fn host_port(url: &str) -> Option<(String, Option<u16>)> {
+pub(crate) fn host_port(url: &str) -> Option<(String, Option<u16>)> {
     let parsed = reqwest::Url::parse(url.trim()).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
     let scheme_default_port = match parsed.scheme() {

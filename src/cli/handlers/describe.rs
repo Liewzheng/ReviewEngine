@@ -61,6 +61,7 @@ pub async fn run_describe(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -124,6 +125,7 @@ pub async fn run_describe_local_diff(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -190,6 +192,7 @@ pub async fn run_describe_local_repo(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 

@@ -145,7 +145,7 @@ Response 400:
 
 返回单个任务详情。`task_id` 必须是合法 UUID：非 UUID 值在路径参数解析阶段即失败，返回 `400`（如误请求 `/api/v1/reviews/history`——历史列表端点是下方单独的 `GET /api/v1/reviews`，不存在 `history` 子路径）；任务不存在返回 `404 { "error": "task not found" }`。
 
-snake_case `TaskStatus` 字段全部保留，之上合并 camelCase 结构化字段（`ReviewDetail`）：`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `participants[]` / `status` / `durationMs` / `createdAt` / `completedAt` / `commitSha` / `experts[{expertId, expertName, status, score, summary, details}]` / `rawComment` / `rawApiResponse` / `gitlabMrUrl`。
+snake_case `TaskStatus` 字段全部保留，之上合并 camelCase 结构化字段（`ReviewDetail`）：`id` / `mrTitle` / `project` / `repository` / `branch` / `targetBranch` / `author{name, avatarUrl}` / `participants[]` / `status` / `durationMs` / `createdAt` / `completedAt` / `commitSha` / `experts[{expertId, expertName, status, score, summary, details}]` / `errors[]` / `rawComment` / `rawApiResponse` / `gitlabMrUrl`。
 
 ```
 Response 200:
@@ -215,6 +215,10 @@ Response 200:
   "gitlabMrUrl": "https://gitlab.com/owner/repo/-/merge_requests/23"
 }
 ```
+
+**`errors` 字段（RENG-77）**
+
+详情项带 `errors: string[]`：**没有产出任何报告**的专家及其失败原因（逐条形如 `Expert task failed: expert 'security' … caused by … empty completion …`）。`experts[]` 只包含成功产出报告的专家，因此部分失败的评审（例如某个 provider 返回空 content、或该专家的 fallback 链耗尽）只能通过这个列表区分于一次干净通过；`reports` 为空且 `errors` 非空时评审本身标记为 `failed`（错误文本点名诊断与修复方向），不会出现「0 发现、满分、Healthy」的空转结果。旧记录没有该字段，返回 `[]`（兼容且不报错）。
 
 **`participants` 字段（RENG-42/44）**
 
@@ -400,6 +404,8 @@ Response 200:
 ```
 
 `llm.providers[]` 每个条目带 `disabled`（bool，RENG-75）：`true` 表示**停用**该 provider —— 配置与历史完整保留，但评审链不再使用它、健康探测也不再检查它（`GET /llm/providers` 报 `status: "disabled"`、`chainPosition: null`）。保存语义与掩码 key 相同：条目里**不带** `disabled` 键 = 「不表态」，保留该同名 provider 的已存值（旧客户端的保存不会意外把停用的 provider 重新启用）；显式传 `true` / `false` 才改变它。存储顺序就是评审链：第一个**启用中**的 provider 是链首；当被记录的 `primaryProvider` 为空、找不到对应 provider、或对应的是被停用项时，保存管道会把它归一到第一个启用中的 provider（全部停用时置空）。
+
+`llm.providers[]` 每个条目还带 `disableThinking`（bool，可选，RENG-77）：`true` 时请求体带 `"thinking": {"type": "disabled"}`，让推理模型不要消耗整个 `max_tokens` 预算去思考（实测 `deepseek-v4-flash` 会因此返回**空 content**，评审变成「无问题、满分」的空转）。它是**三态**而非 bool：**不带**该键 = 「不表态」，保留该卡已存的值（包括「从未设置」——此时请求体不带 `thinking` 字段，与显式 `false` 不是一回事）；显式 `true` / `false` 才写入。`GET /api/v1/config` 原样回显已存值，缺省时不出现该键。保活语义与 `disabled`、掩码 key 完全一致（按同一条目的四元组指纹解析）。
 
 provider 名只是展示标签、**可以重复**（RENG-75 身份批）：`providers[]` 的解析全程按下标，不做任何「按名合并」。掩码/空 key 的「保持不变」解析跟随条目而不是名字：payload 第 `i` 条若与库中第 `i` 条的 `(provider, apiBaseUrl, defaultModel)` 三元组一致 → 用库中第 `i` 条的 key；否则若库中**恰好一条**匹配该三元组 → 用它的 key（纯顺序调整时 key 跟随卡片）；否则置空（两个同三元组不同 key 的账户在掩码 payload 里不可区分，绝不会把甲的 key 错放给乙；改 model / 改 URL 且 key 留空 = key 被清除，需重新输入 —— 与 git 平台改 baseUrl 的规则一致）。`disabled` 的 keep 用同一条目跟随规则。被记录的 `primaryProvider` 按名解析到第一个同名启用条目 —— 与「链首 = 第一张启用卡」同义（同名时不需要索引回声）。
 
@@ -847,6 +853,7 @@ Response 200:
       "successRate": 0.9167,
       "lastUsedAt": "2026-09-14T08:30:00+00:00",
       "avgLatencyMs": 812,
+      "avgTtfbMs": 798,
       "latencySampleCount": 46,
       "latencyFailureCount": 3,
       "latencyLastSampleAt": "2026-09-15T01:58:00+00:00",
@@ -889,10 +896,11 @@ API key 永远不会在响应中返回。
 
 成本：每次读取一次聚合查询，走 `reviews(created_at)` 索引的范围扫描，代价与窗口内评审数成正比（窗口外与 `llm_summary IS NULL` 的行在同一次扫描中被过滤），JSON 快照在 Rust 侧解析（SQLite / PostgreSQL 两端无需 JSON 方言分叉）。
 
-0.10.23 起（RENG-57）额外返回**逐次调用的真实延迟统计**，数据源是评审路径每次 LLM 调用落库的采样表 `llm_call_samples`（迁移 `0004_llm_call_samples.sql`；RENG-75 起每行还带 `entry_fp` 指纹列，迁移 `0005_llm_entry_fp.sql`，聚合同样按指纹分桶、旧行 NULL 归入未标记桶并适用上述并入规则）。此前页面的「平均延迟」只有探测的瞬时值可用（RENG-53 的困惑点正是这两种测量被混为一谈）：
+0.10.23 起（RENG-57）额外返回**逐次调用的真实延迟统计**，数据源是评审路径每次 LLM 调用落库的采样表 `llm_call_samples`（迁移 `0004_llm_call_samples.sql`；RENG-75 起每行还带 `entry_fp` 指纹列，迁移 `0005_llm_entry_fp.sql`，聚合同样按指纹分桶、旧行 NULL 归入未标记桶并适用上述并入规则；RENG-77 起每行还带 `ttfb_ms` 列，迁移 `0006_llm_sample_ttfb.sql`）。此前页面的「平均延迟」只有探测的瞬时值可用（RENG-53 的困惑点正是这两种测量被混为一谈）：
 
 - 窗口：`latencyWindowDays`（当前恒为 7）与 `latencySince`（滚动窗口起点，含端点）**独立于 usage 窗口单独返回**，客户端不假设两者一致（当前实现两者同为 7 天）。
 - `avgLatencyMs`：窗口内该卡片**成功调用**的平均往返耗时（整数毫秒）。失败调用**不计入**均值（一次 401 可能 5ms 返回、一次超时可能 120s，混入会让均值反映错误分布而非 provider 速度），失败次数单独给出。
+- `avgTtfbMs`（RENG-77）：窗口内**成功且实测到**首字节耗时（time-to-first-byte：请求发出 → 收到响应头）的调用的平均值（整数毫秒）。分母只统计 `ttfb_ms IS NOT NULL` 的行 —— 0006 之前的行、registry provider 路径（其 reqwest 内部不回报首字节）、以及**响应头之前就失败**的调用都不参与，既不参与也不按 0 计入；窗口内没有这类样本时为 `null`（页面显示 `—`）。`avgLatencyMs` 保持原义不变，未被重命名或替换。**实测提醒**：当前请求是**非流式**的（不透传 `stream`），服务端一次性生成完再回包，因此 `avgTtfbMs` 通常**接近** `avgLatencyMs`（示例值 798 与 812），而不是用户想象中的「几百毫秒通信延迟」；二者只有在 provider 提前 flush 响应头（即 `stream: true`）时才会明显分离。这是测量结论，不是缺省值。
 - `latencySampleCount` / `latencyFailureCount`：窗口内的成功 / 失败调用次数（采样表的行数口径，逐次尝试计数：重试与 fallback 的每一次失败尝试都各占一行）。`latencySampleCount` 是均值的分母。
 - `latencyLastSampleAt`：窗口内最近一次调用（成功或失败）的时刻。
 - `latencySparkline`：窗口按 6 小时切成 28 桶、每桶成功调用的平均耗时（整数毫秒），最旧桶在前；桶内无调用为 `null`（折线断开，不画假值）。**没有采样就是 `null`**（没有可画的序列，也不会画一条零线）。

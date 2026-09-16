@@ -270,7 +270,7 @@ pub(crate) async fn run_review_common(
     // webhook's own SHA wins when present; the MR metadata is the fallback.
     let revision = sha.filter(|s| !s.trim().is_empty()).unwrap_or(&mr_info.git_hash);
     let remote_files = crate::team::file_source::provider_source_or_warn(url, token, revision);
-    let (reports, global_context, dropped_findings, consolidated) = orchestrator::run_experts(
+    let (reports, global_context, dropped_findings, consolidated, expert_failures) = orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -325,9 +325,20 @@ pub(crate) async fn run_review_common(
     // Publish results. The diff the review actually reviewed is passed along so
     // inline notes are gated on its changed lines (no re-fetch, no anchors the
     // provider would reject).
+    //
+    // RENG-77 §4: the experts that produced no report are carried on the output
+    // so a partially failed run is not silently published as a clean one.
     let output = output
         .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated);
+        .with_consolidated(consolidated)
+        .with_errors(expert_failures);
+    if !output.errors.is_empty() {
+        tracing::warn!(
+            failed = output.errors.len(),
+            "{} expert(s) produced no report; the review is partial",
+            output.errors.len()
+        );
+    }
     if let Err(e) = crate::publish_review_with_diff(token, url, &output, Some(&diff)).await {
         tracing::warn!("Publish failed: {:?}", e);
     }

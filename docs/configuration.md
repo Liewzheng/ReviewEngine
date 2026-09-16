@@ -67,6 +67,8 @@ temperature = 0.3
 
 A `[[llm]]` entry also accepts `disabled = true` (RENG-75): the entry keeps its configuration but is skipped by the review chain and never probed — the same switch the Web UI's provider cards expose, defaulting to `false`.
 
+`disable_thinking = true` (RENG-77) opts a **reasoning model** out of its chain of thought: the request body then carries `"thinking": {"type": "disabled"}`. Some models (measured on `deepseek-v4-flash`) otherwise spend the whole `max_tokens` budget on reasoning tokens and answer with an empty `content` — a review that produces nothing. It is a tri-state, not a bool: unset means "send nothing", which is not the same as an explicit `false`. The Web UI's provider cards expose the same switch as `disableThinking`, and like every other masked field an omitted key keeps the stored value of that card (resolved through the `(provider, api_base, model, api_key)` fingerprint) rather than resetting it.
+
 ### Chain order and the primary provider
 
 **The stored order is the chain.** The provider list order (the Web UI card order, `llm.providers[]` of `GET /api/v1/config`, persisted as each `llm_providers` row's `position`) is the order a review walks. The **first enabled** provider is the head — the primary — and the rest are fallbacks in order.
@@ -105,6 +107,7 @@ The retry decision comes from the **HTTP status** of the failure, not from the w
 - **408 (request timeout), 429 (rate limit) and every 5xx** are retried — up to 3 attempts per provider, with exponential backoff and jitter.
 - **Every other 4xx is permanent** and gives up after a single attempt: no second request, no backoff sleep. That is the credential case (401 wrong or revoked key, 403 key without access) and the request case (400 bad body, 404 unknown model) — re-sending the identical request cannot change either answer.
 - **A failure with no HTTP status** (connection refused, DNS, TLS, timeout, unparsable response) keeps the historical retry: it is usually a transient network problem.
+- **An empty completion is not a failure of the moment** (RENG-77): when a provider answers `200` with blank (or whitespace-only) `content`, re-sending the identical request is not expected to help — the measured cause is a config property (a reasoning model burning `max_tokens` on reasoning tokens), so that provider is given up **without a retry** and the chain advances. The attempt is still recorded in `llm_call_samples` as a failure with the diagnosis. When it was the last provider in the chain, the expert fails; when **every** expert fails the review itself is marked failed (never a clean, high-scoring report with no findings), and the reason is shown with the failed experts.
 
 A permanent failure is logged with its status and attempt count, and the chain then advances immediately:
 

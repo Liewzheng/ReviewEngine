@@ -340,8 +340,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            applied, 5,
-            "0001_init + 0002_llm_snapshot + 0003_participant_meta + 0004_llm_call_samples + 0005_llm_entry_fp should be recorded"
+            applied, 6,
+            "0001_init + 0002_llm_snapshot + 0003_participant_meta + 0004_llm_call_samples + 0005_llm_entry_fp \
+             + 0006_llm_sample_ttfb should be recorded"
         );
 
         // 0002 (RENG-38): the snapshot columns exist on both history tables.
@@ -455,6 +456,72 @@ mod tests {
                 .unwrap();
         assert_eq!(provider, "xiaomi", "the old row is preserved");
         assert_eq!(entry_fp, None, "pre-0005 rows keep entry_fp NULL (the unmarked bucket)");
+    }
+
+    /// 0006 (RENG-77 §5): the time-to-first-byte column exists and is NULL on
+    /// rows that predate it (a measurement that was never taken — the latency
+    /// aggregate excludes those instead of averaging them in as 0), and the
+    /// migration is idempotent: a repeated run keeps both the column and the
+    /// old rows.
+    #[tokio::test]
+    async fn migrate_0006_adds_ttfb_and_preserves_old_rows() {
+        let store = SqlxStore::new_in_memory().await.unwrap();
+        store.migrate().await.unwrap();
+
+        let s_cols: Vec<String> = ::sqlx::query_scalar("SELECT name FROM pragma_table_info('llm_call_samples')")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            s_cols.iter().any(|c| c == "ttfb_ms"),
+            "llm_call_samples missing ttfb_ms, got {s_cols:?}"
+        );
+        // No new index: `ttfb_ms` is a projected column, not a filter — the
+        // read path is still the (created_at, provider) window scan (0004/0006).
+        let s_idx: Vec<String> = ::sqlx::query_scalar("SELECT name FROM sqlite_master WHERE type='index'")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            !s_idx.iter().any(|i| i.contains("ttfb")),
+            "no ttfb index — the window scan is already bounded: {s_idx:?}"
+        );
+
+        // A pre-0006-shaped row (no ttfb) survives with ttfb_ms NULL across a
+        // repeated migrate, and the column is nullable (not defaulted to 0).
+        ::sqlx::query(
+            "INSERT INTO llm_call_samples (id, provider, model, latency_ms, success, attempt, created_at) \
+             VALUES ('row-ttfb', 'deepseek', 'deepseek-v4-flash', 17600, 1, 1, '2026-09-14T10:00:00.000000Z')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        store.migrate().await.unwrap();
+        let (latency_ms, ttfb_ms): (i64, Option<i64>) =
+            ::sqlx::query_as("SELECT latency_ms, ttfb_ms FROM llm_call_samples WHERE id = 'row-ttfb'")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(latency_ms, 17_600, "the old row is preserved");
+        assert_eq!(
+            ttfb_ms, None,
+            "pre-0006 rows keep ttfb_ms NULL — excluded from the average, never treated as 0"
+        );
+
+        // A row that DOES carry a measurement round-trips through the driver,
+        // which is what the write path (`insert_llm_sample`) produces.
+        ::sqlx::query(
+            "INSERT INTO llm_call_samples (id, provider, model, latency_ms, ttfb_ms, success, attempt, created_at) \
+             VALUES ('row-ttfb-2', 'deepseek', 'deepseek-v4-flash', 17600, 310, 1, 1, '2026-09-14T10:01:00.000000Z')",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        let ttfb: Option<i64> = ::sqlx::query_scalar("SELECT ttfb_ms FROM llm_call_samples WHERE id = 'row-ttfb-2'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(ttfb, Some(310), "a measured ttfb round-trips");
     }
 
     /// 0005 (RENG-75), the other half: the `llm_providers.provider` UNIQUE index

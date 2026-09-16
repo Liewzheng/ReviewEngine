@@ -224,6 +224,13 @@ pub struct ReviewDetail {
     pub completed_at: Option<String>,
     pub commit_sha: Option<String>,
     pub experts: Vec<ExpertResultDetail>,
+    /// RENG-77 §4: the experts that produced NO report, each with its failure
+    /// (an empty completion, an exhausted provider chain). `experts` only ever
+    /// contains the ones that answered, so this is what tells a partial run
+    /// apart from a clean one. Empty for full runs and for every record
+    /// persisted before this field existed.
+    #[serde(default)]
+    pub errors: Vec<String>,
     pub raw_comment: Option<String>,
     pub raw_api_response: Option<serde_json::Value>,
     pub gitlab_mr_url: Option<String>,

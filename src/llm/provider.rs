@@ -20,7 +20,13 @@ pub struct CompletionResult {
     pub content: String,
     /// Total tokens consumed (input + output, if available from the provider).
     pub total_tokens: u64,
-    /// Actual model identifier used (may differ from request if provider remapped).
+    /// The CONFIGURED model of the card that served this completion
+    /// (`LLMConfig.model`) — RENG-77. Providers echo an alias of their own
+    /// (`deepseek-flash`, `gpt-4o-2024-11-20`); every consumer looks the value
+    /// up by what the card says, so `LLMClient`'s attribution overwrites the
+    /// alias with the configured id and logs the alias at DEBUG when the two
+    /// differ. A provider implementation may fill this with its own echo;
+    /// outside `LLMClient::dispatch` the value is the configured one.
     pub model: String,
     /// Provider name that produced this completion. Filled by the provider
     /// itself (`LLMProvider::name`); [`LLMClient`](super::client::LLMClient)

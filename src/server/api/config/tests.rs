@@ -461,6 +461,129 @@ async fn put_config_disabling_the_primary_moves_the_recorded_primary_to_the_firs
     assert!(state.ordered_llm_configs().is_empty(), "no enabled provider, no chain");
 }
 
+/// RENG-77 §1: `disable_thinking` is unreachable from the Web UI — the
+/// UI's typed payload never carried the field, and the PUT pipeline
+/// hardcoded `disable_thinking: None` when rebuilding the
+/// `LLMConfig`. Two UAT deepseek reviews hit exactly this: 11 experts
+/// with empty findings, perfect 100, every `max_tokens` spent on
+/// `reasoning_tokens`. This test pins the fix: the field round-trips
+/// through `PUT /config` and is echoed back on `GET /config`, an
+/// unrelated save keeps it, a save that omits it keeps the stored
+/// value, and the request-time config the LLMClient sees carries the
+/// flag (so the request body inlines `"thinking": {"type": "disabled"}`).
+#[tokio::test]
+async fn put_config_disable_thinking_round_trips_and_unspoken_saves_keep_it() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_two_providers();
+
+    // 1) An explicit `true` on the deepseek card reaches the runtime set
+    //    AND is echoed back through `UiConfig::from_app_config`.
+    let mut payload = card_edit_payload(4096);
+    payload["llm"]["providers"][1]["disableThinking"] = serde_json::json!(true);
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let live = state.llm_configs.read().unwrap();
+        let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+        assert_eq!(
+            deepseek.disable_thinking,
+            Some(true),
+            "the flag must reach the runtime set (RENG-77 §1)"
+        );
+        let xiaomi = live.iter().find(|c| c.provider == "xiaomi-token-plan-cn").unwrap();
+        assert_eq!(
+            xiaomi.disable_thinking, None,
+            "the other card is unchanged: tri-state survives a single-card edit"
+        );
+    }
+    {
+        let ui = state.ui_config.read().unwrap();
+        let deepseek = ui.llm.providers.iter().find(|p| p.provider == "deepseek").unwrap();
+        assert_eq!(
+            deepseek.disable_thinking,
+            Some(true),
+            "GET /config echoes the stored value as a concrete Option<bool>"
+        );
+    }
+
+    // 2) An unrelated save (no `llm` key at all) keeps the flag — same rule
+    //    as the masked API key and the disabled flag: a partial save that
+    //    does not speak for the field cannot silently revert it.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let live = state.llm_configs.read().unwrap();
+        let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+        assert_eq!(
+            deepseek.disable_thinking,
+            Some(true),
+            "an unrelated save must not turn the flag back off"
+        );
+    }
+
+    // 3) A card edit whose entries OMIT `disableThinking` keeps it too —
+    //    the masked-keep equivalent, mirroring the `disabled` field's test.
+    let resp = put_config(State(state.clone()), Json(card_edit_payload(2048)))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let live = state.llm_configs.read().unwrap();
+        let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+        assert_eq!(
+            deepseek.disable_thinking,
+            Some(true),
+            "an omitted `disableThinking` key keeps the stored tri-state"
+        );
+        assert_eq!(deepseek.max_tokens, 2048, "the unrelated edit itself still applies");
+    }
+
+    // 4) An explicit `false` re-enables thinking — the configuration was
+    //    fully kept.
+    let mut payload = card_edit_payload(2048);
+    payload["llm"]["providers"][1]["disableThinking"] = serde_json::json!(false);
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        let live = state.llm_configs.read().unwrap();
+        let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+        assert_eq!(
+            deepseek.disable_thinking,
+            Some(false),
+            "explicit false sets the tri-state to false (not None — they are distinct)"
+        );
+    }
+    {
+        let ui = state.ui_config.read().unwrap();
+        let deepseek = ui.llm.providers.iter().find(|p| p.provider == "deepseek").unwrap();
+        assert_eq!(deepseek.disable_thinking, Some(false), "GET /config echoes Some(false)");
+    }
+
+    // 5) A subsequent save that OMITS the field again keeps `Some(false)` —
+    //    the tri-state is preserved across saves, not collapsed to None.
+    let resp = put_config(State(state.clone()), Json(card_edit_payload(8192)))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        state
+            .llm_configs
+            .read()
+            .unwrap()
+            .iter()
+            .find(|c| c.provider == "deepseek")
+            .unwrap()
+            .disable_thinking,
+        Some(false),
+        "tri-state survives another omitted-key save"
+    );
+}
+
 // ─── RENG-75 (identity batch): same-named cards & entry-following keep ───
 
 /// Seed an `AppState` with the DANGEROUS shape: two cards sharing the

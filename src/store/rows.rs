@@ -225,19 +225,37 @@ fn opt_json(value: &Option<Value>, what: &str) -> Result<Option<String>> {
         .transpose()
 }
 
-/// RENG-38: compute the `reviews.llm_summary` TEXT (JSON array of
+/// RENG-38/RENG-75: compute the `reviews.llm_summary` TEXT (JSON array of
 /// [`crate::models::LlmUsage`]) from a serialized `ReviewOutput` result.
 /// `None` when the result is absent, not a `ReviewOutput`, or carries no
 /// llm snapshots (pre-0.10.2 records, all-experts-failed runs) — a
 /// non-ReviewOutput result is a legitimate shape (`complete` only warns and
 /// skips the expert_reports split), never a store error.
 ///
-/// RENG-75: each entry also carries `fp`, the serving card's entry
-/// fingerprint. `LlmUsage::fp` is `skip_serializing` (the API can never leak
-/// it), so the column writer emits it EXPLICITLY here — this function is the
-/// only place a fingerprint is ever serialized.
+/// RENG-77: this is the LEGACY path. `LlmUsage::fp` is `skip_serializing`, so
+/// a fingerprint cannot survive the `reviews.result` round trip this function
+/// performs — it is always `None` here. The review path therefore computes the
+/// summary from the IN-MEMORY `ReviewOutput`
+/// ([`llm_summary_from_output`]) and hands it to the store; this function stays
+/// for rows whose writer had no in-memory output (and the pre-0002 store
+/// shapes), where an unmarked (`fp: None`) entry is still better than none.
 pub(crate) fn llm_summary_json(result: &Value) -> Option<String> {
     let output: crate::models::ReviewOutput = serde_json::from_value(result.clone()).ok()?;
+    llm_summary_from_output(&output)
+}
+
+/// RENG-77: compute the `reviews.llm_summary` TEXT from a LIVE `ReviewOutput`
+/// — the only writer that can carry [`crate::models::LlmUsage::fp`], because
+/// the fingerprint exists only in memory (it hashes the API key).
+///
+/// Security contract: the fingerprint travels ONLY here and into
+/// `llm_call_samples.entry_fp`. It is `skip_serializing` on every
+/// serializable type, is written into this column explicitly, and must never
+/// reach `reviews.result`, an API response, or a log line.
+///
+/// `None` when there is nothing to record (no report carried an LLM
+/// attribution).
+pub(crate) fn llm_summary_from_output(output: &crate::models::ReviewOutput) -> Option<String> {
     let usages = output.llm_usages();
     if usages.is_empty() {
         return None;
@@ -828,5 +846,130 @@ mod tests {
     #[test]
     fn aggregate_llm_usage_empty_window_is_empty() {
         assert!(aggregate_llm_usage(Vec::new()).is_empty());
+    }
+
+    // ─── RENG-77 §2: llm_summary carries fp from the in-memory output ──
+
+    use crate::models::{ExpertReport, ReviewOutput};
+
+    fn output_with(provider: &str, model: &str, fp: &str) -> ReviewOutput {
+        let report = ExpertReport {
+            expert_name: "security".to_string(),
+            findings: Vec::new(),
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: Some(provider.to_string()),
+            llm_model: Some(model.to_string()),
+            llm_fp: Some(fp.to_string()),
+        };
+        // The fp must NEVER reach a serialized form: it stays in memory only.
+        // The whole point of the test is that the in-memory `llm_summary`
+        // writer can still record it for the page's usage statistics.
+        ReviewOutput::new(vec![report])
+    }
+
+    /// The `llm_summary_from_output` writer is the one carrier of the
+    /// fingerprint: it threads `LlmUsage::fp` into the JSON written into
+    /// `reviews.llm_summary` because the serialized `ReviewOutput` cannot
+    /// hold it (`ExpertReport::llm_fp` is `skip_serializing`, RENG-75).
+    #[test]
+    fn llm_summary_from_output_carries_fp_into_the_json() {
+        let output = output_with("xiaomi", "mimo-v2.5", "fp-xiaomi-card");
+        let summary = llm_summary_from_output(&output).expect("the in-memory output has a usage");
+
+        // The summary must name the configured model (not the API-returned
+        // alias — RENG-77 §3) AND carry the fp.
+        let parsed: serde_json::Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(parsed[0]["provider"], "xiaomi");
+        assert_eq!(parsed[0]["model"], "mimo-v2.5");
+        assert_eq!(
+            parsed[0]["fp"], "fp-xiaomi-card",
+            "the fp survives the round trip — this is what the page reads"
+        );
+    }
+
+    /// The LEGACY path (deserializing `result` back into `ReviewOutput`)
+    /// drops the fp — `LlmUsage::fp` is `skip_serializing` — so the
+    /// `rows.rs:375` fallback yields an unmarked summary. This is the
+    /// root-cause assertion: the test whose absence let the bug through.
+    #[test]
+    fn llm_summary_from_serialized_output_drops_the_fp() {
+        let output = output_with("xiaomi", "mimo-v2.5", "fp-xiaomi-card");
+        // Serialize then re-deserialize — the fingerprint is gone, by
+        // construction (skip_serializing).
+        let serialized = serde_json::to_value(&output).unwrap();
+        let back: ReviewOutput = serde_json::from_value(serialized.clone()).unwrap();
+        assert!(
+            back.reports[0].llm_fp.is_none(),
+            "the serialized form cannot carry the fp"
+        );
+
+        let summary = llm_summary_json(&serialized).unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(parsed[0]["provider"], "xiaomi");
+        assert_eq!(parsed[0]["model"], "mimo-v2.5");
+        assert!(
+            parsed[0].get("fp").is_none(),
+            "the legacy path produces an unmarked summary — exactly the bug RENG-77 §2 fixes"
+        );
+    }
+
+    /// End-to-end: the in-memory writer hands the fp to the store, the
+    /// page's `llm_usage_since` reads it back as part of the
+    /// `(provider, model, fp)` triple, and a usage snapshot aggregates
+    /// the two same-named cards with different keys as TWO entries (the
+    /// RENG-75 fingerprint-aware split that was missing).
+    #[test]
+    fn llm_summary_fp_round_trips_through_aggregate_llm_usage() {
+        // Two cards share the (provider, model) pair and differ in fp:
+        // they must NOT fold into one bucket.
+        let a = output_with("acme", "m1", "fp-card-a");
+        let b = output_with("acme", "m1", "fp-card-b");
+        let a_summary = llm_summary_from_output(&a).unwrap();
+        let b_summary = llm_summary_from_output(&b).unwrap();
+
+        let stats = aggregate_llm_usage(vec![
+            (
+                "task-a".to_string(),
+                "completed".to_string(),
+                "2026-09-14T10:00:00.000000Z".to_string(),
+                Some(a_summary),
+            ),
+            (
+                "task-b".to_string(),
+                "completed".to_string(),
+                "2026-09-14T10:01:00.000000Z".to_string(),
+                Some(b_summary),
+            ),
+        ]);
+
+        assert_eq!(
+            stats.len(),
+            2,
+            "the two same-named cards with different fps split into two buckets"
+        );
+        let keys: Vec<(&str, Option<&str>)> = stats.iter().map(|s| (s.model.as_str(), s.fp.as_deref())).collect();
+        // BTreeMap ordering by `(provider, model, fp)` puts `None` first;
+        // both rows here carry an fp, so the order is the fp string order.
+        assert!(keys.contains(&("m1", Some("fp-card-a"))), "card-a is its own bucket");
+        assert!(keys.contains(&("m1", Some("fp-card-b"))), "card-b is its own bucket");
+
+        // A legacy row (no fp key) lands in the unmarked bucket — the
+        // (provider, model) pair still aggregates there, but it never
+        // claims another card's fp-tagged bucket.
+        let legacy_summary = r#"[{"provider":"acme","model":"m1"}]"#.to_string();
+        let stats_legacy = aggregate_llm_usage(vec![(
+            "task-legacy".to_string(),
+            "completed".to_string(),
+            "2026-09-13T10:00:00.000000Z".to_string(),
+            Some(legacy_summary),
+        )]);
+        assert_eq!(stats_legacy.len(), 1);
+        assert_eq!(
+            stats_legacy[0].fp, None,
+            "the unmarked bucket — only the pre-0005 / pre-RENG-77 rows land here"
+        );
     }
 }

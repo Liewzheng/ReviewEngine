@@ -320,12 +320,38 @@ impl TaskStore {
         }
     }
 
+    /// State transition with no in-memory LLM snapshot (RENG-38 behaviour):
+    /// the usage summary is derived from `result`, which can never carry the
+    /// serving cards' fingerprints. The review path uses
+    /// [`Self::update_with_summary`] instead.
     pub async fn update(
         &self,
         task_id: Uuid,
         new_state: TaskState,
         result: Option<serde_json::Value>,
         error: Option<String>,
+    ) {
+        self.update_with_summary(task_id, new_state, result, error, None).await;
+    }
+
+    /// Terminal / mid-flight state transition, with the write-through
+    /// persistence of §5.2.
+    ///
+    /// `llm_summary` (RENG-77) is the review's LLM-usage snapshot JSON, computed
+    /// from the IN-MEMORY `ReviewOutput` by the review runner
+    /// ([`crate::store::rows::llm_summary_from_output`]) because it carries the
+    /// serving cards' fingerprints, which the serialized `result` cannot hold
+    /// (`LlmUsage::fp` is `skip_serializing` — the security contract that keeps
+    /// the fingerprint out of every API response). `None` for a caller with no
+    /// in-memory output; the entry then derives an unmarked summary from
+    /// `result` (or clears it, as a mid-flight transition always did).
+    pub async fn update_with_summary(
+        &self,
+        task_id: Uuid,
+        new_state: TaskState,
+        result: Option<serde_json::Value>,
+        error: Option<String>,
+        llm_summary: Option<String>,
     ) {
         let mut terminal_snapshot = None;
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
@@ -337,9 +363,12 @@ impl TaskStore {
             entry.state = new_state.clone();
             entry.result = result;
             entry.error = error.clone();
-            // RENG-38: refresh the LLM-usage snapshot from the new result
-            // (terminal transitions carry it; mid-flight updates clear it).
-            entry.llm_summary = entry.result.as_ref().and_then(crate::store::rows::llm_summary_json);
+            // RENG-38/RENG-77: the runner's in-memory snapshot wins (it is the
+            // only one that carries the fp); the result-derived fallback keeps
+            // legacy callers — and mid-flight transitions, which pass neither
+            // — behaving exactly as before.
+            entry.llm_summary =
+                llm_summary.or_else(|| entry.result.as_ref().and_then(crate::store::rows::llm_summary_json));
             if new_state == TaskState::Completed || new_state == TaskState::Failed || new_state == TaskState::Cancelled
             {
                 entry.completed_at = Some(chrono::Utc::now());
@@ -734,16 +763,29 @@ pub async fn record_task_outcome(
     outcome: &anyhow::Result<crate::models::ReviewOutput>,
 ) {
     match outcome {
-        Ok(output) => match serde_json::to_value(output) {
-            Ok(result) => {
-                store.update(task_id, TaskState::Completed, Some(result), None).await;
+        Ok(output) => {
+            // RENG-77 §2: the summary must be computed from THIS in-memory
+            // output, before serialization — `LlmUsage::fp` is
+            // `skip_serializing`, so a summary derived from the serialized
+            // result (the pre-RENG-77 behaviour) can never carry the serving
+            // cards' fingerprints and the page cannot tell two same-named
+            // cards apart. The webhook paths land here too, so a
+            // GitLab/GitHub-triggered review records its usage exactly like a
+            // review submitted through the REST API.
+            let llm_summary = crate::store::rows::llm_summary_from_output(output);
+            match serde_json::to_value(output) {
+                Ok(result) => {
+                    store
+                        .update_with_summary(task_id, TaskState::Completed, Some(result), None, llm_summary)
+                        .await;
+                }
+                Err(e) => {
+                    let message = format!("failed to serialize ReviewOutput: {e:#}");
+                    tracing::warn!("{message}");
+                    store.update(task_id, TaskState::Failed, None, Some(message)).await;
+                }
             }
-            Err(e) => {
-                let message = format!("failed to serialize ReviewOutput: {e:#}");
-                tracing::warn!("{message}");
-                store.update(task_id, TaskState::Failed, None, Some(message)).await;
-            }
-        },
+        }
         Err(e) => {
             store
                 .update(task_id, TaskState::Failed, None, Some(format!("{e:#}")))
@@ -1125,6 +1167,7 @@ mod tests {
             aggregated: None,
             dropped_findings: vec![],
             consolidated: None,
+            errors: vec![],
         }
     }
 
@@ -1391,5 +1434,96 @@ mod tests {
         store.update(id, TaskState::Failed, None, Some("x".to_string())).await;
         assert!(store.retry(id).await);
         assert_eq!(store.get(id).await.unwrap().state, TaskState::Pending);
+    }
+
+    /// RENG-77 §2 end-to-end: a review that completes through the real
+    /// write-through path carries the `fp` field into the persisted
+    /// `reviews.llm_summary` JSON — exactly because the runner's in-memory
+    /// output is the only carrier of the fingerprint, and
+    /// `TaskStore::update_with_summary` is what hands it to the store. This
+    /// is the test whose absence let the bug through (the previous path
+    /// derived the summary from the serialized result, which can never
+    /// carry the fp).
+    #[tokio::test]
+    async fn update_with_summary_persists_an_fp_carrying_summary_through_the_store() {
+        let (store, db) = db_backed_store().await;
+        let id = record_task_started(&store, SourceMeta::default()).await;
+
+        // The in-memory output the review runner hands the task store:
+        // every report carries a (provider, model, fp) triple, the
+        // fingerprint is set (it exists in memory only — RENG-75), and
+        // the aggregator does too. `llm_summary_from_output` is what the
+        // review path calls right before `update_with_summary`.
+        let mut output = crate::models::ReviewOutput::new(vec![crate::models::ExpertReport {
+            expert_name: "security".to_string(),
+            findings: vec![],
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: Some("xiaomi".to_string()),
+            llm_model: Some("mimo-v2.5-pro".to_string()),
+            llm_fp: Some("fp-xiaomi-card".to_string()),
+        }]);
+        output.aggregated = Some(crate::models::AggregatedReport {
+            findings: vec![],
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: Some("deepseek".to_string()),
+            llm_model: Some("deepseek-v4-flash".to_string()),
+            llm_fp: Some("fp-deepseek-card".to_string()),
+        });
+        // Dropped / consolidated fields are not used by the summary writer.
+        let llm_summary =
+            crate::store::rows::llm_summary_from_output(&output).expect("the in-memory output carries usages");
+
+        store
+            .update_with_summary(
+                id,
+                TaskState::Completed,
+                Some(serde_json::to_value(&output).unwrap()),
+                None,
+                Some(llm_summary.clone()),
+            )
+            .await;
+
+        // The row the page reads back has the fp-bearing summary.
+        let stored_summary: String = ::sqlx::query_scalar("SELECT llm_summary FROM reviews WHERE task_id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&stored_summary).unwrap();
+        let entries = parsed.as_array().expect("the summary is a JSON array");
+        assert_eq!(entries.len(), 2, "per-expert + aggregator");
+        // The fingerprint made it through end-to-end — this is the
+        // RENG-77 §2 contract.
+        let xiaomi = entries
+            .iter()
+            .find(|e| e["provider"] == "xiaomi")
+            .expect("xiaomi in the summary");
+        assert_eq!(xiaomi["model"], "mimo-v2.5-pro", "configured model, not alias");
+        assert_eq!(xiaomi["fp"], "fp-xiaomi-card", "fp survives the write-through");
+        let deepseek = entries
+            .iter()
+            .find(|e| e["provider"] == "deepseek")
+            .expect("deepseek in the summary");
+        assert_eq!(deepseek["fp"], "fp-deepseek-card", "aggregator's fp too");
+
+        // The security contract: `reviews.result` (the serialized output)
+        // does NOT carry the fp — `ExpertReport::llm_fp` and
+        // `AggregatedReport::llm_fp` are `skip_serializing`, and the
+        // writer must not bypass that.
+        let stored_result: String = ::sqlx::query_scalar("SELECT result FROM reviews WHERE task_id = ?")
+            .bind(id.to_string())
+            .fetch_one(db.pool())
+            .await
+            .unwrap();
+        assert!(
+            !stored_result.contains("fp-xiaomi-card") && !stored_result.contains("fp-deepseek-card"),
+            "the fp must never reach reviews.result: {stored_result}"
+        );
     }
 }

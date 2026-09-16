@@ -674,6 +674,11 @@ fn replay_payload(file: &UiStateFile, overrides: &UiStateEnvOverrides) -> serde_
                 timeout_seconds: super::types::default_timeout_seconds(),
                 retry_attempts: super::types::default_retry_attempts(),
                 disabled: Some(c.disabled),
+                // RENG-77: the replay payload is built from the PERSISTED
+                // configs, so it must carry the thinking opt-out too —
+                // omitting it would resolve the "keep" against the startup
+                // config and silently drop what the UI saved.
+                disable_thinking: c.disable_thinking,
             })
             .collect();
         if let Ok(v) = serde_json::to_value(&section) {

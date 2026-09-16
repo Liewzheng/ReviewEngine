@@ -240,8 +240,10 @@ impl TeamOrchestrator for DefaultOrchestrator {
 /// dispatch, and consolidation.
 ///
 /// Returns per-expert reports, an optional global review context, any
-/// findings dropped by the optional verification pass, and the lead
-/// consolidation summary (always computed — pure post-processing).
+/// findings dropped by the optional verification pass, the lead
+/// consolidation summary (always computed — pure post-processing), and the
+/// per-expert failures (each expert that produced no report, with its reason —
+/// empty for a fully successful run).
 ///
 /// `remote_files` is the provider-API file source the adjudication pass uses
 /// when the review has no local checkout (server-side webhook/API reviews);
@@ -268,6 +270,7 @@ pub async fn run_experts(
     Option<GlobalReviewContext>,
     Vec<DroppedFinding>,
     ConsolidatedReport,
+    Vec<String>,
 )> {
     // Initialize progress (skip if already initialized by caller)
     if let Some(ref map) = progress_map {
@@ -306,6 +309,15 @@ pub async fn run_experts(
     // of returning an empty report set. A legitimately empty team (no experts
     // configured) produces no errors and is left untouched, and a successful
     // review with zero findings still has non-empty reports.
+    //
+    // Decision (RENG-77 §4): a review in which EVERY expert failed is FAILED,
+    // not `unverified` — the pre-existing rule below, kept as-is. The
+    // alternative would leave a review with no finding of any kind behind a
+    // status the pipeline cannot distinguish from a real assessment, which is
+    // the outcome this rule exists to prevent. A run in which only SOME experts
+    // failed returns normally and carries the failures in the last tuple
+    // element, which the callers surface on the output
+    // ([`crate::models::ReviewOutput::errors`]).
     if reports.is_empty() && !errors.is_empty() {
         let sample = errors.first().map(|s| s.as_str()).unwrap_or("");
         anyhow::bail!(
@@ -315,7 +327,7 @@ pub async fn run_experts(
         );
     }
 
-    Ok((reports, global_context, dropped_findings, consolidated))
+    Ok((reports, global_context, dropped_findings, consolidated, errors))
 }
 
 /// Run the aggregator expert to merge individual expert reports.

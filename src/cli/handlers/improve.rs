@@ -59,6 +59,7 @@ pub async fn run_improve(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -120,6 +121,7 @@ pub async fn run_improve_local_diff(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -184,6 +186,7 @@ pub async fn run_improve_local_repo(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 

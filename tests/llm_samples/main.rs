@@ -224,6 +224,7 @@ async fn sample_columns_round_trip_through_the_driver() {
         model: "mimo-v2.5-pro".to_string(),
         entry_fp: "fp-xiaomi-mimo".to_string(),
         latency_ms: 1234,
+        ttfb_ms: None,
         success: false,
         error: Some("HTTP 500 Internal Server Error".to_string()),
         chain_position: 3,
@@ -258,4 +259,59 @@ async fn row_len(pool: &sqlx::AnyPool) -> i64 {
         .fetch_one(pool)
         .await
         .unwrap()
+}
+
+/// RENG-77 §5: both timings a call records round-trip through the real driver
+/// and reach the aggregate the LLM page is served from, where a TTFB is
+/// averaged only when it was actually measured — a legacy / registry-path row
+/// (NULL) reads back as "not measured", never as 0 ms.
+#[tokio::test]
+async fn both_timings_round_trip_and_unmeasured_rows_stay_null() {
+    use review_engine::server::api::llm_latency::LatencySnapshot;
+    use review_engine::store::llm_samples::StoreLlmCallSink;
+
+    let db = Arc::new(SqlxStore::new_in_memory().await.unwrap());
+    db.migrate().await.unwrap();
+    let sink = StoreLlmCallSink::shared(db.clone(), Some("review-ttfb".to_string()));
+    let at = chrono::Utc::now();
+
+    let sample = |provider: &str, latency_ms: u64, ttfb_ms: Option<u64>| LlmCallSample {
+        at,
+        provider: provider.to_string(),
+        model: "deepseek-v4-flash".to_string(),
+        entry_fp: format!("fp-{provider}"),
+        latency_ms,
+        ttfb_ms,
+        success: true,
+        error: None,
+        chain_position: 1,
+        attempt: 1,
+    };
+    // The measured shape (direct OpenAI-compatible path) and the unmeasured
+    // one (registry path today, every pre-0006 row).
+    sink.record(&sample("measured", 17_600, Some(310))).await;
+    sink.record(&sample("unmeasured", 300, None)).await;
+
+    let since = at - chrono::Duration::days(1);
+    let rows = db
+        .llm_samples_since(since)
+        .await
+        .expect("the read path is the aggregate's");
+    let measured = rows.iter().find(|r| r.provider == "measured").expect("row written");
+    assert_eq!(measured.latency_ms, 17_600, "the total round-trips");
+    assert_eq!(measured.ttfb_ms, Some(310), "the TTFB round-trips");
+    let unmeasured = rows.iter().find(|r| r.provider == "unmeasured").expect("row written");
+    assert_eq!(unmeasured.ttfb_ms, None, "a measurement never taken stays NULL, not 0");
+
+    // What the page reads: TTFB averaged over the measured sample only.
+    let snapshot = LatencySnapshot::new(since, rows);
+    let page = snapshot.for_card("measured", "deepseek-v4-flash", "fp-measured", false);
+    assert_eq!(page.avg_latency_ms, Some(17_600));
+    assert_eq!(page.avg_ttfb_ms, Some(310));
+    let registry = snapshot.for_card("unmeasured", "deepseek-v4-flash", "fp-unmeasured", false);
+    assert_eq!(registry.avg_latency_ms, Some(300));
+    assert_eq!(
+        registry.avg_ttfb_ms, None,
+        "no TTFB in the window for this card → the page shows nothing, not 0ms"
+    );
 }

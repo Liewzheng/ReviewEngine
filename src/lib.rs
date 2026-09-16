@@ -127,21 +127,22 @@ pub async fn run_review(
     // reviewed SHA, so the false-positive filter works here too (RENG-31).
     let remote_files = crate::team::file_source::provider_source_or_warn(mr_url, token, &mr_info.git_hash);
 
-    let (findings, global_context, dropped_findings, consolidated) = crate::team::orchestrator::run_experts(
-        &experts,
-        &mr_info,
-        &diff,
-        &llm_configs,
-        &app_config,
-        Some(progress_map.clone()),
-        &review_id,
-        dump_dir,
-        remote_files,
-        // RENG-57: the CLI has no sample store to write to (only `serve`
-        // owns one), so no LLM call latency is recorded here.
-        None,
-    )
-    .await?;
+    let (findings, global_context, dropped_findings, consolidated, expert_failures) =
+        crate::team::orchestrator::run_experts(
+            &experts,
+            &mr_info,
+            &diff,
+            &llm_configs,
+            &app_config,
+            Some(progress_map.clone()),
+            &review_id,
+            dump_dir,
+            remote_files,
+            // RENG-57: the CLI has no sample store to write to (only `serve`
+            // owns one), so no LLM call latency is recorded here.
+            None,
+        )
+        .await?;
 
     let output = if aggregated {
         match experts.iter().find(|e| e.name == "aggregator") {
@@ -166,7 +167,9 @@ pub async fn run_review(
     };
     let output = output
         .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated);
+        .with_consolidated(consolidated)
+        // RENG-77 §4: experts that produced no report, with the reason each saw.
+        .with_errors(expert_failures);
 
     // Mark progress complete
     crate::progress::complete_progress(Some(&progress_map), &review_id);

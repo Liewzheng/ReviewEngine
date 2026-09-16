@@ -66,6 +66,7 @@ pub async fn run_update_changelog(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 

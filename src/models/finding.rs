@@ -187,6 +187,16 @@ pub struct ReviewOutput {
     /// `None` for non-review commands (describe/ask/improve/changelog).
     #[serde(default)]
     pub consolidated: Option<crate::team::lead_consolidator::ConsolidatedReport>,
+    /// Experts that produced NO report, with the failure each saw — an empty
+    /// completion (RENG-77 §4), an exhausted provider chain, an unreachable
+    /// provider. `reports` only ever holds the experts that answered, so
+    /// without this list a partial run reads exactly like a clean one.
+    ///
+    /// Additive and `default`, and omitted from the wire when empty: every
+    /// pre-RENG-77 result decodes and re-serializes unchanged. The review
+    /// detail endpoint exposes it (`ReviewDetail::errors`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
 }
 
 /// A consolidated report produced by the aggregator expert.
@@ -229,6 +239,7 @@ impl ReviewOutput {
             aggregated: None,
             dropped_findings: Vec::new(),
             consolidated: None,
+            errors: Vec::new(),
         }
     }
 
@@ -239,6 +250,7 @@ impl ReviewOutput {
             aggregated: Some(aggregated),
             dropped_findings: Vec::new(),
             consolidated: None,
+            errors: Vec::new(),
         }
     }
 
@@ -251,6 +263,13 @@ impl ReviewOutput {
     /// Attach the lead consolidation summary.
     pub fn with_consolidated(mut self, consolidated: crate::team::lead_consolidator::ConsolidatedReport) -> Self {
         self.consolidated = Some(consolidated);
+        self
+    }
+
+    /// Attach the per-expert failures (RENG-77 §4): the experts that produced
+    /// no report at all, each with the reason it did not.
+    pub fn with_errors(mut self, errors: Vec<String>) -> Self {
+        self.errors = errors;
         self
     }
 

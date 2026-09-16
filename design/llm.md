@@ -129,13 +129,25 @@ shows `0` only when the window was really read and really held no usage.
 The card's latency number is the mean round-trip time of the **calls the
 reviews actually made ON THAT CARD**, not the probe's instantaneous value:
 every LLM call attempt on the review path records a row in `llm_call_samples`
-(timestamp, provider, model, `entry_fp` (RENG-75), `latency_ms`,
-success/failure + error, chain position, attempt, review id), and
+(timestamp, provider, model, `entry_fp` (RENG-75), `latency_ms`, `ttfb_ms`
+(RENG-77), success/failure + error, chain position, attempt, review id), and
 `GET /api/v1/llm/providers` folds the window's rows per entry fingerprint
-into `avgLatencyMs` / `latencySampleCount` / `latencyFailureCount` /
-`latencyLastSampleAt` / `latencySparkline` over the reported
-`latencyWindowDays` (7, same length as the usage window but reported
+into `avgLatencyMs` / `avgTtfbMs` / `latencySampleCount` /
+`latencyFailureCount` / `latencyLastSampleAt` / `latencySparkline` over the
+reported `latencyWindowDays` (7, same length as the usage window but reported
 separately).
+
+`ttfb_ms` is time-to-first-byte — request issued to response **headers**
+received — and `avgTtfbMs` is its mean over the successful calls that carry
+one (`null` when none does; pre-0006 rows and calls served by a registry
+provider are excluded, never averaged in as `0`). It exists because the user
+reading "平均延迟" wants the **communication** latency, not the generation
+time. Measured caveat: the shipped request shape is non-streaming
+(`stream` is not sent), so a server that generates the whole answer before
+flushing anything returns headers and body together and `avgTtfbMs ≈
+avgLatencyMs` — the two fields only diverge once a provider flushes headers
+early (`stream: true`). Neither number is a substitute for the other, and
+`avgLatencyMs` keeps its meaning for its existing consumers.
 
 Two rules make the number trustworthy:
 
@@ -263,6 +275,7 @@ interface LlmProvider {
   successRate: number | null;   // RENG-56, 0–1
   lastUsedAt: string | null;    // RENG-56, ISO 8601
   avgLatencyMs: number | null;         // RENG-57, window, successful calls only
+  avgTtfbMs: number | null;            // RENG-77, time-to-first-byte, measured calls only
   latencySampleCount: number | null;   // RENG-57, the average's denominator
   latencyFailureCount: number | null;  // RENG-57, excluded from the average
   latencyLastSampleAt: string | null;  // RENG-57, newest recorded call

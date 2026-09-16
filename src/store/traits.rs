@@ -210,6 +210,11 @@ pub struct LlmCallSampleRow {
     pub created_at: DateTime<Utc>,
     /// Round-trip time of the attempt, in milliseconds.
     pub latency_ms: i64,
+    /// RENG-77: time-to-first-byte in milliseconds; `None` for rows written
+    /// before migration `0006` and for call paths the underlying provider
+    /// does not expose it for (registry providers). The latency aggregate
+    /// (`server/api/llm_latency.rs`) only averages the rows that carry one.
+    pub ttfb_ms: Option<i64>,
     /// Whether the attempt produced a completion.
     pub success: bool,
 }

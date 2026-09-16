@@ -206,7 +206,7 @@ pub async fn run_local(
     let project_path = local_path.unwrap_or(".");
     let (experts, mr_info) = prepare_review(&config, project_path, "local", "main");
 
-    let (reports, _, dropped_findings, consolidated) = review_engine::team::orchestrator::run_experts(
+    let (reports, _, dropped_findings, consolidated, expert_failures) = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -224,7 +224,9 @@ pub async fn run_local(
 
     let out = ReviewOutput::new(reports)
         .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated);
+        .with_consolidated(consolidated)
+        // RENG-77 §4: experts that produced no report, with the reason each saw.
+        .with_errors(expert_failures);
     write_output(
         &out,
         format,
@@ -301,7 +303,7 @@ pub async fn run_local_repo(
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", base_ref);
 
-    let (reports, _, dropped_findings, consolidated) = review_engine::team::orchestrator::run_experts(
+    let (reports, _, dropped_findings, consolidated, expert_failures) = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -319,7 +321,9 @@ pub async fn run_local_repo(
 
     let out = ReviewOutput::new(reports)
         .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated);
+        .with_consolidated(consolidated)
+        // RENG-77 §4: experts that produced no report, with the reason each saw.
+        .with_errors(expert_failures);
 
     let repo_root = match std::fs::canonicalize(local_path) {
         Ok(p) => Some(p),
@@ -381,7 +385,7 @@ pub async fn run_local_path(
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", "main");
 
-    let (reports, _, dropped_findings, consolidated) = review_engine::team::orchestrator::run_experts(
+    let (reports, _, dropped_findings, consolidated, expert_failures) = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &full.diff,
@@ -399,7 +403,9 @@ pub async fn run_local_path(
 
     let mut out = ReviewOutput::new(reports)
         .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated);
+        .with_consolidated(consolidated)
+        // RENG-77 §4: experts that produced no report, with the reason each saw.
+        .with_errors(expert_failures);
 
     // P1: a full-content review that finds nothing must not read as "the
     // code is clean". Surface the coverage claim explicitly.

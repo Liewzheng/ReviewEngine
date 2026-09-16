@@ -80,6 +80,19 @@ impl std::fmt::Debug for ResolvedSource {
     }
 }
 
+/// The outcome of one review run, as the task runner persists it.
+#[derive(Debug)]
+pub(crate) struct ReviewOutcome {
+    /// The serialized [`crate::models::ReviewOutput`] (`reviews.result`).
+    pub value: serde_json::Value,
+    /// Human-readable one-line summary for the log and the completion event.
+    pub summary: String,
+    /// RENG-77: the `reviews.llm_summary` JSON, computed from the IN-MEMORY
+    /// output because that is the only place the serving cards' fingerprints
+    /// exist. `None` when the run recorded no LLM attribution.
+    pub llm_summary: Option<String>,
+}
+
 /// Run the review for a resolved source.
 ///
 /// `expert_overrides` carries the persisted WebUI expert edits (RENG-69):
@@ -96,7 +109,7 @@ pub(crate) async fn run_review(
     llm_configs: Vec<crate::models::LLMConfig>,
     llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
     expert_overrides: Arc<crate::config::ExpertOverrides>,
-) -> anyhow::Result<(serde_json::Value, String)> {
+) -> anyhow::Result<ReviewOutcome> {
     let config_source = config_toml.map(crate::models::ConfigSource::Inline);
     let mut app_config = crate::config::resolve_config(config_source).await?;
     // DB overrides win over the config file's `[review_experts]` (the file is
@@ -137,20 +150,44 @@ pub(crate) async fn run_review(
     )
     .await;
 
-    let (reports, _, dropped_findings, consolidated) = match review_result {
+    let (reports, _, dropped_findings, consolidated, failures) = match review_result {
         Ok(result) => result?,
         Err(_) => anyhow::bail!("Task timed out after 600 seconds"),
     };
 
+    // RENG-77 §4: an expert that produced no report at all (an empty
+    // completion, an exhausted provider chain) is only visible through the
+    // error list — `reports` holds the experts that answered. Carrying it on
+    // the output is what keeps a partially failed run from reading as a clean
+    // one, and it is what the review detail surfaces.
+    let failed = failures.len();
     let output = crate::models::ReviewOutput::new(reports)
         .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated);
+        .with_consolidated(consolidated)
+        .with_errors(failures);
     let findings: usize = output.reports.iter().map(|r| r.findings.len()).sum();
-    let summary = format!("{} expert report(s), {} finding(s)", output.reports.len(), findings);
+    let summary = if failed == 0 {
+        format!("{} expert report(s), {} finding(s)", output.reports.len(), findings)
+    } else {
+        format!(
+            "{} expert report(s), {} finding(s), {} expert(s) failed",
+            output.reports.len(),
+            findings,
+            failed
+        )
+    };
+    // RENG-77: the usage snapshot must be built from THIS value, before it is
+    // serialized — `LlmUsage::fp` is `skip_serializing`, so a summary derived
+    // from `value` (or from the stored column) would lose the fingerprint and
+    // the page could not tell two same-named cards apart.
+    let llm_summary = crate::store::rows::llm_summary_from_output(&output);
     let value = serde_json::to_value(&output).unwrap_or_default();
-    Ok((value, summary))
+    Ok(ReviewOutcome {
+        value,
+        summary,
+        llm_summary,
+    })
 }
-
 pub(crate) async fn resolve_source(
     source: ReviewSource,
     gitlab_token: Option<String>,
@@ -298,7 +335,7 @@ mod tests {
             agents_md: None,
             file_source: None,
         };
-        let (value, summary) = run_review(
+        let outcome = run_review(
             resolved,
             Some(INLINE.to_string()),
             vec![],
@@ -309,11 +346,214 @@ mod tests {
         .await
         .expect("an empty expert team is a legitimate (empty) review");
 
+        let value = outcome.value;
         assert_eq!(
             value["reports"].as_array().map(Vec::len),
             Some(0),
             "every expert was disabled by the override: {value}"
         );
-        assert_eq!(summary, "0 expert report(s), 0 finding(s)");
+        assert_eq!(outcome.summary, "0 expert report(s), 0 finding(s)");
+        assert_eq!(outcome.llm_summary, None, "no expert ran, so no LLM usage was recorded");
+    }
+
+    /// RENG-77 §4 end-to-end: a single-entry provider chain that returns
+    /// an empty completion is surfaced as a failed review with the
+    /// diagnosis in the error message — exactly what the LLM page surfaces
+    /// through `GET /llm/providers`' failure count and what the user sees
+    /// in the queue status. The runner's `ReviewOutcome.summary` names
+    /// the failure so the log line and the completion event both tell the
+    /// same story (no "0 expert report(s), 0 finding(s)" masquerading as a
+    /// clean, high-scoring pass).
+    #[tokio::test]
+    async fn an_empty_completion_makes_the_review_fail_with_a_diagnosis() {
+        let server = wiremock::MockServer::start().await;
+        // The provider answers with an empty `content` field — the measured
+        // RENG-77 §4 case (a reasoning model spending its whole
+        // `max_tokens` budget on `reasoning_tokens`).
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": ""}}],
+                "usage": {"total_tokens": 4096},
+                "model": "deepseek-v4-flash",
+            })))
+            .mount(&server)
+            .await;
+
+        let resolved = ResolvedSource {
+            diff: "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            mr_info: None,
+            agents_md: None,
+            file_source: None,
+        };
+        let mut config = crate::models::LLMConfig {
+            provider: "deepseek".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            api_key: "sk-test".to_string(),
+            api_base: server.uri(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+            disabled: false,
+        };
+        // No provider registry → the direct OpenAI-compatible path runs.
+        config.api_key = "sk-test".to_string();
+
+        let outcome = crate::server::api::review::resolve::run_review(
+            resolved,
+            Some(INLINE.to_string()),
+            vec![config],
+            // RENG-57: no store in this test → no latency samples to record.
+            None,
+            Arc::new(crate::config::ExpertOverrides::default()),
+        )
+        .await;
+        assert!(
+            outcome.is_err(),
+            "a single-entry chain returning an empty completion must fail the review, \
+             not present as a clean pass: {:?}",
+            outcome
+        );
+        let err = format!("{:#}", outcome.unwrap_err());
+        assert!(
+            err.contains("empty completion"),
+            "the failure's cause chain names the diagnosis the user needs (§4): {err}"
+        );
+        assert!(
+            err.contains("deepseek") || err.contains("deepseek-v4-flash"),
+            "the failure names the provider / model the user already sees on the card: {err}"
+        );
+    }
+
+    /// RENG-77 §2, on the REAL handler and store path: `run_review` — the
+    /// function `enqueue_review` calls — builds `reviews.llm_summary` from the
+    /// IN-MEMORY output (the only place a serving card's `fp` exists) and hands
+    /// it to the write-through, which is what lets `GET /llm/providers`
+    /// attribute the review to the card the user configured.
+    ///
+    /// Nothing is hand-built: the provider is a real HTTP mock, the fingerprint
+    /// is the one `LLMConfig::entry_fp()` derives from the card's own
+    /// credentials, the summary is persisted into a real SQLite `reviews` row,
+    /// and `requestCount` / `usageShare` are read back through
+    /// `UsageSnapshot` — the exact aggregate the endpoint serves. The test also
+    /// pins the security contract: the fp reaches `reviews.llm_summary` and
+    /// never `reviews.result`.
+    #[tokio::test]
+    async fn the_review_runner_persists_an_llm_summary_carrying_the_configured_cards_fp() {
+        use crate::server::api::llm_usage::{window_start, UsageSnapshot};
+        use crate::server::task_queue::{record_task_started, SourceMeta, TaskState, TaskStore};
+        use crate::store::traits::ReviewStore;
+
+        let server = wiremock::MockServer::start().await;
+        // A provider that answers, but echoes an ALIAS of the configured model
+        // (§3): every consumer looks the model up by what the card says, so the
+        // summary must carry `deepseek-v4-flash`, never `deepseek-flash`.
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chat/completions"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "## Review\n\nNothing to report.\n"}}],
+                "usage": {"total_tokens": 21},
+                "model": "deepseek-flash",
+            })))
+            .mount(&server)
+            .await;
+
+        let card = crate::models::LLMConfig {
+            provider: "deepseek".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            api_key: "sk-reng-77-end-to-end".to_string(),
+            api_base: server.uri(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: Some(true),
+            disabled: false,
+        };
+        let expected_fp = card.entry_fp();
+
+        let resolved = ResolvedSource {
+            diff: "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n".to_string(),
+            mr_info: None,
+            agents_md: None,
+            file_source: None,
+        };
+        let outcome = run_review(
+            resolved,
+            Some(INLINE.to_string()),
+            vec![card],
+            // RENG-57: no sample sink here — the usage summary is the subject.
+            None,
+            Arc::new(ExpertOverrides::default()),
+        )
+        .await
+        .expect("the mock provider answers every expert");
+
+        let summary = outcome
+            .llm_summary
+            .clone()
+            .expect("a review that ran experts records their usage");
+        let parsed: serde_json::Value = serde_json::from_str(&summary).expect("the summary is JSON");
+        let entry = parsed.as_array().expect("array").first().expect("at least one usage");
+        assert_eq!(
+            entry["fp"], expected_fp,
+            "the summary carries the CONFIGURED card's fingerprint: {summary}"
+        );
+        assert_eq!(
+            entry["model"], "deepseek-v4-flash",
+            "the configured model, not the provider's alias: {summary}"
+        );
+        assert!(
+            !summary.contains("\"deepseek-flash\""),
+            "the alias must not leak into the summary: {summary}"
+        );
+
+        // The security contract: the fingerprint is in `llm_summary` only.
+        let serialized_result = outcome.value.to_string();
+        assert!(
+            !serialized_result.contains(&expected_fp),
+            "the fp must never reach the serialized result / API response"
+        );
+
+        // The write-through the REST handler performs.
+        let db = Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap());
+        db.migrate().await.unwrap();
+        let mut store = TaskStore::new();
+        store.set_db(db.clone());
+        let task_id = record_task_started(&store, SourceMeta::default()).await;
+        store
+            .update_with_summary(
+                task_id,
+                TaskState::Completed,
+                Some(outcome.value),
+                None,
+                outcome.llm_summary,
+            )
+            .await;
+
+        // Read it back the way `GET /llm/providers` does.
+        let now = chrono::Utc::now();
+        let since = window_start(now);
+        let stats = db.llm_usage_since(since).await.expect("in-memory store is attached");
+        let usage = UsageSnapshot::new(since, stats).for_card("deepseek", "deepseek-v4-flash", &expected_fp, false);
+        assert_eq!(
+            usage.request_count,
+            Some(1),
+            "the page's requestCount attributes the review to the configured card"
+        );
+        assert_eq!(usage.usage_share, Some(1.0), "the only usage in the window is this one");
+        assert_eq!(
+            usage.success_rate,
+            Some(1.0),
+            "the review completed, so the card shows a terminal outcome"
+        );
+
+        let stored_summary: String = sqlx::query_scalar("SELECT llm_summary FROM reviews WHERE task_id = ?")
+            .bind(task_id.to_string())
+            .fetch_one(db.pool())
+            .await
+            .expect("the write-through persists the summary");
+        assert!(
+            stored_summary.contains(&expected_fp),
+            "the persisted column — not just the in-memory value — carries the fp: {stored_summary}"
+        );
     }
 }

@@ -117,7 +117,7 @@ async fn test_run_experts_returns_consolidated_report() {
         "feat/test".to_string(),
         "main".to_string(),
     );
-    let (reports, _global_context, dropped_findings, consolidated) = run_experts(
+    let (reports, _global_context, dropped_findings, consolidated, expert_failures) = run_experts(
         &[],
         &mr_info,
         "",
@@ -133,11 +133,78 @@ async fn test_run_experts_returns_consolidated_report() {
     .expect("run_experts with empty team should succeed");
     assert!(reports.is_empty());
     assert!(dropped_findings.is_empty());
+    // An empty team ran no expert, so nothing FAILED either: the failure list
+    // is what distinguishes "no experts configured" from "every expert
+    // errored" (RENG-77 §4 — the latter bails before this point).
+    assert!(
+        expert_failures.is_empty(),
+        "no expert ran, so none can be reported as failed: {expert_failures:?}"
+    );
     // Empty team → perfect score, no conflicts, non-empty TL;DR.
     assert_eq!(consolidated.assessment.score, 100);
     assert!(consolidated.conflicts.is_empty());
     assert!(consolidated.findings.is_empty());
     assert!(!consolidated.assessment.tl_dr.is_empty());
+}
+
+/// RENG-77 §4, the partial case: when SOME experts answer and others fail,
+/// the successful reports are kept AND the failures are returned as
+/// name-carrying messages — which the callers attach to
+/// [`crate::models::ReviewOutput::errors`] so a partially failed run is not
+/// published as a clean one. (`run_experts` only bails when EVERY expert
+/// failed, see the test above.)
+#[test]
+fn test_collect_expert_results_keeps_reports_and_names_each_failure() {
+    use crate::team::orchestrator::pipeline::collect_expert_results;
+
+    let report = |name: &str| ExpertReport {
+        expert_name: name.to_string(),
+        findings: Vec::new(),
+        markdown: format!("# {name}"),
+        raw_llm_response: "raw".to_string(),
+        parse_error: None,
+        raw_dump_path: None,
+        llm_provider: Some("deepseek".to_string()),
+        llm_model: Some("deepseek-v4-flash".to_string()),
+        llm_fp: None,
+    };
+
+    // One expert answered, two did not — the measured RENG-77 shape, where an
+    // expert whose provider returned empty content produces no report at all.
+    let results = vec![
+        Ok((report("security"), 1200, 500)),
+        Err(
+            anyhow::anyhow!("provider 'deepseek' (model 'deepseek-v4-flash') returned an empty completion")
+                .context("all LLM providers failed")
+                .context("expert 'performance'"),
+        ),
+        Err(anyhow::anyhow!("connection refused").context("expert 'architecture'")),
+    ];
+
+    let (reports, metrics, total_tokens, errors) = collect_expert_results(results);
+
+    assert_eq!(reports.len(), 1, "the expert that answered is kept");
+    assert_eq!(reports[0].expert_name, "security");
+    assert_eq!(metrics.len(), 1, "metrics exist only for the experts that answered");
+    assert_eq!(total_tokens, 500);
+
+    assert_eq!(errors.len(), 2, "every silent expert is recorded: {errors:?}");
+    assert!(
+        errors.iter().all(|e| e.contains("Expert task failed")),
+        "the review's error list is the only place a failed expert appears: {errors:?}"
+    );
+    let performance = errors
+        .iter()
+        .find(|e| e.contains("performance"))
+        .expect("the failing expert is named, not anonymous");
+    assert!(
+        performance.contains("empty completion"),
+        "the recorded failure carries the diagnosis, not just 'a task failed': {performance}"
+    );
+    assert!(
+        errors.iter().any(|e| e.contains("architecture")),
+        "a second, differently-caused failure is named too: {errors:?}"
+    );
 }
 
 // ─── RENG-73: the consolidated TL;DR counts describe the published findings ───

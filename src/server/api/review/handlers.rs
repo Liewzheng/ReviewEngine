@@ -15,7 +15,10 @@ use super::super::types::{ReviewRequest, ReviewSource};
 use super::mr_url::{self, MrUrlRoute};
 use super::resolve;
 use super::task::enqueue_review;
-use super::task::{build_review_detail, build_review_list_item, merge_camel_case_fields, task_to_status, ListParams};
+use super::task::{
+    build_review_detail, build_review_list_item, merge_camel_case_fields, mr_url_request_json, task_to_status,
+    ListParams,
+};
 
 fn error_response(status: StatusCode, message: impl Into<String>) -> axum::response::Response {
     (status, Json(serde_json::json!({ "error": message.into() }))).into_response()
@@ -70,6 +73,28 @@ pub(crate) async fn resolve_history_entry(
 /// finished — the cancel contract is a state migration (`pending`/`running` →
 /// `cancelled`), so a terminal task is nothing to migrate.
 const TERMINAL_CANCEL_MSG: &str = "task is already in a terminal state and cannot be cancelled";
+
+/// RENG-88: the 409 message for a rerun that can recover replayable parameters
+/// from neither source. Keeps the pre-RENG-88 text as its prefix (the
+/// documented response, and what keyword checks on it match) and names which
+/// half is unusable, so "no request was ever stored" and "the stored source is
+/// not a GitLab merge request" — a GitHub-triggered review, say — are
+/// distinguishable without reading the database.
+fn rerun_unreplayable_message(meta: &SourceMeta) -> String {
+    const BASE: &str = "original request parameters are not available";
+    match meta
+        .gitlab_mr_url
+        .as_deref()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+    {
+        Some(url) => format!(
+            "{BASE} and the record's source metadata is not replayable: `{url}` is not a GitLab \
+             merge request URL, and only a GitLab merge request URL can be re-run through the API"
+        ),
+        None => format!("{BASE} and the record's source metadata carries no MR URL"),
+    }
+}
 
 /// Error message for the enqueue-time "no usable LLM configured" gate (422).
 const LLM_NOT_CONFIGURED_MSG: &str = "no usable LLM configured: set api_base (and api_key) via the config page, POST /api/v1/config, the LLM_CONFIG env var, or run `review-engine init`";
@@ -405,11 +430,28 @@ pub(crate) async fn rerun_review(
         return error_response(StatusCode::CONFLICT, "task is still running");
     }
 
+    // RENG-88: a record with no persisted request parameters — every review
+    // the GitLab webhook dispatched before this release, which is most of a
+    // real deployment's history — is recovered from its source metadata
+    // instead of answering 409, so 「重新评审」 works on the history that is
+    // already in the database. The MR URL is the only field that CAN carry a
+    // replayable request: `project`/`repository` are display paths without an
+    // MR iid, and `commit_sha` pins a revision the REST source cannot express.
+    // The reconstruction is gated on the URL being replayable at all (see
+    // [`mr_url_request_json`]), so this never queues a doomed task.
     let request_json = match existing.request {
         Some(r) => r,
-        None => {
-            return error_response(StatusCode::CONFLICT, "original request parameters are not available");
-        }
+        None => match existing
+            .source_meta
+            .gitlab_mr_url
+            .as_deref()
+            .and_then(mr_url_request_json)
+        {
+            Some(recovered) => recovered,
+            None => {
+                return error_response(StatusCode::CONFLICT, rerun_unreplayable_message(&existing.source_meta));
+            }
+        },
     };
 
     let mut request = match serde_json::from_value::<ReviewRequest>(request_json.clone()) {

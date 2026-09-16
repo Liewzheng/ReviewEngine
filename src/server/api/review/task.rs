@@ -182,6 +182,49 @@ pub(crate) fn source_meta_from_request(source: &ReviewSource) -> SourceMeta {
     }
 }
 
+/// RENG-88: the replayable `reviews.request` JSON for a review dispatched from
+/// an MR/PR URL — the same shape `POST /api/v1/reviews` accepts, so a
+/// webhook-created record re-runs through `POST /reviews/{task_id}/rerun`
+/// exactly like one submitted through the API:
+///
+/// ```json
+/// {"source": {"type": "gitlab_mr", "url": "<mr_url>"},
+///  "config": null, "llm_configs": null, "webhook": null}
+/// ```
+///
+/// `None` when the API cannot replay `mr_url`; the caller then records its task
+/// without a request, and a later rerun answers an honest 409 instead of
+/// queueing a task that is doomed to fail:
+///
+/// - the REST source body for an MR/PR URL is [`ReviewSource::GitLabMr`], and
+///   only a GitLab merge-request URL resolves through the REST review pipeline
+///   (`resolve_source` builds a GitLab client from it, and `rerun_review`
+///   applies the same parse up front). The parse is the gate here so that
+///   every request these paths persist is replayable by construction.
+/// - a GitHub pull-request URL has no REST source at all: GitHub reviews run
+///   through the webhook pipeline only (the credential lives on the webhook
+///   handler, the webhook runner resolves the provider per URL), so the GitHub
+///   webhook path stores no request and rerun reports the URL as not
+///   replayable.
+///
+/// Only the URL is persisted — the GitLab credential is never part of
+/// `ReviewRequest` (docs/rest-api.md §1), and the rest of the webhook's source
+/// metadata (title, branch, participants) is display data the replayed review
+/// re-fetches from the provider anyway.
+pub(crate) fn mr_url_request_json(mr_url: &str) -> Option<serde_json::Value> {
+    let url = mr_url.trim();
+    if crate::git_provider::gitlab::client::Client::parse_mr_url(url).is_err() {
+        return None;
+    }
+    serde_json::to_value(crate::server::api::types::ReviewRequest {
+        source: ReviewSource::GitLabMr { url: url.to_string() },
+        config: None,
+        llm_configs: None,
+        webhook: None,
+    })
+    .ok()
+}
+
 use crate::server::task_queue::{source_meta_from_mr_info, TaskStore};
 use crate::server::AppState;
 use serde::Deserialize;

@@ -227,6 +227,186 @@ async fn rerun_reresolves_credentials_per_request() {
     assert_ne!(new_id, task_id, "rerun must create a fresh task id");
 }
 
+/// RENG-88, end-to-end through the real binary: a review created by the GitLab
+/// **webhook** can be re-run. Webhook-created records were persisted with
+/// `request = NULL`, so 「重新评审」 answered 409 on every one of them — the
+/// reported defect, which hits exactly the deployments whose reviews all come
+/// from the webhook.
+///
+/// The mock GitLab is registered as a git platform, so the payload's external
+/// URL is re-hosted onto the mock (the webhook path's normal rewrite) and both
+/// the original review and its rerun fetch it from there.
+#[tokio::test]
+async fn webhook_created_review_can_be_rerun() {
+    let gitlab = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "title": "Fix login bug",
+            "description": "",
+            "source_branch": "feature/login",
+            "target_branch": "main",
+            "author": {"id": 1, "username": "alice", "name": "Alice"},
+            "diff_refs": {"base_sha": "base1", "head_sha": "abc123", "start_sha": "base1"}
+        })))
+        .mount(&gitlab)
+        .await;
+    // An empty diff settles the review ("No diff changes") without any LLM
+    // call, so the test asserts the task lifecycle and nothing else.
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/raw_diffs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(""))
+        .mount(&gitlab)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproj/merge_requests/7/discussions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(&gitlab)
+        .await;
+
+    let payload_url = "http://gitlab.reng88.invalid:8929/group/proj/-/merge_requests/7";
+    // The URL the review actually fetches: the payload URL re-hosted onto the
+    // registered platform's `internalBaseUrl` (the mock).
+    let review_url = format!("{}/group/proj/-/merge_requests/7", gitlab.uri());
+    let llm_config_env = unreachable_llm_config_env();
+    let port = find_free_port();
+    let _guard = spawn_server_inner_with_env(
+        port,
+        None,
+        &[
+            ("GITLAB_WEBHOOK_SECRET", "hook-secret"),
+            ("GITLAB_TOKEN", "glpat-test"),
+            ("LLM_CONFIG", &llm_config_env),
+        ],
+    );
+    wait_for_server(port).await;
+    let client = bootstrap_authed_client(port, API_TOKEN).await;
+    let base = format!("http://127.0.0.1:{}", port);
+
+    // Register the mock as the platform for the payload's host: `baseUrl` is
+    // the address the payload carries, `internalBaseUrl` the one the server
+    // reaches (the mock).
+    let resp = client
+        .put(format!("{}/api/v1/config", base))
+        .json(&serde_json::json!({
+            "gitPlatforms": [{
+                "name": "reng88-mock",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.reng88.invalid:8929",
+                "internalBaseUrl": gitlab.uri(),
+                "token": "glpat-test",
+                "webhookSecret": "hook-secret"
+            }]
+        }))
+        .send()
+        .await
+        .expect("failed to PUT /api/v1/config");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "the mock GitLab must be registered as a git platform, got {}",
+        resp.status()
+    );
+
+    // The webhook delivery GitLab sends for a newly opened MR.
+    let resp = reqwest::Client::new()
+        .post(format!("{}/webhook/gitlab", base))
+        .header("X-Gitlab-Event", "Merge Request Hook")
+        .header("X-Gitlab-Token", "hook-secret")
+        .json(&serde_json::json!({
+            "object_attributes": {
+                "action": "open",
+                "iid": 7,
+                "title": "Fix login bug",
+                "source_branch": "feature/login",
+                "target_branch": "main",
+                "url": payload_url,
+                "last_commit": {"id": "abc123", "author": {"name": "alice"}},
+            },
+            "project": {"path_with_namespace": "group/proj", "web_url": "http://gitlab.reng88.invalid:8929/group/proj"},
+            "user": {"name": "alice"},
+        }))
+        .send()
+        .await
+        .expect("failed to POST /webhook/gitlab");
+    assert_eq!(
+        resp.status(),
+        reqwest::StatusCode::OK,
+        "the webhook must be accepted, got {}",
+        resp.status()
+    );
+    let hook_body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        hook_body["status"].as_str(),
+        Some("received"),
+        "the webhook must dispatch a review, got {hook_body}"
+    );
+
+    // The review is dispatched on a detached task: wait for it to settle, then
+    // re-run it. `gitlabMrUrl` is the payload's external URL (what the History
+    // page shows), so that is the row this delivery created.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let task_id = loop {
+        let list: serde_json::Value = client
+            .get(format!("{}/api/v1/reviews?per_page=100", base))
+            .send()
+            .await
+            .expect("failed to GET /api/v1/reviews")
+            .json()
+            .await
+            .expect("reviews list body is not JSON");
+        let item = list["items"]
+            .as_array()
+            .expect("reviews.items is an array")
+            .iter()
+            .find(|i| {
+                i["gitlabMrUrl"].as_str() == Some(payload_url) || i["gitlab_mr_url"].as_str() == Some(payload_url)
+            });
+        match item.map(|i| {
+            (
+                i["id"].as_str().unwrap_or("").to_string(),
+                i["status"].as_str().unwrap_or(""),
+            )
+        }) {
+            Some((id, "completed" | "failed")) => break id,
+            _ if Instant::now() > deadline => {
+                panic!("the webhook review did not settle within 60s: {list}")
+            }
+            _ => tokio::time::sleep(Duration::from_millis(250)).await,
+        }
+    };
+
+    let resp = client
+        .post(format!("{}/api/v1/reviews/{}/rerun", base, task_id))
+        .send()
+        .await
+        .expect("failed to POST rerun");
+    let (status, json) = response_parts(resp).await;
+    assert_eq!(
+        status,
+        reqwest::StatusCode::ACCEPTED,
+        "a webhook-created review must be re-runnable (RENG-88), got {json}"
+    );
+    let rerun_id = json["task_id"].as_str().expect("rerun returns the new task id");
+    assert_ne!(rerun_id, task_id, "rerun must create a fresh task id");
+
+    // …and the replay really runs: it settles on its own, against the same MR
+    // the webhook review fetched. (`failed` is this test's expected terminal
+    // state — the configured LLM provider is the unreachable discard address —
+    // the point is that the stored request drives a working review at all.)
+    let settled = poll_until_settled(&base, &client, rerun_id).await;
+    assert_eq!(
+        settled["status"].as_str(),
+        Some("failed"),
+        "the replayed review must run (and fail on the test's unreachable LLM), got {settled:?}"
+    );
+    assert_eq!(
+        settled["gitlabMrUrl"].as_str(),
+        Some(review_url.as_str()),
+        "the replayed review must target the same MR the webhook review fetched, got {settled:?}"
+    );
+}
+
 #[tokio::test]
 async fn webhook_url_ssrf_validation_rejects_at_enqueue_time() {
     let port = find_free_port();

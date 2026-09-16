@@ -5,7 +5,7 @@ use sha2::Sha256;
 use std::sync::Arc;
 
 use super::dispatcher::{ContentGate, MrDispatcher};
-use super::task_queue::{record_task_outcome, record_task_started, SourceMeta, TaskStore};
+use super::task_queue::{record_task_outcome, record_task_started_with_request, SourceMeta, TaskStore};
 use super::webhook::WebhookHandler;
 
 use async_trait::async_trait;
@@ -270,6 +270,13 @@ pub(crate) fn source_meta_from_pr_payload(payload: &PrHookPayload) -> SourceMeta
 /// Execute a webhook-dispatched PR review on a detached task, recording its
 /// lifecycle in the task store when one is available.
 ///
+/// RENG-88 checked this path for the "webhook reviews can never be re-run" gap:
+/// the record is created through the same helper as the GitLab path, with the
+/// replayable request `mr_url_request_json` yields — which for a GitHub PR URL
+/// is `None`, because the REST API has no GitHub source to replay it with. The
+/// record therefore keeps `request = NULL` (unchanged behaviour) and a rerun
+/// answers the RENG-88 409 that names the URL as not replayable.
+///
 /// `server_llm_configs` is the handler's snapshot of the server's hot-applied
 /// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]);
 /// `server_expert_overrides` the matching snapshot of the WebUI-managed expert
@@ -294,6 +301,16 @@ async fn run_webhook_pr_review(
 ) {
     // Resolve the PR metadata + diff up front: the diff doubles as the content
     // fingerprint for the gate below, so the gate costs no second fetch.
+    //
+    // RENG-88: the replayable request for this review. `mr_url_request_json`
+    // returns `None` for a GitHub PR URL — the REST API's MR source is
+    // GitLab-only (`ReviewSource` has no GitHub variant, and the GitHub
+    // credential lives on this webhook handler, not in `AppState`) — so the
+    // entry keeps `request = NULL` and a later rerun answers the RENG-88 409
+    // naming the URL as not replayable. This call is what keeps the two webhook
+    // paths symmetric: the moment a GitHub PR URL becomes replayable, this
+    // review's history becomes re-runnable with no change here.
+    let request_json = super::api::review::mr_url_request_json(&pr_url);
     let (info, diff) = match super::resolve_review_source(&pr_url, &github_token).await {
         Ok((info, diff)) => {
             if let Some(reason) = super::gate_unchanged_content(dispatcher, gate, &pr_url, &sha, &diff).await {
@@ -308,7 +325,7 @@ async fn run_webhook_pr_review(
             // The task entry is created here so a failed fetch is still visible
             // in the History panel (pre-RENG-62 the entry existed already).
             if let Some(store) = task_store.as_ref() {
-                let id = record_task_started(store, source_meta).await;
+                let id = record_task_started_with_request(store, source_meta, request_json.clone()).await;
                 record_task_outcome(store, id, &Err(e)).await;
             }
             return;
@@ -316,7 +333,7 @@ async fn run_webhook_pr_review(
     };
 
     let task_id = if let Some(store) = task_store.as_ref() {
-        Some(record_task_started(store, source_meta).await)
+        Some(record_task_started_with_request(store, source_meta, request_json).await)
     } else {
         None
     };

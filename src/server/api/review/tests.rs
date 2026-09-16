@@ -2670,30 +2670,201 @@ async fn rerun_replays_history_request_when_memory_is_empty() {
     );
 }
 
-/// RENG-82: the fallback replays only what the row carries — a history row
-/// without a persisted `request` keeps the actionable 409 instead of inventing
-/// a replay.
+/// RENG-82/RENG-88: the fallback replays only what the row carries. This row's
+/// `source_meta` names a GitHub pull request — a source the REST API has no
+/// `ReviewRequest` for (GitHub reviews run through the webhook pipeline, whose
+/// credential and publisher live on the webhook handler) — so the 409 stands,
+/// and RENG-88 makes it name the URL instead of claiming the parameters were
+/// never stored.
 #[tokio::test]
 async fn rerun_rejects_history_row_without_stored_request() {
     let (_state, db) = state_with_db().await;
     let id = Uuid::new_v4();
+    let pr_url = "https://github.com/owner/repo/pull/1";
+    let meta = webhook_source_meta(pr_url);
     seed_review_row(
         &db,
         id,
         "failed",
         "2026-09-02T09:00:00.000000Z",
         Some("2026-09-02T09:01:00.000000Z"),
-        &source_meta_with_commit(),
+        &meta,
         None,
     )
     .await;
 
-    let resp = rerun_review(State(state_after_restart(db)), Path(id), HeaderMap::new())
+    let state = state_after_restart(db);
+    let store = state.task_store.clone().unwrap();
+    let resp = rerun_review(State(state), Path(id), HeaderMap::new())
         .await
         .into_response();
     let (status, json) = response_json(resp).await;
     assert_eq!(status, StatusCode::CONFLICT, "got {json}");
-    assert_eq!(json["error"], "original request parameters are not available");
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("original request parameters are not available"),
+        "the documented message must stay the prefix: {error}"
+    );
+    assert!(
+        error.contains(pr_url) && error.contains("not replayable"),
+        "the 409 must say which half is unusable: {error}"
+    );
+    assert_eq!(store_total(&store).await, 0, "a rejected rerun must not queue a task");
+}
+
+// ─── RENG-88: webhook-triggered reviews are re-runnable ─────────────
+
+/// The source metadata a webhook payload yields for `mr_url` — the shape the
+/// GitLab dispatch's `hook_source_meta` and GitHub's
+/// `source_meta_from_pr_payload` both build: display fields plus the MR URL.
+fn webhook_source_meta(mr_url: &str) -> SourceMeta {
+    SourceMeta {
+        mr_title: Some("Fix login bug".to_string()),
+        project: Some("owner/repo".to_string()),
+        repository: Some("owner/repo".to_string()),
+        branch: Some("feature/x".to_string()),
+        target_branch: Some("main".to_string()),
+        author_name: Some("alice".to_string()),
+        gitlab_mr_url: Some(mr_url.to_string()),
+        commit_sha: Some("abc123".to_string()),
+        ..SourceMeta::default()
+    }
+}
+
+/// RENG-88 (a): a record written the way the webhook dispatch writes it — the
+/// `record_task_started_with_request` + `mr_url_request_json` pair the GitLab
+/// and GitHub handlers call — re-runs with 202. RENG-82's tests all seeded rows
+/// through `create_with_request` (the REST path), which is exactly why the
+/// webhook path's missing request went unnoticed.
+#[tokio::test]
+async fn rerun_replays_a_webhook_dispatched_record() {
+    let (state, db) = state_with_db().await;
+    let store = state.task_store.clone().unwrap();
+    let mr_url = "http://gitlab.invalid:8929/owner/repo/-/merge_requests/1";
+
+    let original_id = crate::server::task_queue::record_task_started_with_request(
+        &store,
+        webhook_source_meta(mr_url),
+        super::mr_url_request_json(mr_url),
+    )
+    .await;
+    assert!(
+        store.get(original_id).await.unwrap().request.is_some(),
+        "a webhook-dispatched record must persist its request (RENG-88)"
+    );
+    store
+        .update(original_id, TaskState::Failed, None, Some("fetch failed".to_string()))
+        .await;
+
+    // The restart a NAS binary upgrade leaves behind: the row is history-only.
+    let restarted = state_after_restart(db);
+    let restarted_store = restarted.task_store.clone().unwrap();
+    let resp = rerun_review(
+        State(restarted),
+        Path(original_id),
+        headers_with_gitlab_token("glpat-rerun-token"),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a webhook-triggered review must re-run, got {json}"
+    );
+
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    let replayed = restarted_store
+        .get(new_id)
+        .await
+        .expect("the rerun must be enqueued")
+        .request
+        .expect("the rerun carries the replayed request");
+    assert_eq!(replayed["source"]["type"], "gitlab_mr");
+    assert_eq!(replayed["source"]["url"], mr_url);
+}
+
+/// RENG-88 (b): the rows already in the database — everything a deployment like
+/// the reported NAS recorded through the webhook before this release — hold no
+/// `request` but do hold their MR URL, so `rerun_review` reconstructs a minimal
+/// replayable request from `source_meta.gitlab_mr_url` instead of answering
+/// 409. This is the half that makes the EXISTING history re-runnable; the
+/// `request` column only helps reviews recorded from now on.
+#[tokio::test]
+async fn rerun_recovers_a_request_from_source_meta() {
+    let (_state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    let mr_url = "http://gitlab.invalid:8929/owner/repo/-/merge_requests/7";
+    // Seeded exactly like a pre-RENG-88 write-through row: no `request` column.
+    seed_review_row(
+        &db,
+        id,
+        "failed",
+        "2026-09-02T09:00:00.000000Z",
+        Some("2026-09-02T09:01:00.000000Z"),
+        &webhook_source_meta(mr_url),
+        None,
+    )
+    .await;
+
+    let restarted = state_after_restart(db);
+    let store = restarted.task_store.clone().unwrap();
+    let resp = rerun_review(
+        State(restarted),
+        Path(id),
+        headers_with_gitlab_token("glpat-rerun-token"),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a request-less row with a usable MR URL must re-run, got {json}"
+    );
+
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    let replayed = store.get(new_id).await.unwrap().request.expect("the rerun is enqueued");
+    assert_eq!(replayed["source"]["type"], "gitlab_mr");
+    assert_eq!(
+        replayed["source"]["url"], mr_url,
+        "the recovered request must name the MR the history row refers to"
+    );
+}
+
+/// RENG-88 (c): with neither a persisted request nor an MR URL in the source
+/// metadata there is nothing to replay, so the 409 stands — and says which.
+#[tokio::test]
+async fn rerun_rejects_a_record_with_no_request_and_no_source_meta_url() {
+    let (_state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    let mut meta = source_meta_with_commit();
+    meta.gitlab_mr_url = None;
+    seed_review_row(
+        &db,
+        id,
+        "failed",
+        "2026-09-02T09:00:00.000000Z",
+        Some("2026-09-02T09:01:00.000000Z"),
+        &meta,
+        None,
+    )
+    .await;
+
+    let state = state_after_restart(db);
+    let store = state.task_store.clone().unwrap();
+    let resp = rerun_review(State(state), Path(id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::CONFLICT, "got {json}");
+    let error = json["error"].as_str().unwrap();
+    assert!(
+        error.starts_with("original request parameters are not available"),
+        "the documented message must stay the prefix: {error}"
+    );
+    assert!(error.contains("no MR URL"), "the 409 must say what is missing: {error}");
+    assert_eq!(store_total(&store).await, 0, "a rejected rerun must not queue a task");
 }
 
 /// RENG-82: a `pending`/`running` history row (queued when the server died) is

@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use super::super::dispatcher::{ContentGate, MrDispatcher};
 use crate::server::api::review::discussion::{participants_from_notes, DiscussionTap};
-use crate::server::task_queue::{record_task_outcome, record_task_started, SourceMeta, TaskStore};
+use crate::server::api::review::mr_url_request_json;
+use crate::server::task_queue::{record_task_outcome, record_task_started_with_request, SourceMeta, TaskStore};
 use crate::store::traits::{DiscussionNote, DiscussionStore};
 use crate::store::SqlxStore;
 
@@ -127,6 +128,12 @@ pub fn parse_mr_hook_payload(body: &str, gitlab_token: &str) -> Result<MrHookPay
 /// message). Without a store this is exactly the legacy behavior — run, log,
 /// and release the dispatcher's dedup on failure.
 ///
+/// RENG-88: the entry also carries the review's request parameters
+/// (`{"source": {"type": "gitlab_mr", "url": <mr_url>}}`, the shape
+/// `POST /api/v1/reviews` accepts), so a webhook-triggered review — the bulk of
+/// a real deployment's history — can be re-run from the History page exactly
+/// like one submitted through the API.
+///
 /// `server_llm_configs` is the handler's snapshot of the server's hot-applied
 /// LLM providers (see [`crate::server::resolve_webhook_llm_configs`]);
 /// `server_expert_overrides` its RENG-69 counterpart — the WebUI-managed
@@ -154,6 +161,13 @@ async fn run_webhook_review(
 ) {
     // Resolve the MR metadata + diff up front: the diff doubles as the content
     // fingerprint for the gate below, so the gate costs no second fetch.
+    //
+    // RENG-88: the replayable request this review persists (so a webhook-created
+    // record can be re-run from the History page). Built once, from the URL the
+    // review actually fetches — the payload URL, which for a webhook is
+    // GitLab's own external address. `None` only for a URL the REST API could
+    // not replay, which then stores no request at all (pre-RENG-88 behaviour).
+    let request_json = mr_url_request_json(&mr_url);
     let (mut info, diff) = match super::super::resolve_review_source(&mr_url, &gitlab_token).await {
         Ok((info, diff)) => {
             if let Some(reason) = super::super::gate_unchanged_content(dispatcher, gate, &mr_url, &sha, &diff).await {
@@ -166,9 +180,11 @@ async fn run_webhook_review(
             tracing::error!("Review failed for MR !{}: {:?}", mr_iid, e);
             dispatcher.reset(&mr_url).await;
             // The task entry is created here so a failed fetch is still visible
-            // in the History panel (pre-RENG-62 the entry existed already).
+            // in the History panel (pre-RENG-62 the entry existed already) — and
+            // it carries the request, because re-running the review is exactly
+            // what repairs a fetch/credential failure (docs/rest-api.md §1).
             if let Some(store) = task_store.as_ref() {
-                let id = record_task_started(store, source_meta.clone()).await;
+                let id = record_task_started_with_request(store, source_meta.clone(), request_json.clone()).await;
                 record_task_outcome(store, id, &Err(e)).await;
             }
             return;
@@ -176,7 +192,7 @@ async fn run_webhook_review(
     };
 
     let task_id = if let Some(store) = task_store.as_ref() {
-        Some(record_task_started(store, source_meta).await)
+        Some(record_task_started_with_request(store, source_meta, request_json).await)
     } else {
         None
     };
@@ -1590,5 +1606,124 @@ mod tests {
         let (items, total) = store.list(None, 1, 100, None, None, None, None, None).await;
         assert_eq!(total, 1, "an explicit rerun must always enqueue a review: {items:?}");
         assert_eq!(items[0].state, TaskState::Completed);
+    }
+
+    // ─── RENG-88: webhook records carry a replayable request ───────────
+
+    /// RENG-88: a webhook-dispatched review persists the request parameters a
+    /// rerun replays. Before this, every webhook-created record stored
+    /// `request = NULL`, so 「重新评审」 answered 409 for a deployment whose
+    /// reviews are all webhook-triggered (the reported NAS: every row had
+    /// `request = NULL`).
+    #[tokio::test]
+    async fn webhook_dispatched_review_persists_a_replayable_request() {
+        let server = MockServer::start().await;
+        // Empty diff: the review short-circuits inside `run_review_common`
+        // ("No diff changes") before any LLM call, so the real dispatch and
+        // task-record path run offline.
+        let mr_url = mock_gitlab_mr(&server, "").await;
+        let store = Arc::new(TaskStore::new());
+        let dispatcher = MrDispatcher::new();
+
+        run_webhook_review(
+            Some(store.clone()),
+            &dispatcher,
+            mr_url.clone(),
+            "sha1".to_string(),
+            "glpat-test".to_string(),
+            7,
+            hook_source_meta(&mr_url, "sha1"),
+            None,
+            None,
+            None,
+            ContentGate::Bypassed,
+        )
+        .await;
+
+        let (items, total) = store.list(None, 1, 100, None, None, None, None, None).await;
+        assert_eq!(total, 1, "the dispatch must record one review: {items:?}");
+        let entry = store.get(items[0].task_id).await.expect("the review must be recorded");
+
+        let request = entry
+            .request
+            .clone()
+            .expect("a webhook-dispatched review must persist its request (RENG-88)");
+        assert_eq!(
+            request,
+            serde_json::json!({
+                "source": {"type": "gitlab_mr", "url": mr_url},
+                "config": null,
+                "llm_configs": null,
+                "webhook": null
+            }),
+            "the stored body must be the shape `POST /api/v1/reviews` accepts"
+        );
+        // …and it must actually round-trip: this is what `rerun_review` does
+        // with it before re-validating and re-enqueuing.
+        let parsed: crate::server::api::types::ReviewRequest =
+            serde_json::from_value(request).expect("the persisted request must deserialize into a ReviewRequest");
+        match parsed.source {
+            crate::server::api::types::ReviewSource::GitLabMr { url } => assert_eq!(url, mr_url),
+            other => panic!("expected a gitlab_mr source, got {other:?}"),
+        }
+    }
+
+    /// RENG-88: a dispatch whose fetch fails records the request too. A failed
+    /// review is precisely the one a user re-runs after fixing the credential
+    /// or the platform URL, so it must not be the request-less case (the whole
+    /// point of keeping failed rows — docs/rest-api.md §1).
+    #[tokio::test]
+    async fn failed_webhook_dispatch_also_persists_its_request() {
+        // No mocks mounted: every provider call 404s, so the dispatch fails at
+        // the pre-flight fetch — before the task entry is created.
+        let server = MockServer::start().await;
+        let mr_url = format!("{}/group/proj/-/merge_requests/7", server.uri());
+        let store = Arc::new(TaskStore::new());
+        let dispatcher = MrDispatcher::new();
+
+        run_webhook_review(
+            Some(store.clone()),
+            &dispatcher,
+            mr_url.clone(),
+            "sha1".to_string(),
+            "glpat-test".to_string(),
+            7,
+            hook_source_meta(&mr_url, "sha1"),
+            None,
+            None,
+            None,
+            ContentGate::Enabled,
+        )
+        .await;
+
+        let (items, total) = store.list(None, 1, 100, None, None, None, None, None).await;
+        assert_eq!(total, 1, "a failed fetch must still be visible in history: {items:?}");
+        let entry = store.get(items[0].task_id).await.expect("the review must be recorded");
+        assert_eq!(entry.state, TaskState::Failed);
+        assert_eq!(
+            entry.request.expect("a failed review must be re-runnable")["source"]["url"],
+            mr_url
+        );
+    }
+
+    /// RENG-88: `mr_url_request_json` is the gate that decides whether a record
+    /// gets a request at all — a URL the REST API cannot replay yields `None`,
+    /// so the record stays request-less and rerun answers the RENG-88 409
+    /// instead of queueing a task the URL gates would reject.
+    #[test]
+    fn mr_url_request_json_accepts_only_replayable_urls() {
+        let stored = mr_url_request_json(MR_URL).expect("a GitLab MR URL must be replayable");
+        assert_eq!(stored["source"]["type"], "gitlab_mr");
+        assert_eq!(stored["source"]["url"], MR_URL);
+
+        assert!(
+            mr_url_request_json("https://github.com/owner/repo/pull/1").is_none(),
+            "a GitHub PR URL has no REST source to replay it with"
+        );
+        assert!(
+            mr_url_request_json("http://gitlab.internal:8929/group/proj").is_none(),
+            "a non-MR URL cannot be replayed"
+        );
+        assert!(mr_url_request_json("").is_none());
     }
 }

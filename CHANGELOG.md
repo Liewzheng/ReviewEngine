@@ -1,3 +1,14 @@
+## [0.10.40] - 2026-09-16
+
+### Added
+- **Expert prompts are editable in the WebUI, and persisted (RENG-93)**: the expert detail drawer's prompt box was a `readonly` textarea labelled 提示词预览 — it looked editable, and the person who reported it believed their edits took effect, but `PUT /api/v1/system/experts/{id}` accepted only `enabled` / `weight` and a prompt could therefore only come from the config file / built-in defaults. On a deployment with no config file (a container running `serve` over the SQLite state store) that left no way to customize a prompt at all. The drawer now edits it with an explicit Save and a tri-state API — absent = untouched, `""` = cleared back to the config-file value, text = set — capped at 20 000 characters (`422` beyond that, mirrored as the textarea's `maxlength`), and it labels where the shown prompt comes from (`promptOverride`) so an inherited prompt cannot be mistaken for an authored one. `GET`/`PUT /system/experts` expose `prompt` (the field was renamed from `promptPreview`, which was already the complete text, not a preview). (`src/config/expert_overrides.rs`, `src/server/api/system.rs`, `frontend/src/views/ExpertsManagement.vue`)
+
+### Fixed
+- **Removing an expert override now restores the config-file value (RENG-93)**: the running `app_config` applied each edit *on top of the previous result*, so a field the new map no longer covered kept its old override baked in — clearing a prompt never reverted it (`GET /system/experts` kept reporting the cleared value). `AppState` now captures the file-resolved team once (`expert_base`) and re-applies the whole override map over that snapshot on every edit. The "no overrides → skip the DB write" shortcut is gone as well: clearing a prompt can legitimately empty the map, and skipping the write left the stale `app_settings` row behind to resurrect the prompt on restart.
+
+### Notes
+- **Tests**: a prompt round-trips through `PUT`/`GET`; an over-length prompt is `422`; `""` clears and the file/default value comes back; a hand-edited non-string prompt is dropped with the row still usable; the override replays over the file config at startup. Frontend: 14 new view tests (edit → save → success, save failure → revert including a failed clear, in-flight guard, background-refresh follow/no-clobber, expert-switch re-init) plus the six-locale key block. Rust lib **1905 passed** (2 ignored); frontend **187 passed**.
+
 ## [0.10.39] - 2026-09-16
 
 ### Fixed

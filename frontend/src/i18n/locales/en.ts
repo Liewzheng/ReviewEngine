@@ -516,12 +516,18 @@ export default {
       avgLatencyWindow: 'Avg latency (last {days} days)',
       avgTtfb: 'Avg comm. latency',
       avgTtfbWindow: 'Avg comm. latency (last {days} days)',
+      // RENG-78: the probe's own round trip — the card's "communication
+      // latency". Same wording as the TTFB entry, deliberately: both name the
+      // measurement the user reads, and only one of them is what the card
+      // shows today.
+      avgCommLatency: 'Avg comm. latency',
       totalRequests: 'Total Usages',
       totalRequestsWindow: 'Recorded usages (last {days} days)',
     },
     metrics: {
       avgLatency: 'Avg Latency',
       avgTtfb: 'Avg Comm. Latency',
+      avgCommLatency: 'Avg Comm. Latency',
       requests: 'Usages',
       successRate: 'Success Rate',
     },

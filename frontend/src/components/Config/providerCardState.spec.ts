@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import type { ProviderCardState } from '../../composables/llmPayload';
+import en from '../../i18n/locales/en';
+import zhCN from '../../i18n/locales/zh-CN';
+import zhTW from '../../i18n/locales/zh-TW';
+import ja from '../../i18n/locales/ja';
+import ko from '../../i18n/locales/ko';
+import fr from '../../i18n/locales/fr';
 import {
   cardAccent,
   dialogForDuplicate,
@@ -15,6 +21,7 @@ import {
   matchHealthToCards,
   matchProbeMessages,
   statsRow,
+  stripLatency,
   type CardHealth,
 } from './providerCardState';
 
@@ -156,16 +163,15 @@ describe('RENG-77 — a duration is one token', () => {
   });
 });
 
-describe('RENG-77 — the latency reading', () => {
-  it('prefers the measured communication latency', () => {
-    expect(latencyReading(health('a', { avgTtfbMs: 17690, avgLatencyMs: 21000 }))).toEqual({
-      ms: 17690,
-      source: 'ttfb',
-    });
+describe('RENG-78 — the latency reading', () => {
+  it('prefers the probe average: the one number with no model in it', () => {
+    expect(
+      latencyReading(health('a', { avgProbeLatencyMs: 240, avgLatencyMs: 21000, avgTtfbMs: 20980 })),
+    ).toEqual({ ms: 240, source: 'probe' });
   });
 
-  it('falls back to the recorded call latency when the TTFB is null', () => {
-    expect(latencyReading(health('a', { avgTtfbMs: null, avgLatencyMs: 300 }))).toEqual({
+  it('falls back to the recorded call latency when no probe average exists', () => {
+    expect(latencyReading(health('a', { avgProbeLatencyMs: null, avgLatencyMs: 300 }))).toEqual({
       ms: 300,
       source: 'latency',
     });
@@ -175,34 +181,136 @@ describe('RENG-77 — the latency reading', () => {
     expect(latencyReading(health('a', { avgLatencyMs: 300 }))).toEqual({ ms: 300, source: 'latency' });
   });
 
-  it('reports nothing measured as an empty reading, never a zero', () => {
-    expect(latencyReading(health('a', { avgTtfbMs: null, avgLatencyMs: null }))).toEqual({
-      ms: null,
-      source: null,
+  it('no longer shows the TTFB: for a non-streaming provider it is ≈ the call latency', () => {
+    // `avgTtfbMs` is still on the payload (RENG-77) but is not a network
+    // metric, so the card falls past it to the recorded call latency.
+    expect(latencyReading(health('a', { avgTtfbMs: 17690, avgLatencyMs: 21000 }))).toEqual({
+      ms: 21000,
+      source: 'latency',
     });
+  });
+
+  it('reports nothing measured as an empty reading, never a zero', () => {
+    expect(
+      latencyReading(health('a', { avgProbeLatencyMs: null, avgLatencyMs: null, avgTtfbMs: null })),
+    ).toEqual({ ms: null, source: null });
     expect(latencyReading(undefined)).toEqual({ ms: null, source: null });
   });
 
   it('names the measurement so the card labels what it shows', () => {
-    expect(latencyLabelKey('ttfb')).toBe('llm.metrics.avgTtfb');
+    expect(latencyLabelKey('probe')).toBe('llm.metrics.avgCommLatency');
     expect(latencyLabelKey('latency')).toBe('llm.metrics.avgLatency');
     expect(latencyLabelKey(null)).toBe('llm.metrics.avgLatency');
   });
 
   it('puts the unrounded measurement in the stat tooltip', () => {
-    const [latency] = statsRow(health('a', { avgTtfbMs: 17690, avgLatencyMs: 21000 }));
+    const [latency] = statsRow(health('a', { avgProbeLatencyMs: 240, avgLatencyMs: 21000 }));
     expect(latency).toEqual({
       key: 'avgLatency',
-      labelKey: 'llm.metrics.avgTtfb',
-      text: '17.7s',
+      labelKey: 'llm.metrics.avgCommLatency',
+      text: '240ms',
       empty: false,
-      exact: '17690 ms',
+      exact: '240 ms',
     });
     // The fallback keeps the old label and still carries its exact value.
-    const [fallback] = statsRow(health('a', { avgTtfbMs: null, avgLatencyMs: 300 }));
+    const [fallback] = statsRow(health('a', { avgProbeLatencyMs: null, avgLatencyMs: 300 }));
     expect(fallback.labelKey).toBe('llm.metrics.avgLatency');
     expect(fallback.exact).toBe('300 ms');
     expect(fallback.text).toBe('300ms');
+  });
+});
+
+/**
+ * RENG-78: the tooltip names the measurement — 平均通信延迟 / "Avg comm.
+ * latency" — and never the mechanism behind it. The probe is an
+ * implementation detail; the user is reading a duration.
+ */
+describe('RENG-78 — the communication-latency label in every locale', () => {
+  const locales = { en, 'zh-CN': zhCN, 'zh-TW': zhTW, ja, ko, fr };
+
+  /** Resolve a dotted key path inside a locale object. */
+  function message(locale: object, path: string): string {
+    return path.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], locale) as string;
+  }
+
+  it('carries the label behind the reading, in all six locales', () => {
+    const key = latencyLabelKey('probe');
+    expect(key).toBe('llm.metrics.avgCommLatency');
+    for (const [name, messages] of Object.entries(locales)) {
+      expect(message(messages, key), `${name} is missing ${key}`).toBeTruthy();
+      expect(message(messages, 'llm.metrics.avgCommLatency')).toBe(message(messages, 'llm.metrics.avgTtfb'));
+    }
+    // The Chinese locales spell it the way the requirement does.
+    expect(message(zhCN, key)).toBe('平均通信延迟');
+    expect(message(zhTW, key)).toBe('平均通訊延遲');
+  });
+
+  it('never says the number came from a probe', () => {
+    const key = latencyLabelKey('probe');
+    for (const [name, messages] of Object.entries(locales)) {
+      const label = message(messages, key);
+      expect(label, `${name}: ${label}`).not.toContain('探测');
+      expect(label, `${name}: ${label}`).not.toContain('探測');
+      expect(label.toLowerCase(), `${name}: ${label}`).not.toContain('probe');
+    }
+  });
+
+  it('names the strip’s number with the card’s wording', () => {
+    // The two blocks differ in letter case only (en/fr sentence case vs title
+    // case, as the existing `avgTtfb` pair does): the words are the same, so
+    // the KPI strip and the card can never look like two measurements.
+    for (const [name, messages] of Object.entries(locales)) {
+      const strip = message(messages, 'llm.stats.avgCommLatency');
+      expect(strip, `${name} is missing the strip label`).toBeTruthy();
+      expect(strip.toLowerCase(), `${name}: ${strip}`).toBe(
+        message(messages, 'llm.metrics.avgCommLatency').toLowerCase(),
+      );
+    }
+    expect(message(zhCN, 'llm.stats.avgCommLatency')).toBe('平均通信延迟');
+    expect(message(zhTW, 'llm.stats.avgCommLatency')).toBe('平均通訊延遲');
+  });
+});
+
+describe('RENG-78 — the KPI strip’s number', () => {
+  it('weights each provider by the samples behind ITS reading', () => {
+    const strip = stripLatency([
+      // A probe reading with 4 samples: 40 ms.
+      health('a', { avgProbeLatencyMs: 40, probeSampleCount: 4, latencySampleCount: 100 }),
+      // A fallback call reading with 1 sample: 1000 ms.
+      health('b', { avgProbeLatencyMs: null, avgLatencyMs: 1000, latencySampleCount: 1 }),
+    ]);
+    // (40 * 4 + 1000 * 1) / 5 = 232 — NOT weighted by the call counts (which
+    // would be 45), and not the average of the two averages (520).
+    expect(strip).toEqual({ ms: 232, source: 'probe' });
+  });
+
+  it('names the number communication latency as soon as one reading is a probe’s', () => {
+    const withOneProbe = stripLatency([
+      health('a', { avgProbeLatencyMs: 40, probeSampleCount: 1 }),
+      health('b', { avgProbeLatencyMs: null, avgLatencyMs: 1000, latencySampleCount: 1 }),
+    ]);
+    expect(withOneProbe.source).toBe('probe');
+    expect(latencyLabelKey(withOneProbe.source)).toBe('llm.metrics.avgCommLatency');
+
+    // Every reading fell back: the strip says so instead of claiming a
+    // communication latency nobody measured.
+    const allFallback = stripLatency([
+      health('b', { avgProbeLatencyMs: null, avgLatencyMs: 1000, latencySampleCount: 1 }),
+    ]);
+    expect(allFallback).toEqual({ ms: 1000, source: 'latency' });
+    expect(latencyLabelKey(allFallback.source)).toBe('llm.metrics.avgLatency');
+  });
+
+  it('is an empty reading when nothing was measured, never a zero', () => {
+    expect(stripLatency([])).toEqual({ ms: null, source: null });
+    // A reading with no sample behind it carries no weight: it is not evidence.
+    expect(stripLatency([health('a', { avgProbeLatencyMs: 40, probeSampleCount: 0 })])).toEqual({
+      ms: null,
+      source: null,
+    });
+    expect(
+      stripLatency([health('a', { avgProbeLatencyMs: null, avgLatencyMs: null, latencySampleCount: 3 })]),
+    ).toEqual({ ms: null, source: null });
   });
 });
 

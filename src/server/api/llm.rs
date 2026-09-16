@@ -13,6 +13,7 @@ use axum::{
 use std::sync::Arc;
 
 use super::llm_latency::{LatencySnapshot, LATENCY_WINDOW_DAYS};
+use super::llm_probe::ProbeSnapshot;
 use super::llm_usage::{UsageSnapshot, USAGE_WINDOW_DAYS};
 use crate::server::AppState;
 
@@ -44,6 +45,10 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
     // review path recorded. Same contract: one read, `None` means every
     // latency metric is `null`.
     let latency = super::llm_latency::snapshot(&state, usage_now).await;
+    // RENG-78: how long the probes themselves took, from the samples every
+    // probe writes. `None` (no store / query failed) makes the two probe
+    // fields `null` rather than a fabricated zero.
+    let probe = super::llm_probe::snapshot(&state, usage_now).await;
     Json(serde_json::json!({
         // The numbers below are meaningless without their window, so the
         // window travels with them (rolling `USAGE_WINDOW_DAYS` days).
@@ -60,7 +65,7 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
         "latencyWindowDays": LATENCY_WINDOW_DAYS,
         "latencySince": super::llm_latency::window_start(usage_now).to_rfc3339(),
         "latencyAvailable": latency.is_some(),
-        "items": provider_items(&primary, &configs, &health, usage.as_ref(), latency.as_ref()),
+        "items": provider_items(&primary, &configs, &health, usage.as_ref(), latency.as_ref(), probe.as_ref()),
     }))
 }
 
@@ -94,12 +99,20 @@ async fn get_providers(State(state): State<Arc<AppState>>) -> Json<serde_json::V
 /// `avgLatencyMs` is the mean of the successful calls the reviews actually
 /// made on that card — the RENG-53 finding was precisely that the two must
 /// not be confused on screen.
+///
+/// `probe` holds the recorded PROBE latency (RENG-78): the mean round trip of
+/// the probes themselves, which is the "communication latency" the card shows
+/// first (`avgProbeLatencyMs`) — a pure network measurement, with no model
+/// anywhere in it. It is matched by card fingerprint like the others, and its
+/// window is the latency window (`latencyWindowDays`), so the card's three
+/// numbers cover the same period.
 fn provider_items(
     primary: &str,
     configs: &[crate::models::LLMConfig],
     health: &[super::llm_health::ProviderHealth],
     usage: Option<&UsageSnapshot>,
     latency: Option<&LatencySnapshot>,
+    probe: Option<&ProbeSnapshot>,
 ) -> Vec<serde_json::Value> {
     let ranks = crate::llm::chain_positions(primary, configs);
     configs
@@ -118,6 +131,7 @@ fn provider_items(
             let merge_unmarked = may_merge_unmarked(configs, cfg);
             let usage = usage.map(|snapshot| snapshot.for_card(&cfg.provider, &cfg.model, &fp, merge_unmarked));
             let latency = latency.map(|snapshot| snapshot.for_card(&cfg.provider, &cfg.model, &fp, merge_unmarked));
+            let probe = probe.map(|snapshot| snapshot.for_card(&cfg.provider, &fp));
             serde_json::json!({
                 "id": id,
                 "name": cfg.provider,
@@ -174,6 +188,16 @@ fn provider_items(
                 // user-facing surface says so the "communication latency"
                 // mental model isn't a fiction.
                 "avgTtfbMs": latency.as_ref().and_then(|l| l.avg_ttfb_ms),
+                // RENG-78: the mean round trip of the PROBES themselves over
+                // the window — one `GET {api_base}/models` each, DNS + TCP +
+                // TLS + HTTP, no model involved. This is the card's
+                // "communication latency" (`平均通信延迟`): `null` when no probe
+                // succeeded in the window (or the samples could not be read),
+                // never a fabricated `0`. `probeSampleCount` is that mean's
+                // denominator (successful probes only; failures are recorded in
+                // the table but excluded here, like the call samples).
+                "avgProbeLatencyMs": probe.and_then(|p| p.avg_latency_ms),
+                "probeSampleCount": probe.map(|p| p.sample_count),
                 "latencySampleCount": latency.as_ref().map(|l| l.sample_count),
                 "latencyFailureCount": latency.as_ref().map(|l| l.failure_count),
                 "latencyLastSampleAt": latency
@@ -667,7 +691,7 @@ mod tests {
     #[test]
     fn provider_items_expose_chain_position_and_primary() {
         let stored = vec![cfg("xiaomi"), cfg("deepseek")];
-        let items = provider_items("deepseek", &stored, &healthy(stored.len()), None, None);
+        let items = provider_items("deepseek", &stored, &healthy(stored.len()), None, None, None);
 
         // Stored order (and the `{provider}-{index}` ids) is untouched.
         assert_eq!(items[0]["name"], "xiaomi");
@@ -688,13 +712,13 @@ mod tests {
     #[test]
     fn provider_items_head_is_primary_without_a_primary_selection() {
         let stored = vec![cfg("xiaomi"), cfg("deepseek")];
-        let items = provider_items("", &stored, &healthy(stored.len()), None, None);
+        let items = provider_items("", &stored, &healthy(stored.len()), None, None, None);
         assert_eq!(items[0]["isPrimary"], true);
         assert_eq!(items[1]["isPrimary"], false);
         assert_eq!(items[1]["chainPosition"], 2);
         // A primary naming a provider the runtime no longer holds (stale
         // `primaryProvider` in the echo) degrades to the same rule.
-        let items = provider_items("ghost", &[cfg("xiaomi")], &healthy(1), None, None);
+        let items = provider_items("ghost", &[cfg("xiaomi")], &healthy(1), None, None, None);
         assert_eq!(items[0]["isPrimary"], true);
         assert_eq!(items[0]["chainPosition"], 1);
     }
@@ -702,7 +726,7 @@ mod tests {
     /// Empty provider set → empty payload, no panic.
     #[test]
     fn provider_items_empty_set() {
-        assert!(provider_items("deepseek", &[], &[], None, None).is_empty());
+        assert!(provider_items("deepseek", &[], &[], None, None, None).is_empty());
     }
 
     /// RENG-75: a disabled provider's card tells "deliberately off", never a
@@ -723,6 +747,7 @@ mod tests {
                 ProviderHealth::disabled(),
                 ProviderHealth::healthy(9),
             ],
+            None,
             None,
             None,
         );
@@ -761,6 +786,7 @@ mod tests {
             ],
             None,
             None,
+            None,
         );
         assert_eq!(items[1]["chainPosition"], serde_json::Value::Null);
         assert_eq!(items[0]["chainPosition"], 1);
@@ -786,6 +812,7 @@ mod tests {
             ],
             None,
             None,
+            None,
         );
 
         assert_eq!(items[0]["status"], "error");
@@ -803,7 +830,7 @@ mod tests {
         // A provider with no stored key is `offline` and never probed.
         let mut blank = cfg("xiaomi");
         blank.api_key = String::new();
-        let items = provider_items("xiaomi", &[blank], &[ProviderHealth::offline()], None, None);
+        let items = provider_items("xiaomi", &[blank], &[ProviderHealth::offline()], None, None, None);
         assert_eq!(items[0]["status"], "offline");
         assert_eq!(items[0]["configured"], false);
         assert_eq!(items[0]["lastProbeLatencyMs"], 0);
@@ -811,7 +838,7 @@ mod tests {
         // payload says `null` instead of stamping the current time.
         assert_eq!(items[0]["lastChecked"], serde_json::Value::Null);
         // A config with no report at all (misaligned health list) is the same.
-        let items = provider_items("xiaomi", &stored, &[], None, None);
+        let items = provider_items("xiaomi", &stored, &[], None, None, None);
         assert_eq!(items[0]["lastChecked"], serde_json::Value::Null);
         assert_eq!(ProviderStatus::Offline.dashboard_str(), "offline");
         assert_eq!(ProviderStatus::Error.dashboard_str(), "error");
@@ -830,7 +857,7 @@ mod tests {
             chrono::Utc::now(),
             vec![usage_stats(&stored[0], 4, 4, 0, Some(chrono::Utc::now()))],
         );
-        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot), None);
+        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot), None, None);
         let item = items[0].as_object().unwrap();
 
         for gone in ["usagePercent", "sparkline", "errorRate"] {
@@ -846,7 +873,7 @@ mod tests {
     #[test]
     fn provider_items_without_a_store_report_null_usage() {
         let stored = vec![cfg("xiaomi")];
-        let items = provider_items("xiaomi", &stored, &healthy(1), None, None);
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, None, None);
         for field in ["requestCount", "usageShare", "successRate", "lastUsedAt"] {
             assert_eq!(items[0][field], serde_json::Value::Null, "{field} must be null");
         }
@@ -858,7 +885,7 @@ mod tests {
     fn provider_items_empty_window_reports_zero_count_and_null_derivations() {
         let stored = vec![cfg("xiaomi")];
         let snapshot = UsageSnapshot::new(chrono::Utc::now(), Vec::new());
-        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot), None);
+        let items = provider_items("xiaomi", &stored, &healthy(1), Some(&snapshot), None, None);
 
         assert_eq!(items[0]["requestCount"], 0);
         assert_eq!(items[0]["usageShare"], serde_json::Value::Null);
@@ -880,7 +907,7 @@ mod tests {
                 usage_stats(&stored[1], 1, 0, 1, None),
             ],
         );
-        let items = provider_items("xiaomi", &stored, &healthy(2), Some(&snapshot), None);
+        let items = provider_items("xiaomi", &stored, &healthy(2), Some(&snapshot), None, None);
 
         assert_eq!(items[0]["requestCount"], 3);
         assert_eq!(items[0]["usageShare"], 0.75);
@@ -1367,7 +1394,7 @@ mod tests {
             latency_row_for(&b, now - chrono::Duration::minutes(1), 900),
             unmarked_latency_row(now - chrono::Duration::minutes(4), 50),
         ]);
-        let items = provider_items("acme", &stored, &healthy(2), Some(&usage), Some(&latency));
+        let items = provider_items("acme", &stored, &healthy(2), Some(&usage), Some(&latency), None);
 
         // Card A: its own 3 usages / 2 samples at mean 200.
         assert_eq!(items[0]["requestCount"], 3);
@@ -1410,7 +1437,7 @@ mod tests {
             unmarked_latency_row(now - chrono::Duration::minutes(2), 300),
             unmarked_latency_row(now - chrono::Duration::minutes(1), 500),
         ]);
-        let items = provider_items("acme", &stored, &healthy(1), Some(&usage), Some(&latency));
+        let items = provider_items("acme", &stored, &healthy(1), Some(&usage), Some(&latency), None);
 
         assert_eq!(items[0]["requestCount"], 7, "2 own + 5 unmarked");
         assert_eq!(items[0]["successRate"], 0.8571, "6 completed of 7 decided");
@@ -1454,7 +1481,7 @@ mod tests {
             // A failure: counted, kept out of the average.
             latency_row("xiaomi", now - chrono::Duration::minutes(1), 90_000, false),
         ]);
-        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot));
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot), None);
         let item = items[0].as_object().unwrap();
 
         assert_eq!(item["lastProbeLatencyMs"], 7, "the probe's own round trip");
@@ -1481,7 +1508,7 @@ mod tests {
     fn provider_items_without_samples_report_null_latency() {
         let stored = vec![cfg("xiaomi")];
         // No snapshot at all (no store attached / query failed).
-        let items = provider_items("xiaomi", &stored, &healthy(1), None, None);
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, None, None);
         for field in [
             "avgLatencyMs",
             "latencySampleCount",
@@ -1501,6 +1528,7 @@ mod tests {
             &healthy(1),
             None,
             Some(&latency_snapshot(Vec::new())),
+            None,
         );
         assert_eq!(items[0]["latencySampleCount"], 0);
         assert_eq!(items[0]["latencyFailureCount"], 0);
@@ -1634,7 +1662,7 @@ mod tests {
         let now = chrono::Utc::now();
         // The only successful call has `ttfb_ms: None` (registry-path shape).
         let snapshot = latency_snapshot(vec![latency_row("xiaomi", now, 100, true)]);
-        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot));
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot), None);
         let item = &items[0];
         assert_eq!(item["avgLatencyMs"], 100, "the latency average still computes");
         assert_eq!(
@@ -1678,12 +1706,205 @@ mod tests {
                 },
             ],
         );
-        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot));
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot), None);
         let item = &items[0];
         assert_eq!(item["avgLatencyMs"], 200);
         assert_eq!(
             item["avgTtfbMs"], 200,
             "(180 + 220) / 2 rounds to 200 — the field is on the wire"
+        );
+    }
+
+    // ─── RENG-78: the probe's own communication latency ─────────────────
+
+    fn probe_snapshot(rows: Vec<crate::store::traits::ProbeSample>) -> ProbeSnapshot {
+        ProbeSnapshot::new(rows)
+    }
+
+    fn probe_row(
+        provider: &str,
+        at: chrono::DateTime<chrono::Utc>,
+        latency_ms: Option<i64>,
+        success: bool,
+    ) -> crate::store::traits::ProbeSample {
+        crate::store::traits::ProbeSample {
+            provider: provider.to_string(),
+            entry_fp: cfg(provider).entry_fp(),
+            at,
+            latency_ms,
+            success,
+            error: (!success).then(|| "HTTP 401 Unauthorized".to_string()),
+        }
+    }
+
+    /// The card carries the probe average next to the call metrics, under a
+    /// name of its own — and the probe's own field is still the probe's number.
+    #[test]
+    fn provider_items_report_the_probe_average() {
+        let stored = vec![cfg("xiaomi")];
+        let now = chrono::Utc::now();
+        let snapshot = probe_snapshot(vec![
+            probe_row("xiaomi", now - chrono::Duration::minutes(30), Some(30), true),
+            probe_row("xiaomi", now - chrono::Duration::minutes(5), Some(50), true),
+            // A failed probe: recorded, excluded from the average.
+            probe_row("xiaomi", now, None, false),
+        ]);
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, None, Some(&snapshot));
+        let item = items[0].as_object().unwrap();
+        assert_eq!(item["avgProbeLatencyMs"], 40, "mean of the two successful probes");
+        assert_eq!(item["probeSampleCount"], 2, "the successful probes behind it");
+        assert_eq!(
+            item["lastProbeLatencyMs"], 7,
+            "the instantaneous probe field keeps its own meaning (RENG-36)"
+        );
+        assert_eq!(
+            item["avgLatencyMs"],
+            serde_json::Value::Null,
+            "no call samples in this snapshot: the call average is untouched and still null"
+        );
+    }
+
+    /// No probe succeeded in the window → `null`, never `0 ms`; and without a
+    /// readable probe table the count is `null` too (unknown, not zero).
+    #[test]
+    fn provider_items_report_a_null_probe_average_when_nothing_succeeded() {
+        let stored = vec![cfg("xiaomi")];
+        let now = chrono::Utc::now();
+        let items = provider_items(
+            "xiaomi",
+            &stored,
+            &healthy(1),
+            None,
+            None,
+            Some(&probe_snapshot(vec![probe_row("xiaomi", now, None, false)])),
+        );
+        assert_eq!(items[0]["avgProbeLatencyMs"], serde_json::Value::Null);
+        assert_eq!(
+            items[0]["probeSampleCount"], 0,
+            "measured: one probe, none of them good"
+        );
+
+        // No snapshot at all (no store attached / query failed).
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, None, None);
+        assert_eq!(items[0]["avgProbeLatencyMs"], serde_json::Value::Null);
+        assert_eq!(items[0]["probeSampleCount"], serde_json::Value::Null);
+    }
+
+    /// The whole path the page reads: the probes the health store runs become
+    /// the card's `avgProbeLatencyMs`, and the number equals the mean of the
+    /// rows the store holds — computed here independently.
+    #[tokio::test]
+    async fn get_providers_reports_the_probe_average_from_the_store() {
+        use crate::store::traits::{ProbeSample, ReviewStore};
+
+        let store = Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap());
+        store.migrate().await.unwrap();
+        let now = chrono::Utc::now();
+        // Two successful probes of THIS card, one of a same-named sibling, and
+        // one failure.
+        let xiaomi = cfg("xiaomi");
+        let sibling = crate::models::LLMConfig {
+            api_key: "other-key".to_string(),
+            ..xiaomi.clone()
+        };
+        assert_ne!(
+            xiaomi.entry_fp(),
+            sibling.entry_fp(),
+            "a different key is a different card"
+        );
+        for (fp, latency, success) in [
+            (xiaomi.entry_fp(), Some(40i64), true),
+            (xiaomi.entry_fp(), Some(60), true),
+            (sibling.entry_fp(), Some(9000), true),
+            (xiaomi.entry_fp(), None, false),
+        ] {
+            store
+                .insert_probe_sample(&ProbeSample {
+                    provider: "xiaomi".to_string(),
+                    entry_fp: fp,
+                    at: now,
+                    latency_ms: latency,
+                    success,
+                    error: (!success).then(|| "HTTP 401 Unauthorized".to_string()),
+                })
+                .await
+                .unwrap();
+        }
+
+        let mut state = stub_state(vec![xiaomi.clone()]);
+        Arc::get_mut(&mut state).unwrap().db = Some(store.clone());
+        let payload = get_providers(State(state)).await.0;
+
+        let item = &payload["items"][0];
+        assert_eq!(
+            item["avgProbeLatencyMs"], 50,
+            "mean of this card's two successful probes"
+        );
+        assert_eq!(item["probeSampleCount"], 2);
+        // Independent computation over the raw rows, for the record.
+        let rows = store
+            .probe_samples_since(crate::server::api::llm_probe::window_start(now))
+            .await
+            .unwrap();
+        let own: Vec<&ProbeSample> = rows
+            .iter()
+            .filter(|r| r.entry_fp == xiaomi.entry_fp() && r.success)
+            .collect();
+        let sum: i64 = own.iter().filter_map(|r| r.latency_ms).sum();
+        assert_eq!(
+            sum / own.len() as i64,
+            item["avgProbeLatencyMs"].as_i64().unwrap(),
+            "the payload's average must equal the mean of the stored probes"
+        );
+    }
+
+    /// With no store the two probe fields are `null` and nothing else about the
+    /// card changes (`REVIEW_DISABLE_DB=1`).
+    #[tokio::test]
+    async fn get_providers_without_a_store_reports_unknown_probe_latency() {
+        let state = stub_state(vec![cfg("xiaomi")]);
+        let payload = get_providers(State(state)).await.0;
+        let item = &payload["items"][0];
+        assert_eq!(item["avgProbeLatencyMs"], serde_json::Value::Null);
+        assert_eq!(item["probeSampleCount"], serde_json::Value::Null, "unknown, not zero");
+        assert_eq!(item["name"], "xiaomi");
+        assert_eq!(item["status"], "healthy");
+    }
+
+    /// The full round trip the server runs: a health store with the sample sink
+    /// attached probes a provider, and the next `GET /llm/providers` reports the
+    /// probe's own latency as the card's communication latency.
+    #[tokio::test]
+    async fn a_probe_through_the_health_store_reaches_the_card() {
+        use crate::server::api::llm_probe::{store_sink, window_start};
+        use crate::store::traits::ReviewStore;
+
+        let store = Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap());
+        store.migrate().await.unwrap();
+        let mut state = stub_state(vec![cfg("xiaomi")]);
+        // The same sink `serve` attaches at startup, over a real table.
+        state
+            .llm_health
+            .attach_sample_sink(Some(store_sink(Arc::clone(&store) as Arc<dyn ReviewStore>)));
+        Arc::get_mut(&mut state).unwrap().db = Some(store.clone());
+
+        let configs = state.llm_configs.read().unwrap().clone();
+        state.llm_health.probe_all(&configs).await;
+
+        let rows = store
+            .probe_samples_since(window_start(chrono::Utc::now()))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 1, "the round wrote exactly one sample");
+        assert_eq!(rows[0].entry_fp, configs[0].entry_fp());
+        assert!(rows[0].success);
+
+        let payload = get_providers(State(state)).await.0;
+        let item = &payload["items"][0];
+        assert_eq!(item["probeSampleCount"], 1, "the sample the round just wrote");
+        assert!(
+            item["avgProbeLatencyMs"].is_i64(),
+            "and it is what the card averages: {item}"
         );
     }
 }

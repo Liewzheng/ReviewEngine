@@ -13,10 +13,30 @@ export interface CardHealth {
   isPrimary?: boolean
   avgLatencyMs?: number | null
   /**
+   * RENG-78: mean round-trip time of the probes over the window, in whole
+   * milliseconds — the card's "communication latency", a pure network
+   * measurement (one `GET {api_base}/models`, no model involved). `null` when
+   * no probe succeeded in the window; optional so a payload written before the
+   * field shipped falls back to `avgLatencyMs` instead of showing nothing.
+   */
+  avgProbeLatencyMs?: number | null
+  /**
+   * RENG-78: successful probes behind `avgProbeLatencyMs` — the KPI's weight
+   * for a provider whose reading came from the probe.
+   */
+  probeSampleCount?: number | null
+  /**
+   * RENG-57: successful calls behind `avgLatencyMs`. Not rendered on the card
+   * (which shows a duration, not a count); it is the KPI strip's weight for a
+   * provider whose reading fell back to the recorded call latency.
+   */
+  latencySampleCount?: number | null
+  /**
    * RENG-77: mean communication latency (time to first byte) of the calls the
    * server recorded for this provider, in whole milliseconds; `null` when no
-   * sample carries a TTFB yet. Optional so a page rendered before the field
-   * shipped falls back to `avgLatencyMs` instead of showing nothing.
+   * sample carries a TTFB yet. RENG-78: kept on the payload, no longer the
+   * card's primary display (a non-streaming provider reports `ttfb ≈ latency`,
+   * so it is not the network metric this card wants).
    */
   avgTtfbMs?: number | null
   requestCount?: number | null
@@ -120,9 +140,10 @@ export function exactMs(ms: number | null | undefined): string | undefined {
   return ms === null || ms === undefined ? undefined : `${ms} ms`
 }
 
-/** Which recorded measurement a latency reading came from. `ttfb` is
- *  communication latency, `latency` the full recorded call. */
-export type LatencySource = 'ttfb' | 'latency'
+/** Which measurement a latency reading came from. `probe` is the probe's own
+ *  round trip — pure network latency; `latency` the recorded LLM call (which
+ *  contains generation, so it is the fallback). */
+export type LatencySource = 'probe' | 'latency'
 
 export interface LatencyReading {
   ms: number | null
@@ -131,17 +152,20 @@ export interface LatencyReading {
 }
 
 /**
- * The latency a card (or the KPI strip) shows. RENG-77: the communication
- * latency (`avgTtfbMs`) is preferred once the server reports one — it is the
- * number that tells a user whether the provider is reachable quickly — and
- * the recorded call latency (`avgLatencyMs`) is the fallback for a provider
- * whose samples predate the field, or for a payload written before it shipped
- * (`undefined`). The two are different measurements, so the reading carries
- * which one it is and the UI labels it accordingly.
+ * The latency a card (or the KPI strip) shows.
+ *
+ * RENG-78: the communication latency (`avgProbeLatencyMs`) comes first — it is
+ * the round trip of the lightweight probe, i.e. the network and nothing else,
+ * which is what the number is meant to say. The recorded call latency
+ * (`avgLatencyMs`) is the fallback for a card whose probes have not been
+ * sampled yet (the field is `null`, or absent in a payload written before it
+ * shipped). The two are different measurements, so the reading carries which
+ * one it is and the UI labels it accordingly — and the label never mentions a
+ * probe: the user is reading a duration, not a mechanism.
  */
 export function latencyReading(health?: CardHealth): LatencyReading {
-  const ttfb = health?.avgTtfbMs
-  if (typeof ttfb === 'number') return { ms: ttfb, source: 'ttfb' }
+  const probe = health?.avgProbeLatencyMs
+  if (typeof probe === 'number') return { ms: probe, source: 'probe' }
   const call = health?.avgLatencyMs
   if (typeof call === 'number') return { ms: call, source: 'latency' }
   return { ms: null, source: null }
@@ -149,7 +173,35 @@ export function latencyReading(health?: CardHealth): LatencyReading {
 
 /** i18n key naming the measurement a reading carries. */
 export function latencyLabelKey(source: LatencySource | null): string {
-  return source === 'ttfb' ? 'llm.metrics.avgTtfb' : 'llm.metrics.avgLatency'
+  return source === 'probe' ? 'llm.metrics.avgCommLatency' : 'llm.metrics.avgLatency'
+}
+
+/**
+ * The KPI strip's number: the weighted mean of what the cards show.
+ *
+ * Each provider contributes the reading its own card shows, weighted by the
+ * sample count behind THAT reading — a provider with 210 probes is not the
+ * same evidence as one with 2, and using the other measurement's count would
+ * weight the wrong number. The label follows the same rule as the mean: the
+ * strip says "communication latency" as soon as one contributing provider's
+ * reading came from a probe, and "latency" only when every one of them fell
+ * back to the recorded call latency — one number, never two described as one.
+ */
+export function stripLatency(providers: CardHealth[]): LatencyReading {
+  const measured = providers
+    .map((p) => {
+      const reading = latencyReading(p)
+      const weight = reading.source === 'probe' ? (p.probeSampleCount ?? 0) : (p.latencySampleCount ?? 0)
+      return { reading, weight }
+    })
+    .filter((r) => r.reading.ms !== null && r.weight > 0)
+  if (!measured.length) return { ms: null, source: null }
+  const total = measured.reduce((sum, r) => sum + r.weight, 0)
+  const weighted = measured.reduce((sum, r) => sum + (r.reading.ms as number) * r.weight, 0)
+  return {
+    ms: Math.round(weighted / total),
+    source: measured.some((r) => r.reading.source === 'probe') ? 'probe' : 'latency',
+  }
 }
 
 /** Recorded usages (review-level count) over the window. */

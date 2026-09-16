@@ -17,9 +17,9 @@ import {
   dialogForEdit,
   formatLatency,
   healthTriple,
-  latencyReading,
   matchHealthToCards,
   matchProbeMessages,
+  stripLatency,
 } from '../components/Config/providerCardState'
 
 /* ------------------------------------------------------------------ */
@@ -41,37 +41,22 @@ const offlineCount = computed(() => llm.offlineCount.value)
  *  into `—` rather than a fabricated number. */
 const latencyWindowDays = computed(() => (llm.latencyAvailable.value ? llm.latencyWindowDays.value : null))
 
-/** Mean recorded call latency over the window, weighted by each provider's
- *  successful sample count — i.e. the average call this instance made, not the
- *  average of the per-provider averages (a provider with 100 calls is not the
- *  same evidence as one with 2). `—` when no provider has a recorded sample,
- *  including when the samples could not be read at all; the probe's own
- *  instantaneous number is NOT a substitute for it.
- *
- *  RENG-77: each provider contributes the same reading its card shows — the
- *  communication latency when the server measures one, else the recorded call
- *  latency — so the strip can never contradict the grid beneath it. */
-const latencyReadings = computed(() =>
-  providers.value
-    .map((p) => ({ reading: latencyReading(p), weight: p.latencySampleCount ?? 0 }))
-    .filter((r) => r.reading.ms !== null && r.weight > 0)
-)
+/** Mean communication latency over the window: the weighted mean of what the
+ *  cards show, each provider weighted by the sample count behind its own
+ *  reading — i.e. the average measurement this instance has, not the average
+ *  of the per-provider averages. `—` when no provider has a reading, including
+ *  when the samples could not be read at all. RENG-78: the card reading it
+ *  averages is the probe's round trip wherever one was averaged, so this strip
+ *  and the grid beneath it can never disagree — including on what to call the
+ *  number. */
+const stripReading = computed(() => stripLatency(providers.value))
 
-const avgLatency = computed(() => {
-  const measured = latencyReadings.value
-  if (!measured.length) return null
-  const total = measured.reduce((sum, r) => sum + r.weight, 0)
-  const weighted = measured.reduce((sum, r) => sum + (r.reading.ms as number) * r.weight, 0)
-  return Math.round(weighted / total)
-})
+const avgLatency = computed(() => stripReading.value.ms)
 
-/** The measurement the strip's number covers: communication latency once any
- *  contributing provider reports one, else the recorded call latency. One
- *  label, naming what the number is — never a mix described as one of them. */
+/** The measurement the strip's number covers, named by the same rule the mean
+ *  was taken with. */
 const latencyStatKey = computed(() =>
-  latencyReadings.value.some((r) => r.reading.source === 'ttfb')
-    ? 'llm.stats.avgTtfb'
-    : 'llm.stats.avgLatency'
+  stripReading.value.source === 'probe' ? 'llm.stats.avgCommLatency' : 'llm.stats.avgLatency'
 )
 
 /** The compact single token the KPI face shows, so the value can never wrap

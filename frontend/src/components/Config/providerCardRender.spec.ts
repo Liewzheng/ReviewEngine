@@ -25,7 +25,13 @@ const messages = {
   common: { edit: 'Edit', testConnection: 'Test Connection' },
   llm: {
     status: { healthy: 'Healthy', degraded: 'Degraded', error: 'Error', offline: 'Offline', disabled: 'Disabled' },
-    metrics: { avgLatency: 'Avg Latency', avgTtfb: 'Avg Comm. Latency', requests: 'Usages', successRate: 'Success Rate' },
+    metrics: {
+      avgLatency: 'Avg Latency',
+      avgTtfb: 'Avg Comm. Latency',
+      avgCommLatency: 'Avg Comm. Latency',
+      requests: 'Usages',
+      successRate: 'Success Rate',
+    },
     card: { disabled: 'Disabled', probeFailed: 'Probe failed', testOk: 'Test OK', testFailed: 'Test failed' },
     usageShare: '{percent}% of usage (last {days} days)',
   },
@@ -128,17 +134,34 @@ describe('provider card layout', () => {
         name: 'anthropic',
         status: 'healthy',
         disabled: false,
+        avgProbeLatencyMs: 240,
         avgTtfbMs: 17690,
         avgLatencyMs: 21000,
       },
     });
-    // One compact token, with the recorded call latency kept out of the
-    // card. The measurement name + exact value live in the hover tooltip
-    // (pinned by `statsRow` in providerCardState.spec.ts); SSR skips the
-    // el-tooltip popper body, so the trigger text is what this assertion
-    // owns.
-    expect(html).toContain('17.7s');
+    // One compact token, with the call latency (17.7s) and the TTFB kept out
+    // of the card: RENG-78 shows the PROBE's round trip, and for a
+    // non-streaming provider the other two are model-generation numbers.
+    // The measurement name + exact value live in the hover tooltip (pinned by
+    // `statsRow` in providerCardState.spec.ts); SSR skips the el-tooltip
+    // popper body, so the trigger text is what this assertion owns.
+    expect(html).toContain('240ms');
+    expect(html).not.toContain('17.7s');
     expect(html).not.toContain('21.0s');
+  });
+
+  it('falls back to the recorded call latency while no probe average exists', async () => {
+    const html = await renderCard({
+      card: card(),
+      health: {
+        name: 'anthropic',
+        status: 'healthy',
+        disabled: false,
+        avgProbeLatencyMs: null,
+        avgLatencyMs: 1800,
+      },
+    });
+    expect(html).toContain('1.8s');
   });
 
   it('renders an unmeasured statistic as an em dash in the muted colour', async () => {

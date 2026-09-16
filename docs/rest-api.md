@@ -852,6 +852,8 @@ Response 200:
       "usageShare": 0.75,
       "successRate": 0.9167,
       "lastUsedAt": "2026-09-14T08:30:00+00:00",
+      "avgProbeLatencyMs": 318,
+      "probeSampleCount": 44,
       "avgLatencyMs": 812,
       "avgTtfbMs": 798,
       "latencySampleCount": 46,
@@ -907,7 +909,16 @@ API key 永远不会在响应中返回。
 - `lastProbeLatencyMs`：探测的瞬时往返耗时（RENG-36），与上面的历史均值是**不同字段**，页面也分开显示（卡片指标行显示历史均值，探测值显示在「Last checked」一行的 `Probe {n} ms`）。
 - `latencyAvailable`：`false` 表示采样表读不到（无 DB / 查询失败），此时六个延迟字段全为 `null`。
 
-**不知道就是 `null`**：窗口内没有成功调用的 provider，`avgLatencyMs` 为 `null`（页面显示 `—`），`latencySampleCount` / `latencyFailureCount` 是实测的 `0`（实测计数可以是 0，均值不能）。
+0.10.31 起（RENG-78）额外返回**探测本身**的历史均值，数据源是每次探测落库的采样表 `llm_probe_samples`（迁移 `0007_llm_probe_samples.sql`）。这是卡片首项与 KPI「平均延迟」**真正显示**的数字：探测请求就是一次 `GET {api_base}/models`（DNS + TCP + TLS + HTTP），**全程与模型无关**，所以它是纯粹的通信延迟；而 `avgLatencyMs` 含模型生成、`avgTtfbMs` 在非流式请求下 ≈ `avgLatencyMs`（见上），两者都不是用户要的「通信延迟」。
+
+- 窗口：与延迟窗口**同一个** `latencyWindowDays` / `latencySince`（同为滚动 7 天，不额外引入第二个窗口）。
+- `avgProbeLatencyMs`：窗口内该卡片**成功探测**的平均往返耗时（整数毫秒）。失败的探测也入库但**不进均值**（401 可能 5ms 返回、超时 120s：那是失败的形态，不是链路快慢），失败行的 `latency_ms` 落库即 `NULL`；窗口内没有成功探测时为 `null`（页面显示 `—`）。
+- `probeSampleCount`：该均值的分母，即窗口内成功探测次数（实测计数，`0` 是真实值）。读不到采样表时为 `null`。
+- **按指纹分桶**：`llm_probe_samples.entry_fp` 与调用采样同源（RENG-75 四元组指纹，`NOT NULL` —— 该表随列一起出生，没有需要升级的旧行，因此不需要未标记桶）。两张同名卡片各自持有自己链路上的探测延迟。
+- 写入路径（best-effort，绝不影响探测结果）：`LlmHealthStore` 每次真正发起探测（页面读取触发的、以及下面的主动轮询）都写一行；写失败只记 WARN，探测的 `status` / `lastProbeLatencyMs` 照旧返回。从缓存答复的读取**不写样本** —— 缓存值不是一次测量。保留期 30 天（`PROBE_RETENTION_DAYS`，与调用采样同宽），清理在每个进程第一次写入时做一次。
+- **主动探测（仅服务端模式）**：`reng serve` 启动时挂上采样 sink，并起一个后台任务每 **30 分钟**探测一次**所有启用中**的 provider（停用 / 无 key 的不探测）。一次性 CLI 命令**不启动**该任务（用 `--progress` 的 `reng review` 之类进程活不到一个周期，只会白留一个空闲 runtime）；进程退出（`serve` 返回）时该任务收到关闭信号并结束。失败日志按**状态跳变**记录：某个 provider 持续失败只在**第一次失败**时 WARN 一次（恢复时 INFO 一次），后续轮次降到 `debug` —— 但每一轮的样本照常入库，安静的只是日志。
+
+**不知道就是 `null`**：窗口内没有成功调用的 provider，`avgLatencyMs` 为 `null`（页面显示 `—`），`latencySampleCount` / `latencyFailureCount` 是实测的 `0`（实测计数可以是 0，均值不能）。`avgProbeLatencyMs` 同理：没有成功探测即为 `null`，`probeSampleCount` 如实给出实测计数。
 
 写入路径（best-effort，绝不影响评审）：`LLMClient` 每次调用尝试结束后把一行交给 `StoreLlmCallSink`，它写 `llm_call_samples` 并在**每个 sink 的第一次写入**时顺带做一次保留期清理（删除 30 天前的行，`src/store/llm_samples.rs` 的 `RETENTION_DAYS = 30`）。写失败只记 WARN（与 `llm_summary` 写穿一致）；无 DB 时不挂 sink，什么都不写。Repo 扫描类评审（`/api/v1/repo/*`）不在覆盖范围内：它的报告不带 provider 归因（`llm_provider: None`），RENG-56 的 usage 统计同样看不到它。
 

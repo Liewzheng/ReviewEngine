@@ -187,6 +187,32 @@ pub trait ReviewStore: Send + Sync {
     /// table that grows without bound would eventually make the window scan
     /// proportional to the whole history instead of the window.
     async fn prune_llm_samples(&self, before: DateTime<Utc>) -> Result<u64>;
+
+    /// RENG-78: append one connectivity-probe sample (`llm_probe_samples`).
+    ///
+    /// ONE SAMPLE = one `GET {api_base}/models` the health store ran, whether
+    /// it succeeded or not — written by
+    /// [`crate::server::api::llm_probe::StoreProbeSampleSink`], the only
+    /// writer. There is no uniqueness constraint: the proactive loop probes
+    /// the same provider every round, and a page view probes it again once
+    /// its cached status is stale.
+    ///
+    /// Best-effort by contract, exactly like [`Self::insert_llm_sample`]:
+    /// callers log a failure and continue, because a statistics gap must never
+    /// turn a provider that just answered into a provider reported as broken.
+    async fn insert_probe_sample(&self, sample: &ProbeSample) -> Result<()>;
+
+    /// RENG-78: every probe sample recorded at or after `since`, oldest first.
+    ///
+    /// Same shape as [`Self::llm_samples_since`]: one index range scan, folded
+    /// in Rust, no per-provider query and no dialect split.
+    async fn probe_samples_since(&self, since: DateTime<Utc>) -> Result<Vec<ProbeSample>>;
+
+    /// RENG-78: delete probe samples older than `before`, returning how many
+    /// rows went. The probe samples are written by a page poll as well as by
+    /// the 30-minute loop, so they accumulate faster than the call samples do;
+    /// the same retention bound applies.
+    async fn prune_probe_samples(&self, before: DateTime<Utc>) -> Result<u64>;
 }
 
 /// RENG-57: one recorded call sample, as read back for the latency aggregate.
@@ -217,6 +243,37 @@ pub struct LlmCallSampleRow {
     pub ttfb_ms: Option<i64>,
     /// Whether the attempt produced a completion.
     pub success: bool,
+}
+
+/// RENG-78: one recorded connectivity-probe sample, as written and read back
+/// by `llm_probe_samples`.
+///
+/// The measurement is the probe's own round trip — one `GET {api_base}/models`
+/// (DNS + TCP + TLS + HTTP) — and nothing about the model: the model is not
+/// even involved in the request. [`Self::latency_ms`] is `None` for a FAILED
+/// probe even though the probe did measure how long the failure took to come
+/// back: a 401 answered in 5 ms and a timeout at 120 s describe the failure,
+/// not the link, and the aggregate averages successful samples only (the same
+/// rule `LlmCallSampleRow` follows).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeSample {
+    /// Provider the probe addressed (`llm_probe_samples.provider`) — a display
+    /// label two cards may share (RENG-75), which is why the fingerprint below
+    /// is what the aggregate buckets by.
+    pub provider: String,
+    /// The probed CARD's four-tuple fingerprint
+    /// (`llm_probe_samples.entry_fp`, [`crate::llm::identity::entry_fp`]); the
+    /// latency of a card's endpoint is that card's, never its namesake's.
+    pub entry_fp: String,
+    /// When the probe ran (UTC).
+    pub at: DateTime<Utc>,
+    /// Round-trip time of the probe in milliseconds; `None` when it failed.
+    pub latency_ms: Option<i64>,
+    /// Whether the probe reached the provider and its key was accepted.
+    pub success: bool,
+    /// Why the probe failed (`HTTP 401 Unauthorized`, `error sending
+    /// request…`); `None` on success.
+    pub error: Option<String>,
 }
 
 /// RENG-56: recorded LLM usage of one provider inside a query window.

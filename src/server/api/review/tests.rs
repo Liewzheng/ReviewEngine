@@ -1049,14 +1049,16 @@ async fn gitlab_token_resolution_falls_back_to_legacy_when_no_platform_matches()
     crate::server::gitlab::gitlab_runtime().write().unwrap().token = "glpat-legacy".to_string();
     let platforms = vec![testbed_platform()];
 
-    // Different port → no match → legacy token.
+    // A port no entry configures, but a host that uniquely identifies one:
+    // the RENG-90 host-only fold resolves the platform token — the same fold
+    // that fixes the NAS `:8443`-vs-port-less-base rerun below.
     assert_eq!(
         resolve_gitlab_token(
             None,
             Some("http://gitlab.internal:9999/g/p/-/merge_requests/1"),
             &platforms
         ),
-        Some("glpat-legacy".to_string())
+        Some("glpat-platform".to_string())
     );
     // Different host → no match → legacy token.
     assert_eq!(
@@ -1338,6 +1340,55 @@ async fn rerun_falls_back_to_server_config_token() {
         status,
         StatusCode::ACCEPTED,
         "rerun must fall back to the server-side configured token, got {json}"
+    );
+}
+
+/// RENG-90: the user-visible fix. A history row whose MR URL carries the
+/// GitLab `external_url`'s port (`https://gitlab.islet.space:8443/...`) while
+/// the git platform entry is configured port-less (`https://gitlab.islet.space`,
+/// no `internal_base_url`) used to answer 400 — the strict review matcher
+/// rejected `:8443`, so neither the platform token nor the (empty) legacy
+/// server-side token resolved. The unique-host fold now identifies the entry,
+/// the platform token satisfies the credential rule, and the rerun re-hosts
+/// the fetch onto the entry's own configured (port-less) base.
+#[tokio::test]
+async fn rerun_with_port_carrying_mr_url_resolves_platform_token_via_host_fold() {
+    let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    // No legacy token: the fold is the ONLY source that can satisfy the
+    // credential rule, so a 400 here would be the bug re-surfacing.
+    crate::server::gitlab::gitlab_runtime().write().unwrap().token = String::new();
+
+    let platforms = vec![review_platform("nas", "https://gitlab.islet.space", "")];
+    let state = state_with_platforms(platforms);
+    let store = state.task_store.clone().unwrap();
+    let stored = gitlab_mr_url_body("https://gitlab.islet.space:8443/group/proj/-/merge_requests/7");
+    let original_id = store
+        .create_with_request(Some(SourceMeta::default()), Some(stored))
+        .await;
+    store
+        .update(original_id, TaskState::Failed, None, Some("boom".to_string()))
+        .await;
+
+    let resp = rerun_review(State(state), Path(original_id), HeaderMap::new())
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "the host fold must resolve the platform token instead of 400, got {json}"
+    );
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    let new_entry = store.get(new_id).await.expect("the rerun task must be stored");
+    // The routing gate re-applies on rerun: the stored `:8443` URL is
+    // re-hosted onto the matched entry's own configured (port-less) base, so
+    // the fetch and the new record's MR URL are the address the entry itself
+    // configured — where its token is meant to flow.
+    assert_eq!(
+        new_entry.request.as_ref().unwrap()["source"]["url"],
+        "https://gitlab.islet.space/group/proj/-/merge_requests/7",
+        "the rerun must re-host the fetch onto the entry's configured base"
     );
 }
 

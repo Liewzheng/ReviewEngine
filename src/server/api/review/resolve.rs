@@ -16,11 +16,18 @@ pub(crate) const GITLAB_TOKEN_HEADER: &str = "x-gitlab-token";
 /// Precedence (docs/rest-api.md §1): the `X-Gitlab-Token` request header
 /// wins; when absent/blank, a configured git platform whose `base_url` — or,
 /// when set, `internal_base_url` — scheme-less `host[:port]` matches the MR
-/// URL supplies the token for that instance; when no platform matches (or the
-/// match has no token), the legacy server-side token is used — the GitLab
-/// runtime config seeded at startup from `--gitlab-token` / `GITLAB_TOKEN` and
-/// mutable via `PUT /api/v1/config`. Returns `None` when no source yields a
-/// token; callers turn that into a `400`.
+/// URL supplies the token for that instance, and a URL whose host differs
+/// only in the port still resolves when the host identifies EXACTLY ONE entry
+/// (RENG-90, the same host-only fold as the inbound matcher
+/// [`crate::models::find_git_platform_for_url`], minus its webhook-verification
+/// filter); when no platform matches (or the match has no token), the legacy
+/// server-side token is used — the GitLab runtime config seeded at startup
+/// from `--gitlab-token` / `GITLAB_TOKEN` and mutable via `PUT /api/v1/config`.
+/// The fetch that consumes the token is re-hosted onto the matched entry's own
+/// configured base (`internal_base_url` when set, else `base_url` —
+/// `route_gitlab_mr_url`), so the token still only ever flows to an address
+/// that entry itself configured. Returns `None` when no source yields a token;
+/// callers turn that into a `400`.
 pub(crate) fn resolve_gitlab_token(
     header: Option<&str>,
     mr_url: Option<&str>,
@@ -33,12 +40,15 @@ pub(crate) fn resolve_gitlab_token(
     // continues to the legacy default (first non-empty token wins), exactly
     // like a blank header falls through to the server-side lookup.
     if let Some(url) = mr_url {
-        // Review-URL identity (RENG-33): `base_url` or the entry's own
-        // `internal_base_url`, so a submission of either configured address
-        // resolves to that platform's token. Both are addresses the entry
-        // explicitly configured, so the token still cannot flow to a port the
-        // user never wrote down (unlike inbound webhook verification, which
-        // folds a uniquely-matched host — see find_git_platform_for_url).
+        // Review-URL identity (RENG-33 + RENG-90): `base_url` or the entry's
+        // own `internal_base_url`, so a submission of either configured
+        // address resolves to that platform's token — and when no strict
+        // `host[:port]` match exists, a host that identifies EXACTLY ONE entry
+        // still resolves it (the same unique-host fold the inbound matcher
+        // applies, minus its webhook-verification filter). The consuming fetch
+        // is re-hosted onto the matched entry's own configured base
+        // (`route_gitlab_mr_url`), so the token still never flows to a port
+        // the entry did not configure.
         if let Some(platform) = crate::models::find_git_platform_for_review_url(platforms, url) {
             if !platform.token.trim().is_empty() {
                 return Some(platform.token.clone());

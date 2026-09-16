@@ -175,7 +175,7 @@ fn resolve_gitlab_credential(
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
-                "gitlab token required for gitlab_mr reviews: pass the X-Gitlab-Token request header or configure a server-side GitLab token".to_string(),
+                "gitlab token required for gitlab_mr reviews: pass the X-Gitlab-Token request header, configure a git platform for this host (baseUrl / internalBaseUrl on the Configuration page), or configure a server-side GitLab token".to_string(),
             )
         })
 }

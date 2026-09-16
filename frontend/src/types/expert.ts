@@ -29,8 +29,19 @@ export interface Expert {
   weight: number
   /** Human-readable description of what this expert reviews. */
   description: string
-  /** Preview of the expert's LLM prompt (truncated). */
-  promptPreview: string
+  /**
+   * Full effective prompt (RENG-93): the WebUI override when one is set, else
+   * the config-file `[review_experts.*].prompt`, else the built-in default.
+   * This is the complete text, not a preview.
+   */
+  prompt: string
+  /**
+   * True when `prompt` was authored in the WebUI (a persisted override);
+   * false when it comes from the config file / built-in default. The detail
+   * dialog labels the source with it so a config-file prompt is not mistaken
+   * for one the user wrote.
+   */
+  promptOverride: boolean
   /** Recent reviews performed by this expert. */
   lastReviews: ExpertReviewSummary[]
 }

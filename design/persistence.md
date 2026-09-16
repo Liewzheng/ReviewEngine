@@ -183,7 +183,7 @@ CREATE TABLE app_settings (
 说明：
 
 - legacy `gitlab` 三个凭据（`PersistedGitlabConfig`）进 `app_settings`（key=`gitlab`，值 JSON，三个字段均 `enc:`），不开新表——它是遗留域，未来会被 `git_platforms` 吸收。
-- WebUI 的专家改动（RENG-69）进 `app_settings`（key=`experts`），值是 `{"<专家名>": {"enabled": bool, "weight": u8}}` 的 override 映射，只记「UI 改过的字段」：启动与每次 review 派发时叠加到配置文件解析出的 `[review_experts]` 之上（数据库覆盖配置文件；配置文件仍是基线，override 只补丁已存在的专家，不会新增）。单独用 `experts` 键而不并进 `ui` 投影，是因为 `ui` 投影要经 `PUT /config` 的 `apply_ui_config` 回放，而专家走的是 `PUT /api/v1/system/experts/{id}`，与 `PUT /config` 无对应关系。
+- WebUI 的专家改动（RENG-69 / RENG-93）进 `app_settings`（key=`experts`），值是 `{"<专家名>": {"enabled": bool, "weight": u8, "prompt": string}}` 的 override 映射，只记「UI 改过的字段」：启动与每次 review 派发时叠加到配置文件解析出的 `[review_experts]` 之上（数据库覆盖配置文件；配置文件仍是基线，override 只补丁已存在的专家，不会新增）。`prompt` 是 RENG-93 新增的可编辑字段：空字符串视为「清除覆盖」，恢复配置文件/默认提示词，因此库里不会存 `"prompt": ""`。单独用 `experts` 键而不并进 `ui` 投影，是因为 `ui` 投影要经 `PUT /config` 的 `apply_ui_config` 回放，而专家走的是 `PUT /api/v1/system/experts/{id}`，与 `PUT /config` 无对应关系。
 - `git_platforms.id` / `llm_providers.id` 用 UUID 而非自增，原因见 §3.1 自增主键行。
 - `reviews.request` 沿用现有约定：序列化的是无凭据 `ReviewRequest`，token 永不入库（task.rs:175-178 注释承诺的语义，入库后不变）。
 

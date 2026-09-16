@@ -622,7 +622,15 @@ export default {
       weight: 'Weight:',
       toggleAria: 'Toggle {name}',
       description: 'Description',
-      promptPreview: 'Prompt Preview',
+      prompt: 'Prompt',
+      promptSave: 'Save',
+      promptSaving: 'Saving…',
+      promptSaved: 'Saved',
+      promptSaveFailed: 'Failed to save the prompt. Your edit was reverted.',
+      promptSourceConfig:
+        'This prompt comes from the config file / built-in default. Saving here applies an override for this expert.',
+      promptSourceOverride:
+        'This prompt is a WebUI override and takes precedence over the config file. Saving an empty prompt restores the default.',
       lastReviews: 'Last 5 Reviews',
       score: 'Score',
       date: 'Date',

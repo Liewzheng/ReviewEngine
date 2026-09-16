@@ -280,7 +280,7 @@ Provider deletes deserve care: provider IDs are derived from list position (`{pr
 
 ### Experts page (`/#/experts`)
 
-The Experts page edits the live expert team: `GET /api/v1/system/experts` lists every expert defined under `[review_experts]` (disabled ones included, so a card can be switched back on) and `PUT /api/v1/system/experts/{id}` changes one expert's `enabled` / `weight`. Each card's switch and weight slider save themselves.
+The Experts page edits the live expert team: `GET /api/v1/system/experts` lists every expert defined under `[review_experts]` (disabled ones included, so a card can be switched back on) and `PUT /api/v1/system/experts/{id}` changes one expert's `enabled` / `weight` / `prompt`. Each card's switch and weight slider save themselves; the detail dialog's prompt editor saves on an explicit button (RENG-93) — an empty prompt clears the override, so the config file / built-in default prompt applies again.
 
 **Precedence: the database wins over the config file.** An edit made here is stored as an *override* (just the fields you changed, keyed by expert name) in the configuration database, and that override is applied over the file's `[review_experts]` on every startup and on every review dispatch — REST-submitted reviews, webhook-triggered reviews, and repo scans all run the overridden values. The config file stays the base/default:
 

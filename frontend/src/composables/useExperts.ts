@@ -77,10 +77,14 @@ export function useExperts() {
    * the caller should warn instead of reporting a clean success.
    *
    * @param id - Expert identifier.
-   * @param data - Fields to update (enabled, weight).
+   * @param data - Fields to update (enabled, weight, prompt; RENG-93 adds the
+   *   latter — an empty `prompt` clears the override).
    * @returns The updated expert definition.
    */
-  async function update(id: string, data: { enabled?: boolean; weight?: number }): Promise<ExpertUpdateResult> {
+  async function update(
+    id: string,
+    data: { enabled?: boolean; weight?: number; prompt?: string }
+  ): Promise<ExpertUpdateResult> {
     error.value = null;
     try {
       const updated = await updateExpert(id, data);

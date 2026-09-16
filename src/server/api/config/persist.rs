@@ -1987,6 +1987,7 @@ webhook_secret = "legacy-wh-plain"
             crate::config::ExpertOverride {
                 enabled: Some(false),
                 weight: None,
+                ..Default::default()
             },
         );
         save_expert_overrides(&store, &overrides).await.unwrap();
@@ -2021,6 +2022,50 @@ webhook_secret = "legacy-wh-plain"
         assert!(
             state.expert_overrides_snapshot().get("security").is_some(),
             "the snapshot the review dispatches take is published too"
+        );
+    }
+
+    /// RENG-93: a stored prompt override reaches the resolved config the same
+    /// way — DB wins over the config file, and the file prompt stands for an
+    /// expert the override does not cover.
+    #[tokio::test]
+    async fn expert_overrides_replay_applies_a_prompt_override() {
+        let store = fresh_db().await;
+        let mut overrides = ExpertOverrides::default();
+        overrides.record(
+            "security",
+            crate::config::ExpertOverride {
+                prompt: Some("You are the SOC lead.".to_string()),
+                ..Default::default()
+            },
+        );
+        save_expert_overrides(&store, &overrides).await.unwrap();
+
+        let state = Arc::new(fresh_expert_state());
+        let applied = load_and_apply_expert_overrides(&state, &store).await;
+        assert_eq!(applied, 1);
+
+        let cfg = state.app_config.read().unwrap();
+        let security = cfg.as_ref().unwrap().review_experts.get("security").unwrap();
+        assert_eq!(
+            security.prompt.as_deref(),
+            Some("You are the SOC lead."),
+            "the DB prompt override wins over the file"
+        );
+        assert!(security.enabled, "the untouched fields keep the file values");
+        assert_eq!(security.weight, 30);
+        assert_eq!(
+            cfg.as_ref().unwrap().review_experts["lead"].prompt,
+            None,
+            "an unedited expert keeps the file prompt (none here)"
+        );
+        assert_eq!(
+            state
+                .expert_overrides_snapshot()
+                .get("security")
+                .and_then(|o| o.prompt.as_deref()),
+            Some("You are the SOC lead."),
+            "the published snapshot carries the prompt too"
         );
     }
 

@@ -13,6 +13,7 @@ import type { Expert, ExpertCategory, ExpertReviewSummary } from '../types/exper
 import { categoryLabelMap } from '../types/expert'
 import { useExperts } from '../composables/useExperts'
 import { useAutoRefresh } from '../composables/useAutoRefresh'
+import { usePromptEditor, MAX_EXPERT_PROMPT_CHARS } from '../composables/usePromptEditor'
 import ExpertCard from '../components/ExpertsManagement/ExpertCard.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 
@@ -171,6 +172,48 @@ function notifyUpdateFailed(name: string, error: unknown) {
   })
 }
 
+/* RENG-93: the prompt editor. The textarea edits a local draft (see
+ * `usePromptEditor`); saving is explicit, never per keystroke. A save is an
+ * expert PUT like any other, so it is gated by the same `savesInFlight` poll
+ * pause, and the draft itself pauses polling while unsaved (like
+ * `weightDragPending`) so a background refresh can neither snap the textarea
+ * back nor relabel the source hint under the user. */
+const promptEditor = usePromptEditor(selectedExpert, async (id, prompt) => {
+  const updated = await expertsStore.update(id, { prompt })
+  if (updated.persisted === false) {
+    // Same honesty rule as the toggle: the prompt saved, but without a store
+    // it will not survive a restart.
+    notifyMemoryOnly(updated.name)
+  }
+  return updated
+})
+const promptDraft = promptEditor.draft
+const promptDirty = promptEditor.dirty
+const promptSaving = promptEditor.saving
+const promptSaveState = promptEditor.saveState
+const setPromptDraft = promptEditor.setDraft
+const savePrompt = promptEditor.savePrompt
+
+function notifyPromptSaveFailed(error: unknown) {
+  console.error('Failed to save expert prompt', error)
+  ElNotification({
+    title: t('common.error'),
+    message: t('experts.detail.promptSaveFailed'),
+    type: 'error',
+    duration: 5000,
+  })
+}
+
+/* The button's handler: `savePrompt` already reverts the draft on failure
+ * (the server value stands), so all that is left is to say so. */
+const onSavePrompt = async () => {
+  try {
+    await savePrompt()
+  } catch (e) {
+    notifyPromptSaveFailed(e)
+  }
+}
+
 /* RENG-69: the server applied the edit but could not (or would not) store it,
  * so it is lost on restart. A warning, not a success — the user must not
  * believe the configuration is durable. */
@@ -212,7 +255,14 @@ const getScoreType = (score?: number): 'success' | 'warning' | 'danger' | 'info'
 const expertsAutoRefresh = useAutoRefresh(
   () => fetchExperts(true),
   10_000,
-  { isPaused: () => weightDragPending.value || savesInFlight.value > 0 }
+  {
+    // RENG-54 + RENG-93: skip a tick while a local edit is up — a weight
+    // drag window, any expert PUT, or an unsaved prompt draft — so a poll can
+    // neither replace the list, snap a slider back mid-drag, revert an
+    // optimistic switch, nor overwrite a prompt the user is still editing.
+    isPaused: () =>
+      weightDragPending.value || savesInFlight.value > 0 || promptDirty.value,
+  }
 )
 
 onMounted(() => {
@@ -389,15 +439,42 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="detail-section">
-          <h4 class="section-title">{{ $t('experts.detail.promptPreview') }}</h4>
+          <div class="prompt-header">
+            <h4 class="section-title">{{ $t('experts.detail.prompt') }}</h4>
+            <span
+              v-if="promptSaveState === 'saved'"
+              class="prompt-status"
+              role="status"
+            >{{ $t('experts.detail.promptSaved') }}</span>
+          </div>
           <el-input
+            :model-value="promptDraft"
             type="textarea"
-            :model-value="selectedExpert.promptPreview"
-            readonly
             :rows="8"
             resize="none"
             class="prompt-textarea"
+            :disabled="promptSaving"
+            :maxlength="MAX_EXPERT_PROMPT_CHARS"
+            :aria-label="$t('experts.detail.prompt')"
+            @update:model-value="setPromptDraft"
           />
+          <p class="prompt-source">
+            {{ selectedExpert.promptOverride
+              ? $t('experts.detail.promptSourceOverride')
+              : $t('experts.detail.promptSourceConfig') }}
+          </p>
+          <div class="prompt-actions">
+            <el-button
+              type="primary"
+              size="small"
+              :loading="promptSaving"
+              :disabled="!promptDirty || promptSaving"
+              :aria-label="$t('experts.detail.promptSave')"
+              @click="onSavePrompt"
+            >
+              {{ promptSaving ? $t('experts.detail.promptSaving') : $t('experts.detail.promptSave') }}
+            </el-button>
+          </div>
         </div>
 
         <div class="detail-section">
@@ -591,6 +668,32 @@ onBeforeUnmount(() => {
   line-height: 1.6;
   background-color: var(--bg-primary);
   color: var(--text-primary);
+}
+
+/* RENG-93: the editable prompt's header row (title + transient "Saved"), the
+   source hint line, and the save action. All colours and spacing come off the
+   token layer like the rest of the dialog. */
+.prompt-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.prompt-status {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-success);
+}
+
+.prompt-source {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  margin: var(--space-2) 0 0 0;
+}
+
+.prompt-actions {
+  margin-top: var(--space-3);
 }
 
 .reviews-table {

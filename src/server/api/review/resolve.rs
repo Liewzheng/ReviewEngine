@@ -373,6 +373,7 @@ mod tests {
                 ExpertOverride {
                     enabled: Some(false),
                     weight: None,
+                    ..Default::default()
                 },
             );
         }

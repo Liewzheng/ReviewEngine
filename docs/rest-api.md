@@ -635,24 +635,28 @@ Response 200:
       "enabled": true,
       "weight": 15,
       "description": "Security Lead",
-      "promptPreview": "You are the Security Lead...",
+      "prompt": "You are the Security Lead...",
+      "promptOverride": false,
       "lastReviews": []
     }
   ]
 }
 ```
 
+`prompt` 是专家当前**生效**的完整提示词（WebUI 覆盖 > 配置文件 `[review_experts.*].prompt` > 触发器派生的默认值，见 RENG-93），不是截断预览；`promptOverride` 为 `true` 表示该文本来自 WebUI 覆盖，`false` 表示来自配置文件/内置默认 —— 前端据此如实标注提示词来源。
+
 VSCode Extension 可用此接口展示可选专家、让用户开关。
 
 #### `PUT /api/v1/system/experts/{id}`
 
-更新单个专家的启用状态与权重（`{id}` 为专家名 slug，如 `security`）。请求体字段都是可选的，只提交需要改的字段。
+更新单个专家的启用状态、权重或提示词（`{id}` 为专家名 slug，如 `security`）。请求体字段都是可选的，只提交需要改的字段。
 
 ```
 Request:
 {
   "enabled": false,
-  "weight": 20
+  "weight": 20,
+  "prompt": "You are the SOC lead; flag every auth flaw."
 }
 
 Response 200: 更新后的专家对象（结构同 GET），额外带一个 `persisted` 字段：
@@ -660,15 +664,20 @@ Response 200: 更新后的专家对象（结构同 GET），额外带一个 `per
   "id": "security",
   "enabled": false,
   "weight": 20,
+  "prompt": "You are the SOC lead; flag every auth flaw.",
+  "promptOverride": true,
   ...,
   "persisted": true
 }
 Response 404: { "error": "expert not found" }
 Response 422: { "error": "invalid weight 200: an expert's weight must be between 0 and 100" }
+Response 422: { "error": "invalid prompt: must be at most 20000 characters (30000 given)" }
 Response 500: { "error": "failed to persist the expert change to the database: ..." }
 ```
 
-请求体字段都可选，`{}` 表示「不改任何字段」，不会写入空的 override（专家的 `enabled`/`weight` 保持原值）。
+请求体字段都可选，`{}` 表示「不改任何字段」，不会写入空的 override（专家的 `enabled`/`weight`/`prompt` 保持原值）。
+
+`prompt` 是三态的（RENG-93）：缺省 = 本次请求不动它；非空字符串 = 设置；`""` = **清除**覆盖，恢复配置文件/内置默认提示词（override 映射不再覆盖该字段，不会存储空字符串）。响应的 `prompt` 是编辑后的**生效**值，`promptOverride` 说明它是 WebUI 覆盖还是配置文件/默认。`prompt` 超过 **20000 字符**返回 `422`（与 `weight` 越界同一状态；提示词是系统提示片段，UI 的文本框 `maxlength` 镜像同一上限）。
 
 `weight` 的合法范围是 **0–100**（与配置文件 `[review_experts.*]` 的 `weight` 一致），超出范围返回 `422` —— 与 `PUT /config` 对非法值的处理一致；之所以拒绝而不是静默截断，是因为 UI 的滑杆不可能产生越界值，能产生的只有手写客户端，静默存一个与请求不同的值会让接口的返回变成假话。
 

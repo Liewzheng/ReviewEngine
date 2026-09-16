@@ -1,9 +1,9 @@
-//! WebUI-managed expert overrides (RENG-69).
+//! WebUI-managed expert overrides (RENG-69, RENG-93).
 //!
-//! `PUT /api/v1/system/experts/{id}` edits an expert's `enabled` / `weight`
-//! at runtime. Before 0.10.24 that mutation lived in `AppState::app_config`
-//! only, so a container recreate restored the config file's `[review_experts]`
-//! values and the WebUI edit was silently lost.
+//! `PUT /api/v1/system/experts/{id}` edits an expert's `enabled` / `weight` /
+//! `prompt` at runtime. Before 0.10.24 that mutation lived in
+//! `AppState::app_config` only, so a container recreate restored the config
+//! file's `[review_experts]` values and the WebUI edit was silently lost.
 //!
 //! This type is the persisted form of those edits: a map of
 //! `expert name → patched fields`, so it is self-describing (it holds ONLY
@@ -38,21 +38,40 @@ use crate::models::AppConfig;
 /// when read back).
 pub const MAX_EXPERT_WEIGHT: u8 = 100;
 
+/// Longest expert prompt the API accepts, in characters.
+///
+/// A prompt is a system-prompt fragment (the `perspective` injected into the
+/// review system prompt), not a free-form document. The largest built-in
+/// default prompt is ~0.6k chars, so 20_000 is ~30× headroom for a custom
+/// persona while keeping the `app_settings` row and the rendered system
+/// prompt bounded — an unbounded prompt could be smuggled past every context
+/// window the LLM row names. The UI mirrors this as the textarea `maxlength`.
+pub const MAX_EXPERT_PROMPT_CHARS: usize = 20_000;
+
 /// The fields `PUT /api/v1/system/experts/{id}` lets the UI change. Every
 /// field is optional: a `None` means "this request did not touch it", so a
 /// partially-specified override never clobbers the other field.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+///
+/// `prompt` has the same optionality, with one extra state at the API
+/// boundary: an empty string CLEARS the override, so the config file / built-in
+/// default prompt applies again. [`Self::record`] maps `Some("")` to "not
+/// covered" — the stored entry never carries an empty prompt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct ExpertOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub weight: Option<u8>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 impl ExpertOverride {
     /// True when the patch carries nothing (its stored entry can be dropped).
+    /// A prompt — even an empty one — counts as content, so an override that
+    /// only sets a prompt is never treated as empty.
     pub fn is_empty(&self) -> bool {
-        self.enabled.is_none() && self.weight.is_none()
+        self.enabled.is_none() && self.weight.is_none() && self.prompt.is_none()
     }
 }
 
@@ -94,9 +113,14 @@ impl ExpertOverrides {
 
     /// Merge one UI edit into the map. Fields the request omitted
     /// (`None`) leave the stored value untouched, and a patch that clears
-    /// both fields removes the entry entirely — "no override" and "an
+    /// every field removes the entry entirely — "no override" and "an
     /// override that changes nothing" are the same state, so an entry is never
     /// stored empty (see [`Self::to_setting`]).
+    ///
+    /// `prompt` is tri-state at this level too: `None` = untouched, `Some("")`
+    /// = CLEAR the field (the override stops covering it, so the config file /
+    /// built-in default prompt applies again — the stored entry never carries
+    /// an empty prompt), `Some(text)` = set.
     pub fn record(&mut self, name: &str, patch: ExpertOverride) {
         let entry = self.entries.entry(name.to_string()).or_default();
         if patch.enabled.is_some() {
@@ -104,6 +128,11 @@ impl ExpertOverrides {
         }
         if patch.weight.is_some() {
             entry.weight = patch.weight;
+        }
+        match patch.prompt.as_deref() {
+            None => {}
+            Some("") => entry.prompt = None,
+            Some(text) => entry.prompt = Some(text.to_string()),
         }
         if entry.is_empty() {
             self.entries.remove(name);
@@ -126,6 +155,9 @@ impl ExpertOverrides {
                     }
                     if let Some(weight) = over.weight {
                         expert.weight = weight;
+                    }
+                    if let Some(prompt) = &over.prompt {
+                        expert.prompt = Some(prompt.clone());
                     }
                     applied += 1;
                 }
@@ -158,9 +190,10 @@ impl ExpertOverrides {
     /// has no Web UI left to fix the row from.
     ///
     /// Dropped, each with a WARN: a value that is not a JSON object at all, an
-    /// entry that is not an object, an `enabled` that is not a bool, and a
+    /// entry that is not an object, an `enabled` that is not a bool, a
     /// `weight` that is not an integer in `0..=MAX_EXPERT_WEIGHT` (so a
-    /// hand-edited row cannot inject a weight the schema forbids). An entry
+    /// hand-edited row cannot inject a weight the schema forbids), and a
+    /// `prompt` that is not a string. An entry
     /// left with no valid field is dropped entirely — "no override" must not be
     /// stored as `{}`.
     ///
@@ -218,6 +251,16 @@ impl ExpertOverrides {
                     ),
                 }
             }
+            if let Some(prompt) = fields.get("prompt") {
+                match prompt.as_str() {
+                    Some(p) => patch.prompt = Some(p.to_string()),
+                    None => tracing::warn!(
+                        expert = %name,
+                        "ignoring persisted expert override field 'prompt': expected a string; \
+                         the config file's value stands"
+                    ),
+                }
+            }
             // A patch with no valid field leaves no entry behind: "no override"
             // must not be stored as an empty object.
             overrides.record(name, patch);
@@ -271,6 +314,7 @@ mod tests {
             ExpertOverride {
                 enabled: Some(false),
                 weight: None,
+                ..Default::default()
             },
         );
         overrides.record(
@@ -278,6 +322,7 @@ mod tests {
             ExpertOverride {
                 enabled: None,
                 weight: Some(30),
+                ..Default::default()
             },
         );
 
@@ -306,6 +351,7 @@ mod tests {
             ExpertOverride {
                 enabled: Some(false),
                 weight: None,
+                ..Default::default()
             },
         );
 
@@ -323,6 +369,7 @@ mod tests {
             ExpertOverride {
                 enabled: Some(false),
                 weight: None,
+                ..Default::default()
             },
         );
         overrides.record(
@@ -330,6 +377,7 @@ mod tests {
             ExpertOverride {
                 enabled: None,
                 weight: Some(40),
+                ..Default::default()
             },
         );
 
@@ -357,6 +405,7 @@ mod tests {
             ExpertOverride {
                 enabled: Some(false),
                 weight: Some(15),
+                ..Default::default()
             },
         );
 
@@ -368,6 +417,161 @@ mod tests {
             ExpertOverrides::from_setting(&serde_json::json!(null)),
             ExpertOverrides::default()
         );
+    }
+
+    // ─── RENG-93: prompt overrides ───
+
+    /// A prompt override reaches the resolved config; fields the override does
+    /// not cover (and experts it does not name) keep the config-file values.
+    #[test]
+    fn apply_patches_the_prompt_and_leaves_untouched_fields_alone() {
+        let mut overrides = ExpertOverrides::default();
+        overrides.record(
+            "security",
+            ExpertOverride {
+                enabled: None,
+                weight: None,
+                prompt: Some("You are a strict security reviewer.".to_string()),
+            },
+        );
+
+        let mut cfg = config_with(&[("security", true, 50), ("docs", true, 30)]);
+        cfg.review_experts.get_mut("security").unwrap().prompt = Some("file prompt".to_string());
+        cfg.review_experts.get_mut("docs").unwrap().prompt = Some("docs prompt".to_string());
+        assert_eq!(overrides.apply_to(&mut cfg), 1);
+
+        assert_eq!(
+            cfg.review_experts["security"].prompt.as_deref(),
+            Some("You are a strict security reviewer."),
+            "the prompt is patched"
+        );
+        assert!(cfg.review_experts["security"].enabled, "enabled untouched");
+        assert_eq!(cfg.review_experts["security"].weight, 50, "weight untouched");
+        assert_eq!(
+            cfg.review_experts["docs"].prompt.as_deref(),
+            Some("docs prompt"),
+            "an unedited expert keeps the file prompt"
+        );
+    }
+
+    /// A prompt is content for `is_empty`: an override that only carries a
+    /// prompt is stored (never pruned), and it round-trips through the
+    /// `app_settings` value.
+    #[test]
+    fn prompt_only_override_is_stored_and_round_trips() {
+        let mut overrides = ExpertOverrides::default();
+        overrides.record(
+            "security",
+            ExpertOverride {
+                prompt: Some("custom persona".to_string()),
+                ..Default::default()
+            },
+        );
+
+        assert!(!overrides.is_empty(), "a prompt-only map is not empty");
+        assert_eq!(overrides.len(), 1);
+
+        let value = overrides.to_setting();
+        assert_eq!(value["security"]["prompt"], "custom persona");
+        assert_eq!(ExpertOverrides::from_setting(&value), overrides);
+    }
+
+    /// An empty string CLEARS the prompt override: the stored entry stops
+    /// covering the field, so the config file / built-in default prompt
+    /// applies again. A clear of a prompt-only override removes the entry
+    /// entirely; a clear alongside other fields keeps them.
+    #[test]
+    fn record_clears_an_empty_prompt_so_the_file_value_stands() {
+        let mut overrides = ExpertOverrides::default();
+        overrides.record(
+            "security",
+            ExpertOverride {
+                prompt: Some("custom persona".to_string()),
+                ..Default::default()
+            },
+        );
+
+        // Clearing alongside another field: the other field survives, the
+        // prompt is no longer covered.
+        overrides.record(
+            "security",
+            ExpertOverride {
+                enabled: Some(false),
+                prompt: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        let entry = overrides.get("security").expect("enabled keeps the entry");
+        assert_eq!(entry.enabled, Some(false));
+        assert_eq!(entry.prompt, None, "the cleared prompt is not covered");
+
+        let mut cfg = config_with(&[("security", true, 50)]);
+        cfg.review_experts.get_mut("security").unwrap().prompt = Some("file prompt".to_string());
+        overrides.apply_to(&mut cfg);
+        assert_eq!(
+            cfg.review_experts["security"].prompt.as_deref(),
+            Some("file prompt"),
+            "clearing restores the config-file prompt"
+        );
+
+        // Clearing a prompt-only override removes the entry entirely — an
+        // override that covers nothing is not stored.
+        let mut overrides = ExpertOverrides::default();
+        overrides.record(
+            "quality",
+            ExpertOverride {
+                prompt: Some("q".to_string()),
+                ..Default::default()
+            },
+        );
+        overrides.record(
+            "quality",
+            ExpertOverride {
+                prompt: Some(String::new()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(overrides.get("quality"), None, "a cleared prompt-only entry is dropped");
+        assert_eq!(overrides.len(), 0);
+    }
+
+    /// A hand-edited row with a string `prompt` is accepted (and replayed),
+    /// while a non-string one is dropped with a WARN — the row stays usable
+    /// and the other fields survive, exactly like the `weight` rule.
+    #[test]
+    fn from_setting_accepts_a_string_prompt_and_drops_a_non_string_one() {
+        let value = serde_json::json!({
+            "security": { "enabled": false, "prompt": 42 },
+            "docs": { "prompt": "hand-written persona" },
+            "quality": { "enabled": true, "prompt": [1, 2] }
+        });
+        let overrides = ExpertOverrides::from_setting(&value);
+
+        let security = overrides.get("security").expect("enabled survives");
+        assert_eq!(security.enabled, Some(false));
+        assert_eq!(security.prompt, None, "the non-string prompt is dropped");
+
+        assert_eq!(
+            overrides.get("docs").and_then(|o| o.prompt.as_deref()),
+            Some("hand-written persona"),
+            "a string prompt is accepted"
+        );
+        assert_eq!(
+            overrides.get("quality"),
+            Some(&ExpertOverride {
+                enabled: Some(true),
+                prompt: None,
+                ..Default::default()
+            }),
+            "a valid field survives its invalid sibling"
+        );
+
+        // A hand-edited `""` is a clear: the field is not covered, so the
+        // config file's prompt stands.
+        let cleared = ExpertOverrides::from_setting(&serde_json::json!({
+            "docs": { "prompt": "" }
+        }));
+        assert_eq!(cleared.get("docs"), None, "an empty-string prompt is not stored");
     }
 
     /// A hand-edited row cannot inject a weight the schema does not allow: the
@@ -433,6 +637,7 @@ mod tests {
             Some(&ExpertOverride {
                 enabled: Some(true),
                 weight: None,
+                ..Default::default()
             }),
             "a valid field survives its invalid sibling"
         );

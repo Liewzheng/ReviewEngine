@@ -44,10 +44,11 @@ async fn list_experts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // `build_expert_defs` is deliberately NOT used here: it filters disabled
     // and invalid experts, which is right for review execution but wrong for
     // a management listing.
+    let overrides = state.expert_overrides_snapshot();
     let experts: Vec<serde_json::Value> = cfg
         .review_experts
         .iter()
-        .map(|(name, e)| expert_view(&slugify(name), name, e))
+        .map(|(name, e)| expert_view(&slugify(name), name, e, prompt_overridden(&overrides, name)))
         .collect();
 
     Json(serde_json::json!({ "experts": experts })).into_response()
@@ -225,12 +226,37 @@ fn icon_for_category(category: &str) -> String {
 struct UpdateExpertRequest {
     enabled: Option<bool>,
     weight: Option<u8>,
+    prompt: Option<String>,
+}
+
+/// Whether an expert's prompt is currently a WebUI override (covered by the
+/// override map) rather than the config-file / built-in default. `Some("")`
+/// never reaches the map (`ExpertOverride::record` turns an empty prompt into
+/// "not covered"), so any stored string is a real override.
+fn prompt_overridden(overrides: &crate::config::ExpertOverrides, name: &str) -> bool {
+    overrides
+        .get(name)
+        .and_then(|o| o.prompt.as_deref())
+        .is_some_and(|p| !p.is_empty())
 }
 
 /// The JSON view of one configured expert — the shape `GET /system/experts`
 /// and `PUT /system/experts/{id}` both return. `id` is the slug the UI uses
 /// to address the expert, `name` its key in `[review_experts]`.
-fn expert_view(id: &str, name: &str, expert: &crate::models::ExpertTomlDef) -> serde_json::Value {
+///
+/// `prompt` is the FULL effective prompt (the resolved
+/// `[review_experts.<name>].prompt` — the persisted WebUI override when one is
+/// set, else the config-file value, else the trigger-derived default). It is
+/// not a preview, so the UI must treat it as the complete text.
+/// `promptOverride` tells the UI whether that text was authored in the WebUI
+/// (true) or comes from the config file / built-in default (false) — without
+/// it the drawer could not honestly label the source.
+fn expert_view(
+    id: &str,
+    name: &str,
+    expert: &crate::models::ExpertTomlDef,
+    prompt_overridden: bool,
+) -> serde_json::Value {
     let category = derive_category(name, &expert.role);
     let icon = icon_for_category(&category);
     serde_json::json!({
@@ -241,13 +267,14 @@ fn expert_view(id: &str, name: &str, expert: &crate::models::ExpertTomlDef) -> s
         "enabled": expert.enabled,
         "weight": expert.weight,
         "description": expert.role,
-        "promptPreview": expert.prompt.clone().unwrap_or_default(),
+        "prompt": expert.prompt.clone().unwrap_or_default(),
+        "promptOverride": prompt_overridden,
         "lastReviews": [],
     })
 }
 
-/// `PUT /api/v1/system/experts/{id}` — enable/disable an expert or change its
-/// weight.
+/// `PUT /api/v1/system/experts/{id}` — enable/disable an expert, change its
+/// weight, or edit its prompt.
 ///
 /// The edit is persisted AND applied to the running config (RENG-69 —
 /// pre-0.10.24 it was memory-only, so every container recreate silently
@@ -259,6 +286,17 @@ fn expert_view(id: &str, name: &str, expert: &crate::models::ExpertTomlDef) -> s
 /// - **No DB** (`REVIEW_DISABLE_DB=1`, tests, embedded use) → memory-only, the
 ///   pre-0.10.24 behaviour, reported honestly as `"persisted": false` plus a
 ///   warning log; the response never implies the edit survives a restart.
+///
+/// **Prompt semantics** (RENG-93): `prompt` is tri-state, exactly like the
+/// other fields — absent = this request does not touch it, a non-empty string
+/// = set, and `""` = CLEAR the override, so the config file / built-in default
+/// prompt applies again (the override map stops covering the prompt; it never
+/// stores an empty string). The response's `prompt` is therefore the *effective*
+/// prompt after the edit, and `promptOverride` says whether that text is a
+/// WebUI override or the config file / default. A prompt longer than
+/// [`crate::config::MAX_EXPERT_PROMPT_CHARS`] characters is rejected with 422
+/// (see below) — a prompt is a system-prompt fragment, and the UI mirrors the
+/// same bound as the textarea `maxlength`.
 ///
 /// **Ordering: persist, then apply** (RENG-69 review). The store write is
 /// awaited BEFORE the runtime is touched, so a `500` means the request changed
@@ -293,7 +331,9 @@ async fn update_expert(
     Json(body): Json<UpdateExpertRequest>,
 ) -> impl IntoResponse {
     // Validate before touching anything: an out-of-range weight is refused
-    // outright (see the doc comment above).
+    // outright (see the doc comment above), and so is a prompt beyond the
+    // documented maximum — the UI's textarea `maxlength` mirrors the same
+    // bound, so an over-length value can only come from a hand-written client.
     if let Some(weight) = body.weight {
         if weight > crate::config::MAX_EXPERT_WEIGHT {
             return (
@@ -302,6 +342,21 @@ async fn update_expert(
                     "error": format!(
                         "invalid weight {weight}: an expert's weight must be between 0 and {}",
                         crate::config::MAX_EXPERT_WEIGHT
+                    )
+                })),
+            )
+                .into_response();
+        }
+    }
+    if let Some(prompt) = &body.prompt {
+        if prompt.chars().count() > crate::config::MAX_EXPERT_PROMPT_CHARS {
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "invalid prompt: must be at most {} characters ({} given)",
+                        crate::config::MAX_EXPERT_PROMPT_CHARS,
+                        prompt.chars().count()
                     )
                 })),
             )
@@ -336,10 +391,12 @@ async fn update_expert(
     };
 
     // Merge this request into the persisted override map (fields the body
-    // omitted keep their stored value). Nothing is applied yet.
+    // omitted keep their stored value; an empty `prompt` clears it). Nothing is
+    // applied yet.
     let patch = crate::config::ExpertOverride {
         enabled: body.enabled,
         weight: body.weight,
+        prompt: body.prompt,
     };
     let mut overrides = (*state.expert_overrides_snapshot()).clone();
     overrides.record(&name, patch);
@@ -348,36 +405,26 @@ async fn update_expert(
     // there is no rollback to get wrong and no window in which the API's answer
     // and the process state disagree.
     let persisted = match state.db.as_ref() {
-        Some(db) => {
-            if overrides.is_empty() {
-                // Nothing was ever overridden (an all-optional body after the
-                // previous entry was emptied): the volatile state equals the
-                // durable state, so a restart cannot lose anything and there is
-                // no row to write.
-                true
-            } else {
-                match super::config::persist::save_expert_overrides(db, &overrides).await {
-                    Ok(()) => true,
-                    Err(e) => {
-                        tracing::error!(
-                            expert = %name,
-                            error = %format!("{e:#}"),
-                            "failed to persist expert override to the database; \
-                             the running configuration is unchanged"
-                        );
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            Json(serde_json::json!({
-                                "error": format!(
-                                    "failed to persist the expert change to the database: {e}"
-                                )
-                            })),
+        Some(db) => match super::config::persist::save_expert_overrides(db, &overrides).await {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::error!(
+                    expert = %name,
+                    error = %format!("{e:#}"),
+                    "failed to persist expert override to the database; \
+                     the running configuration is unchanged"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "failed to persist the expert change to the database: {e}"
                         )
-                            .into_response();
-                    }
-                }
+                    })),
+                )
+                    .into_response();
             }
-        }
+        },
         None => {
             tracing::warn!(
                 expert = %name,
@@ -396,8 +443,9 @@ async fn update_expert(
     // Echo the effective expert back (read after the apply, so the response is
     // the value the server will use, not the request echo).
     let cfg_opt = state.app_config.read().unwrap();
+    let overrides = state.expert_overrides_snapshot();
     let mut response = match cfg_opt.as_ref().and_then(|cfg| cfg.review_experts.get(&name)) {
-        Some(expert) => expert_view(&id, &name, expert),
+        Some(expert) => expert_view(&id, &name, expert, prompt_overridden(&overrides, &name)),
         None => {
             return (
                 StatusCode::NOT_FOUND,
@@ -572,10 +620,26 @@ mod tests {
         enabled: Option<bool>,
         weight: Option<u8>,
     ) -> axum::response::Response {
+        put_expert_prompt(state, id, enabled, weight, None).await
+    }
+
+    /// `put_expert` with the RENG-93 `prompt` field (tri-state, so a clear is
+    /// `Some("")` and an untouched prompt is `None`).
+    async fn put_expert_prompt(
+        state: &Arc<AppState>,
+        id: &str,
+        enabled: Option<bool>,
+        weight: Option<u8>,
+        prompt: Option<String>,
+    ) -> axum::response::Response {
         update_expert(
             State(state.clone()),
             Path(id.to_string()),
-            Json(UpdateExpertRequest { enabled, weight }),
+            Json(UpdateExpertRequest {
+                enabled,
+                weight,
+                prompt,
+            }),
         )
         .await
         .into_response()
@@ -633,6 +697,7 @@ mod tests {
             Json(UpdateExpertRequest {
                 enabled: None,
                 weight: Some(25),
+                prompt: None,
             }),
         )
         .await
@@ -849,6 +914,186 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(body_json(resp).await["weight"], 100);
         assert_eq!(effective_experts(&state)["Security"].weight, 100);
+    }
+
+    // ─── RENG-93: editable, persisted prompts ───
+
+    /// A prompt edit round-trips: PUT applies + persists it (the response and
+    /// GET both carry the new `prompt` with `promptOverride: true`), and a
+    /// restart replay restores it over the config-file value.
+    #[tokio::test]
+    async fn update_expert_round_trips_a_prompt_through_get() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+
+        // The fixture's file prompt is on the face of the initial listing, and
+        // it is honestly not an override.
+        let listed = experts_body(state.clone()).await;
+        assert_eq!(
+            expert_by_id(&listed, "security")["prompt"],
+            "Security Lead prompt",
+            "the file prompt is the base"
+        );
+        assert_eq!(
+            expert_by_id(&listed, "security")["promptOverride"],
+            false,
+            "no override yet"
+        );
+
+        let resp = put_expert_prompt(
+            &state,
+            "security",
+            None,
+            None,
+            Some("You are the SOC lead; flag every auth flaw.".to_string()),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["prompt"], "You are the SOC lead; flag every auth flaw.");
+        assert_eq!(body["promptOverride"], true, "the echo says it is an override");
+        assert_eq!(body["persisted"], true);
+
+        // GET agrees, and the durable form holds the prompt under the NAME key.
+        let listed = experts_body(state.clone()).await;
+        assert_eq!(
+            expert_by_id(&listed, "security")["prompt"],
+            "You are the SOC lead; flag every auth flaw."
+        );
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored.get("Security").and_then(|o| o.prompt.as_deref()),
+            Some("You are the SOC lead; flag every auth flaw."),
+            "the prompt is persisted with the other override fields"
+        );
+
+        // The running config and the review-side snapshot both carry it.
+        assert_eq!(
+            effective_experts(&state)["Security"].prompt.as_deref(),
+            Some("You are the SOC lead; flag every auth flaw.")
+        );
+        assert_eq!(
+            state
+                .expert_overrides_snapshot()
+                .get("Security")
+                .and_then(|o| o.prompt.as_deref()),
+            Some("You are the SOC lead; flag every auth flaw.")
+        );
+
+        // A restart (fresh state, same store) replays the prompt override.
+        let restarted = expert_state_with_db(Some(db.clone()));
+        let applied = crate::server::api::config::persist::load_and_apply_expert_overrides(&restarted, &db).await;
+        assert_eq!(applied, 1);
+        assert_eq!(
+            effective_experts(&restarted)["Security"].prompt.as_deref(),
+            Some("You are the SOC lead; flag every auth flaw."),
+            "the prompt edit survived the restart"
+        );
+    }
+
+    /// A prompt beyond [`MAX_EXPERT_PROMPT_CHARS`] is rejected with 422 at the
+    /// boundary — the status the weight validation uses — and nothing is
+    /// stored or applied. The boundary length itself is accepted.
+    #[tokio::test]
+    async fn update_expert_rejects_an_over_length_prompt() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+
+        let max = crate::config::MAX_EXPERT_PROMPT_CHARS;
+        let over = put_expert_prompt(&state, "security", None, None, Some("x".repeat(max + 1))).await;
+        assert_eq!(
+            over.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a prompt over the maximum must be refused"
+        );
+        let body = body_json(over).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("at most 20000 characters"),
+            "the error must state the limit: {body}"
+        );
+
+        // Nothing was stored and nothing was applied.
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .unwrap();
+        assert!(stored.is_empty(), "a rejected prompt must not be stored");
+        assert!(state.expert_overrides_snapshot().is_empty());
+        assert_eq!(
+            effective_experts(&state)["Security"].prompt.as_deref(),
+            Some("Security Lead prompt"),
+            "the file prompt stands"
+        );
+
+        // The boundary itself is accepted.
+        let ok = put_expert_prompt(&state, "security", None, None, Some("y".repeat(max))).await;
+        assert_eq!(ok.status(), StatusCode::OK);
+        assert_eq!(body_json(ok).await["prompt"].as_str().unwrap().chars().count(), max);
+    }
+
+    /// An empty-string prompt CLEARS the override: the response and GET fall
+    /// back to the config-file / built-in default prompt, `promptOverride`
+    /// reads false again, and the persisted override no longer covers the
+    /// prompt (so a restart also restores the file value).
+    #[tokio::test]
+    async fn update_expert_clears_a_prompt_with_an_empty_string() {
+        let db = fresh_store().await;
+        let state = expert_state_with_db(Some(db.clone()));
+
+        assert_eq!(
+            put_expert_prompt(&state, "security", None, None, Some("override persona".to_string()),)
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        assert_eq!(
+            expert_by_id(&experts_body(state.clone()).await, "security")["promptOverride"],
+            true
+        );
+
+        // The clear: `""` removes the prompt override.
+        let resp = put_expert_prompt(&state, "security", None, None, Some(String::new())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(
+            body["prompt"], "Security Lead prompt",
+            "clearing restores the config-file prompt in the echo"
+        );
+        assert_eq!(body["promptOverride"], false, "no longer an override");
+
+        let listed = experts_body(state.clone()).await;
+        assert_eq!(
+            expert_by_id(&listed, "security")["prompt"],
+            "Security Lead prompt",
+            "GET agrees with the clear"
+        );
+        assert_eq!(expert_by_id(&listed, "security")["promptOverride"], false);
+
+        // The stored override no longer covers the prompt — the entry was
+        // prompt-only, so the clear empties the map — and a restart therefore
+        // also restores the file value.
+        let stored = crate::server::api::config::persist::load_expert_overrides(&db)
+            .await
+            .unwrap();
+        assert!(
+            stored.is_empty(),
+            "a prompt-only override that was cleared leaves nothing stored"
+        );
+        assert_eq!(
+            effective_experts(&state)["Security"].prompt.as_deref(),
+            Some("Security Lead prompt")
+        );
+
+        // A restart replays the emptied map: the file prompt is what serves.
+        let restarted = expert_state_with_db(Some(db.clone()));
+        crate::server::api::config::persist::load_and_apply_expert_overrides(&restarted, &db).await;
+        assert_eq!(
+            effective_experts(&restarted)["Security"].prompt.as_deref(),
+            Some("Security Lead prompt"),
+            "the clear survives the restart"
+        );
     }
 
     /// A body with no field (`{}`) expresses no change: it must not invent an

@@ -610,7 +610,15 @@ export default {
       weight: 'Poids :',
       toggleAria: 'Activer/désactiver {name}',
       description: 'Description',
-      promptPreview: 'Aperçu du prompt',
+      prompt: 'Prompt',
+      promptSave: 'Enregistrer',
+      promptSaving: 'Enregistrement…',
+      promptSaved: 'Enregistré',
+      promptSaveFailed: 'Échec de l’enregistrement du prompt. Votre modification a été annulée.',
+      promptSourceConfig:
+        'Ce prompt provient du fichier de configuration / de la valeur par défaut intégrée. L’enregistrer ici applique un remplacement pour cet expert.',
+      promptSourceOverride:
+        'Ce prompt est un remplacement WebUI qui prime sur le fichier de configuration. Enregistrer un prompt vide rétablit la valeur par défaut.',
       lastReviews: '5 dernières revues',
       score: 'Score',
       date: 'Date',

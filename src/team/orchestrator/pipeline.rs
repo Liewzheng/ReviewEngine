@@ -696,7 +696,7 @@ pub(crate) async fn run_experts_inner(
     // `risk_level` / `consensus_reached` stay that way by design (D2/RENG-73),
     // while `tl_dr` / `unverified` are re-derived after adjudication.
     let coverage_ledger = build_coverage_ledger(&diff_files, &reports);
-    let mut consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger));
+    let mut consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger), experts);
 
     // Final adjudication pass (false-positive reduction, phase 3): the
     // lead-model LLM re-examines each consolidated finding at or above

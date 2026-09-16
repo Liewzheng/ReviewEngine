@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 
 use crate::models::*;
-use crate::team::lead_consolidator::{ConsolidatedReport, ConsolidatorConfig, FileCoverage};
+use crate::team::lead_consolidator::{ConsolidatedReport, ConsolidatorConfig, ExpertWeights, FileCoverage};
 use crate::team::verifier::DroppedFinding;
 
 /// Run lead consolidation over the validated expert findings.
@@ -12,16 +12,28 @@ use crate::team::verifier::DroppedFinding;
 /// diff-file `coverage` is threaded in so the score is capped when files
 /// were not reviewed by any expert (anti-cheat: under-coverage must never
 /// inflate the score).
+///
+/// `experts` supplies the configured expert weights (RENG-92): each expert's
+/// `config.weight` moves its share of the overall score. Only experts with a
+/// positive configured weight participate — an expert without one (weight 0)
+/// falls back to equal weighting in the consolidator.
 pub(super) fn build_consolidated_report(
     reports: &[ExpertReport],
     config: &AppConfig,
     coverage: &FileCoverage,
     ledger: Option<&crate::coverage::CoverageLedger>,
+    experts: &[ExpertDef],
 ) -> ConsolidatedReport {
+    let expert_weights: ExpertWeights = experts
+        .iter()
+        .filter(|e| e.config.weight > 0)
+        .map(|e| (e.name.clone(), e.config.weight))
+        .collect();
     ConsolidatorConfig {
         min_confidence: config.report.min_confidence,
         drop_low_confidence: config.report.drop_low_confidence,
         scoring: Some(config.scoring.clone()),
+        expert_weights,
         ..Default::default()
     }
     .consolidate_with_coverage(reports, None, coverage, ledger)

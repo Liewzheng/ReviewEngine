@@ -126,6 +126,7 @@ fn test_filter_low_confidence_drops() {
         drop_low_confidence: true,
         deduplicate: true,
         scoring: None,
+        expert_weights: ExpertWeights::new(),
     };
     let findings = vec![
         make_finding(Severity::High, 4, "b.rs", Some(2), "Low conf"),
@@ -591,4 +592,75 @@ fn test_refresh_assessment_after_full_removal() {
         "coverage banner must survive the refresh, got: {tl_dr}"
     );
     assert_tldr_counts_match(&consolidated.findings, tl_dr);
+}
+
+// ─── RENG-92: configured expert weights drive the overall score ───
+
+/// Two reports scored with equal weights vs a configured mapping favouring the
+/// worse expert must land on different totals, and the weighted total must
+/// match a hand computation. (alice: Critical → 67; bob: Medium → 91.)
+fn two_weighted_reports() -> Vec<ExpertReport> {
+    vec![
+        make_report(
+            "alice",
+            vec![make_finding(Severity::Critical, 8, "a.rs", Some(1), "alice issue")],
+        ),
+        make_report(
+            "bob",
+            vec![make_finding(Severity::Medium, 8, "b.rs", Some(2), "bob issue")],
+        ),
+    ]
+}
+
+#[test]
+fn test_weighted_overall_score_uses_configured_weights() {
+    let reports = two_weighted_reports();
+
+    let equal = ConsolidatorConfig::default().consolidate(&reports, None);
+    assert_eq!(equal.assessment.score, 79, "equal weights: (67*0.5 + 91*0.5)");
+
+    let mut weights = ExpertWeights::new();
+    weights.insert("alice".to_string(), 90);
+    weights.insert("bob".to_string(), 10);
+    let weighted = ConsolidatorConfig {
+        expert_weights: weights,
+        ..Default::default()
+    }
+    .consolidate(&reports, None);
+    assert_eq!(
+        weighted.assessment.score, 69,
+        "favouring the worse expert must change the total: (67*0.9 + 91*0.1)"
+    );
+    assert_ne!(weighted.assessment.score, equal.assessment.score);
+}
+
+#[test]
+fn test_weighted_overall_score_mixed_configured_and_fallback() {
+    // bob has no configured weight → falls back to equal weighting (100/2 = 50).
+    let reports = two_weighted_reports();
+    let mut weights = ExpertWeights::new();
+    weights.insert("alice".to_string(), 90);
+    let config = ConsolidatorConfig {
+        expert_weights: weights,
+        ..Default::default()
+    };
+    let result = config.consolidate(&reports, None);
+    assert_eq!(result.assessment.score, 76); // (67*90 + 91*50) / 140
+}
+
+#[test]
+fn test_weighted_overall_score_empty_mapping_equals_legacy() {
+    // An empty mapping must reproduce the pre-RENG-92 equal-weight behaviour
+    // exactly — the contract for every call site that does not thread weights.
+    let reports = two_weighted_reports();
+    let with_map = ConsolidatorConfig {
+        expert_weights: ExpertWeights::new(),
+        ..Default::default()
+    };
+    let defaulted = ConsolidatorConfig::default();
+    assert_eq!(
+        with_map.consolidate(&reports, None).assessment.score,
+        defaulted.consolidate(&reports, None).assessment.score
+    );
+    assert_eq!(with_map.consolidate(&reports, None).assessment.score, 79);
 }

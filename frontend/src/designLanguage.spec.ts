@@ -598,5 +598,42 @@ describe('RENG-83 — the duplicate dialog', () => {
     const dialog = source('components/Config/ProviderEditDialog.vue');
     expect(dialog).toContain('duplicateUnchanged(duplicateSnapshot.value, submitted)');
     expect(dialog).toContain('DUPLICATE_UNCHANGED_KEY');
+ * RENG-87 — the KPI strip on the LLM Status page: it fills the row it sits in,
+ * its numbers are legible, and its labels are readable in every locale.
+ *
+ * All three are stylesheet facts, so they are pinned here the way the rest of
+ * the design language is. The HTML side (which card shows what, and which
+ * label resolves) lives in `views/LlmStatus.spec.ts`.
+ */
+describe('RENG-87 — the KPI strip', () => {
+  it('stretches the cards across the row instead of reserving an empty column', () => {
+    // Comments are stripped first: the rule's own note names the value it
+    // replaced, and a `not.toContain` would trip over it.
+    const row = rule(read('src/views/LlmStatus.vue'), '.stats-row').replace(/\/\*[\s\S]*?\*\//g, ' ');
+    // `auto-fill` sized the row by the tracks that FIT: with room for eight, the
+    // seven KPIs stopped one 164px column short of the right edge, while the
+    // provider grid and the recent-usage panel below both spanned it.
+    expect(row).toContain('grid-template-columns: repeat(auto-fit, minmax(160px, 1fr))');
+    expect(row).not.toContain('auto-fill');
+  });
+
+  it('asks the mono face for a weight it actually ships', () => {
+    const value = rule(read('src/views/LlmStatus.vue'), '.stat-value');
+    // `index.html` loads JetBrains Mono at 400 and 500 only. A 600 value is
+    // therefore synthesised, and faux bold thickens the strokes until the
+    // dotted zero's counter closes — the offline card's `0` read as a solid
+    // vertical dash at 28px.
+    expect(value).toContain('font-weight: 500');
+    expect(value).not.toContain('font-weight: 600');
+  });
+
+  it('gives every label two lines, reserved in all seven cards alike', () => {
+    const label = rule(read('src/views/LlmStatus.vue'), '.stat-label');
+    expect(label).toContain('-webkit-line-clamp: 2');
+    // Reserved in EVERY card, not only the long ones: an unpadded card would
+    // centre its shorter content and step out of line with its neighbours.
+    expect(label).toContain('min-height: 30px');
+    // One line is no longer the rule — it is what trimmed `已记录使用（过…`.
+    expect(label).not.toContain('white-space: nowrap');
   });
 });

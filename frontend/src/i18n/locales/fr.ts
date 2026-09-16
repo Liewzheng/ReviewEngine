@@ -514,6 +514,7 @@ export default {
       avgTtfb: 'Latence comm. moy.',
       avgTtfbWindow: 'Latence comm. moy. ({days} derniers jours)',
       avgCommLatency: 'Latence comm. moy.',
+      avgCommLatencyWindow: 'Latence comm. moy. ({days} derniers jours)',
       totalRequests: 'Utilisations totales',
       totalRequestsWindow: 'Utilisations enregistrées ({days} derniers jours)',
     },

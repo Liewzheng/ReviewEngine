@@ -21,6 +21,7 @@ import {
   matchProbeMessages,
   stripLatency,
   type ProviderDialogMode,
+  stripLatencyLabelKeys,
 } from '../components/Config/providerCardState'
 
 /* ------------------------------------------------------------------ */
@@ -54,11 +55,11 @@ const stripReading = computed(() => stripLatency(providers.value))
 
 const avgLatency = computed(() => stripReading.value.ms)
 
-/** The measurement the strip's number covers, named by the same rule the mean
- *  was taken with. */
-const latencyStatKey = computed(() =>
-  stripReading.value.source === 'probe' ? 'llm.stats.avgCommLatency' : 'llm.stats.avgLatency'
-)
+/** The labels for the strip's number — the measurement and the same name over
+ *  the window — named by the same rule the mean was taken with. Both keys come
+ *  from the reading, so the strip can no longer ask for one no locale has
+ *  (RENG-87). */
+const latencyLabels = computed(() => stripLatencyLabelKeys(stripReading.value.source))
 
 /** The compact single token the KPI face shows, so the value can never wrap
  *  the strip onto a second line (RENG-77). */
@@ -66,7 +67,9 @@ const avgLatencyText = computed(() => formatLatency(avgLatency.value))
 
 /** The same number as the server measured it, for the hover tooltip. */
 const avgLatencyTooltip = computed(() =>
-  avgLatency.value === null ? t(latencyStatKey.value) : `${t(latencyStatKey.value)} · ${avgLatency.value} ms`
+  avgLatency.value === null
+    ? t(latencyLabels.value.label)
+    : `${t(latencyLabels.value.label)} · ${avgLatency.value} ms`
 )
 
 /** RENG-56: usage window the per-provider numbers cover; null when the
@@ -392,8 +395,8 @@ onUnmounted(() => {
             </el-tooltip>
             <div class="stat-label">
               {{ latencyWindowDays === null
-                ? $t(latencyStatKey)
-                : $t(`${latencyStatKey}Window`, { days: latencyWindowDays }) }}
+                ? $t(latencyLabels.label)
+                : $t(latencyLabels.window, { days: latencyWindowDays }) }}
             </div>
           </div>
         </div>
@@ -514,7 +517,13 @@ onUnmounted(() => {
 /* Stats Row */
 .stats-row {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  /* RENG-87: `auto-fill` sized the row by the tracks that FIT, not by the
+     cards in it — seven KPIs left one 164px track empty and the row stopped
+     ~12% short of the container's right edge, next to a provider grid and a
+     recent-usage panel that both span it. `auto-fit` collapses those empty
+     tracks, so the cards stretch to fill the row (and wrap at the same
+     breakpoints as before on a narrow viewport). */
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: var(--space-3);
   margin-bottom: var(--space-5);
 }
@@ -542,11 +551,16 @@ onUnmounted(() => {
 /* RENG-77: one line, always. `17696 ms` wrapped onto a second line inside the
    160px column and took the whole KPI strip out of alignment; the value is a
    single compact token now (`17.7s`), and anything longer than the column
-   still never wraps — it trims, with the exact measurement in the tooltip. */
+   still never wraps — it trims, with the exact measurement in the tooltip.
+   RENG-87: weight 500, not 600. The page loads JetBrains Mono at 400 and 500
+   only, so 600 was synthesised by the browser — faux bold thickens the strokes
+   until the dotted zero's counter closes, and `0` (the offline count) read as
+   a solid vertical dash. 500 is a weight the face really has, and the zero is
+   a zero again. */
 .stat-value {
   font-family: var(--font-mono);
   font-size: 28px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text-primary);
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
@@ -559,13 +573,23 @@ onUnmounted(() => {
   color: var(--text-tertiary);
 }
 
+/* RENG-87: the window labels ("Recorded usages (last 7 days)", 已记录使用
+   （过去 7 天）) are longer than one card column, and trimming them to one line
+   cost the reader the window the number covers. Two lines are RESERVED in
+   every card — not just the long ones — so the values above them and the cards
+   themselves stay on one baseline whether or not a label wraps; a label too
+   long for two lines still trims rather than growing the strip. */
 .stat-label {
   font-size: 12px;
   color: var(--text-secondary);
   margin-top: 2px;
-  white-space: nowrap;
+  line-height: 1.25;
+  min-height: 30px;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
   overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
 /* LLM-not-configured banner sits below the stats row, above the cards */

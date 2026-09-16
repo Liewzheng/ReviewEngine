@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createEmptyProviderCard, type ProviderCardState } from '../../composables/llmPayload';
+import { createI18n } from 'vue-i18n';
+import type { ProviderCardState } from '../../composables/llmPayload';
 import en from '../../i18n/locales/en';
 import zhCN from '../../i18n/locales/zh-CN';
 import zhTW from '../../i18n/locales/zh-TW';
@@ -25,6 +27,7 @@ import {
   matchProbeMessages,
   statsRow,
   stripLatency,
+  stripLatencyLabelKeys,
   type CardHealth,
 } from './providerCardState';
 
@@ -582,5 +585,68 @@ describe('RENG-83 — the unchanged-copy prompt in every locale', () => {
     expect(message(zhCN, DUPLICATE_UNCHANGED_KEY)).toContain('已存在');
     expect(message(zhTW, DUPLICATE_UNCHANGED_KEY)).toContain('已存在');
     expect(message(fr, DUPLICATE_UNCHANGED_KEY)).toContain('existe déjà');
+ * RENG-87 — the KPI strip's label keys, resolved the way the strip resolves
+ * them.
+ *
+ * The strip labels its number with the measurement it averaged, and with the
+ * same name over the window the samples cover. RENG-78 gave the probe reading
+ * its own `llm.stats` label; the strip kept composing the window key as
+ * `${label}Window`, which named a message that existed for the recorded
+ * latency and for nothing else — so every probe reading printed
+ * `llm.stats.avgCommLatencyWindow` on the card, trimmed to `llm.stats.avgC…`.
+ *
+ * These assertions are the question the concatenation never asked: for EVERY
+ * reading the strip can take, and every locale the app ships, does the key
+ * come back as a translation? A missing one comes back as the key itself.
+ */
+describe('RENG-87 — the KPI strip’s label keys', () => {
+  const locales = { en, 'zh-CN': zhCN, 'zh-TW': zhTW, ja, ko, fr };
+
+  /** The sources `stripLatency` can return, plus the empty reading. */
+  const sources = ['probe', 'latency', null] as const;
+
+  it('names both of its keys and asks for nothing it has to build', () => {
+    for (const source of sources) {
+      const { label, window } = stripLatencyLabelKeys(source);
+      expect(label).toMatch(/^llm\.stats\./);
+      expect(window).toBe(`${label}Window`);
+    }
+    expect(stripLatencyLabelKeys('probe')).toEqual({
+      label: 'llm.stats.avgCommLatency',
+      window: 'llm.stats.avgCommLatencyWindow',
+    });
+    expect(stripLatencyLabelKeys('latency')).toEqual({
+      label: 'llm.stats.avgLatency',
+      window: 'llm.stats.avgLatencyWindow',
+    });
+    // The empty reading has no measurement to name: it labels as a latency.
+    expect(stripLatencyLabelKeys(null)).toEqual(stripLatencyLabelKeys('latency'));
+  });
+
+  it('resolves to a translation in all six locales, for every reading', () => {
+    for (const [name, messages] of Object.entries(locales)) {
+      const i18n = createI18n({ legacy: false, locale: name, messages: { [name]: messages } });
+      for (const source of sources) {
+        const { label, window } = stripLatencyLabelKeys(source);
+        for (const [key, params] of [
+          [label, {}],
+          [window, { days: 7 }],
+        ] as const) {
+          const text = i18n.global.t(key, params);
+          expect(text, `${name} has no message for ${key}`).not.toMatch(/^llm\./);
+          expect(text.length, `${name}: ${key} is empty`).toBeGreaterThan(0);
+        }
+        // The window label carries the window: `{days}` interpolates.
+        expect(i18n.global.t(window, { days: 7 }), `${name}: ${window}`).toContain('7');
+      }
+    }
+  });
+
+  it('says the same thing in both Chinese locales as the shipped wording', () => {
+    expect(zhCN.llm.stats.avgCommLatencyWindow).toBe('平均通信延迟（过去 {days} 天）');
+    expect(zhTW.llm.stats.avgCommLatencyWindow).toBe('平均通訊延遲（過去 {days} 天）');
+    // The window form is only the measurement plus its window — never a second
+    // name for the same number (the RENG-78 rule).
+    expect(zhCN.llm.stats.avgCommLatencyWindow.startsWith(zhCN.llm.stats.avgCommLatency)).toBe(true);
   });
 });

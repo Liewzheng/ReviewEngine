@@ -508,6 +508,7 @@ export default {
       avgTtfb: '평균 통신 지연',
       avgTtfbWindow: '평균 통신 지연(최근 {days}일)',
       avgCommLatency: '평균 통신 지연',
+      avgCommLatencyWindow: '평균 통신 지연(최근 {days}일)',
       totalRequests: '총 사용 횟수',
       totalRequestsWindow: '기록된 사용 횟수(최근 {days}일)',
     },

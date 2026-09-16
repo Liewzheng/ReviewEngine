@@ -3,7 +3,7 @@
 //! @module review-engine: CodeReview Board platform
 use crate::models::*;
 use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
-use crate::team::lead_consolidator::ConsolidatedReport;
+use crate::team::lead_consolidator::{ConsolidatedReport, ExpertWeights};
 
 /// How many characters of a raw LLM response to inline in the report before
 /// pointing at the full dump file. Keeps the report readable while making the
@@ -87,6 +87,11 @@ pub fn render_expert_section(report: &crate::models::ExpertReport) -> String {
 /// * `metrics` — Per-expert latency and token usage.
 /// * `errors` — Non-fatal errors encountered during review.
 /// * `scoring` — Optional scoring configuration for custom penalties and thresholds.
+/// * `weights` — Expert name → configured weight (RENG-92). Each report is
+///   scored with its expert's configured weight, falling back to equal
+///   weighting when absent, so the rendered total can never disagree with the
+///   consolidator's total for the same reports. `None`/empty reproduces the
+///   legacy equal-weight total exactly.
 ///
 /// # Returns
 /// A Markdown string containing the overall assessment, score table, findings grouped by severity, and any errors.
@@ -96,6 +101,7 @@ pub fn render_team_report_with_scoring(
     metrics: &[crate::team::ExpertMetrics],
     errors: &[String],
     scoring: Option<&ScoringConfig>,
+    weights: Option<&ExpertWeights>,
 ) -> String {
     let num_reviewers = metrics.len();
     let total_duration_ms: u64 = metrics.iter().map(|m| m.latency_ms).sum();
@@ -106,16 +112,17 @@ pub fn render_team_report_with_scoring(
         0
     };
 
+    // RENG-92: weight each report by its expert's configured weight when one is
+    // supplied, falling back to equal weighting — the same rule the lead
+    // consolidator applies, so both totals are computed from the same
+    // per-report weights and can never disagree.
+    let equal_weight = 100u8 / num_reviewers.max(1) as u8;
+    let weight_of = |name: &str| weights.and_then(|m| m.get(name).copied()).unwrap_or(equal_weight);
+
     // Compute overall score from findings
     let expert_findings: Vec<(&str, &[Finding], u8)> = reports
         .iter()
-        .map(|r| {
-            (
-                r.expert_name.as_str(),
-                r.findings.as_slice(),
-                100u8 / num_reviewers.max(1) as u8,
-            )
-        })
+        .map(|r| (r.expert_name.as_str(), r.findings.as_slice(), weight_of(&r.expert_name)))
         .collect();
 
     let (overall_score, risk_level) = match scoring {
@@ -176,7 +183,7 @@ pub fn render_team_report_with_scoring(
             Some(s) => crate::scoring::expert_score_with_config(&report.findings, &s.penalties),
             None => crate::scoring::expert_score(&report.findings),
         };
-        let weight = 100u8 / num_reviewers.max(1) as u8;
+        let weight = weight_of(&report.expert_name);
         let contribution = (score as f64 * weight as f64 / 100.0).round() as u8;
         out.push_str(&format!(
             "| {} | {} | {}% | {} |\n",
@@ -253,14 +260,15 @@ pub fn render_team_report_with_scoring(
     out
 }
 
-/// Backward-compatible wrapper that uses default scoring configuration.
+/// Backward-compatible wrapper that uses default scoring configuration and
+/// equal expert weights.
 pub fn render_team_report(
     team_name: &str,
     reports: &[crate::team::ExpertReport],
     metrics: &[crate::team::ExpertMetrics],
     errors: &[String],
 ) -> String {
-    render_team_report_with_scoring(team_name, reports, metrics, errors, None)
+    render_team_report_with_scoring(team_name, reports, metrics, errors, None, None)
 }
 
 /// Render an inclusive line range as `L` (single line) or `L-H`.

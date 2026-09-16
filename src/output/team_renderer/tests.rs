@@ -112,7 +112,8 @@ fn test_render_team_report_with_custom_scoring() {
             healthy_min: 95,
         },
     };
-    let report = render_team_report_with_scoring("CodeReview Board", &reports, &metrics, &[], Some(&custom_scoring));
+    let report =
+        render_team_report_with_scoring("CodeReview Board", &reports, &metrics, &[], Some(&custom_scoring), None);
     assert!(report.contains("CodeReview Board"));
     // custom critical penalty 50 with confidence factor 0.96 → score 48
     assert!(report.contains("| security | 48 | 100% | 48 |"));
@@ -140,7 +141,7 @@ fn test_render_team_report_backward_compatible() {
         tokens_used: 500,
     }];
     let report1 = render_team_report("Test", &reports, &metrics, &[]);
-    let report2 = render_team_report_with_scoring("Test", &reports, &metrics, &[], None);
+    let report2 = render_team_report_with_scoring("Test", &reports, &metrics, &[], None, None);
     assert_eq!(report1, report2);
 }
 
@@ -468,4 +469,69 @@ fn test_render_expert_section_raw_dump_path_referenced() {
     assert!(section.contains("/tmp/report.raw/security.1.response.txt"));
     // Not the full 1200 chars inline.
     assert!(!section.contains(&"x".repeat(1200)));
+}
+
+// ─── RENG-92: the rendered total agrees with the consolidator's total ───
+
+/// Extract the overall score from a rendered team report's assessment line
+/// ("Overall Score: **N/100**").
+fn parse_overall_score(md: &str) -> usize {
+    let marker = "Overall Score: **";
+    let start = md.find(marker).expect("report must carry an overall score") + marker.len();
+    let end = md[start..].find('/').expect("score ends at '/100'") + start;
+    md[start..end].parse().expect("score must be numeric")
+}
+
+/// The rendered markdown total for a weighted mapping must equal the lead
+/// consolidator's total for the same reports and weights — the two sites that
+/// score a review can never disagree.
+#[test]
+fn test_render_team_report_weighted_total_matches_consolidator() {
+    use crate::team::lead_consolidator::{ConsolidatorConfig, ExpertWeights};
+
+    let make_report = |name: &str, severity: Severity| ExpertReport {
+        expert_name: name.to_string(),
+        findings: vec![make_test_finding(severity, "src/main.rs")],
+        markdown: String::new(),
+        raw_llm_response: String::new(),
+        parse_error: None,
+        raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
+        llm_fp: None,
+    };
+    let reports = vec![
+        make_report("security", Severity::Critical),
+        make_report("docs", Severity::Medium),
+    ];
+    let metrics = vec![
+        ExpertMetrics {
+            name: "security".to_string(),
+            latency_ms: 1000,
+            tokens_used: 100,
+        },
+        ExpertMetrics {
+            name: "docs".to_string(),
+            latency_ms: 800,
+            tokens_used: 80,
+        },
+    ];
+    let mut weights = ExpertWeights::new();
+    weights.insert("security".to_string(), 90);
+    weights.insert("docs".to_string(), 10);
+
+    let rendered = render_team_report_with_scoring("Team", &reports, &metrics, &[], None, Some(&weights));
+    let rendered_total = parse_overall_score(&rendered);
+
+    let consolidated = ConsolidatorConfig {
+        expert_weights: weights,
+        ..Default::default()
+    }
+    .consolidate(&reports, None);
+    assert_eq!(rendered_total, consolidated.assessment.score as usize);
+    assert_eq!(rendered_total, 69, "(67*0.9 + 91*0.1)");
+
+    // The weight column shows the configured weights, not the legacy equal weight.
+    assert!(rendered.contains("| security | 67 | 90% |"), "got: {rendered}");
+    assert!(rendered.contains("| docs | 91 | 10% |"), "got: {rendered}");
 }

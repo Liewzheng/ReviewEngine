@@ -1,9 +1,17 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
 use crate::models::*;
 use crate::scoring::review;
+
+/// Expert name → configured scoring weight (RENG-92).
+///
+/// Threaded from the review's `[review_experts]` config into overall scoring so
+/// a configured weight actually moves the score. An expert with no entry (or a
+/// weight of 0) falls back to equal weighting, so an empty map reproduces the
+/// pre-RENG-92 behaviour exactly.
+pub type ExpertWeights = HashMap<String, u8>;
 
 /// Configuration for the lead consolidator.
 #[derive(Debug, Clone)]
@@ -16,6 +24,10 @@ pub struct ConsolidatorConfig {
     pub deduplicate: bool,
     /// Optional scoring configuration for custom penalties and thresholds.
     pub scoring: Option<ScoringConfig>,
+    /// Expert name → configured scoring weight, used when combining expert
+    /// scores into the overall assessment (RENG-92). Experts without an entry
+    /// fall back to equal weighting, so an empty map scores exactly as before.
+    pub expert_weights: ExpertWeights,
 }
 
 impl Default for ConsolidatorConfig {
@@ -25,6 +37,7 @@ impl Default for ConsolidatorConfig {
             drop_low_confidence: false,
             deduplicate: true,
             scoring: None,
+            expert_weights: ExpertWeights::new(),
         }
     }
 }
@@ -322,10 +335,19 @@ impl ConsolidatorConfig {
         if reports.is_empty() {
             return 100;
         }
-        let weight = 100 / reports.len() as u8;
+        // Each report is weighted by its expert's configured weight when one is
+        // set; otherwise it falls back to equal weighting, so a run without a
+        // mapping (or a report whose expert has no configured weight) scores
+        // exactly as it did before RENG-92. `compute_weighted` normalises by
+        // the weight sum, so the weights need not add up to 100 to be
+        // meaningful.
+        let equal_weight = 100 / reports.len() as u8;
         let data: Vec<(&str, &[Finding], u8)> = reports
             .iter()
-            .map(|r| (r.expert_name.as_str(), r.findings.as_slice(), weight))
+            .map(|r| {
+                let weight = self.expert_weights.get(&r.expert_name).copied().unwrap_or(equal_weight);
+                (r.expert_name.as_str(), r.findings.as_slice(), weight)
+            })
             .collect();
         match &self.scoring {
             Some(s) => {

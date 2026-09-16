@@ -68,7 +68,7 @@ fn test_build_consolidated_report_respects_min_confidence_drop() {
             make_finding(Severity::Medium, 10, "b.rs", Some(2), "confident finding"),
         ],
     )];
-    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None);
+    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None, &[]);
     assert_eq!(consolidated.low_confidence_removed, 1);
     assert_eq!(consolidated.findings.len(), 1);
     assert_eq!(consolidated.findings[0].title, "confident finding");
@@ -82,7 +82,7 @@ fn test_build_consolidated_report_downgrades_by_default() {
         "security",
         vec![make_finding(Severity::High, 4, "a.rs", Some(1), "shaky finding")],
     )];
-    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None);
+    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None, &[]);
     assert_eq!(consolidated.low_confidence_removed, 0);
     assert_eq!(consolidated.findings.len(), 1);
     // Downgraded one severity step: High → Medium
@@ -100,7 +100,7 @@ fn test_build_consolidated_report_detects_conflicts_and_scores() {
     f2.recommendation = "Use spaces".to_string();
     f2.expert_name = "bob".to_string();
     let reports = vec![make_report("alice", vec![f1]), make_report("bob", vec![f2])];
-    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None);
+    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), None, &[]);
     assert!(!consolidated.conflicts.is_empty());
     assert!(consolidated.assessment.score <= 100);
     assert!(!consolidated.assessment.tl_dr.is_empty());
@@ -223,7 +223,7 @@ fn test_build_consolidated_report_tldr_matches_findings() {
             make_finding(Severity::High, 4, "b.rs", Some(2), "Shaky high"),
         ],
     )];
-    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None);
+    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None, &[]);
     let tl_dr = &consolidated.assessment.tl_dr;
 
     assert_eq!(consolidated.findings.len(), 2);
@@ -426,4 +426,41 @@ fn coverage_ledger_merges_overlapping_touches_from_two_experts() {
     let mut by = target.touched_by.clone();
     by.sort();
     assert_eq!(by, vec!["q", "s"]);
+}
+
+// ─── RENG-92: [review_experts] weights flow into the consolidated score ───
+
+/// End-to-end wiring through the orchestrator's validation path: the `weight`
+/// field of the `[review_experts]` defs must reach `build_consolidated_report`
+/// and move the overall score (alice: Critical → 67, bob: Medium → 91).
+#[test]
+fn test_build_consolidated_report_uses_configured_weights() {
+    let mut config = test_config();
+    let toml_def = |weight: u8| ExpertTomlDef {
+        enabled: true,
+        role: "test role".to_string(),
+        weight,
+        ..Default::default()
+    };
+    config.review_experts.insert("alice".to_string(), toml_def(90));
+    config.review_experts.insert("bob".to_string(), toml_def(10));
+
+    let reports = vec![
+        make_report(
+            "alice",
+            vec![make_finding(Severity::Critical, 8, "a.rs", Some(1), "alice issue")],
+        ),
+        make_report(
+            "bob",
+            vec![make_finding(Severity::Medium, 8, "b.rs", Some(2), "bob issue")],
+        ),
+    ];
+    let experts = config.build_expert_defs();
+    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None, &experts);
+    assert_eq!(consolidated.assessment.score, 69, "(67*0.9 + 91*0.1)");
+
+    // The map-less path (no weights) is unchanged, and an expert without a
+    // positive configured weight falls back to it.
+    let no_weights = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None, &[]);
+    assert_eq!(no_weights.assessment.score, 79, "equal weights: (67*0.5 + 91*0.5)");
 }

@@ -155,18 +155,55 @@ pub fn find_git_platform_for_url_strict<'a>(
 /// the first entry (config order) whose `base_url` OR configured
 /// `internal_base_url` matches it — see [`GitPlatformConfig::matches_review_url`].
 ///
+/// Strict `host[:port]` first, then a host-only port fold (RENG-90): when no
+/// entry matches strictly, an entry whose configured host — `base_url`, or
+/// `internal_base_url` when set — equals the URL's host (port ignored) wins,
+/// provided EXACTLY ONE entry carries that host; zero or multiple host
+/// matches (or an unparseable URL) yield `None` — never guess. A self-hosted
+/// instance is often reachable at a different port than its advertised
+/// `external_url` (e.g. GitLab behind an `https://host:8443` port mapping
+/// while the server is configured against `https://host` on 443), and a
+/// history row may carry either address, so the fold keeps the review path
+/// identifying the entry when the host alone is unambiguous.
+///
+/// The fold is SAFE here although the same fold is deliberately forbidden for
+/// the strict outbound matcher [`find_git_platform_for_url_strict`]: a
+/// fold-matched entry is what the review is then RE-HOSTED onto
+/// (`route_gitlab_mr_url` → `rewrite_url_to_platform(url,
+/// review_base_url(platform))`, where `review_base_url` is `internal_base_url`
+/// when set else `base_url`), so a configured token still only ever flows to
+/// an address that entry itself configured; the fold decides WHICH entry, and
+/// only when the host is unambiguous. The outbound-strict path has no
+/// re-host — its matched entry's credentials are sent straight to the URL's
+/// own host:port — so folding the port there would widen where a configured
+/// token is sent.
+///
 /// Deliberately NOT [`find_git_platform_for_url`]: that is the INBOUND
-/// webhook matcher, whose host-only port fold and
-/// [`GitPlatformConfig::has_webhook_verification`] filter select which
-/// credentials may verify a payload. A token-only entry exists precisely to
-/// route REST `gitlab_mr` reviews, and a review URL is (re-)hosted onto the
-/// matched entry's own configured address, so neither the fold nor the
-/// verification filter applies here.
+/// webhook matcher, whose host-only fold additionally requires
+/// [`GitPlatformConfig::has_webhook_verification`] so only entries that can
+/// verify a payload may win it. A token-only entry exists precisely to route
+/// REST `gitlab_mr` reviews, and a review URL is (re-)hosted onto the matched
+/// entry's own configured address, so the verification filter does not apply
+/// here.
 pub fn find_git_platform_for_review_url<'a>(
     platforms: &'a [GitPlatformConfig],
     url: &str,
 ) -> Option<&'a GitPlatformConfig> {
-    platforms.iter().find(|p| p.matches_review_url(url))
+    if let Some(strict) = platforms.iter().find(|p| p.matches_review_url(url)) {
+        return Some(strict);
+    }
+    let target_host = host_port(url)?.0;
+    let mut host_matches = platforms.iter().filter(|p| {
+        let base_host = host_port(&p.base_url).is_some_and(|(host, _)| host == target_host);
+        let internal_host = !p.internal_base_url.is_empty()
+            && host_port(&p.internal_base_url).is_some_and(|(host, _)| host == target_host);
+        base_host || internal_host
+    });
+    let hit = host_matches.next()?;
+    if host_matches.next().is_some() {
+        return None;
+    }
+    Some(hit)
 }
 
 /// Normalise a URL to its scheme-less `(host, port)` identity.
@@ -182,7 +219,7 @@ pub fn find_git_platform_for_review_url<'a>(
 ///
 /// URLs without a host (or that fail to parse) yield `None` and simply
 /// never match.
-fn host_port(url: &str) -> Option<(String, Option<u16>)> {
+pub(crate) fn host_port(url: &str) -> Option<(String, Option<u16>)> {
     let parsed = reqwest::Url::parse(url.trim()).ok()?;
     let host = parsed.host_str()?.to_ascii_lowercase();
     let scheme_default_port = match parsed.scheme() {
@@ -310,6 +347,76 @@ mod tests {
         assert!(find_git_platform_for_review_url(&platforms, "http://localhost:8929/g/p").is_none());
         assert!(find_git_platform_for_review_url(&platforms, "not-a-url").is_none());
         assert!(find_git_platform_for_review_url(&[], "http://gitlab.internal:8929/g/p").is_none());
+    }
+
+    /// RENG-90: the regression the whole change exists for — the NAS shape
+    /// where the entry is configured port-less (`https://gitlab.islet.space`,
+    /// no `internal_base_url`) while the review URL carries GitLab's own
+    /// `external_url` port (`:8443`). The host-only fold identifies the entry
+    /// and the rerun resolves its token instead of answering 400.
+    #[test]
+    fn find_platform_for_review_url_folds_unique_host_port() {
+        let platforms = vec![platform("https://gitlab.islet.space")];
+        let hit =
+            find_git_platform_for_review_url(&platforms, "https://gitlab.islet.space:8443/g/p/-/merge_requests/7");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+        // Reverse direction folds too: explicit-port platform, port-less URL.
+        let platforms = vec![platform("https://gitlab.islet.space:8443")];
+        let hit = find_git_platform_for_review_url(&platforms, "https://gitlab.islet.space/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+    }
+
+    #[test]
+    fn find_platform_for_review_url_ambiguous_host_fold_yields_none() {
+        // Two entries share the host with different ports: no strict match
+        // for :1234 and the host alone is ambiguous → None (never guess).
+        let platforms = vec![
+            platform("https://h:8443"),
+            GitPlatformConfig {
+                name: "second".to_string(),
+                ..platform("https://h:9443")
+            },
+        ];
+        assert!(find_git_platform_for_review_url(&platforms, "https://h:1234/g/p").is_none());
+    }
+
+    #[test]
+    fn find_platform_for_review_url_strict_wins_over_host_fold() {
+        let platforms = vec![
+            platform("https://h:8443"),
+            GitPlatformConfig {
+                name: "plain".to_string(),
+                ..platform("https://h")
+            },
+        ];
+        // Port matches exactly → strict hit, even though the host-only
+        // fallback would be ambiguous (two entries share the host).
+        let hit = find_git_platform_for_review_url(&platforms, "https://h:8443/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+        let hit = find_git_platform_for_review_url(&platforms, "https://h/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("plain"));
+    }
+
+    #[test]
+    fn find_platform_for_review_url_folds_through_internal_base_url_host() {
+        // A candidate found through `internal_base_url`'s host also qualifies:
+        // the fold checks both configured addresses, like the strict match.
+        let mut p = platform("https://public:8443");
+        p.internal_base_url = "https://internal".to_string();
+        let platforms = vec![p];
+        let hit = find_git_platform_for_review_url(&platforms, "https://internal:1234/g/p");
+        assert_eq!(hit.map(|p| p.name.as_str()), Some("testbed"));
+    }
+
+    #[test]
+    fn find_platform_for_review_url_non_matches_stay_none() {
+        let platforms = vec![platform("https://gitlab.islet.space")];
+        // Different host → no fold.
+        assert!(find_git_platform_for_review_url(&platforms, "https://elsewhere.example.com:8443/g/p").is_none());
+        // Unparseable URL → no fold.
+        assert!(find_git_platform_for_review_url(&platforms, "not-a-url").is_none());
+        // Empty slice → no fold.
+        assert!(find_git_platform_for_review_url(&[], "https://gitlab.islet.space:8443/g/p").is_none());
     }
 
     #[test]

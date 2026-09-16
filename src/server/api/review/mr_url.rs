@@ -15,11 +15,16 @@
 //!    `internal_base_url` has the URL's scheme-less `host[:port]` identity
 //!    (`GitPlatformConfig::matches_review_url`; host case-insensitive, an
 //!    explicitly written default port folded to absent, otherwise the port is
-//!    compared strictly). The review then fetches the URL re-hosted onto that
-//!    platform's review-time base: `internal_base_url` when set, else
-//!    `base_url`. First match in config order wins; a matched platform's
+//!    compared strictly). A URL whose host differs only in the port still
+//!    matches when the host identifies EXACTLY ONE configured entry (RENG-90,
+//!    the host-only fold in `find_git_platform_for_review_url`): a history row
+//!    can carry the `external_url`'s port (`https://host:8443`) while the
+//!    entry is configured port-less (or vice versa). The review then fetches
+//!    the URL re-hosted onto THAT entry's own review-time base:
+//!    `internal_base_url` when set, else `base_url` — a matched platform's
 //!    configured target is always trusted (so a GitLab the server really does
-//!    reach on a local address keeps working).
+//!    reach on a local address keeps working). First strict match in config
+//!    order wins over the fold.
 //! 2. **Unmatched local host** — no platform matched AND the URL host is a
 //!    well-known local address (`localhost`, any `127.0.0.0/8`, `0.0.0.0`,
 //!    `::1`, `::`). Inside a container those name the container itself, so the
@@ -142,6 +147,26 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "https://gitlab.islet.space/group/proj/-/merge_requests/2".to_string(),
+                platform: "nas".to_string(),
+            }
+        );
+    }
+
+    /// RENG-90: NAS shape where the entry is configured with the PORT-LESS
+    /// base (`https://gitlab.islet.space`) and the submitted URL carries the
+    /// `external_url`'s `:8443`. The unique-host fold matches and the review
+    /// is re-hosted onto the entry's own configured (port-less) base.
+    #[test]
+    fn matched_platform_folds_unique_host_port_onto_configured_base() {
+        let platforms = vec![platform("nas", "https://gitlab.islet.space", "")];
+        assert_eq!(
+            route_gitlab_mr_url(
+                &platforms,
+                "https://gitlab.islet.space:8443/group/proj/-/merge_requests/7"
+            )
+            .unwrap(),
+            MrUrlRoute::Rewritten {
+                url: "https://gitlab.islet.space/group/proj/-/merge_requests/7".to_string(),
                 platform: "nas".to_string(),
             }
         );

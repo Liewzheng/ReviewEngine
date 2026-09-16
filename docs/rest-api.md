@@ -80,7 +80,9 @@ related:
 > 同一请求可同时携带两者（注意区分：`/webhook/gitlab` 入站回调上的同名头承载的是 webhook
 > secret，与此处含义不同，两者互不影响）。请求头缺失时，服务端回退使用服务器侧已配置的
 > GitLab token（优先 Web UI **Git 平台** 条目 / `ui-state.toml`，按 MR URL 的 `host[:port]`
-> 匹配该条目的 `base_url` 或已配置的 `internal_base_url`；`--gitlab-token` /
+> 匹配该条目的 `base_url` 或已配置的 `internal_base_url`；RENG-90 起，当无严格匹配时，URL 的主机若
+> 唯一指向某个条目（端口不同也行）同样命中该条目——历史行里保存的 `external_url` 端口与条目配置的
+> 无端口 `baseUrl` 因此也能对上；`--gitlab-token` /
 > `GITLAB_TOKEN` 已降级为 fallback-only，仅在服务器侧无该值时生效并打 deprecation 警告）；都缺失时
 > 返回 `400`。token 永远不会在响应或日志中返回（遵循 `***` 掩码约定，见 §3）。
 > `llm_configs` 中的 `api_key` 同属敏感字段：只允许经 §7 已认证的 `/api/v1` 通道提交，
@@ -122,7 +124,7 @@ Response 202:
 
 手动提交的 `source.url` 通常是调用方浏览器能打开的地址（即 GitLab 的 `external_url`），而 review-engine 自己（常常跑在容器里）未必能访问它——容器内的 `localhost` 指向容器自身。webhook 路径早已按「匹配到的 Git 平台」把 payload URL 改写到可达地址（见 `docs/integrations/gitlab.md` 的 Internal URL 一节）；REST 提交路径自 0.10.15 起遵循同一套规则、复用同一个改写函数 `rewrite_url_to_platform`：
 
-1. **主机匹配**：把提交 URL 的 `host[:port]` 身份（scheme 不参与、host 大小写不敏感、显式写出的默认端口 80/443 折叠为「未写」、其余端口严格比对）与每个 Git 平台条目比对，命中其 `base_url` 或（已配置的）`internal_base_url` 即视为同一实例；按配置顺序取第一个命中项。URL 的路径、查询串、尾部 `/` 都不参与匹配。
+1. **主机匹配**：把提交 URL 的 `host[:port]` 身份（scheme 不参与、host 大小写不敏感、显式写出的默认端口 80/443 折叠为「未写」、其余端口严格比对）与每个 Git 平台条目比对，命中其 `base_url` 或（已配置的）`internal_base_url` 即视为同一实例；按配置顺序取第一个命中项。URL 的路径、查询串、尾部 `/` 都不参与匹配。RENG-90 起，无严格命中时还有一次 **主机折叠**：URL 的主机（忽略端口）恰好对应**唯一一个**条目的已配置主机（`base_url` 或 `internal_base_url`）时也视为命中——历史行里保存的 MR URL 常带 GitLab `external_url` 的端口（如 `https://host:8443`）而条目配置的是无端口的 `baseUrl`（或反之），这类对不上的地址同样能路由到自己的平台；主机对应零个或两个以上条目（或 URL 无法解析）时不命中，绝不猜测。
 2. **改写**：命中后，提交 URL 的路径与查询串被重新挂到该平台的可达地址（`internal_base_url`，未配置则 `base_url`）。改写后的 URL 既是异步评审实际抓取的地址，也是任务记录里保存的 MR URL（`GET /api/v1/reviews/:task_id` 的 `gitlabMrUrl` 因此始终是「实际抓取的那个地址」）；调用方提交的原始 URL 不入库，仅在服务端日志中与命中的平台名一起记录一次。
 3. **未命中且为本地地址**：没有任何平台命中、且 URL 主机是众所周知的本地地址（`localhost`、`*.localhost`、任意 `127.0.0.0/8`、`0.0.0.0`、`::1`、`::`）时，**在入队之前**以 `400` 拒绝。这类地址在容器内指向容器自身，放行只会得到一个晚到的、含义不明的 `Failed to send GET`：
 

@@ -173,10 +173,13 @@ fn resolve_gitlab_credential(
     resolve::resolve_gitlab_token(header, Some(url.as_str()), &platforms)
         .map(Some)
         .ok_or_else(|| {
-            (
-                StatusCode::BAD_REQUEST,
-                "gitlab token required for gitlab_mr reviews: pass the X-Gitlab-Token request header or configure a server-side GitLab token".to_string(),
-            )
+            let message = match crate::models::host_port(url.as_str()).map(|(host, _)| host) {
+                Some(host) => format!(
+                    "gitlab token required for gitlab_mr reviews: pass the X-Gitlab-Token request header, configure a git platform for this host `{host}` (baseUrl / internalBaseUrl on the Configuration page), or configure a server-side GitLab token"
+                ),
+                None => "gitlab token required for gitlab_mr reviews: pass the X-Gitlab-Token request header, configure a git platform for this host (baseUrl / internalBaseUrl on the Configuration page), or configure a server-side GitLab token".to_string(),
+            };
+            (StatusCode::BAD_REQUEST, message)
         })
 }
 

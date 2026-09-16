@@ -20,7 +20,7 @@ use std::sync::Arc;
 use crate::server::AppState;
 
 pub(crate) use self::handlers::resolve_history_entry;
-pub(crate) use self::task::{task_status_str, task_to_status};
+pub(crate) use self::task::{mr_url_request_json, task_status_str, task_to_status};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()

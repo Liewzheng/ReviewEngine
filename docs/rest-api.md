@@ -297,6 +297,8 @@ Response 400: { "error": "task not found or cannot be cancelled" }
 
 用原任务的请求参数（source / config / llm_configs / webhook）重新创建任务并排入队列，返回新任务 id；原任务记录不变。
 
+**请求参数的来源（RENG-88）**：优先用 `reviews.request` 里保存的原样请求。webhook（GitLab MR / GitHub PR）触发的评审同样保存该列——落库内容是 REST 提交可接受的同一形状 `{"source":{"type":"gitlab_mr","url":"<评审实际抓取的 MR URL>"}}`（URL 为 webhook 重写后、服务器真正抓取的那个地址；凭证不在其中）。若某条记录没有 `request`（RENG-88 之前由 webhook 写下的历史行），则回退到该行的 `source_meta.gitlab_mr_url`，据其重建一个最小可回放请求；只有该 URL 是 **GitLab MR URL** 时回退成立（REST 的 MR 源只有 `gitlab_mr` 一种，GitHub PR 评审只走 webhook 通道，其凭证在 webhook handler 上、不在 REST 侧），其余情况维持 409 并指明是哪一半不可用。
+
 存储的请求参数不含 GitLab token（凭证走 `X-Gitlab-Token` 请求头，不随请求参数落存储）；rerun 时按同一凭证传输规则重新解析——调用方可重新携带该头，否则回退服务器侧已配置的 GitLab token。
 
 ```
@@ -307,13 +309,14 @@ Response 202:
 
 Response 404: { "error": "task not found" }
 Response 409: { "error": "task is still running" }
-Response 409: { "error": "original request parameters are not available" }
+Response 409: { "error": "original request parameters are not available and the record's source metadata carries no MR URL" }
+Response 409: { "error": "original request parameters are not available and the record's source metadata is not replayable: `<url>` is not a GitLab merge request URL, …" }
 Response 422: { "error": "stored request parameters are not replayable" }
 ```
 
 - `404`：任务不存在
 - `409`：任务仍处于 `pending` / `running`
-- `409`：原任务未保存请求参数（不可回放）
+- `409`：既没有保存的请求参数，`source_meta` 里也没有可回放的 MR URL——错误文本以 `original request parameters are not available` 开头，并说明缺的是请求参数还是源 URL（后者会点名该 URL，例如 GitHub PR 评审）
 - `422`：保存的请求参数无法反序列化为 `ReviewRequest`（参数不可回放）
 
 #### Webhook 回调 URL 校验（SSRF 防护）

@@ -767,8 +767,29 @@ impl TaskStore {
 ///
 /// Webhook-dispatched reviews call this after the dispatcher has accepted the
 /// URL+SHA pair, so each actually-started review records exactly one entry.
+///
+/// The entry carries no request parameters, so it can never be re-run — use
+/// [`record_task_started_with_request`] whenever a replayable request exists
+/// (RENG-88: the GitLab and GitHub webhook paths both have one).
 pub async fn record_task_started(store: &TaskStore, meta: SourceMeta) -> Uuid {
-    let task_id = store.create(Some(meta)).await;
+    record_task_started_with_request(store, meta, None).await
+}
+
+/// [`record_task_started`] plus the serialized request parameters the review is
+/// running with (`reviews.request`), so the very same review can be re-run
+/// through `POST /reviews/{task_id}/rerun` later.
+///
+/// `request` must be the `ReviewRequest` JSON shape the REST path persists —
+/// anything else leaves the record un-replayable, which is why the webhook
+/// paths build it with `crate::server::api::review::mr_url_request_json`
+/// (RENG-88: before this, webhook-dispatched reviews stored no request at all
+/// and every one of them answered 409 on 「重新评审」).
+pub async fn record_task_started_with_request(
+    store: &TaskStore,
+    meta: SourceMeta,
+    request: Option<serde_json::Value>,
+) -> Uuid {
+    let task_id = store.create_with_request(Some(meta), request).await;
     store.start(task_id).await;
     task_id
 }

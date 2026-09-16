@@ -567,3 +567,36 @@ describe('RENG-78 — the communication-latency label', () => {
     }
   });
 });
+
+/**
+ * RENG-83 — 「复制卡片」 opens the form on the source card, and a copy saved
+ * untouched is pointed out before it is written.
+ *
+ * The values themselves are pinned in `providerCardState.spec.ts` against
+ * `initialDialogForm`/`duplicateUnchanged`. What remains is binding them to the
+ * dialog: the bug was a mode branch INSIDE the open-watch, so extracting the
+ * pure function only fixes it while the watch actually calls it — a future
+ * `if (mode === 'edit')` reintroduced there would keep every value-level test
+ * green and bring the blank form back.
+ */
+describe('RENG-83 — the duplicate dialog', () => {
+  it('labels the unchanged-copy prompt in all six locales', () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr']) {
+      const file = source(`i18n/locales/${locale}.ts`);
+      expect(file, `${locale} is missing duplicateUnchanged`).toContain('duplicateUnchanged:');
+    }
+  });
+
+  it('opens the form from the extracted (mode, initial) function', () => {
+    const dialog = source('components/Config/ProviderEditDialog.vue');
+    expect(dialog).toContain('initialDialogForm(props.mode, props.initial)');
+    // The exact branch that discarded a duplicate's card, gone for good.
+    expect(dialog).not.toContain("props.mode === 'edit' && props.initial");
+  });
+
+  it('consults the unchanged-copy check before writing a duplicate', () => {
+    const dialog = source('components/Config/ProviderEditDialog.vue');
+    expect(dialog).toContain('duplicateUnchanged(duplicateSnapshot.value, submitted)');
+    expect(dialog).toContain('DUPLICATE_UNCHANGED_KEY');
+  });
+});

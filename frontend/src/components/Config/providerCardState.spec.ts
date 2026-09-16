@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ProviderCardState } from '../../composables/llmPayload';
+import { createEmptyProviderCard, type ProviderCardState } from '../../composables/llmPayload';
 import en from '../../i18n/locales/en';
 import zhCN from '../../i18n/locales/zh-CN';
 import zhTW from '../../i18n/locales/zh-TW';
@@ -10,12 +10,15 @@ import {
   cardAccent,
   dialogForDuplicate,
   dialogForEdit,
+  DUPLICATE_UNCHANGED_KEY,
+  duplicateUnchanged,
   cardFooter,
   cardVisualState,
   formatLatency,
   formatRequests,
   formatSuccessRate,
   formatUsagePercent,
+  initialDialogForm,
   latencyLabelKey,
   latencyReading,
   matchHealthToCards,
@@ -407,9 +410,11 @@ describe('context-menu dialog contract', () => {
     expect(open?.initial).not.toBe(cards[1]);
   });
 
-  it('duplicate opens the ADD form, pre-filled with the card and its key', () => {
+  it('duplicate opens its own mode, pre-filled with the card and its key', () => {
     const open = dialogForDuplicate(cards, 1);
-    expect(open?.mode).toBe('add');
+    // RENG-83: `duplicate`, never `add` — the dialog reset every `add` to a
+    // blank card, which discarded exactly these values.
+    expect(open?.mode).toBe('duplicate');
     expect(open?.initial).toEqual(cards[1]);
     expect(open?.initial.apiKey).toBe('***');
     // -1 = the save appends; the original card is left where it is.
@@ -419,5 +424,163 @@ describe('context-menu dialog contract', () => {
   it('reports nothing to open for an index that is not there', () => {
     expect(dialogForEdit(cards, 9)).toBeNull();
     expect(dialogForDuplicate(cards, -1)).toBeNull();
+  });
+});
+
+/**
+ * RENG-83 — 「复制卡片」 must open the form on the source card's values.
+ *
+ * The UAT bug lived in the dialog's open-watch, which only read `initial` in
+ * `edit` mode: a duplicate (then `mode: 'add'`) fell through to an empty card
+ * and the user re-typed every field, which is what made the action pointless.
+ * The watch itself runs after the dialog opens and this project has no DOM test
+ * environment, so the decision it now delegates to — which form a
+ * `(mode, initial)` pair produces — is pinned here as a pure function.
+ */
+describe('RENG-83 — the form a dialog opens with', () => {
+  it('pre-fills a duplicate with the source card’s values', () => {
+    const source = card('xiaomi', { defaultModel: 'xiaomi-v2.5' });
+    const open = dialogForDuplicate([source], 0);
+    expect(open).not.toBeNull();
+    const form = initialDialogForm(open!.mode, open!.initial);
+    // Everything the user would otherwise re-type, key field excepted.
+    expect(form).toMatchObject({ ...source, apiKey: '' });
+    // …and the form is a whole card, with no field of its own left over.
+    expect(Object.keys(form).sort()).toEqual(Object.keys(createEmptyProviderCard()).sort());
+  });
+
+  it('carries every advanced field, so editing one of them is enough', () => {
+    const source = card('xiaomi', {
+      defaultModel: 'xiaomi-v2.5',
+      maxTokens: 8192,
+      temperature: 0.1,
+      timeoutSeconds: 120,
+      retryAttempts: 5,
+      disableThinking: true,
+      disabled: true,
+    });
+    expect(initialDialogForm('duplicate', source)).toMatchObject({
+      provider: 'xiaomi',
+      apiBaseUrl: source.apiBaseUrl,
+      defaultModel: 'xiaomi-v2.5',
+      maxTokens: 8192,
+      temperature: 0.1,
+      timeoutSeconds: 120,
+      retryAttempts: 5,
+      disableThinking: true,
+      disabled: true,
+    });
+  });
+
+  it('opens the duplicate’s key field blank, never the echo’s mask', () => {
+    // The browser only ever sees `***`; the server resolves a blank key back to
+    // the stored one by the `(provider, api_base, model)` triple. The mask in a
+    // text input would read as a key the user typed (and a real key must never
+    // be displayed) — the dialog shows the "leave empty to keep" placeholder.
+    const source = card('xiaomi', { apiKey: '***' });
+    expect(initialDialogForm('duplicate', source).apiKey).toBe('');
+    expect(source.apiKey).toBe('***');
+  });
+
+  it('still opens a plain 「Add Provider」 empty, whatever card is handed in', () => {
+    // Regression: the add button must never inherit a card.
+    expect(initialDialogForm('add', card('xiaomi'))).toEqual(createEmptyProviderCard());
+    expect(initialDialogForm('add', null)).toEqual(createEmptyProviderCard());
+  });
+
+  it('leaves edit mode exactly as it was', () => {
+    const source = card('deepseek', { defaultModel: 'deepseek-v4-flash' });
+    expect(initialDialogForm('edit', source)).toMatchObject({ ...source, apiKey: '' });
+    // No card to edit (a stale index): empty rather than a half-built form.
+    expect(initialDialogForm('edit', null)).toEqual(createEmptyProviderCard());
+  });
+
+  it('fills the optional switches from the defaults for a card that omits them', () => {
+    // A payload written before `disabled`/`disableThinking` shipped has neither
+    // key; the form must show them off rather than keep a previous session's.
+    const legacy = {
+      provider: 'openai',
+      apiKey: '***',
+      apiBaseUrl: 'https://openai.example/v1',
+      defaultModel: 'gpt-4o',
+      maxTokens: 4096,
+      temperature: 0.7,
+      timeoutSeconds: 60,
+      retryAttempts: 3,
+    } as ProviderCardState;
+    const form = initialDialogForm('edit', legacy);
+    expect(form.disabled).toBe(false);
+    expect(form.disableThinking).toBe(false);
+  });
+});
+
+/**
+ * RENG-83 — the "you copied it and changed nothing" prompt.
+ *
+ * `duplicateUnchanged` is what the save consults before writing a second card
+ * identical to the first. It must fire on an untouched copy and stay quiet
+ * after any real edit — a false positive blocks nothing (the prompt allows the
+ * save) but nags on every duplicate, and a false negative ships the silent
+ * duplicate the requirement is about.
+ */
+describe('RENG-83 — detecting a copy that was not modified', () => {
+  const snapshot = initialDialogForm('duplicate', card('xiaomi', { defaultModel: 'xiaomi-v2.5' }));
+
+  it('fires when the form still holds what the dialog opened with', () => {
+    expect(duplicateUnchanged(snapshot, { ...snapshot })).toBe(true);
+    // A save submits trimmed strings, so trailing space is not a modification.
+    expect(duplicateUnchanged(snapshot, { ...snapshot, defaultModel: '  xiaomi-v2.5  ' })).toBe(true);
+  });
+
+  it('does not fire after a single field edit', () => {
+    const edits: Partial<ProviderCardState>[] = [
+      { defaultModel: 'xiaomi-v3' },
+      { apiBaseUrl: 'https://other.example/v1' },
+      { provider: 'deepseek' },
+      { maxTokens: 8192 },
+      { temperature: 0.2 },
+      { timeoutSeconds: 120 },
+      { retryAttempts: 4 },
+      { disabled: true },
+      { disableThinking: true },
+      // A key typed into the copy: the one field the client cannot pre-fill,
+      // and the one that makes two same-triple cards genuinely different.
+      { apiKey: 'sk-typed-by-hand' },
+    ];
+    for (const edit of edits) {
+      expect(duplicateUnchanged(snapshot, { ...snapshot, ...edit }), JSON.stringify(edit)).toBe(false);
+    }
+  });
+
+  it('treats an absent optional switch and an explicit false as the same card', () => {
+    // A card echoed before `disabled`/`disableThinking` shipped carries neither
+    // key; both readings mean the switches are off, so the copy is unchanged.
+    const withoutSwitches = { ...snapshot };
+    delete withoutSwitches.disabled;
+    delete withoutSwitches.disableThinking;
+    expect(duplicateUnchanged(snapshot, withoutSwitches)).toBe(true);
+  });
+});
+
+/** RENG-83 — the prompt the save raises, in the user's language. */
+describe('RENG-83 — the unchanged-copy prompt in every locale', () => {
+  const locales = { en, 'zh-CN': zhCN, 'zh-TW': zhTW, ja, ko, fr };
+
+  /** Resolve a dotted key path inside a locale object. */
+  function message(locale: object, path: string): string {
+    return path.split('.').reduce<unknown>((node, part) => (node as Record<string, unknown>)?.[part], locale) as string;
+  }
+
+  it('resolves the key the duplicate save raises, in all six locales', () => {
+    expect(DUPLICATE_UNCHANGED_KEY).toBe('config.providerCards.duplicateUnchanged');
+    for (const [name, messages] of Object.entries(locales)) {
+      expect(message(messages, DUPLICATE_UNCHANGED_KEY), `${name} is missing the key`).toBeTruthy();
+    }
+  });
+
+  it('says the card already exists, in the user’s own words', () => {
+    expect(message(zhCN, DUPLICATE_UNCHANGED_KEY)).toContain('已存在');
+    expect(message(zhTW, DUPLICATE_UNCHANGED_KEY)).toContain('已存在');
+    expect(message(fr, DUPLICATE_UNCHANGED_KEY)).toContain('existe déjà');
   });
 });

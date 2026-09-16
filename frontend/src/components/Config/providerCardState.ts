@@ -1,5 +1,9 @@
 import type { LlmProviderStatus } from '../../types/llm'
-import { duplicateCard as cloneCard, type ProviderCardState } from '../../composables/llmPayload'
+import {
+  createEmptyProviderCard,
+  duplicateCard as cloneCard,
+  type ProviderCardState,
+} from '../../composables/llmPayload'
 
 /** The runtime health entry a card is rendered from (`GET /llm/providers`). */
 export interface CardHealth {
@@ -315,9 +319,18 @@ export function matchProbeMessages<T extends { service: string; message?: string
   return cards.map((card) => byLabel.get(`${card.provider} ${card.defaultModel}`) ?? null)
 }
 
+/**
+ * The three ways the provider dialog opens.
+ *
+ * `add` starts from a blank card; `edit` from the card at `index` and saves
+ * back over it; `duplicate` (RENG-83) from a copy of the card at `index` and
+ * saves as a new card appended to the grid.
+ */
+export type ProviderDialogMode = 'add' | 'edit' | 'duplicate'
+
 /** What the add/edit dialog is opened with, and what a save then addresses. */
 export interface ProviderDialogOpen {
-  mode: 'add' | 'edit'
+  mode: ProviderDialogMode
   /** Card the form starts from. */
   initial: ProviderCardState
   /**
@@ -341,12 +354,18 @@ export function dialogForEdit(
 }
 
 /**
- * "复制卡片" — open the ADD form pre-filled with this card and a copy of its
- * API key, so the copy starts life as a real sibling. The key travels as the
- * `***` sentinel the echo carries (the secret never reaches the browser); the
- * server's masked-keep resolution turns it back into the original entry's
- * stored key while the triple still matches it, and an edit to the copy's
- * base URL or model is what makes it a distinct entry.
+ * "复制卡片" — open the form pre-filled with a copy of this card, so the copy
+ * starts life as a real sibling and the user only has to change the field that
+ * makes it different (RENG-83: the form used to open blank, which made the
+ * action pointless). The `'duplicate'` mode is what lets the dialog tell this
+ * apart from a plain 「添加供应商」, which must keep opening empty.
+ *
+ * The API key travels as the `***` sentinel the echo carries (the secret never
+ * reaches the browser); the server's masked-keep resolution turns it back into
+ * the original card's stored key while the triple still matches it. The dialog
+ * does not put the sentinel in the key input — it opens that field blank with
+ * the "leave empty to keep the saved key" placeholder, the shape edit mode has
+ * always had — see {@link initialDialogForm}.
  */
 export function dialogForDuplicate(
   cards: ProviderCardState[],
@@ -354,5 +373,77 @@ export function dialogForDuplicate(
 ): ProviderDialogOpen | null {
   const card = cards[index]
   if (!card) return null
-  return { mode: 'add', initial: cloneCard(card), index: -1 }
+  return { mode: 'duplicate', initial: cloneCard(card), index: -1 }
+}
+
+/**
+ * The form a dialog opens with (RENG-83).
+ *
+ * `edit` and `duplicate` both start from `initial`; the API key starts BLANK in
+ * both, because the browser never holds the secret. `GET /config` echoes the
+ * `***` mask instead, and the server resolves a blank (or masked) key back to a
+ * stored key by the `(provider, api_base, model)` triple — so an empty field is
+ * the accurate "keep the saved key", while the sentinel in a text input would
+ * read as a key the user typed. A duplicate edited into a DIFFERENT triple no
+ * longer matches a stored card, so the key is not kept (the server keeps
+ * nothing rather than guessing between two same-triple accounts); that is the
+ * same rule edit mode has always followed.
+ *
+ * `add` is the one mode that ignores `initial`: the 「添加供应商」 button can
+ * never inherit a card, however a caller passes one.
+ *
+ * Optional fields are filled from the empty card first, so a card that carries
+ * no `disabled`/`disableThinking` cannot leave a previous dialog session's
+ * switch state behind.
+ */
+export function initialDialogForm(
+  mode: ProviderDialogMode,
+  initial?: ProviderCardState | null,
+): ProviderCardState {
+  if (mode === 'add' || !initial) return createEmptyProviderCard()
+  return { ...createEmptyProviderCard(), ...initial, apiKey: '' }
+}
+
+/** i18n key of the "nothing was changed" prompt a duplicate save raises. */
+export const DUPLICATE_UNCHANGED_KEY = 'config.providerCards.duplicateUnchanged'
+
+/**
+ * True when a duplicate dialog's form still holds exactly the values it was
+ * opened with — the user copied a card and pressed save without touching it,
+ * which adds a second card identical to the first.
+ *
+ * This feeds a PROMPT, never a silent block or a silent refusal: the client's
+ * view of a card's identity stops at the `(provider, api_base, model)` triple,
+ * while RENG-75's real identity includes the API key it cannot see. Two
+ * same-triple cards are legitimate (one account, two keys), so the user gets
+ * the last word rather than the client deciding for them.
+ */
+export function duplicateUnchanged(
+  snapshot: ProviderCardState,
+  form: ProviderCardState,
+): boolean {
+  return cardSignature(snapshot) === cardSignature(form)
+}
+
+/**
+ * Every field of a card, in a fixed order, as one comparable string.
+ *
+ * Strings are compared TRIMMED because that is what a save submits — a stray
+ * space is not a modification. The optional booleans compare as `false` when
+ * absent, so a payload written before `disableThinking` shipped and one that
+ * carries an explicit `false` describe the same card.
+ */
+function cardSignature(card: ProviderCardState): string {
+  return [
+    card.provider.trim(),
+    card.apiKey.trim(),
+    card.apiBaseUrl.trim(),
+    card.defaultModel.trim(),
+    card.maxTokens,
+    card.temperature,
+    card.timeoutSeconds,
+    card.retryAttempts,
+    card.disabled ?? false,
+    card.disableThinking ?? false,
+  ].join('\u0000')
 }

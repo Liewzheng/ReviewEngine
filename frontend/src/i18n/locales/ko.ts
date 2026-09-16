@@ -387,6 +387,8 @@ export default {
       primaryBadge: '기본',
       chainPosition: '체인 #{n}',
       duplicate: '카드 복제',
+      duplicateUnchanged:
+        '변경된 내용이 없습니다 — 설정이 완전히 같은 카드가 이미 있습니다. 그래도 복사본을 만들까요?',
       enable: '사용',
       disable: '사용 중지',
       enabled: '"{name}" 공급자가 활성화되었습니다',

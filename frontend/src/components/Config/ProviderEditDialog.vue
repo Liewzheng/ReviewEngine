@@ -2,7 +2,7 @@
 import { computed, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { Connection, Plus } from '@element-plus/icons-vue'
-import type { FormInstance, FormRules } from 'element-plus'
+import { ElMessageBox, type FormInstance, type FormRules } from 'element-plus'
 import { PROVIDER_TYPES } from '../../types/llm'
 import type { TestResult } from '../../types/llm'
 import type { CatalogProvider } from '../../types/catalog'
@@ -12,13 +12,21 @@ import {
   createEmptyProviderCard,
   type ProviderCardState,
 } from '../../composables/llmPayload'
+import {
+  DUPLICATE_UNCHANGED_KEY,
+  duplicateUnchanged,
+  initialDialogForm,
+  type ProviderDialogMode,
+} from './providerCardState'
 
 const props = defineProps<{
   /** Dialog visibility (v-model:visible). */
   visible: boolean
-  /** Add a new provider or edit an existing card. */
-  mode: 'add' | 'edit'
-  /** The card being edited (edit mode only). */
+  /** Add a new provider, edit an existing card, or edit a copy of one before
+   *  saving it as a new card (RENG-83). */
+  mode: ProviderDialogMode
+  /** The card the form starts from: the one an edit replaces, or the one a
+   *  duplicate copies. Ignored by `add`, which always opens empty. */
   initial?: ProviderCardState | null
   /**
    * RENG-75: the provider NAME is a display label, not an identity — two
@@ -47,6 +55,11 @@ const dialogVisible = computed({
 const formRef = ref<FormInstance>()
 const form = reactive<ProviderCardState>(createEmptyProviderCard())
 
+/** RENG-83: the values a `duplicate` dialog opened with, so a save that
+ *  changed nothing can be pointed out before it is written. `null` in the other
+ *  two modes, which have nothing to compare against. */
+const duplicateSnapshot = ref<ProviderCardState | null>(null)
+
 // --- Provider type select (models.dev catalog with preset fallback) ---
 const { catalogProviders, catalogFailed, loadCatalogProviders } = useCatalog()
 const selectedCatalogProvider = ref<CatalogProvider | null>(null)
@@ -54,20 +67,26 @@ const selectedCatalogProvider = ref<CatalogProvider | null>(null)
 const catalogAvailable = computed(() => catalogProviders.value.length > 0)
 const presetProviderTypes = computed(() => PROVIDER_TYPES.filter((pt) => pt.value !== 'custom'))
 
-/** Edit mode only: the saved provider id may be absent from both the catalog
- *  and the preset list (e.g. a removed catalog entry like "xiaomi-mimo").
- *  The disabled select would then render the raw id as bare text, so inject
- *  it as a temporary option (label = id) to display a proper selected value. */
+/** `edit` and `duplicate` both pre-fill the type select: the card they start
+ *  from may name a provider that is absent from both the catalog and the
+ *  preset list (e.g. a removed catalog entry like "xiaomi-mimo"). The select
+ *  would then render the raw id as bare text, so inject it as a temporary
+ *  option (label = id) to display a proper selected value. `add` always starts
+ *  from `custom`, which is an option. */
 const currentProviderMissing = computed(() => {
-  if (props.mode !== 'edit' || !form.provider || form.provider === 'custom') return false
+  if (props.mode === 'add' || !form.provider || form.provider === 'custom') return false
   if (catalogAvailable.value) {
     return !catalogProviders.value.some((p) => p.id === form.provider)
   }
   return !presetProviderTypes.value.some((pt) => pt.value === form.provider)
 })
 
+/** A blank key means "keep the saved key" in every mode that pre-fills the
+ *  form — `edit` and `duplicate` alike (RENG-83): the browser only ever sees
+ *  the mask, and the server resolves the blank back to a stored key by the
+ *  card's triple. Only a genuinely new card needs a key typed in. */
 const apiKeyPlaceholder = computed(() => {
-  if (props.mode === 'edit') return t('config.providerCards.keepKeyPlaceholder')
+  if (props.mode !== 'add') return t('config.providerCards.keepKeyPlaceholder')
   return selectedCatalogProvider.value?.env?.[0] || t('config.providers.apiKeyPlaceholder')
 })
 
@@ -120,8 +139,11 @@ const rules = computed<FormRules>(() => ({
 }))
 
 /** True when a model fetch is worthwhile: a parseable base URL, and either a
- *  typed key or the edit-mode "keep" blank (which the backend resolves to
- *  the stored key for the same api_base). */
+ *  typed key or a pre-filled "keep" blank (which the server resolves to the
+ *  stored key for the same api_base). `duplicate` qualifies like `edit`: a
+ *  copied card has its base URL pre-filled and its key field blank, and the
+ *  dropdown is exactly what the user needs to pick the one field they are
+ *  changing. */
 function canFetchModels(): boolean {
   const base = form.apiBaseUrl.trim()
   if (!base) return false
@@ -130,7 +152,7 @@ function canFetchModels(): boolean {
   } catch {
     return false
   }
-  return !!form.apiKey.trim() || props.mode === 'edit'
+  return !!form.apiKey.trim() || props.mode !== 'add'
 }
 
 async function loadModelOptions() {
@@ -175,7 +197,15 @@ watch(
   },
 )
 
-/** Initialize the form every time the dialog opens. */
+/**
+ * Initialize the form every time the dialog opens.
+ *
+ * RENG-83: the values come from {@link initialDialogForm}, which is the piece
+ * that used to be missing here — `add` mode discarded the card a duplicate had
+ * passed in, so 「复制卡片」 opened an empty form. The source card is also kept
+ * as the snapshot the save compares against, so an untouched copy can be
+ * pointed out before it is written.
+ */
 watch(
   () => props.visible,
   async (open) => {
@@ -185,19 +215,18 @@ watch(
       modelFetchTimer = null
     }
     modelRequestSeq++
-    if (props.mode === 'edit' && props.initial) {
-      // Secret fields start blank: "leave empty to keep the saved key".
-      Object.assign(form, { ...props.initial, apiKey: '' })
-    } else {
-      Object.assign(form, createEmptyProviderCard())
-    }
+    const opened = initialDialogForm(props.mode, props.initial)
+    Object.assign(form, opened)
+    // Snapshot of what the duplicate dialog STARTED with: a save that still
+    // equals it added nothing the source card did not already say.
+    duplicateSnapshot.value = props.mode === 'duplicate' ? { ...opened } : null
     selectedCatalogProvider.value =
       catalogProviders.value.find((p) => p.id === form.provider) ?? null
     modelOptions.value = []
     modelsError.value = null
     testResult.value = null
     advancedActive.value = []
-    if (props.mode === 'add') {
+    if (props.mode !== 'edit') {
       // Force a retry when the previous attempt failed — a 503 may be
       // transient. Edit mode hides the type select, so skip the fetch.
       void loadCatalogProviders(catalogFailed.value)
@@ -242,27 +271,49 @@ async function confirm() {
   if (!formRef.value) return
   const valid = await formRef.value.validate().catch(() => false)
   if (!valid) return
-  emit('save', {
+  const submitted: ProviderCardState = {
     ...form,
     provider: form.provider.trim(),
     apiKey: form.apiKey.trim(),
     apiBaseUrl: form.apiBaseUrl.trim(),
     defaultModel: form.defaultModel.trim(),
-  })
+  }
+  // RENG-83: a copy saved without a single change adds a second card saying
+  // exactly what the first one says. Warn — do not refuse: the client cannot
+  // see the API key, so two cards this view calls identical may differ in the
+  // one field it never reads (RENG-75 allows a same-triple pair), and a hard
+  // block would take that decision away from the user.
+  if (
+    props.mode === 'duplicate' &&
+    duplicateSnapshot.value &&
+    duplicateUnchanged(duplicateSnapshot.value, submitted)
+  ) {
+    try {
+      await ElMessageBox.confirm(t(DUPLICATE_UNCHANGED_KEY), t('config.providerCards.duplicate'), {
+        confirmButtonText: t('common.save'),
+        cancelButtonText: t('common.cancel'),
+        type: 'warning',
+      })
+    } catch {
+      // Dismissed: the user stays in the dialog to change something first.
+      return
+    }
+  }
+  emit('save', submitted)
 }
 </script>
 
 <template>
   <el-dialog
     v-model="dialogVisible"
-    :title="mode === 'add' ? $t('config.providerCards.addTitle') : $t('config.providerCards.editTitle')"
+    :title="mode === 'edit' ? $t('config.providerCards.editTitle') : $t('config.providerCards.addTitle')"
     width="var(--modal-w-lg)"
     append-to-body
     :close-on-click-modal="false"
   >
     <el-form ref="formRef" :model="form" :rules="rules" label-position="top" @submit.prevent>
       <el-alert
-        v-if="mode === 'add' && catalogFailed"
+        v-if="mode !== 'edit' && catalogFailed"
         type="warning"
         :closable="false"
         :title="$t('config.providers.catalogUnavailable')"
@@ -304,7 +355,7 @@ async function confirm() {
                 />
               </template>
             </el-select>
-            <div v-if="mode === 'add' && selectedCatalogProvider?.doc" class="form-item-help">
+            <div v-if="mode !== 'edit' && selectedCatalogProvider?.doc" class="form-item-help">
               <el-link
                 :href="selectedCatalogProvider.doc"
                 target="_blank"
@@ -423,8 +474,8 @@ async function confirm() {
         <div class="footer-actions">
           <el-button @click="dialogVisible = false">{{ $t('common.cancel') }}</el-button>
           <el-button type="primary" :loading="saving" @click="confirm">
-            <el-icon v-if="mode === 'add'"><Plus /></el-icon>
-            <span>{{ mode === 'add' ? $t('config.providerCards.add') : $t('common.save') }}</span>
+            <el-icon v-if="mode !== 'edit'"><Plus /></el-icon>
+            <span>{{ mode !== 'edit' ? $t('config.providerCards.add') : $t('common.save') }}</span>
           </el-button>
         </div>
       </div>

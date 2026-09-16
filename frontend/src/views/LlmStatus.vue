@@ -20,6 +20,7 @@ import {
   matchHealthToCards,
   matchProbeMessages,
   stripLatency,
+  type ProviderDialogMode,
 } from '../components/Config/providerCardState'
 
 /* ------------------------------------------------------------------ */
@@ -168,7 +169,7 @@ function formatUsageWhen(createdAt: string): string {
 
 // --- Add/Edit dialog ---
 const dialogVisible = ref(false)
-const dialogMode = ref<'add' | 'edit'>('add')
+const dialogMode = ref<ProviderDialogMode>('add')
 const editingCard = ref<ProviderCardState | null>(null)
 /** Grid index the dialog edits (edit mode) — a card is addressed by position,
  *  never by name (RENG-75: two cards may share a name). */
@@ -191,13 +192,17 @@ function openEditDialog(index: number) {
 }
 
 /**
- * "Duplicate card": the add dialog, pre-filled with the card the user picked
- * and its API key. The key is the `***` sentinel the echo carries (the secret
- * never leaves the server) — the masked-keep rule resolves it back to the
- * original entry's stored key while the triple still matches, so the copy
- * starts as a real sibling holding the same credential. Editing the copy's
- * base URL or model is what makes it a distinct entry, and that edit needs a
- * re-entered key (the same rule the API applies to any masked key).
+ * "Duplicate card" (RENG-83): the dialog opens in `duplicate` mode, pre-filled
+ * with a copy of the card the user picked so only the field that makes the copy
+ * different has to be typed. The dialog adds it as a new card (`index -1`).
+ *
+ * The API key is NOT sent to the browser in the clear — the echo carries the
+ * `***` mask — so the form's key field opens blank with the "leave empty to
+ * keep the saved key" placeholder, exactly as edit mode does. Leaving it blank
+ * keeps the source card's stored key through the server's masked-keep rule
+ * while the `(provider, base, model)` triple still matches; changing the base
+ * URL or the model makes the triple a different one, and that key then has to
+ * be re-entered (the same rule the API applies to any masked key).
  */
 function openDuplicateDialog(index: number) {
   const open = dialogForDuplicate(providerCards.value, index)

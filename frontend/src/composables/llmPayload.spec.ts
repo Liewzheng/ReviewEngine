@@ -76,4 +76,19 @@ describe('buildLlmPayload', () => {
     expect(llm.primaryProvider).toBe('');
     expect(llm.providers).toEqual([]);
   });
+
+  it('sends the disable-thinking switch as a concrete bool (RENG-77)', () => {
+    const { llm } = buildLlmPayload(
+      [card('deepseek', { disableThinking: true }), card('xiaomi')],
+      'deepseek',
+    );
+    expect(llm.providers?.map((p) => p.disableThinking)).toEqual([true, false]);
+  });
+
+  it('keeps a stored switch off when the card never loaded the flag', () => {
+    // A card from a payload predating the field is sent as `false` — the same
+    // value the backend would have echoed, so a plain save changes nothing.
+    const { llm } = buildLlmPayload([card('deepseek')], 'deepseek');
+    expect(llm.providers?.[0]?.disableThinking).toBe(false);
+  });
 });

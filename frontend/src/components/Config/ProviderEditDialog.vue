@@ -388,6 +388,18 @@ async function confirm() {
                 </div>
               </el-form-item>
             </el-col>
+            <el-col :span="24">
+              <!-- RENG-77: a reasoning model otherwise spends its whole output
+                   budget on hidden reasoning and answers with nothing. -->
+              <el-form-item :label="$t('config.providers.disableThinking')">
+                <div class="switch-row">
+                  <el-switch v-model="form.disableThinking" />
+                  <span class="form-item-help switch-row__hint">
+                    {{ $t('config.providers.disableThinkingHint') }}
+                  </span>
+                </div>
+              </el-form-item>
+            </el-col>
           </el-row>
         </el-collapse-item>
       </el-collapse>
@@ -469,6 +481,21 @@ async function confirm() {
   align-items: center;
   gap: var(--space-3);
   width: 100%;
+}
+
+/* RENG-77: the switch and the sentence explaining it on one row — the label
+   above them names the setting, the hint sits beside the control. */
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+}
+
+.switch-row__hint {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
 }
 
 .slider-with-value .el-slider {

@@ -12,6 +12,13 @@ export interface CardHealth {
   chainPosition?: number | null
   isPrimary?: boolean
   avgLatencyMs?: number | null
+  /**
+   * RENG-77: mean communication latency (time to first byte) of the calls the
+   * server recorded for this provider, in whole milliseconds; `null` when no
+   * sample carries a TTFB yet. Optional so a page rendered before the field
+   * shipped falls back to `avgLatencyMs` instead of showing nothing.
+   */
+  avgTtfbMs?: number | null
   requestCount?: number | null
   successRate?: number | null
   usageShare?: number | null
@@ -23,6 +30,9 @@ export interface StatCell {
   labelKey: string
   text: string
   empty: boolean
+  /** The measurement behind `text` exactly as the server reported it, for the
+   *  hover tooltip — the face shows a rounded single token. */
+  exact?: string
 }
 
 /** What the reserved 32px footer slot shows for a card. */
@@ -89,19 +99,57 @@ export function cardFooter(
   return { kind: 'none', detail: '' }
 }
 
-/** Monogram for the avatar: up to two alphanumerics of the display name. */
-export function monogramOf(name: string): string {
-  const cleaned = name.replace(/[^A-Za-z0-9]/g, '')
-  return cleaned.slice(0, 2).toUpperCase() || '?'
-}
-
 /** `—` for a value the server did not report: unknown, never `0`. */
 export const EM_DASH = '—'
 
-/** Mean recorded call latency over the window. */
+/**
+ * A measured duration as ONE token, so a KPI value or a stat cell can never
+ * wrap onto a second line: whole milliseconds below a second, one-decimal
+ * seconds below a minute, one-decimal minutes above it. The unrounded value
+ * stays available through {@link StatCell.exact}.
+ */
 export function formatLatency(ms: number | null | undefined): string {
-  if (ms === null || ms === undefined) return '—'
-  return `${ms}ms`
+  if (ms === null || ms === undefined) return EM_DASH
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`
+  return `${(ms / 60_000).toFixed(1)}min`
+}
+
+/** A measurement as the server reported it, for a tooltip. */
+export function exactMs(ms: number | null | undefined): string | undefined {
+  return ms === null || ms === undefined ? undefined : `${ms} ms`
+}
+
+/** Which recorded measurement a latency reading came from. `ttfb` is
+ *  communication latency, `latency` the full recorded call. */
+export type LatencySource = 'ttfb' | 'latency'
+
+export interface LatencyReading {
+  ms: number | null
+  /** `null` when neither measurement exists — the reading is `—`. */
+  source: LatencySource | null
+}
+
+/**
+ * The latency a card (or the KPI strip) shows. RENG-77: the communication
+ * latency (`avgTtfbMs`) is preferred once the server reports one — it is the
+ * number that tells a user whether the provider is reachable quickly — and
+ * the recorded call latency (`avgLatencyMs`) is the fallback for a provider
+ * whose samples predate the field, or for a payload written before it shipped
+ * (`undefined`). The two are different measurements, so the reading carries
+ * which one it is and the UI labels it accordingly.
+ */
+export function latencyReading(health?: CardHealth): LatencyReading {
+  const ttfb = health?.avgTtfbMs
+  if (typeof ttfb === 'number') return { ms: ttfb, source: 'ttfb' }
+  const call = health?.avgLatencyMs
+  if (typeof call === 'number') return { ms: call, source: 'latency' }
+  return { ms: null, source: null }
+}
+
+/** i18n key naming the measurement a reading carries. */
+export function latencyLabelKey(source: LatencySource | null): string {
+  return source === 'ttfb' ? 'llm.metrics.avgTtfb' : 'llm.metrics.avgLatency'
 }
 
 /** Recorded usages (review-level count) over the window. */
@@ -125,11 +173,18 @@ export function formatUsagePercent(share: number | null | undefined): number | n
 
 /** The three stats values with their label-only tooltips, in render order. */
 export function statsRow(health?: CardHealth): StatCell[] {
-  const latency = formatLatency(health?.avgLatencyMs)
+  const reading = latencyReading(health)
+  const latency = formatLatency(reading.ms)
   const requests = formatRequests(health?.requestCount)
   const successRate = formatSuccessRate(health?.successRate)
   return [
-    { key: 'avgLatency', labelKey: 'llm.metrics.avgLatency', text: latency, empty: latency === EM_DASH },
+    {
+      key: 'avgLatency',
+      labelKey: latencyLabelKey(reading.source),
+      text: latency,
+      empty: latency === EM_DASH,
+      exact: exactMs(reading.ms),
+    },
     { key: 'requests', labelKey: 'llm.metrics.requests', text: requests, empty: requests === EM_DASH },
     {
       key: 'successRate',

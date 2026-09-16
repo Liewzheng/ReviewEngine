@@ -47,6 +47,13 @@ export interface LlmProvider {
    */
   lastProbeLatencyMs: number
   /**
+   * RENG-77: mean communication latency (time to first byte) of the calls
+   * recorded for this provider, in whole milliseconds; `null` when no sample
+   * carries a TTFB yet. The card prefers it over `avgLatencyMs` and falls back
+   * to that when it is null or absent.
+   */
+  avgTtfbMs: number | null
+  /**
    * RENG-57: mean round-trip time of the SUCCESSFUL LLM calls this provider
    * served inside the latency window (`latencyWindowDays`), in whole
    * milliseconds; `null` when the window holds no successful call (or the

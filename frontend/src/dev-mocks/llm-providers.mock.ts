@@ -50,6 +50,7 @@ export const MOCK_PROVIDERS: LlmProvider[] = [
     disabled: false,
     lastProbeLatencyMs: 35,
     avgLatencyMs: 300,
+    avgTtfbMs: 280,
     latencySampleCount: 7,
     latencyFailureCount: 0,
     latencyLastSampleAt: iso(30 * 60_000),
@@ -73,6 +74,7 @@ export const MOCK_PROVIDERS: LlmProvider[] = [
     disabled: false,
     lastProbeLatencyMs: 12,
     avgLatencyMs: 45,
+    avgTtfbMs: 42,
     latencySampleCount: 210,
     latencyFailureCount: 1,
     latencyLastSampleAt: iso(2 * 60_000),
@@ -96,6 +98,7 @@ export const MOCK_PROVIDERS: LlmProvider[] = [
     disabled: false,
     lastProbeLatencyMs: 155,
     avgLatencyMs: 1800,
+    avgTtfbMs: 17690,
     latencySampleCount: 42,
     latencyFailureCount: 6,
     latencyLastSampleAt: iso(8 * 60_000),
@@ -119,6 +122,7 @@ export const MOCK_PROVIDERS: LlmProvider[] = [
     disabled: false,
     lastProbeLatencyMs: 401,
     avgLatencyMs: null,
+    avgTtfbMs: null,
     latencySampleCount: 0,
     latencyFailureCount: 4,
     latencyLastSampleAt: null,
@@ -142,6 +146,7 @@ export const MOCK_PROVIDERS: LlmProvider[] = [
     disabled: true,
     lastProbeLatencyMs: 0,
     avgLatencyMs: null,
+    avgTtfbMs: null,
     latencySampleCount: null,
     latencyFailureCount: null,
     latencyLastSampleAt: null,
@@ -180,6 +185,7 @@ function card(
   apiBaseUrl: string,
   defaultModel: string,
   disabled = false,
+  disableThinking = false,
 ): ProviderCardState {
   return {
     provider,
@@ -191,11 +197,14 @@ function card(
     timeoutSeconds: 60,
     retryAttempts: 3,
     disabled,
+    disableThinking,
   };
 }
 
+/** The card the edit dialog is opened on for the reasoning-model case: the
+ *  UAT's `deepseek-v4-flash`, which answers nothing unless the switch is on. */
 export const MOCK_CARDS: ProviderCardState[] = MOCK_PROVIDERS.map((p) =>
-  card(p.name, p.apiBaseUrl ?? '', p.defaultModel ?? '', p.disabled),
+  card(p.name, p.apiBaseUrl ?? '', p.defaultModel ?? '', p.disabled, p.name === 'deepseek'),
 );
 
 export const MOCK_PRIMARY = 'xiaomi';

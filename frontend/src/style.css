@@ -268,12 +268,18 @@ html.dark {
   padding: 0 var(--space-2);
 }
 
-.el-button--primary {
+/* RENG-77: the accent fill belongs to the SOLID primary button only. Applied
+   to every `--primary` button it also painted the `plain` variant, whose text
+   EP colours with `--el-color-primary` — the same indigo R1.3 bridged that
+   fill to, so a plain primary button rendered as an empty rectangle (the Queue
+   task cards). `text` and `link` paint their own colour and are excluded for
+   the same reason. */
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link) {
   background-color: var(--brand);
   border-color: var(--brand);
 }
 
-.el-button--primary:hover {
+.el-button--primary:not(.is-plain):not(.is-text):not(.is-link):hover {
   background-color: var(--brand-hover);
   border-color: var(--brand-hover);
 }

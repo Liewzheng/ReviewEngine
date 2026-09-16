@@ -49,10 +49,34 @@ export interface LlmProvider {
   /**
    * RENG-77: mean communication latency (time to first byte) of the calls
    * recorded for this provider, in whole milliseconds; `null` when no sample
-   * carries a TTFB yet. The card prefers it over `avgLatencyMs` and falls back
-   * to that when it is null or absent.
+   * carries a TTFB yet.
+   *
+   * RENG-78 demoted it from the card's primary display: the shipped request
+   * shape is non-streaming, so a provider's headers and body arrive together
+   * and `avgTtfbMs ≈ avgLatencyMs` (measured, RENG-77 §5) — neither is a
+   * network metric. The field stays on the wire for anyone reading the API;
+   * `avgProbeLatencyMs` is what the card shows.
    */
   avgTtfbMs: number | null
+  /**
+   * RENG-78: mean round-trip time of the PROBES over the latency window, in
+   * whole milliseconds — one `GET {api_base}/models` each (DNS + TCP + TLS +
+   * HTTP), with no model involved anywhere. This is the card's "communication
+   * latency" (平均通信延迟); the frontend prefers it and falls back to
+   * `avgLatencyMs` when it is `null` (no successful probe recorded / the
+   * samples could not be read) — `null` means unknown, never `0`.
+   *
+   * Failed probes are excluded (a 401 answered in 5 ms or a 120 s timeout is
+   * the failure's shape, not the link's) and are still recorded in the sample
+   * table; `probeSampleCount` counts the successes behind this mean.
+   */
+  avgProbeLatencyMs: number | null
+  /**
+   * RENG-78: successful probes in the window — the denominator of
+   * `avgProbeLatencyMs`, a measured count (`0` is a real value); `null` when
+   * the probe samples could not be read at all.
+   */
+  probeSampleCount: number | null
   /**
    * RENG-57: mean round-trip time of the SUCCESSFUL LLM calls this provider
    * served inside the latency window (`latencyWindowDays`), in whole

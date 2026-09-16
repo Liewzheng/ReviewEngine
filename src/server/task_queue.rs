@@ -1393,6 +1393,18 @@ mod tests {
             async fn prune_llm_samples(&self, _: chrono::DateTime<chrono::Utc>) -> anyhow::Result<u64> {
                 anyhow::bail!("db down")
             }
+            async fn insert_probe_sample(&self, _: &crate::store::traits::ProbeSample) -> anyhow::Result<()> {
+                anyhow::bail!("db down")
+            }
+            async fn probe_samples_since(
+                &self,
+                _: chrono::DateTime<chrono::Utc>,
+            ) -> anyhow::Result<Vec<crate::store::traits::ProbeSample>> {
+                anyhow::bail!("db down")
+            }
+            async fn prune_probe_samples(&self, _: chrono::DateTime<chrono::Utc>) -> anyhow::Result<u64> {
+                anyhow::bail!("db down")
+            }
         }
 
         let failing = Arc::new(FailingStore::default());

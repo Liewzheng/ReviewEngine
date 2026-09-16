@@ -798,7 +798,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     use anyhow::Context as _;
 
-    let app = router::build(state, auth.clone(), webhook_handlers);
+    let app = router::build(state.clone(), auth.clone(), webhook_handlers);
 
     let http_addr = format!("{}:{}", bind, port);
     let http_listener = bind_listener(&http_addr, port, "--port").await?;
@@ -829,7 +829,29 @@ pub async fn serve(
             .with_context(|| format!("server on {http_addr} terminated unexpectedly"))
     };
 
-    match tls {
+    // RENG-78: the probe samples the cards' communication latency is averaged
+    // from. Attaching the sink here (rather than at state construction) is what
+    // ties sampling to SERVER mode: every probe this process runs afterwards —
+    // the lazy page-view ones and the proactive round below — leaves a sample.
+    // With no database attached (`REVIEW_DISABLE_DB=1`) there is nowhere to
+    // record one, and the field stays `null` on the wire, exactly as the other
+    // history-backed metrics do.
+    if let Some(db) = state.db.clone() {
+        state
+            .llm_health
+            .attach_sample_sink(Some(crate::server::api::llm_probe::store_sink(db)));
+    }
+
+    // Proactive probing, server mode only. `serve` IS the server mode: every
+    // other command is one-shot and never reaches this function, and the mode
+    // is passed explicitly so that stays assertable without binding a port.
+    let probe_task = crate::server::api::llm_probe::start_proactive_probing(
+        &state,
+        crate::server::api::llm_probe::ProcessMode::Server,
+        crate::server::api::llm_probe::PROACTIVE_PROBE_INTERVAL,
+    );
+
+    let served = match tls {
         Some(tls_config) => {
             let tls_addr = format!("{}:{}", bind, tls_config.tls_port);
             let tls_listener = bind_listener(&tls_addr, tls_config.tls_port, "--tls-port").await?;
@@ -863,9 +885,17 @@ pub async fn serve(
                     .with_context(|| format!("server on {tls_addr} terminated unexpectedly"))
             };
 
-            tokio::try_join!(http_future, tls_future)?;
+            tokio::try_join!(http_future, tls_future).map(|_| ())
         }
-        None => http_future.await?,
+        None => http_future.await,
+    };
+
+    // RENG-78: the proactive probe loop belongs to the server and stops with it
+    // — signalled and awaited here rather than left to the runtime teardown, so
+    // no probe outlives the listener it was serving. (An early return above
+    // drops the task, whose `Drop` signals the same shutdown.)
+    if let Some(task) = probe_task {
+        task.shutdown().await;
     }
-    Ok(())
+    served
 }

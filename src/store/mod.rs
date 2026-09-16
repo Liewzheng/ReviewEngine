@@ -322,6 +322,7 @@ mod tests {
             "expert_reports",
             "git_platforms",
             "llm_call_samples",
+            "llm_probe_samples",
             "llm_providers",
             "mr_discussions",
             "review_contexts",
@@ -340,9 +341,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            applied, 6,
+            applied, 7,
             "0001_init + 0002_llm_snapshot + 0003_participant_meta + 0004_llm_call_samples + 0005_llm_entry_fp \
-             + 0006_llm_sample_ttfb should be recorded"
+             + 0006_llm_sample_ttfb + 0007_llm_probe_samples should be recorded"
         );
 
         // 0002 (RENG-38): the snapshot columns exist on both history tables.

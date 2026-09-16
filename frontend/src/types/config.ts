@@ -17,10 +17,11 @@ export interface LlmProviderConfigEntry {
   /** Number of retry attempts on transient LLM API failures. */
   retryAttempts: number
   /**
-   * RENG-77: the LLM provider card and the KPI strip show the mean
-   * COMMUNICATION latency (`avgTtfbMs`) once the server measures one, else
-   * the mean recorded call latency (`avgLatencyMs`). Both are whole-ms
-   * integers; `null`/absent means unknown, never 0.
+   * RENG-78: the LLM provider card and the KPI strip show the mean
+   * COMMUNICATION latency — the probe's own round trip (`avgProbeLatencyMs`)
+   * — falling back to the mean recorded call latency (`avgLatencyMs`) while no
+   * probe average exists. Both are whole-ms integers; `null`/absent means
+   * unknown, never 0.
    */
   avgTtfbMs?: number | null
   /**

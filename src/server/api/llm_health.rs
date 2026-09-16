@@ -32,6 +32,12 @@
 //!   is refreshed in the background so the poll path never waits; a burst of
 //!   concurrent readers collapses into one request per provider via the
 //!   per-fingerprint flight gate.
+//! - **Every probe leaves a sample (RENG-78).** A probe that actually ran
+//!   writes one [`ProbeSample`] through the optional sink, successful or not,
+//!   so the card's communication latency has a history instead of one number.
+//!   The write is best-effort: a failure is logged and the probe's own result
+//!   is returned unchanged ([`crate::server::api::llm_probe`]). A report served
+//!   from the cache records nothing — a cached value is not a measurement.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -42,6 +48,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 
 use crate::models::LLMConfig;
+use crate::store::traits::ProbeSample;
 
 /// How long a probe result is served before the next reader refreshes it.
 ///
@@ -178,6 +185,12 @@ pub struct LlmHealthStore {
     /// probe is in flight wait for it instead of starting a second request
     /// (thundering-herd guard). `Weak` so finished flights do not accumulate.
     flights: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    /// Where a probe leaves its sample (RENG-78); `None` — the default when no
+    /// database is attached (`REVIEW_DISABLE_DB=1`, embedded use, tests), in
+    /// which case the probe behaves exactly as it did before the sample table
+    /// existed. Behind a lock because the store is shared behind an `Arc`
+    /// before the server knows whether a database is attached.
+    samples: RwLock<Option<super::llm_probe::ProbeSampleSink>>,
 }
 
 impl LlmHealthStore {
@@ -193,7 +206,15 @@ impl LlmHealthStore {
             probe,
             entries: RwLock::new(HashMap::new()),
             flights: Mutex::new(HashMap::new()),
+            samples: RwLock::new(None),
         }
+    }
+
+    /// Attach — or with `None`, detach — the sink every probe records through
+    /// (RENG-78). Called once by [`crate::server::serve`] when a database is
+    /// attached; detaching restores the pre-RENG-78 behaviour exactly.
+    pub fn attach_sample_sink(&self, sink: Option<super::llm_probe::ProbeSampleSink>) {
+        *self.samples.write().unwrap() = sink;
     }
 
     /// Report the health of every config in `cfgs`, in the same order.
@@ -204,6 +225,24 @@ impl LlmHealthStore {
     /// answered from the cache while a refresh runs in the background — the
     /// value is still a real probe of THIS config, just up to one TTL old.
     pub async fn report(self: &Arc<Self>, cfgs: &[LLMConfig]) -> Vec<ProviderHealth> {
+        self.resolve(cfgs, false).await
+    }
+
+    /// Probe every ENABLED config in `cfgs` right now (RENG-78), in the same
+    /// order, ignoring the cache: this is the proactive round, whose whole
+    /// point is a fresh sample per provider per interval. Entries the probe
+    /// produces are written to the cache like any other probe, so a page read
+    /// right after a round is served the round's result.
+    ///
+    /// A disabled provider (RENG-75) and a keyless one are still reported —
+    /// `disabled` / `offline` — and, as everywhere else, are not contacted.
+    pub async fn probe_all(self: &Arc<Self>, cfgs: &[LLMConfig]) -> Vec<ProviderHealth> {
+        self.resolve(cfgs, true).await
+    }
+
+    /// Resolve every config to a report, either from the cache (`force` false)
+    /// or by probing (`force` true).
+    async fn resolve(self: &Arc<Self>, cfgs: &[LLMConfig], force: bool) -> Vec<ProviderHealth> {
         let mut out: Vec<Option<ProviderHealth>> = vec![None; cfgs.len()];
         let mut cold: Vec<(usize, String, LLMConfig)> = Vec::new();
 
@@ -220,10 +259,14 @@ impl LlmHealthStore {
                 continue;
             }
             let key = Self::fingerprint(cfg);
+            if force {
+                cold.push((i, key, cfg.clone()));
+                continue;
+            }
             match self.cached(&key) {
                 Some(entry) => {
                     if !self.is_fresh(&entry) {
-                        self.spawn_refresh(key, cfg.clone());
+                        self.spawn_refresh(key, cfg.clone(), false);
                     }
                     out[i] = Some(entry);
                 }
@@ -234,7 +277,7 @@ impl LlmHealthStore {
         if !cold.is_empty() {
             // Concurrently, one request per provider — but only for the
             // providers the cache could not answer.
-            let probes = cold.iter().map(|(_, key, cfg)| self.probe(key, cfg));
+            let probes = cold.iter().map(|(_, key, cfg)| self.probe(key, cfg, force));
             for ((i, _, _), health) in cold.iter().zip(futures::future::join_all(probes).await) {
                 out[*i] = Some(health);
             }
@@ -277,13 +320,16 @@ impl LlmHealthStore {
     }
 
     /// Probe `cfg` unless a concurrent reader already resolved it while we
-    /// waited on the flight gate.
-    async fn probe(&self, key: &str, cfg: &LLMConfig) -> ProviderHealth {
+    /// waited on the flight gate (or unless `force`, the proactive round, which
+    /// wants a measurement of its own).
+    async fn probe(&self, key: &str, cfg: &LLMConfig, force: bool) -> ProviderHealth {
         let flight = self.flight(key);
         let _guard = flight.lock().await;
-        if let Some(entry) = self.cached(key) {
-            if self.is_fresh(&entry) {
-                return entry;
+        if !force {
+            if let Some(entry) = self.cached(key) {
+                if self.is_fresh(&entry) {
+                    return entry;
+                }
             }
         }
         let started = Instant::now();
@@ -291,8 +337,36 @@ impl LlmHealthStore {
             Ok(_) => ProviderHealth::healthy(started.elapsed().as_millis() as u64),
             Err(e) => ProviderHealth::error(e, started.elapsed().as_millis() as u64),
         };
+        self.record_sample(cfg, &health).await;
         self.entries.write().unwrap().insert(key.to_string(), health.clone());
         health
+    }
+
+    /// Hand the probe that just ran to the sample sink (RENG-78).
+    ///
+    /// Awaited, so a sample is not lost to a process exit, and best-effort: the
+    /// sink owns the error handling (it logs and drops), because a statistics
+    /// gap must never change the verdict this probe produced. Without a sink
+    /// nothing is recorded and nothing else changes.
+    async fn record_sample(&self, cfg: &LLMConfig, health: &ProviderHealth) {
+        // Clone the sink out of the lock: no std guard may be held across the
+        // await below.
+        let Some(sink) = self.samples.read().unwrap().clone() else {
+            return;
+        };
+        let success = health.status == ProviderStatus::Healthy;
+        sink(ProbeSample {
+            provider: cfg.provider.clone(),
+            entry_fp: Self::fingerprint(cfg),
+            at: health.checked_at,
+            // A failed probe has no latency (0007): its elapsed time measures
+            // the failure, not the link, and the aggregate averages successful
+            // probes only — so recording it would be a number nobody may use.
+            latency_ms: success.then(|| i64::try_from(health.latency_ms).unwrap_or(i64::MAX)),
+            success,
+            error: (!success).then(|| health.message.clone()),
+        })
+        .await;
     }
 
     /// Refresh a stale entry off the request path.
@@ -301,13 +375,13 @@ impl LlmHealthStore {
     /// writes a fresh entry, and a second task would spend its time waiting on
     /// the same flight gate. The poll path therefore issues at most one request
     /// per provider per TTL, however often the pages tick.
-    fn spawn_refresh(self: &Arc<Self>, key: String, cfg: LLMConfig) {
+    fn spawn_refresh(self: &Arc<Self>, key: String, cfg: LLMConfig, force: bool) {
         if self.flight(&key).try_lock().is_err() {
             return;
         }
         let store = Arc::clone(self);
         tokio::spawn(async move {
-            store.probe(&key, &cfg).await;
+            store.probe(&key, &cfg, force).await;
         });
     }
 
@@ -354,6 +428,7 @@ impl Default for LlmHealthStore {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
 
     fn cfg(provider: &str, key: &str, base: &str) -> LLMConfig {
         LLMConfig {
@@ -652,5 +727,140 @@ mod tests {
         keyless.api_key = String::new();
         store.record(&keyless, ProviderHealth::healthy(1));
         assert_eq!(store.report(&[keyless]).await[0].status, ProviderStatus::Offline);
+    }
+
+    // ─── RENG-78: every probe leaves a sample ───────────────────────────
+
+    /// A sink collecting the samples the store records, in order.
+    fn collecting_sink() -> (Arc<Mutex<Vec<ProbeSample>>>, super::super::llm_probe::ProbeSampleSink) {
+        let seen: Arc<Mutex<Vec<ProbeSample>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink: super::super::llm_probe::ProbeSampleSink = {
+            let seen = Arc::clone(&seen);
+            Arc::new(move |sample: ProbeSample| {
+                let seen = Arc::clone(&seen);
+                Box::pin(async move {
+                    seen.lock().unwrap().push(sample);
+                })
+            })
+        };
+        (seen, sink)
+    }
+
+    /// A store whose every probe records through `sink`.
+    fn sampling_store(probe: ProbeFn, sink: super::super::llm_probe::ProbeSampleSink) -> Arc<LlmHealthStore> {
+        let store = LlmHealthStore::with_probe(probe, DEFAULT_TTL);
+        store.attach_sample_sink(Some(sink));
+        Arc::new(store)
+    }
+
+    /// Both outcomes leave a sample: a success with its measured round trip, a
+    /// failure with no latency (the failure's duration is not a link
+    /// measurement, 0007) and the probe's own words as the error.
+    #[tokio::test]
+    async fn every_probe_records_a_sample_of_its_own_outcome() {
+        let (seen, sink) = collecting_sink();
+        let store = sampling_store(counting_probe(Arc::new(AtomicUsize::new(0)), true), sink);
+        let good = cfg("openai", "sk-a", "https://api.openai.com/v1");
+        let report = &store.report(std::slice::from_ref(&good)).await[0];
+        assert_eq!(report.status, ProviderStatus::Healthy);
+
+        let samples = seen.lock().unwrap().clone();
+        assert_eq!(samples.len(), 1, "one probe, one sample");
+        assert_eq!(samples[0].provider, "openai");
+        assert_eq!(
+            samples[0].entry_fp,
+            LlmHealthStore::fingerprint(&good),
+            "the sample names the CARD that was probed, not just its provider"
+        );
+        assert!(samples[0].success);
+        assert!(samples[0].latency_ms.is_some(), "a success measures the round trip");
+        assert_eq!(samples[0].error, None);
+        assert_eq!(
+            samples[0].at, report.checked_at,
+            "the sample carries the probe's own time"
+        );
+
+        // A failing probe: success 0, no latency, the probe's message.
+        let (seen, sink) = collecting_sink();
+        let broken = sampling_store(counting_probe(Arc::new(AtomicUsize::new(0)), false), sink);
+        let bad = cfg("openai", "sk-broken", "https://api.openai.com/v1");
+        let report = &broken.report(std::slice::from_ref(&bad)).await[0];
+        assert_eq!(report.status, ProviderStatus::Error);
+
+        let samples = seen.lock().unwrap().clone();
+        assert_eq!(
+            samples.len(),
+            1,
+            "a failure is sampled too — that is the point of the table"
+        );
+        assert!(!samples[0].success);
+        assert_eq!(samples[0].latency_ms, None, "a failed probe records no duration");
+        assert_eq!(samples[0].error.as_deref(), Some("HTTP 401 Unauthorized"));
+        assert_eq!(
+            samples[0].entry_fp,
+            LlmHealthStore::fingerprint(&bad),
+            "the failing card is the one the sample names"
+        );
+    }
+
+    /// A provider that is never probed (no key, disabled) writes no sample, and
+    /// a store without a sink records nothing rather than failing.
+    #[tokio::test]
+    async fn unprobed_providers_and_a_missing_sink_record_nothing() {
+        let (seen, sink) = collecting_sink();
+        let store = sampling_store(counting_probe(Arc::new(AtomicUsize::new(0)), true), sink);
+        let mut off = cfg("deepseek", "sk-b", "https://api.deepseek.com/v1");
+        off.disabled = true;
+        let reports = store.report(&[cfg("ollama", "", "http://localhost:11434"), off]).await;
+        assert_eq!(reports[0].status, ProviderStatus::Offline);
+        assert_eq!(reports[1].status, ProviderStatus::Disabled);
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "no probe happened, so there is no sample"
+        );
+
+        // No sink at all: the probe path is exactly what it was before RENG-78.
+        let bare = Arc::new(LlmHealthStore::with_probe(
+            counting_probe(Arc::new(AtomicUsize::new(0)), true),
+            DEFAULT_TTL,
+        ));
+        let provider = cfg("xiaomi", "sk-a", "https://api.xiaomi.example/v1");
+        assert_eq!(
+            bare.report(std::slice::from_ref(&provider)).await[0].status,
+            ProviderStatus::Healthy
+        );
+    }
+
+    /// The proactive round forces a probe even though a fresh entry is cached,
+    /// and the sample it writes is one more measurement (the page read before
+    /// it wrote its own).
+    #[tokio::test]
+    async fn a_forced_round_probes_through_the_cache_and_samples_again() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (seen, sink) = collecting_sink();
+        let store = sampling_store(counting_probe(Arc::clone(&calls), true), sink);
+        let provider = cfg("xiaomi", "sk-a", "https://api.xiaomi.example/v1");
+
+        store.report(std::slice::from_ref(&provider)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        // A second read inside the TTL is served from the cache: no probe, no
+        // sample — a cached value is not a measurement.
+        store.report(std::slice::from_ref(&provider)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(seen.lock().unwrap().len(), 1);
+
+        // The proactive round probes anyway.
+        let reports = store.probe_all(std::slice::from_ref(&provider)).await;
+        assert_eq!(reports[0].status, ProviderStatus::Healthy);
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "the round probes a fresh provider");
+        assert_eq!(seen.lock().unwrap().len(), 2, "and leaves its own sample");
+
+        // It also answered `disabled` / `offline` without touching the network,
+        // like every other read.
+        let keyless = cfg("ollama", "", "http://localhost:11434");
+        let reports = store.probe_all(&[keyless]).await;
+        assert_eq!(reports[0].status, ProviderStatus::Offline);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(seen.lock().unwrap().len(), 2);
     }
 }

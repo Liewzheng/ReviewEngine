@@ -533,3 +533,37 @@ describe('RENG-77 — the UAT deltas', () => {
     }
   });
 });
+
+/**
+ * RENG-78 — the communication-latency label. The number is the probe's own
+ * round trip, but the user is reading a duration and not a mechanism: the
+ * label says what was measured (`平均通信延迟` / "Avg comm. latency") and never
+ * the word 探测 / "probe". Pinned here as a stylesheet-style source check on
+ * every locale; the value-level assertion lives in
+ * `providerCardState.spec.ts`, which resolves the key the card actually uses.
+ */
+describe('RENG-78 — the communication-latency label', () => {
+  it('exists in all six locales, in both the card and the KPI block', () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr']) {
+      const file = source(`i18n/locales/${locale}.ts`);
+      const stats = file.split('metrics: {')[0];
+      expect(stats, `${locale} is missing the KPI label`).toContain('avgCommLatency:');
+      expect(file.split('metrics: {')[1], `${locale} is missing the card label`).toContain('avgCommLatency:');
+    }
+  });
+
+  it('never spells the mechanism into the label', () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr']) {
+      const file = source(`i18n/locales/${locale}.ts`);
+      // Every `avgCommLatency` line is a user-visible string; none of them may
+      // name the probe.
+      const lines = file.split('\n').filter((line) => line.includes('avgCommLatency:'));
+      expect(lines, `${locale} carries no avgCommLatency`).not.toHaveLength(0);
+      for (const line of lines) {
+        expect(line, `${locale}: ${line}`).not.toContain('探测');
+        expect(line, `${locale}: ${line}`).not.toContain('探測');
+        expect(line.toLowerCase(), `${locale}: ${line}`).not.toContain('probe');
+      }
+    }
+  });
+});

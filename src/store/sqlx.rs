@@ -21,7 +21,8 @@ use crate::server::task_queue::{SourceMeta, TaskEntry};
 
 use super::rows;
 use super::traits::{
-    ConfigStore, DiscussionNote, DiscussionStore, LlmCallSampleRow, ProviderUsageStats, ReviewListQuery, ReviewStore,
+    ConfigStore, DiscussionNote, DiscussionStore, LlmCallSampleRow, ProbeSample, ProviderUsageStats, ReviewListQuery,
+    ReviewStore,
 };
 use super::{adapt_sql, encode_ts, BackendKind, SqlxStore};
 
@@ -658,6 +659,68 @@ impl ReviewStore for SqlxStore {
             .execute(self.pool())
             .await
             .context("prune llm call samples")?;
+        Ok(result.rows_affected())
+    }
+
+    async fn insert_probe_sample(&self, sample: &ProbeSample) -> Result<()> {
+        // RENG-78. `latency_ms` is NULL for a failed probe (0007): the
+        // aggregate averages successful probes only, and a failure's duration
+        // is not a link measurement. The surrogate key is Rust-side (0001: no
+        // RETURNING).
+        let sql = self.sql(
+            "INSERT INTO llm_probe_samples \
+             (id, provider, entry_fp, latency_ms, success, error, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        );
+        ::sqlx::query(&sql)
+            .bind(uuid::Uuid::new_v4().to_string())
+            .bind(&sample.provider)
+            .bind(&sample.entry_fp)
+            .bind(sample.latency_ms.filter(|v| *v >= 0))
+            .bind(i64::from(sample.success))
+            .bind(sample.error.as_deref())
+            .bind(encode_ts(&sample.at))
+            .execute(self.pool())
+            .await
+            .with_context(|| format!("insert llm_probe_sample for provider {}", sample.provider))?;
+        Ok(())
+    }
+
+    async fn probe_samples_since(&self, since: DateTime<Utc>) -> Result<Vec<ProbeSample>> {
+        // One index range scan over `llm_probe_samples(created_at, provider)`;
+        // `success` stays an INTEGER in SQL and is converted in Rust (0001's
+        // dialect rule: booleans are 0/1, never BOOLEAN).
+        let sql = self.sql(
+            "SELECT provider, entry_fp, created_at, latency_ms, success, error FROM llm_probe_samples \
+             WHERE created_at >= ? ORDER BY created_at",
+        );
+        let rows = ::sqlx::query_as::<_, (String, String, String, Option<i64>, i64, Option<String>)>(&sql)
+            .bind(encode_ts(&since))
+            .fetch_all(self.pool())
+            .await
+            .context("list llm probe samples")?;
+        rows.into_iter()
+            .map(|(provider, entry_fp, created_at, latency_ms, success, error)| {
+                Ok(ProbeSample {
+                    provider,
+                    entry_fp,
+                    at: super::decode_ts(&created_at)
+                        .with_context(|| format!("llm_probe_samples.created_at: {created_at:?}"))?,
+                    latency_ms,
+                    success: success != 0,
+                    error,
+                })
+            })
+            .collect()
+    }
+
+    async fn prune_probe_samples(&self, before: DateTime<Utc>) -> Result<u64> {
+        let sql = self.sql("DELETE FROM llm_probe_samples WHERE created_at < ?");
+        let result = ::sqlx::query(&sql)
+            .bind(encode_ts(&before))
+            .execute(self.pool())
+            .await
+            .context("prune llm probe samples")?;
         Ok(result.rows_affected())
     }
 }
@@ -1733,6 +1796,127 @@ mod tests {
         assert_eq!(survivors, vec!["fresh", "kept"], "the cutoff row is kept");
         // Pruning again finds nothing.
         assert_eq!(ReviewStore::prune_llm_samples(&store, cutoff).await.unwrap(), 0);
+    }
+
+    // ─── RENG-78: per-probe communication samples ───
+
+    /// One recorded probe, as the sink writes it.
+    fn probe_sample(
+        provider: &str,
+        fp: &str,
+        at: DateTime<Utc>,
+        latency_ms: Option<u64>,
+        success: bool,
+    ) -> ProbeSample {
+        ProbeSample {
+            provider: provider.to_string(),
+            entry_fp: fp.to_string(),
+            at,
+            latency_ms: latency_ms.map(|v| v as i64),
+            success,
+            error: (!success).then(|| "HTTP 401 Unauthorized".to_string()),
+        }
+    }
+
+    /// The store round-trips every field the aggregate needs, keeps a failed
+    /// probe's latency NULL (0007), and holds the window bound inclusive.
+    #[tokio::test]
+    async fn probe_samples_since_round_trips_and_holds_the_window_boundary() {
+        let store = fresh_store().await;
+        let since =
+            (Utc.with_ymd_and_hms(2026, 9, 8, 0, 0, 0).unwrap() + chrono::Duration::nanoseconds(500)).trunc_subsecs(6);
+
+        ReviewStore::insert_probe_sample(&store, &probe_sample("xiaomi", "fp-a", since, Some(42), true))
+            .await
+            .unwrap();
+        ReviewStore::insert_probe_sample(
+            &store,
+            &probe_sample("xiaomi", "fp-a", since + chrono::Duration::minutes(30), None, false),
+        )
+        .await
+        .unwrap();
+        ReviewStore::insert_probe_sample(
+            &store,
+            &probe_sample("deepseek", "fp-b", since + chrono::Duration::hours(1), Some(310), true),
+        )
+        .await
+        .unwrap();
+        // One microsecond before the window: excluded.
+        ReviewStore::insert_probe_sample(
+            &store,
+            &probe_sample("old", "fp-c", since - chrono::Duration::microseconds(1), Some(5), true),
+        )
+        .await
+        .unwrap();
+
+        let rows = ReviewStore::probe_samples_since(&store, since).await.unwrap();
+        let providers: Vec<&str> = rows.iter().map(|r| r.provider.as_str()).collect();
+        assert_eq!(providers, vec!["xiaomi", "xiaomi", "deepseek"], "oldest first");
+
+        assert_eq!(rows[0].latency_ms, Some(42));
+        assert_eq!(rows[0].entry_fp, "fp-a", "the card identity round-trips");
+        assert!(rows[0].success);
+        assert_eq!(rows[0].error, None);
+        assert_eq!(rows[0].at, since, "the timestamp round-trips exactly");
+        assert!(!rows[1].success, "a failed probe is a row too");
+        assert_eq!(
+            rows[1].latency_ms, None,
+            "a failure has no latency: its duration measures the failure, not the link"
+        );
+        assert_eq!(rows[1].error.as_deref(), Some("HTTP 401 Unauthorized"));
+
+        let rows = ReviewStore::probe_samples_since(&store, Utc::now()).await.unwrap();
+        assert!(rows.is_empty(), "no probe was made after now: {rows:?}");
+    }
+
+    /// Two cards sharing a provider NAME keep their own samples: the probe of
+    /// one endpoint is never read back as the other's (RENG-75 card identity).
+    #[tokio::test]
+    async fn probe_samples_keep_same_named_cards_apart() {
+        let store = fresh_store().await;
+        let now = Utc::now();
+        ReviewStore::insert_probe_sample(&store, &probe_sample("acme", "fp-a", now, Some(20), true))
+            .await
+            .unwrap();
+        ReviewStore::insert_probe_sample(&store, &probe_sample("acme", "fp-b", now, Some(900), true))
+            .await
+            .unwrap();
+
+        let rows = ReviewStore::probe_samples_since(&store, now - chrono::Duration::minutes(1))
+            .await
+            .unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].entry_fp, "fp-a");
+        assert_eq!(rows[1].entry_fp, "fp-b");
+    }
+
+    /// Retention deletes exactly what is older than the cutoff and reports how
+    /// many rows went.
+    #[tokio::test]
+    async fn prune_probe_samples_deletes_only_rows_past_the_cutoff() {
+        let store = fresh_store().await;
+        let now = Utc::now();
+        let cutoff = crate::server::api::llm_probe::retention_cutoff(now);
+        ReviewStore::insert_probe_sample(
+            &store,
+            &probe_sample("old", "fp-a", cutoff - chrono::Duration::seconds(1), Some(10), true),
+        )
+        .await
+        .unwrap();
+        ReviewStore::insert_probe_sample(&store, &probe_sample("kept", "fp-a", cutoff, Some(10), true))
+            .await
+            .unwrap();
+        ReviewStore::insert_probe_sample(&store, &probe_sample("fresh", "fp-a", now, Some(10), true))
+            .await
+            .unwrap();
+
+        assert_eq!(ReviewStore::prune_probe_samples(&store, cutoff).await.unwrap(), 1);
+        let survivors: Vec<String> = ::sqlx::query_scalar("SELECT provider FROM llm_probe_samples ORDER BY provider")
+            .fetch_all(store.pool())
+            .await
+            .unwrap();
+        assert_eq!(survivors, vec!["fresh", "kept"], "the cutoff row is kept");
+        assert_eq!(ReviewStore::prune_probe_samples(&store, cutoff).await.unwrap(), 0);
     }
 
     // ─── DiscussionStore (step 6a) ───

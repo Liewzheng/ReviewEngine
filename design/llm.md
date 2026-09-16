@@ -126,9 +126,7 @@ shows `0` only when the window was really read and really held no usage.
 
 ### 2.3 Recorded call latency (RENG-57)
 
-The card's latency number is the mean round-trip time of the **calls the
-reviews actually made ON THAT CARD**, not the probe's instantaneous value:
-every LLM call attempt on the review path records a row in `llm_call_samples`
+Every LLM call attempt on the review path records a row in `llm_call_samples`
 (timestamp, provider, model, `entry_fp` (RENG-75), `latency_ms`, `ttfb_ms`
 (RENG-77), success/failure + error, chain position, attempt, review id), and
 `GET /api/v1/llm/providers` folds the window's rows per entry fingerprint
@@ -140,14 +138,14 @@ separately).
 `ttfb_ms` is time-to-first-byte — request issued to response **headers**
 received — and `avgTtfbMs` is its mean over the successful calls that carry
 one (`null` when none does; pre-0006 rows and calls served by a registry
-provider are excluded, never averaged in as `0`). It exists because the user
+provider are excluded, never averaged in as `0`). It was added because the user
 reading "平均延迟" wants the **communication** latency, not the generation
 time. Measured caveat: the shipped request shape is non-streaming
 (`stream` is not sent), so a server that generates the whole answer before
 flushing anything returns headers and body together and `avgTtfbMs ≈
 avgLatencyMs` — the two fields only diverge once a provider flushes headers
-early (`stream: true`). Neither number is a substitute for the other, and
-`avgLatencyMs` keeps its meaning for its existing consumers.
+early (`stream: true`). RENG-78 therefore demoted it from the card's display
+(§2.4) while leaving both fields and their meanings untouched.
 
 Two rules make the number trustworthy:
 
@@ -159,13 +157,52 @@ Two rules make the number trustworthy:
   table at all) → no average. Only the counts, which are measured, may be `0`.
 
 The probe stays visible and separate: `lastProbeLatencyMs` renders as
-`Probe {n} ms` next to "Last checked", and the historical average is the
-metric-row value. RENG-53's complaint was precisely that the two were
-indistinguishable.
+`Probe {n} ms` next to "Last checked" — the LATEST probe — while the metric row
+shows a window average. RENG-53's complaint was precisely that an
+instantaneous probe and a historical average were indistinguishable; RENG-78
+keeps them apart and says which average the row carries (§2.4).
 
 Retention is bounded by the write path (`RETENTION_DAYS = 30`), which prunes
 once per review inside the sink's first write — the table cannot grow with the
 whole history, so the window query stays a bounded index range scan.
+
+### 2.4 Probe latency — the card's communication latency (RENG-78)
+
+The card's FIRST metric (and the KPI strip's "平均延迟") is neither of the two
+above: it is `avgProbeLatencyMs`, the mean round trip of the connectivity
+probes themselves. A probe is one `GET {api_base}/models` (DNS + TCP + TLS +
+HTTP) with no model anywhere in it, so this is the only number on the payload
+that measures the network and nothing else — `avgLatencyMs` contains
+generation, and `avgTtfbMs ≈ avgLatencyMs` for the shipped non-streaming
+request shape (§2.3).
+
+- **Every probe leaves a sample.** `LlmHealthStore` writes one row per probe it
+  actually runs into `llm_probe_samples` (migration `0007`, same dialect rules
+  as 0001–0006): provider, `entry_fp`, `latency_ms` (**NULL on failure**),
+  success, error, timestamp. A failed probe's duration measures the failure, so
+  it is recorded but never averaged; the fold uses successful rows only, per
+  card fingerprint (RENG-75: two same-named cards have different `api_base`s
+  and therefore different latencies). A read answered from the health cache
+  writes nothing — a cached value is not a measurement. The write is
+  best-effort: a failing sample table logs a WARN and cannot change the health
+  verdict the same probe produced.
+- **Probing is proactive in server mode.** `serve` attaches the sample sink and
+  starts a background loop that probes every ENABLED provider every 30 minutes
+  (`PROACTIVE_PROBE_INTERVAL`), so the average keeps moving without a page
+  being opened; one-shot CLI commands never start it, and the loop exits on
+  the server's shutdown signal. A provider that keeps failing logs once per
+  outage (state transitions only) while its samples keep being written.
+- **The window travels with the number**, and it is the latency window
+  (`latencyWindowDays`): the card shows one period, not three.
+- **`null` is unknown.** No successful probe in the window (or an unreadable
+  sample table) → `null` on the wire, `—` on the page; `probeSampleCount`, the
+  mean's denominator, is a measured count and may really be `0`.
+
+The front end prefers `avgProbeLatencyMs` and falls back to `avgLatencyMs` when
+it is `null`/absent, labelling the reading accordingly — "平均通信延迟" /
+"Avg comm. latency" for the probe, "平均延迟" for the fallback. The label
+names the measurement, never the mechanism: the user-visible string does not
+contain 探测 / "probe".
 
 ## 3. Component Breakdown
 
@@ -180,8 +217,8 @@ whole history, so the window query stays a bounded index range scan.
 ┌────────────────────────────────────────┐
 │ [Logo]  Provider Name    [StatusBadge] │  → header row
 │                                        │
-│ Avg latency  Usages (7d)  Success Rate │  → metrics row (3 columns)
-│ 812 ms          12           91.7%     │     + "46 calls · 3 failed"
+│ Avg comm. latency  Usages (7d)  Success Rate │  → metrics row (3 columns)
+│ 318 ms             12            91.7%      │     + "46 calls · 3 failed"
 │  ╱╲__╱╲___╱╲                           │  → recorded latency series (RENG-57)
 │  Call latency · last 7 days            │
 │ ██████████████████████░░░░░░░░░░░░░░░░  │  → usage-share bar (window)
@@ -204,10 +241,14 @@ whole history, so the window query stays a bounded index range scan.
 - Avg-latency color: < 500ms = green, 500–1500ms = amber, > 1500ms = red.
 - Success-rate color: ≥ 99% = green, 95–99% = amber, < 95% = red (forced red
   while the probe reports `error`).
+- The first cell is the **communication latency** (RENG-78, §2.4): the probe's
+  own mean round trip (`avgProbeLatencyMs`), labelled `平均通信延迟` / "Avg
+  comm. latency", falling back to the recorded call average (`avgLatencyMs`) —
+  labelled `平均延迟` / "Avg Latency" — while no probe average exists. The label
+  never mentions the probe: the user reads a duration, not a mechanism.
 - Every value is `—` when the server has no number for it. The usage metrics
   are independent of the probe: an `offline` provider that served last week's
-  reviews still shows them; the latency average is independent of it too (it
-  is history, not a live probe).
+  reviews still shows them.
 
 **Recorded latency series (RENG-57):**
 - 28 six-hour buckets over the window, drawn by
@@ -274,8 +315,10 @@ interface LlmProvider {
   usageShare: number | null;    // RENG-56, 0–1
   successRate: number | null;   // RENG-56, 0–1
   lastUsedAt: string | null;    // RENG-56, ISO 8601
-  avgLatencyMs: number | null;         // RENG-57, window, successful calls only
-  avgTtfbMs: number | null;            // RENG-77, time-to-first-byte, measured calls only
+  avgProbeLatencyMs: number | null;    // RENG-78, what the card SHOWS: probe round trip
+  probeSampleCount: number | null;     // RENG-78, its denominator (successful probes)
+  avgLatencyMs: number | null;         // RENG-57, window, successful calls only (fallback)
+  avgTtfbMs: number | null;            // RENG-77, time-to-first-byte, no longer the display
   latencySampleCount: number | null;   // RENG-57, the average's denominator
   latencyFailureCount: number | null;  // RENG-57, excluded from the average
   latencyLastSampleAt: string | null;  // RENG-57, newest recorded call

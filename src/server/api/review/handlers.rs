@@ -32,6 +32,45 @@ fn error_response_with_code(status: StatusCode, message: impl Into<String>, code
         .into_response()
 }
 
+/// RENG-82: the fallback lookup for a task-id endpoint whose in-memory
+/// `TaskStore` lookup missed.
+///
+/// After a restart (binary upgrade, deploy, crash) the in-memory store is
+/// empty while the `reviews` table still lists every finished task, so a
+/// memory miss is the *normal* state for a review the user picked out of the
+/// history list — not a missing task. Same source order as [`get_review`]
+/// (0.10.0 §8.1: the DB is the history source).
+///
+/// `Ok(None)` = neither store knows the task (the caller answers 404).
+/// `Err` is the ready-made response for a failed history read (boxed: a
+/// response is far larger than the entry it stands in for): a broken DB must
+/// never read as "this review is gone".
+pub(crate) async fn resolve_history_entry(
+    state: &AppState,
+    task_id: Uuid,
+) -> Result<Option<TaskEntry>, Box<axum::response::Response>> {
+    let Some(db) = &state.db else {
+        // db=None (REVIEW_DISABLE_DB=1, the 0.9 in-memory startup): memory is
+        // the only source there is, so a miss really is a missing task.
+        return Ok(None);
+    };
+    match db.get_review(task_id).await {
+        Ok(entry) => Ok(entry),
+        Err(e) => {
+            tracing::error!("failed to load review {task_id} from the database: {e:#}");
+            Err(Box::new(error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to load review",
+            )))
+        }
+    }
+}
+
+/// RENG-82: the response for a cancel attempted on a task that is already
+/// finished — the cancel contract is a state migration (`pending`/`running` →
+/// `cancelled`), so a terminal task is nothing to migrate.
+const TERMINAL_CANCEL_MSG: &str = "task is already in a terminal state and cannot be cancelled";
+
 /// Error message for the enqueue-time "no usable LLM configured" gate (422).
 const LLM_NOT_CONFIGURED_MSG: &str = "no usable LLM configured: set api_base (and api_key) via the config page, POST /api/v1/config, the LLM_CONFIG env var, or run `review-engine init`";
 
@@ -347,9 +386,16 @@ pub(crate) async fn rerun_review(
         None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "task store not initialized"),
     };
 
+    // RENG-82: memory first, then the history row — the stored request a
+    // rerun replays lives in `reviews.request`, so a restart no longer turns
+    // "rerun this old review" into a 404.
     let existing = match store.get(task_id).await {
         Some(entry) => entry,
-        None => return error_response(StatusCode::NOT_FOUND, "task not found"),
+        None => match resolve_history_entry(&state, task_id).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return error_response(StatusCode::NOT_FOUND, "task not found"),
+            Err(response) => return *response,
+        },
     };
 
     if existing.state == TaskState::Pending {
@@ -525,25 +571,40 @@ pub(crate) async fn delete_review(State(state): State<Arc<AppState>>, Path(task_
         Some(s) => s,
         None => return error_response(StatusCode::SERVICE_UNAVAILABLE, "task store not initialized"),
     };
-    let existing = match store.get(task_id).await {
-        Some(entry) => entry,
-        None => return error_response(StatusCode::NOT_FOUND, "task not found"),
+    // RENG-82: a history row whose live record is long gone is exactly the
+    // case this endpoint used to 404 on, so the in-memory lookup missing is
+    // resolved against the DB before it can become a "not found".
+    let live_entry = store.get(task_id).await;
+    let existing = match &live_entry {
+        Some(entry) => entry.clone(),
+        None => match resolve_history_entry(&state, task_id).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => return error_response(StatusCode::NOT_FOUND, "task not found"),
+            Err(response) => return *response,
+        },
     };
     if matches!(
         existing.state,
         TaskState::Completed | TaskState::Failed | TaskState::Cancelled
     ) {
-        return error_response(
-            StatusCode::CONFLICT,
-            "task is already in a terminal state and cannot be cancelled",
-        );
+        return error_response(StatusCode::CONFLICT, TERMINAL_CANCEL_MSG);
     }
-    if store.delete(task_id).await {
-        (StatusCode::OK, Json(serde_json::json!({"status": "deleted"}))).into_response()
+    if live_entry.is_some() {
+        // In-memory hit: the unchanged path — the transition happens on the
+        // live record and the store mirrors it to the DB.
+        if store.delete(task_id).await {
+            (StatusCode::OK, Json(serde_json::json!({"status": "deleted"}))).into_response()
+        } else {
+            error_response(StatusCode::CONFLICT, TERMINAL_CANCEL_MSG)
+        }
     } else {
-        error_response(
-            StatusCode::CONFLICT,
-            "task is already in a terminal state and cannot be cancelled",
-        )
+        // History-only row: the very same transition, applied straight to the
+        // row (the record is migrated, never physically removed, so
+        // `expert_reports` / `review_contexts` stay with it).
+        if store.cancel_persisted(task_id, chrono::Utc::now()).await {
+            (StatusCode::OK, Json(serde_json::json!({"status": "deleted"}))).into_response()
+        } else {
+            error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to cancel task")
+        }
     }
 }

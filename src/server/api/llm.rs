@@ -165,6 +165,15 @@ fn provider_items(
                 // sparkline is one point per 6-hour bucket, `null` when there
                 // is no series to draw.
                 "avgLatencyMs": latency.as_ref().and_then(|l| l.avg_latency_ms),
+                // RENG-77 §5: avg time-to-first-byte across the successful
+                // calls that actually carried one. `null` when no such call
+                // exists (pre-0006 rows, registry-path calls, failed calls).
+                // The field is intentionally NOT a renaming of avgLatencyMs —
+                // a non-streaming provider can serve headers and body at the
+                // same instant and the two numbers will be equal, which the
+                // user-facing surface says so the "communication latency"
+                // mental model isn't a fiction.
+                "avgTtfbMs": latency.as_ref().and_then(|l| l.avg_ttfb_ms),
                 "latencySampleCount": latency.as_ref().map(|l| l.sample_count),
                 "latencyFailureCount": latency.as_ref().map(|l| l.failure_count),
                 "latencyLastSampleAt": latency
@@ -1279,6 +1288,7 @@ mod tests {
             entry_fp: Some(card.entry_fp()),
             created_at: at,
             latency_ms: ms,
+            ttfb_ms: None,
             success: true,
         }
     }
@@ -1290,6 +1300,7 @@ mod tests {
             entry_fp: None,
             created_at: at,
             latency_ms: ms,
+            ttfb_ms: None,
             success: true,
         }
     }
@@ -1417,6 +1428,7 @@ mod tests {
             entry_fp: Some(c.entry_fp()),
             created_at: at,
             latency_ms: ms,
+            ttfb_ms: None,
             success,
         }
     }
@@ -1529,6 +1541,7 @@ mod tests {
                 model: format!("{provider}-model"),
                 entry_fp: cfg(provider).entry_fp(),
                 latency_ms,
+                ttfb_ms: None,
                 success,
                 error: (!success).then(|| "HTTP 500".to_string()),
                 chain_position: 1,
@@ -1543,6 +1556,7 @@ mod tests {
             model: "mimo".to_string(),
             entry_fp: "fp-mimo".to_string(),
             latency_ms: 9999,
+            ttfb_ms: None,
             success: true,
             error: None,
             chain_position: 1,
@@ -1607,5 +1621,69 @@ mod tests {
         // never share a field.
         assert_eq!(item["lastProbeLatencyMs"], 0);
         assert!(!item.as_object().unwrap().contains_key("latencyMs"));
+    }
+
+    /// RENG-77 §5: `avgTtfbMs` is emitted alongside `avgLatencyMs` and is
+    /// `null` when the window holds no successful sample that carries a
+    /// TTFB (the legacy / registry-path shape). Both metrics are computed
+    /// independently and may legitimately be equal for a non-streaming
+    /// provider (see `ttfb_equals_latency_*` in `llm_latency.rs`).
+    #[test]
+    fn provider_items_emit_avg_ttfb_null_when_no_sample_carries_one() {
+        let stored = vec![cfg("xiaomi")];
+        let now = chrono::Utc::now();
+        // The only successful call has `ttfb_ms: None` (registry-path shape).
+        let snapshot = latency_snapshot(vec![latency_row("xiaomi", now, 100, true)]);
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot));
+        let item = &items[0];
+        assert_eq!(item["avgLatencyMs"], 100, "the latency average still computes");
+        assert_eq!(
+            item["avgTtfbMs"],
+            serde_json::Value::Null,
+            "no TTFB measurements in the window → null on the wire"
+        );
+    }
+
+    /// RENG-77 §5: when the window has measured TTFB values, the payload
+    /// carries the rounded mean. The verdict (`avgTtfbMs ≈ avgLatencyMs` for
+    /// non-streaming providers) is asserted inside `llm_latency.rs`'s
+    /// `ttfb_equals_latency_*`; this test only proves the field reaches the
+    /// wire on the card the page reads.
+    #[test]
+    fn provider_items_emit_avg_ttfb_when_samples_carry_it() {
+        let stored = vec![cfg("xiaomi")];
+        let now = chrono::Utc::now();
+        // Two successful calls WITH ttfb values.
+        let since = chrono::Utc::now() - chrono::Duration::days(super::super::llm_latency::LATENCY_WINDOW_DAYS);
+        let snapshot = LatencySnapshot::new(
+            since,
+            vec![
+                LlmCallSampleRow {
+                    provider: "xiaomi".to_string(),
+                    model: "xiaomi-model".to_string(),
+                    entry_fp: Some(cfg("xiaomi").entry_fp()),
+                    created_at: now,
+                    latency_ms: 200,
+                    ttfb_ms: Some(180),
+                    success: true,
+                },
+                LlmCallSampleRow {
+                    provider: "xiaomi".to_string(),
+                    model: "xiaomi-model".to_string(),
+                    entry_fp: Some(cfg("xiaomi").entry_fp()),
+                    created_at: now,
+                    latency_ms: 200,
+                    ttfb_ms: Some(220),
+                    success: true,
+                },
+            ],
+        );
+        let items = provider_items("xiaomi", &stored, &healthy(1), None, Some(&snapshot));
+        let item = &items[0];
+        assert_eq!(item["avgLatencyMs"], 200);
+        assert_eq!(
+            item["avgTtfbMs"], 200,
+            "(180 + 220) / 2 rounds to 200 — the field is on the wire"
+        );
     }
 }

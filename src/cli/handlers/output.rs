@@ -244,6 +244,7 @@ mod tests {
             aggregated: None,
             dropped_findings: vec![],
             consolidated,
+            errors: vec![],
         }
     }
 

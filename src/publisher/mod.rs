@@ -810,6 +810,7 @@ mod tests {
             aggregated: None,
             dropped_findings: Vec::new(),
             consolidated: Some(consolidated.clone()),
+            errors: Vec::new(),
         };
 
         let provider = RecordingProvider::new(&[]);

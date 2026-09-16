@@ -158,8 +158,10 @@ describe('RENG-75 — the card’s state visuals', () => {
 
   it('dims a disabled card end to end', () => {
     expect(rule(css, '.provider-card--disabled')).toContain('opacity: 0.55');
-    expect(rule(css, '.provider-card--disabled .provider-card__monogram')).toContain(
-      'background: var(--text-tertiary)',
+    // The usage share is the one part that keeps a colour of its own on a
+    // stopped card; RENG-77 dropped the avatar this rule used to dim.
+    expect(rule(css, '.provider-card--disabled .provider-card__usage-fill')).toContain(
+      'background: var(--offline)',
     );
   });
 
@@ -167,9 +169,31 @@ describe('RENG-75 — the card’s state visuals', () => {
     expect(rule(css, '.provider-card__usage-bar')).toContain('height: var(--progress-h-hairline)');
   });
 
-  it('uses a grab cursor and no drag handle element', () => {
+  it('uses a grab cursor, with the header itself as the drag handle', () => {
     expect(rule(css, '.provider-card__header')).toContain('cursor: grab');
     expect(css).not.toContain('provider-card__drag-handle');
+    // RENG-77: the mock's top-right mark is decoration ON that handle — a
+    // muted icon pushed to the far edge, never a control with its own hit box.
+    expect(rule(css, '.provider-card__grip')).toContain('margin-left: auto');
+    expect(rule(css, '.provider-card__grip')).toContain('color: var(--text-tertiary)');
+  });
+
+  it('tells the URL and the model apart in the mock’s two greys', () => {
+    expect(rule(css, '.provider-card__row--url')).toContain('color: var(--text-secondary)');
+    expect(rule(css, '.provider-card__row--model')).toContain('color: var(--text-primary)');
+    expect(rule(css, '.provider-card__row--key')).toContain('color: var(--text-tertiary)');
+  });
+
+  it('moves the health to a dot beside the name, and only when it matters', () => {
+    expect(rule(css, '.provider-card__health')).toContain('border-radius: 50%');
+    expect(rule(css, '.provider-card__health--degraded')).toContain('background: var(--accent-warning)');
+    expect(rule(css, '.provider-card__health--error')).toContain('background: var(--accent-error)');
+    // The right-aligned pill is gone from the card entirely.
+    expect(css).not.toContain('provider-card__status');
+  });
+
+  it('draws the usage share with no caption line under it', () => {
+    expect(css).not.toContain('provider-card__usage-label');
   });
 });
 
@@ -461,6 +485,51 @@ describe('R2.4 — a progress bar is a restraint', () => {
   it('leaves no component sizing a bar inline', () => {
     for (const [path, source] of allSources()) {
       expect(source, `${path} still binds :stroke-width`).not.toContain(':stroke-width=');
+    }
+  });
+});
+
+/**
+ * RENG-77 — the UAT deltas: the primary button that rendered as an empty
+ * rectangle, the KPI that wrapped onto two lines, the score badge that was
+ * trimmed, and the labels for the two contract fields the Rust side adds
+ * (`disableThinking` on the config echo, `avgTtfbMs` on the provider list).
+ * Every one of them is a stylesheet rule or a locale string, so they are
+ * pinned here the same way as the rest of the design language.
+ */
+describe('RENG-77 — the UAT deltas', () => {
+  it('keeps the accent fill off the plain, text and link primary buttons', () => {
+    const css = read('src/style.css');
+    const solid = rule(css, '.el-button--primary:not(.is-plain):not(.is-text):not(.is-link)');
+    expect(solid).toContain('background-color: var(--brand)');
+    expect(solid).toContain('border-color: var(--brand)');
+    // The bare selectors are what painted the plain variant indigo on indigo —
+    // its text colour is `--el-color-primary`, which R1.3 bridged to that fill.
+    expect(flat(css)).not.toContain('.el-button--primary {');
+    expect(flat(css)).not.toContain('.el-button--primary:hover {');
+  });
+
+  it('holds a KPI value to one line, whatever it holds', () => {
+    const value = rule(read('src/views/LlmStatus.vue'), '.stat-value');
+    expect(value).toContain('white-space: nowrap');
+    expect(value).toContain('overflow: hidden');
+    expect(value).toContain('text-overflow: ellipsis');
+  });
+
+  it('drops the redundant inner padding on the score column', () => {
+    const css = read('src/views/ReviewHistory.vue');
+    // 28px of content for a 23–38px badge is what trimmed `88` to `88 ..`.
+    expect(rule(css, '.history-table :deep(.col-score .cell)')).toContain('padding: 0');
+    expect(css).toContain('class-name="col-score"');
+    expect(css).toContain('label-class-name="col-score"');
+  });
+
+  it('labels the two new provider fields in all six locales', () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr']) {
+      const file = source(`i18n/locales/${locale}.ts`);
+      for (const key of ['disableThinking', 'disableThinkingHint', 'avgTtfb', 'avgTtfbWindow']) {
+        expect(file, `${locale} is missing ${key}`).toContain(`${key}:`);
+      }
     }
   });
 });

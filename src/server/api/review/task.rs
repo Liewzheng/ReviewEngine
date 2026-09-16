@@ -64,7 +64,7 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
     let meta = &entry.source_meta;
     let status = task_status_str(&entry.state);
 
-    let (experts, raw_comment) = match &entry.result {
+    let (experts, errors, raw_comment) = match &entry.result {
         Some(result) => match serde_json::from_value::<crate::models::ReviewOutput>(result.clone()) {
             Ok(output) => {
                 let experts = output
@@ -98,11 +98,12 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
                     // empty; empty strings degrade to None (empty state).
                     .or_else(|| output.consolidated.as_ref().map(|c| c.assessment.tl_dr.clone()))
                     .filter(|s| !s.is_empty());
-                (experts, raw_comment)
+                // RENG-77 §4: the experts that produced no report at all.
+                (experts, output.errors.clone(), raw_comment)
             }
-            Err(_) => (Vec::new(), None),
+            Err(_) => (Vec::new(), Vec::new(), None),
         },
-        None => (Vec::new(), None),
+        None => (Vec::new(), Vec::new(), None),
     };
 
     ReviewDetail {
@@ -123,6 +124,7 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
         completed_at: entry.completed_at.map(|t| t.to_rfc3339()),
         commit_sha: meta.commit_sha.clone(),
         experts,
+        errors,
         raw_comment,
         raw_api_response: entry.result.clone(),
         gitlab_mr_url: meta.gitlab_mr_url.clone(),
@@ -402,10 +404,10 @@ pub(crate) async fn enqueue_review(
         };
 
         match outcome {
-            Ok((value, summary)) => {
+            Ok(outcome) => {
                 crate::server::log_collector::push_global_entry(
                     "INFO",
-                    format!("Review task {} completed: {}", task_id, summary),
+                    format!("Review task {} completed: {}", task_id, outcome.summary),
                     Some(crate::server::log_collector::LogMetadata {
                         request_id: Some(task_id.to_string()),
                         duration_ms: Some(task_started.elapsed().as_millis() as u64),
@@ -414,9 +416,23 @@ pub(crate) async fn enqueue_review(
                     }),
                 );
                 store_clone
-                    .update(task_id, TaskState::Completed, Some(value), None)
+                    .update_with_summary(
+                        task_id,
+                        TaskState::Completed,
+                        Some(outcome.value),
+                        None,
+                        // RENG-77: the in-memory snapshot, the only carrier of
+                        // the serving cards' fingerprints.
+                        outcome.llm_summary,
+                    )
                     .await;
-                crate::server::api::callback::spawn_callback(webhook, task_id, "completed", Some(summary), None);
+                crate::server::api::callback::spawn_callback(
+                    webhook,
+                    task_id,
+                    "completed",
+                    Some(outcome.summary),
+                    None,
+                );
             }
             Err(e) => {
                 let message = e.to_string();
@@ -498,6 +514,40 @@ mod tests {
             llm_model: None,
             llm_fp: None,
         }
+    }
+
+    /// RENG-77 §4: the experts that produced no report reach the review detail
+    /// payload, so a partially failed review is not rendered as a clean one.
+    /// The list is additive and optional: a pre-RENG-77 result decodes it as
+    /// empty rather than failing to parse.
+    #[test]
+    fn review_detail_exposes_the_failed_experts() {
+        let mut output = ReviewOutput::new(Vec::new());
+        output.errors = vec![
+            "all experts failed: 1 expert task(s) errored (first error: Expert task failed: expert 'security' \
+             — empty completion)"
+                .to_string(),
+        ];
+        let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
+        let detail = build_review_detail(&entry);
+        assert_eq!(detail.errors.len(), 1, "the failing expert is reported to the UI");
+        assert!(
+            detail.errors[0].contains("empty completion"),
+            "the reason travels with it: {:?}",
+            detail.errors
+        );
+
+        // A result persisted before the field existed decodes to an empty list,
+        // never a parse failure (which would blank the whole detail panel).
+        let legacy = serde_json::json!({
+            "reports": [],
+            "aggregated": null,
+            "dropped_findings": [],
+            "consolidated": null,
+        });
+        let detail = build_review_detail(&entry_with_result(Some(legacy)));
+        assert!(detail.errors.is_empty());
+        assert!(detail.raw_api_response.is_some(), "the legacy result still renders");
     }
 
     /// §8.3 regression: the aggregator markdown wins when both are present.

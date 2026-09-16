@@ -41,6 +41,14 @@ export interface ProviderCardState {
    * UI loaded carries the state the user last saw.
    */
   disabled?: boolean;
+  /**
+   * RENG-77: skip the provider's reasoning phase. A reasoning model otherwise
+   * spends its whole output budget on hidden reasoning and returns an empty
+   * answer — the P0 UAT symptom on `deepseek-v4-flash`. Same keep-on-omit
+   * contract as {@link disabled}, and sent as a concrete bool for the same
+   * reason: an untouched switch keeps the value the card was loaded with.
+   */
+  disableThinking?: boolean;
 }
 
 /** A sparse `llm` section of a PUT /config payload: `providers` is always
@@ -81,6 +89,7 @@ export function createEmptyProviderCard(): ProviderCardState {
     defaultModel: '',
     ...PROVIDER_FIELD_DEFAULTS,
     disabled: false,
+    disableThinking: false,
   };
 }
 
@@ -112,6 +121,7 @@ export function cardsFromLlmConfig(llm: LLMConfig | null | undefined): {
     timeoutSeconds: p.timeoutSeconds ?? PROVIDER_FIELD_DEFAULTS.timeoutSeconds,
     retryAttempts: p.retryAttempts ?? PROVIDER_FIELD_DEFAULTS.retryAttempts,
     disabled: p.disabled ?? false,
+    disableThinking: p.disableThinking ?? false,
   }));
   if (cards.length === 0 && scalarsLookConfigured(llm)) {
     // Legacy projection without providers[]: reconstruct the primary card
@@ -158,6 +168,7 @@ export function buildLlmPayload(
     timeoutSeconds: c.timeoutSeconds,
     retryAttempts: c.retryAttempts,
     disabled: c.disabled ?? false,
+    disableThinking: c.disableThinking ?? false,
   }));
   const primary = cards.find((c) => c.provider === primaryProvider) ?? cards[0];
   if (!primary) {

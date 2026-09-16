@@ -25,7 +25,7 @@ const messages = {
   common: { edit: 'Edit', testConnection: 'Test Connection' },
   llm: {
     status: { healthy: 'Healthy', degraded: 'Degraded', error: 'Error', offline: 'Offline', disabled: 'Disabled' },
-    metrics: { avgLatency: 'Avg Latency', requests: 'Usages', successRate: 'Success Rate' },
+    metrics: { avgLatency: 'Avg Latency', avgTtfb: 'Avg Comm. Latency', requests: 'Usages', successRate: 'Success Rate' },
     card: { disabled: 'Disabled', probeFailed: 'Probe failed', testOk: 'Test OK', testFailed: 'Test failed' },
     usageShare: '{percent}% of usage (last {days} days)',
   },
@@ -95,8 +95,20 @@ describe('provider card layout', () => {
     const html = await renderCard({ card: card(), health: undefined });
     expect(html).toContain('https://api.anthropic.com');
     expect(html).toContain('claude-sonnet-4-5');
-    expect(html).toContain('••••••');
-    expect(html).toContain('AN');
+    expect(html).toContain('**********');
+  });
+
+  it('renders mock v3 shape: no avatar, no status pill, no bullet mask', async () => {
+    const html = await renderCard({ card: card(), health: undefined });
+    expect(html).not.toContain('provider-card__monogram');
+    expect(html).not.toContain('••');
+    expect(html).not.toContain('provider-card__status');
+    // The URL / model / key rows are told apart by their own rules, and the
+    // header closes with the drag affordance the mock shows on the right.
+    expect(html).toContain('provider-card__row--url');
+    expect(html).toContain('provider-card__row--model');
+    expect(html).toContain('provider-card__row--key');
+    expect(html).toContain('provider-card__grip');
   });
 
   it('shows the three statistics with their values', async () => {
@@ -109,6 +121,26 @@ describe('provider card layout', () => {
     expect(html).toContain('100.0%');
   });
 
+  it('shows the communication latency once the server measures one', async () => {
+    const html = await renderCard({
+      card: card(),
+      health: {
+        name: 'anthropic',
+        status: 'healthy',
+        disabled: false,
+        avgTtfbMs: 17690,
+        avgLatencyMs: 21000,
+      },
+    });
+    // One compact token, with the recorded call latency kept out of the
+    // card. The measurement name + exact value live in the hover tooltip
+    // (pinned by `statsRow` in providerCardState.spec.ts); SSR skips the
+    // el-tooltip popper body, so the trigger text is what this assertion
+    // owns.
+    expect(html).toContain('17.7s');
+    expect(html).not.toContain('21.0s');
+  });
+
   it('renders an unmeasured statistic as an em dash in the muted colour', async () => {
     const html = await renderCard({
       card: card(),
@@ -117,22 +149,41 @@ describe('provider card layout', () => {
     expect(html).toMatch(/provider-card__stat is-empty[^>]*>—</);
   });
 
-  it('labels the chain position and shows the status pill', async () => {
+  it('keeps the chain marker beside the name and takes the status off the right edge', async () => {
     const html = await renderCard({
       card: card(),
       health: { name: 'anthropic', status: 'healthy', disabled: false, chainPosition: 1 },
     });
     expect(html).toContain('Chain #1');
-    expect(html).toContain('Healthy');
+    // RENG-77: no pill on the right — a healthy card carries no dot either, so
+    // its state is announced in the accessible name instead of drawn.
+    expect(html).not.toContain('provider-card__health');
+    expect(html).toContain('anthropic · Healthy');
   });
 
-  it('carries the usage bar and its caption when a share is known', async () => {
+  it('marks a card that needs attention with a dot beside its name', async () => {
+    const degraded = await renderCard({
+      card: card(),
+      health: { name: 'anthropic', status: 'degraded', disabled: false },
+    });
+    expect(degraded).toContain('provider-card__health--degraded');
+    expect(degraded).toContain('anthropic · Degraded');
+    const errored = await renderCard({
+      card: card(),
+      health: { name: 'anthropic', status: 'error', disabled: false },
+    });
+    expect(errored).toContain('provider-card__health--error');
+  });
+
+  it('carries the usage bar and no caption under it', async () => {
     const html = await renderCard({
       card: card(),
       health: { name: 'anthropic', status: 'healthy', disabled: false, usageShare: 0.253 },
     });
-    expect(html).toContain('25.3% of usage (last 7 days)');
     expect(html).toContain('provider-card__usage-fill');
+    expect(html).not.toContain('provider-card__usage-label');
+    // The share is still reachable — on the bar, for hover and screen readers.
+    expect(html).toContain('25.3% of usage (last 7 days)');
   });
 
   it('hides the usage row entirely when the share is unknown', async () => {

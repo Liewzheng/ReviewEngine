@@ -55,6 +55,14 @@ pub struct LlmCallSample {
     pub entry_fp: String,
     /// Round-trip time of this attempt, in milliseconds.
     pub latency_ms: u64,
+    /// RENG-77 (Issue 5): time-to-first-byte — request issued to response
+    /// headers received. `None` for rows written before migration `0006`
+    /// and for call paths where the underlying provider does not expose
+    /// TTFB granularity (the registry providers wrap reqwest internally
+    /// and never report it back, so their samples land here as `None`).
+    /// The aggregate averages only successful samples that carry one —
+    /// `null` when no sample in the window does.
+    pub ttfb_ms: Option<u64>,
     /// `true` when the attempt produced a completion.
     pub success: bool,
     /// The failure, truncated to [`ERROR_MAX_CHARS`]; `None` on success.
@@ -112,6 +120,7 @@ mod tests {
             model: "mimo".to_string(),
             entry_fp: "fp-xiaomi".to_string(),
             latency_ms: 120,
+            ttfb_ms: None,
             success: true,
             error: None,
             chain_position,

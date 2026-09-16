@@ -588,10 +588,14 @@ impl ReviewStore for SqlxStore {
         // The row's surrogate key is Rust-side (0001: no RETURNING); the
         // natural identity of a sample — review, provider, attempt, time —
         // cannot be a PK because `review_id` is nullable.
+        // RENG-77: `ttfb_ms` is the new column from migration 0006; pre-0006
+        // callers pass `None` and the column stays NULL, which the aggregate
+        // excludes from the average (a measurement we did not take is not a
+        // 0 — same rule as 0005's `entry_fp`).
         let sql = self.sql(
             "INSERT INTO llm_call_samples \
-             (id, review_id, provider, model, entry_fp, latency_ms, success, error, chain_position, attempt, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, review_id, provider, model, entry_fp, latency_ms, ttfb_ms, success, error, chain_position, attempt, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         );
         ::sqlx::query(&sql)
             .bind(uuid::Uuid::new_v4().to_string())
@@ -600,6 +604,7 @@ impl ReviewStore for SqlxStore {
             .bind(&sample.model)
             .bind(&sample.entry_fp)
             .bind(i64::try_from(sample.latency_ms).unwrap_or(i64::MAX))
+            .bind(sample.ttfb_ms.and_then(|t| i64::try_from(t).ok()))
             .bind(i64::from(sample.success))
             .bind(sample.error.as_deref())
             .bind(i64::from(sample.chain_position))
@@ -616,28 +621,33 @@ impl ReviewStore for SqlxStore {
         // `success` stays an INTEGER in SQL and is converted in Rust, matching
         // the dialect rule of 0001/0003 (booleans are 0/1, never BOOLEAN).
         // `entry_fp` is NULL for every pre-0005 row (RENG-75: the aggregate
-        // folds those into the unmarked bucket).
+        // folds those into the unmarked bucket); `ttfb_ms` is NULL for every
+        // pre-0006 row and for calls served by the registry path (RENG-77:
+        // the aggregate averages only the rows that carry a value).
         let sql = self.sql(
-            "SELECT provider, model, entry_fp, created_at, latency_ms, success FROM llm_call_samples \
+            "SELECT provider, model, entry_fp, created_at, latency_ms, ttfb_ms, success FROM llm_call_samples \
              WHERE created_at >= ? ORDER BY created_at",
         );
-        let rows = ::sqlx::query_as::<_, (String, String, Option<String>, String, i64, i64)>(&sql)
+        let rows = ::sqlx::query_as::<_, (String, String, Option<String>, String, i64, Option<i64>, i64)>(&sql)
             .bind(encode_ts(&since))
             .fetch_all(self.pool())
             .await
             .context("list llm call samples")?;
         rows.into_iter()
-            .map(|(provider, model, entry_fp, created_at, latency_ms, success)| {
-                Ok(LlmCallSampleRow {
-                    provider,
-                    model,
-                    entry_fp,
-                    created_at: super::decode_ts(&created_at)
-                        .with_context(|| format!("llm_call_samples.created_at: {created_at:?}"))?,
-                    latency_ms,
-                    success: success != 0,
-                })
-            })
+            .map(
+                |(provider, model, entry_fp, created_at, latency_ms, ttfb_ms, success)| {
+                    Ok(LlmCallSampleRow {
+                        provider,
+                        model,
+                        entry_fp,
+                        created_at: super::decode_ts(&created_at)
+                            .with_context(|| format!("llm_call_samples.created_at: {created_at:?}"))?,
+                        latency_ms,
+                        ttfb_ms,
+                        success: success != 0,
+                    })
+                },
+            )
             .collect()
     }
 
@@ -1621,6 +1631,7 @@ mod tests {
             model: format!("{provider}-model"),
             entry_fp: format!("fp-{provider}"),
             latency_ms,
+            ttfb_ms: None,
             success,
             error: (!success).then(|| "HTTP 401 Unauthorized".to_string()),
             chain_position: 1,

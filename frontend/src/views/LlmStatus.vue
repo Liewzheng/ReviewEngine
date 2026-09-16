@@ -15,7 +15,9 @@ import ProviderEditDialog from '../components/Config/ProviderEditDialog.vue'
 import {
   dialogForDuplicate,
   dialogForEdit,
+  formatLatency,
   healthTriple,
+  latencyReading,
   matchHealthToCards,
   matchProbeMessages,
 } from '../components/Config/providerCardState'
@@ -44,16 +46,42 @@ const latencyWindowDays = computed(() => (llm.latencyAvailable.value ? llm.laten
  *  average of the per-provider averages (a provider with 100 calls is not the
  *  same evidence as one with 2). `—` when no provider has a recorded sample,
  *  including when the samples could not be read at all; the probe's own
- *  instantaneous number is NOT a substitute for it. */
+ *  instantaneous number is NOT a substitute for it.
+ *
+ *  RENG-77: each provider contributes the same reading its card shows — the
+ *  communication latency when the server measures one, else the recorded call
+ *  latency — so the strip can never contradict the grid beneath it. */
+const latencyReadings = computed(() =>
+  providers.value
+    .map((p) => ({ reading: latencyReading(p), weight: p.latencySampleCount ?? 0 }))
+    .filter((r) => r.reading.ms !== null && r.weight > 0)
+)
+
 const avgLatency = computed(() => {
-  const measured = providers.value.filter(
-    (p) => typeof p.avgLatencyMs === 'number' && (p.latencySampleCount ?? 0) > 0
-  )
+  const measured = latencyReadings.value
   if (!measured.length) return null
-  const total = measured.reduce((sum, p) => sum + (p.latencySampleCount ?? 0), 0)
-  const weighted = measured.reduce((sum, p) => sum + (p.avgLatencyMs as number) * (p.latencySampleCount ?? 0), 0)
+  const total = measured.reduce((sum, r) => sum + r.weight, 0)
+  const weighted = measured.reduce((sum, r) => sum + (r.reading.ms as number) * r.weight, 0)
   return Math.round(weighted / total)
 })
+
+/** The measurement the strip's number covers: communication latency once any
+ *  contributing provider reports one, else the recorded call latency. One
+ *  label, naming what the number is — never a mix described as one of them. */
+const latencyStatKey = computed(() =>
+  latencyReadings.value.some((r) => r.reading.source === 'ttfb')
+    ? 'llm.stats.avgTtfb'
+    : 'llm.stats.avgLatency'
+)
+
+/** The compact single token the KPI face shows, so the value can never wrap
+ *  the strip onto a second line (RENG-77). */
+const avgLatencyText = computed(() => formatLatency(avgLatency.value))
+
+/** The same number as the server measured it, for the hover tooltip. */
+const avgLatencyTooltip = computed(() =>
+  avgLatency.value === null ? t(latencyStatKey.value) : `${t(latencyStatKey.value)} · ${avgLatency.value} ms`
+)
 
 /** RENG-56: usage window the per-provider numbers cover; null when the
  *  server could not read the usage history, which hides the usage row. */
@@ -367,13 +395,15 @@ onUnmounted(() => {
         <div class="stat-content">
           <el-icon class="stat-icon" :size="24"><RefreshRight /></el-icon>
           <div class="stat-body">
-            <div class="stat-value" :class="{ 'is-empty': avgLatency === null }">
-              {{ avgLatency === null ? '—' : `${avgLatency} ms` }}
-            </div>
+            <el-tooltip :content="avgLatencyTooltip" placement="top" :show-after="200">
+              <div class="stat-value" :class="{ 'is-empty': avgLatency === null }">
+                {{ avgLatencyText }}
+              </div>
+            </el-tooltip>
             <div class="stat-label">
               {{ latencyWindowDays === null
-                ? $t('llm.stats.avgLatency')
-                : $t('llm.stats.avgLatencyWindow', { days: latencyWindowDays }) }}
+                ? $t(latencyStatKey)
+                : $t(`${latencyStatKey}Window`, { days: latencyWindowDays }) }}
             </div>
           </div>
         </div>
@@ -519,6 +549,10 @@ onUnmounted(() => {
   min-width: 0;
 }
 
+/* RENG-77: one line, always. `17696 ms` wrapped onto a second line inside the
+   160px column and took the whole KPI strip out of alignment; the value is a
+   single compact token now (`17.7s`), and anything longer than the column
+   still never wraps — it trims, with the exact measurement in the tooltip. */
 .stat-value {
   font-family: var(--font-mono);
   font-size: 28px;
@@ -526,6 +560,9 @@ onUnmounted(() => {
   color: var(--text-primary);
   line-height: 1.2;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .stat-value.is-empty {

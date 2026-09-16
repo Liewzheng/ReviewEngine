@@ -137,8 +137,8 @@ fn test_complete_direct_rejects_empty_api_base() {
             disabled: false,
         };
         let result = client.complete_direct(&config, "sys", "user").await;
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
+        assert!(result.0.is_err());
+        let err = result.0.unwrap_err().to_string();
         assert!(err.contains("api_base"));
     });
 }
@@ -497,7 +497,10 @@ async fn test_fallback_result_is_attributed_to_the_hitting_provider() {
     // Direct hit: attributed to the (only) config.
     let result = client.complete(&config("second"), "system", "user").await.unwrap();
     assert_eq!(result.provider, "second");
-    assert_eq!(result.model, "mock", "mock provider's reported model is preserved");
+    assert_eq!(
+        result.model, "second-model",
+        "RENG-77: the CONFIGURED model is attributed, not the provider's echo ('mock') — every consumer looks the value up by what the card says"
+    );
 }
 
 /// RENG-55: a hit on a later chain entry is flagged (`fallback = true`) and

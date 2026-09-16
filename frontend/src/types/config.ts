@@ -17,11 +17,24 @@ export interface LlmProviderConfigEntry {
   /** Number of retry attempts on transient LLM API failures. */
   retryAttempts: number
   /**
+   * RENG-77: the LLM provider card and the KPI strip show the mean
+   * COMMUNICATION latency (`avgTtfbMs`) once the server measures one, else
+   * the mean recorded call latency (`avgLatencyMs`). Both are whole-ms
+   * integers; `null`/absent means unknown, never 0.
+   */
+  avgTtfbMs?: number | null
+  /**
    * Administrative off switch (RENG-75). `GET /config` always reports a
    * concrete bool; a save that OMITS the key keeps the stored flag of the
    * same entry, so only an explicit value can flip it.
    */
   disabled?: boolean
+  /**
+   * RENG-77: ask the provider to skip its reasoning/thinking phase. Reasoning
+   * models otherwise spend the whole output budget on hidden reasoning and
+   * return an empty answer. Same keep-on-omit contract as `disabled`.
+   */
+  disableThinking?: boolean
 }
 
 /** LLM provider configuration for code review AI models. */

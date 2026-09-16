@@ -45,7 +45,43 @@ enum RetryVerdict {
     /// be read. Retried — the class the pre-RENG-35 substring list was reaching
     /// for with `"timeout"` / `"connection"`.
     Unknown,
+    /// The provider ANSWERED, but with nothing usable: an empty (or
+    /// whitespace-only) completion (RENG-77 §4). Re-sending the identical
+    /// request is not expected to help — the measured case is a reasoning
+    /// model spending its whole `max_tokens` budget on `reasoning_tokens`, a
+    /// property of the config's request shape — so this config is given up
+    /// WITHOUT retry and the chain moves to the next entry, which is the
+    /// provider that can actually answer.
+    Empty,
 }
+
+/// The provider answered with a blank completion (RENG-77 §4).
+///
+/// A typed marker rather than a message match: [`LLMClient::retry_verdict`]
+/// downcasts to it to give the config up without a retry, and the error text
+/// is what reaches the review's `errors` list. Before this, an empty answer
+/// was accepted as a successful call — `parse_llm_response` is fail-soft, so
+/// it became an expert report with no findings and no raw response, and a
+/// review that produced nothing reported itself as a clean, high-scoring pass.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EmptyCompletion {
+    provider: String,
+    model: String,
+}
+
+impl std::fmt::Display for EmptyCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "provider '{}' (model '{}') returned an empty completion — no content to review. \
+             A reasoning model may be spending its whole max_tokens budget on reasoning tokens; \
+             set disable_thinking on this provider, or promote a provider that answers to the head of the chain",
+            self.provider, self.model
+        )
+    }
+}
+
+impl std::error::Error for EmptyCompletion {}
 
 impl LLMClient {
     /// Create a new `LLMClient` with a default reqwest HTTP client (120s timeout).
@@ -141,6 +177,12 @@ impl LLMClient {
     /// while a wrongly-permanent verdict would silently give up on a provider
     /// that was only briefly unreachable.
     fn retry_verdict(err: &anyhow::Error) -> RetryVerdict {
+        // An empty completion is a verdict about the CONFIG, not about the
+        // moment: the same request went through and produced nothing (RENG-77
+        // §4). Checked before the status parse because it carries no status.
+        if err.downcast_ref::<EmptyCompletion>().is_some() {
+            return RetryVerdict::Empty;
+        }
         match Self::http_status_code(err) {
             Some(status) if status == 408 || status == 429 || (500..600).contains(&status) => {
                 RetryVerdict::Retryable { status }
@@ -182,6 +224,15 @@ impl LLMClient {
     /// for history snapshots — e.g. an empty `config.provider` falls back to
     /// the registry name instead of recording an empty string.
     ///
+    /// The model is attributed the same way (RENG-77): `result.model` is
+    /// overwritten with the CONFIGURED `config.model`. Providers alias model
+    /// ids in their responses (`deepseek-flash` for a configured
+    /// `deepseek-v4-flash`, `gpt-4o-2024-11-20` for `gpt-4o`) and every
+    /// consumer — `reviews.llm_summary`, `expert_reports.llm_model`, the
+    /// review detail — looks the value up by what the CARD says, so the alias
+    /// silently matched nothing (the provider's usage and latency showed 0).
+    /// The alias is not lost: it is logged at DEBUG when it differs.
+    ///
     /// `fallback` (RENG-55) marks a hit that was NOT the head of the chain:
     /// either a chain advance in [`Self::complete_with_fallback`] or — for
     /// direct [`Self::complete`] calls — whatever the caller passes.
@@ -192,6 +243,15 @@ impl LLMClient {
         result.fallback = fallback;
         // RENG-75: attribute the exact card, for the usage snapshot's `fp`.
         result.entry_fp = Some(config.entry_fp());
+        if result.model != config.model {
+            tracing::debug!(
+                configured_model = %config.model,
+                reported_model = %result.model,
+                provider = %config.provider,
+                "the provider reported a different model id; attributing by the configured one (RENG-77)"
+            );
+            result.model = config.model.clone();
+        }
         result
     }
 
@@ -219,6 +279,12 @@ impl LLMClient {
     /// before the result is handed back: a failed attempt is recorded by the
     /// same path that records a successful one, which is what gives the page
     /// the call-level failure history the review-level snapshot cannot.
+    ///
+    /// RENG-77 §4: a blank completion is turned into an error HERE, before the
+    /// caller can treat it as a report — see [`EmptyCompletion`]. This is the
+    /// narrowest layer that sees every attempt (direct, chain, retry) and the
+    /// one that owns the sample, so the recorded row and the returned outcome
+    /// can never disagree about whether the call produced anything.
     async fn complete_attempt(
         &self,
         config: &LLMConfig,
@@ -228,8 +294,18 @@ impl LLMClient {
         attempt: u32,
     ) -> Result<CompletionResult> {
         let started = std::time::Instant::now();
-        let result = self.dispatch(config, system_prompt, user_prompt).await;
-        self.record_sample(config, started.elapsed(), &result, chain_position, attempt)
+        let (result, ttfb_ms) = self.dispatch(config, system_prompt, user_prompt).await;
+        let result = result.and_then(|r| {
+            if r.content.trim().is_empty() {
+                Err(anyhow::Error::new(EmptyCompletion {
+                    provider: config.provider.clone(),
+                    model: config.model.clone(),
+                }))
+            } else {
+                Ok(r)
+            }
+        });
+        self.record_sample(config, started.elapsed(), ttfb_ms, &result, chain_position, attempt)
             .await;
         result
     }
@@ -237,7 +313,19 @@ impl LLMClient {
     /// The provider call itself: registry routing when the provider is known,
     /// the direct OpenAI-compatible HTTP path otherwise. Records the
     /// Prometheus metric and attributes the result to the hitting config.
-    async fn dispatch(&self, config: &LLMConfig, system_prompt: &str, user_prompt: &str) -> Result<CompletionResult> {
+    ///
+    /// Returns `(Result, Option<u64>)` — the second element is the
+    /// time-to-first-byte in whole milliseconds for the underlying HTTP
+    /// exchange (RENG-77 §5). `None` for call paths that don't expose it
+    /// (the registry providers wrap reqwest internally and never report it
+    /// back); the direct OpenAI-compatible path measures the gap between
+    /// request issue and response-headers received and reports it.
+    async fn dispatch(
+        &self,
+        config: &LLMConfig,
+        system_prompt: &str,
+        user_prompt: &str,
+    ) -> (Result<CompletionResult>, Option<u64>) {
         // If we have a provider registry, use it for better routing
         if let Some(ref registry) = self.provider_registry {
             if let Some(provider) = registry.get(&config.provider) {
@@ -251,14 +339,17 @@ impl LLMClient {
                 };
                 let result = provider.complete(&params).await;
                 Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
-                return result.map(|r| Self::attribute_provider(r, config, false));
+                // Registry providers own their own reqwest client: they can
+                // expose TTFB later by changing the trait, but today they
+                // don't, so the recorded sample carries `ttfb_ms: None`.
+                return (result.map(|r| Self::attribute_provider(r, config, false)), None);
             }
         }
 
         // Fallback: use the direct OpenAI-compatible HTTP approach (original behavior)
-        let result = self.complete_direct(config, system_prompt, user_prompt).await;
+        let (result, ttfb_ms) = self.complete_direct(config, system_prompt, user_prompt).await;
         Self::record_llm_metrics(&config.provider, &config.model, result.is_ok());
-        result.map(|r| Self::attribute_provider(r, config, false))
+        (result.map(|r| Self::attribute_provider(r, config, false)), ttfb_ms)
     }
 
     /// Hand one attempt's latency to the sink, if one is attached (RENG-57).
@@ -270,6 +361,7 @@ impl LLMClient {
         &self,
         config: &LLMConfig,
         elapsed: std::time::Duration,
+        ttfb_ms: Option<u64>,
         result: &Result<CompletionResult>,
         chain_position: u32,
         attempt: u32,
@@ -283,6 +375,11 @@ impl LLMClient {
             // aggregate separately. Never logged (it hashes the key).
             entry_fp: config.entry_fp(),
             latency_ms: elapsed.as_millis() as u64,
+            // RENG-77 §5: the time-to-first-byte of THIS attempt. `None` when
+            // the underlying provider does not expose it (registry path);
+            // `Some(_)` for the direct OpenAI-compatible path, where it is
+            // the gap between request issue and response-headers received.
+            ttfb_ms,
             success: result.is_ok(),
             error: result.as_ref().err().map(|e| truncate_error(&format!("{e:#}"))),
             chain_position,
@@ -292,12 +389,20 @@ impl LLMClient {
     }
 
     /// Direct HTTP-based completion (backward compat, OpenAI-compatible only).
+    ///
+    /// Returns `(Result<CompletionResult>, Option<u64>)`: the second element
+    /// is the time-to-first-byte (the gap between the request being issued
+    /// and the response headers being received), in whole milliseconds.
+    /// `Some(_)` on the direct path because the reqwest `send()` await returns
+    /// once headers arrive — there is no body read happening yet — so the
+    /// elapsed at that point IS the TTFB. `None` if the request errored
+    /// before headers came back (DNS / TLS / connection refused / timeout).
     async fn complete_direct(
         &self,
         config: &LLMConfig,
         system_prompt: &str,
         user_prompt: &str,
-    ) -> Result<CompletionResult> {
+    ) -> (Result<CompletionResult>, Option<u64>) {
         let _start = std::time::Instant::now();
 
         // Validate API base URL early so we give a helpful error instead of
@@ -306,17 +411,19 @@ impl LLMClient {
         if base.is_empty() || !base.starts_with("http") {
             // If api_base is empty, check if the user might have used `base_url`
             // (a common alias that we support via serde(alias)).
-            anyhow::bail!(
-                "LLM config '{}' has no api_base set. \
-                 Use api_base = \"https://api.example.com/v1\" or \
-                 LLM_CONFIG environment variable.",
-                config.provider,
+            return (
+                Err(anyhow::anyhow!(
+                    "LLM config '{}' has no api_base set. \
+                     Use api_base = \"https://api.example.com/v1\" or \
+                     LLM_CONFIG environment variable.",
+                    config.provider,
+                )),
+                None,
             );
         }
         let url = format!("{}/chat/completions", base.trim_end_matches('/'));
         let body = Self::build_chat_request_body(config, system_prompt, user_prompt);
 
-        let latency_send = _start.elapsed();
         let resp = self
             .inner
             .post(&url)
@@ -324,10 +431,18 @@ impl LLMClient {
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
-            .await
-            .map_err(|e| {
+            .await;
+        // RENG-77 §5: `send()` resolves when the response headers arrive
+        // (the response body has not been read yet), so the elapsed since
+        // `_start` at this point is the time-to-first-byte. An error
+        // before headers means no measurement, hence `None` — distinct
+        // from a measured 0 ms (the aggregate would still average those
+        // in, and we do not want to).
+        let (resp, ttfb_ms) = match resp {
+            Ok(r) => (Ok(r), Some(_start.elapsed().as_millis() as u64)),
+            Err(e) => {
                 let msg = e.to_string();
-                if msg.contains("builder error") {
+                let mapped = if msg.contains("builder error") {
                     anyhow::anyhow!(
                         "LLM request failed: invalid API base URL '{}'. \
                          Check api_base in your config — it should be like \
@@ -348,48 +463,53 @@ impl LLMClient {
                     )
                 } else {
                     anyhow::anyhow!("LLM request failed: {e}")
-                }
-            })?;
+                };
+                (Err(mapped), None)
+            }
+        };
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => return (Err(e), ttfb_ms),
+        };
 
-        let latency_resp = _start.elapsed();
         tracing::debug!(
-            "LLM call to {}: send={:?} resp={:?} total={:?}",
+            "LLM call to {}: ttfb={:?}ms total={:?}ms",
             config.model,
-            latency_send,
-            latency_resp - latency_send,
+            ttfb_ms,
             _start.elapsed()
         );
 
         let status = resp.status();
         if !status.is_success() {
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("LLM API returned {status}: {text}");
+            return (Err(anyhow::anyhow!("LLM API returned {status}: {text}")), ttfb_ms);
         }
 
-        tracing::debug!("parsing JSON at {:?}", _start.elapsed());
-        let value: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to parse LLM response: {}", e))?;
-        tracing::debug!("JSON parsed at {:?}", _start.elapsed());
+        let value: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return (Err(anyhow::anyhow!("Failed to parse LLM response: {}", e)), ttfb_ms),
+        };
 
-        let content = value["choices"][0]["message"]["content"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("LLM response missing content"))?
-            .to_string();
+        let content = match value["choices"][0]["message"]["content"].as_str() {
+            Some(s) => s.to_string(),
+            None => return (Err(anyhow::anyhow!("LLM response missing content")), ttfb_ms),
+        };
 
         let total_tokens = value["usage"]["total_tokens"].as_u64().unwrap_or(0);
         let model = value["model"].as_str().unwrap_or(&config.model).to_string();
 
-        Ok(CompletionResult {
-            content,
-            total_tokens,
-            model,
-            provider: config.provider.clone(),
-            fallback: false,
-            // Filled by `attribute_provider` on the way out.
-            entry_fp: None,
-        })
+        (
+            Ok(CompletionResult {
+                content,
+                total_tokens,
+                model,
+                provider: config.provider.clone(),
+                fallback: false,
+                // Filled by `attribute_provider` on the way out.
+                entry_fp: None,
+            }),
+            ttfb_ms,
+        )
     }
 
     /// Complete with fallback across multiple configs.
@@ -407,6 +527,12 @@ impl LLMClient {
     /// different provider with its own credentials — the very case the chain
     /// exists for (the RENG-55 fallback logging covers it unchanged). The total
     /// cost stays bounded by one attempt per config.
+    ///
+    /// RENG-77 §4 adds a third non-retriable verdict: an EMPTY completion. The
+    /// provider answered, but with nothing to review, so the config is skipped
+    /// without a retry and the chain advances to a provider that answers — a
+    /// chain of one then fails the expert, which is what surfaces the problem
+    /// instead of reporting a clean, empty, high-scoring review.
     pub async fn complete_with_fallback(
         &self,
         configs: &[LLMConfig],
@@ -503,6 +629,18 @@ impl LLMClient {
                                 took = ?attempt_dur,
                                 error = %e,
                                 "LLM request failed permanently ({status}), not retrying"
+                            );
+                        }
+                        // RENG-77 §4: the provider answered with nothing. The
+                        // request itself was accepted, so a retry would repeat
+                        // it — the config is given up and the chain advances.
+                        if let RetryVerdict::Empty = verdict {
+                            tracing::warn!(
+                                provider = %config.provider,
+                                model = %config.model,
+                                attempt = attempt + 1,
+                                took = ?attempt_dur,
+                                "LLM provider returned an empty completion; not retrying this provider (RENG-77)"
                             );
                         }
 

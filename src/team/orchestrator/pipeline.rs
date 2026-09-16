@@ -17,6 +17,7 @@ use crate::llm::select_llm_config;
 use crate::models::*;
 use crate::progress::ProgressMap;
 use crate::prompt::PromptEngine;
+use anyhow::Context as _;
 
 use crate::output::parser::validate_findings;
 use crate::team::adjudicator;
@@ -298,7 +299,13 @@ fn create_expert_task(
             },
         )?;
         let llm_config = select_llm_config(&expert, &llm_configs);
-        let result = llm_client.complete_with_fallback(&llm_config, &system, &user).await?;
+        // RENG-77 §4: an empty completion is an ERROR from the client, so the
+        // expert fails here and its name is attached to the failure — a task
+        // that errors returns no report, and the name would otherwise be lost.
+        let result = llm_client
+            .complete_with_fallback(&llm_config, &system, &user)
+            .await
+            .with_context(|| format!("expert '{}'", expert.name))?;
         let mut report = crate::output::parser::parse_llm_response(&expert.name, &result.content);
         // RENG-38: snapshot the LLM that actually produced this report (the
         // fallback-chain hit), so history can show provider/model per expert.
@@ -368,7 +375,12 @@ fn mark_expert_stage_complete(progress_map: Option<&ProgressMap>, review_id: &st
 }
 
 /// Iterate over task results and split them into reports, metrics, and errors.
-fn collect_expert_results(
+///
+/// RENG-77 §4: a failed task has no report, so the expert's NAME exists only
+/// here — the task's error carries it as context (`create_expert_task`), which
+/// is what lets the message name the expert that failed instead of an
+/// anonymous "a task failed".
+pub(super) fn collect_expert_results(
     results: Vec<anyhow::Result<(ExpertReport, u64, u64)>>,
 ) -> (Vec<ExpertReport>, Vec<ExpertMetrics>, u64, Vec<String>) {
     let mut reports = Vec::new();

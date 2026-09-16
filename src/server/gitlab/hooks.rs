@@ -986,9 +986,12 @@ mod tests {
             raw_llm_response: "raw".to_string(),
             parse_error: None,
             raw_dump_path: None,
-            llm_provider: None,
-            llm_model: None,
-            llm_fp: None,
+            llm_provider: Some("deepseek".to_string()),
+            llm_model: Some("deepseek-v4-flash".to_string()),
+            // RENG-77 §2: a webhook-triggered review must record the serving
+            // card's fingerprint too — the summary is computed from this
+            // in-memory output before it is serialized away.
+            llm_fp: Some("fp-webhook-card".to_string()),
         };
         let output = crate::models::ReviewOutput::new(vec![report]);
         let outcome: anyhow::Result<crate::models::ReviewOutput> = Ok(output);
@@ -1003,6 +1006,21 @@ mod tests {
         assert_eq!(reports.len(), 1);
         assert_eq!(reports[0]["expert_name"], "security");
         assert!(entry.error.is_none());
+
+        let summary = entry
+            .llm_summary
+            .expect("a review that ran an expert records its usage summary");
+        let parsed: serde_json::Value = serde_json::from_str(&summary).unwrap();
+        assert_eq!(parsed[0]["provider"], "deepseek");
+        assert_eq!(parsed[0]["model"], "deepseek-v4-flash");
+        assert_eq!(
+            parsed[0]["fp"], "fp-webhook-card",
+            "the webhook path carries the fp exactly like the REST path: {summary}"
+        );
+        assert!(
+            !result.to_string().contains("fp-webhook-card"),
+            "the fp stays out of reviews.result on this path too"
+        );
     }
 
     #[tokio::test]

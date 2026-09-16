@@ -10,9 +10,10 @@ import {
   formatRequests,
   formatSuccessRate,
   formatUsagePercent,
+  latencyLabelKey,
+  latencyReading,
   matchHealthToCards,
   matchProbeMessages,
-  monogramOf,
   statsRow,
   type CardHealth,
 } from './providerCardState';
@@ -137,6 +138,74 @@ describe('value formatting', () => {
   });
 });
 
+describe('RENG-77 — a duration is one token', () => {
+  it('scales milliseconds to seconds to minutes', () => {
+    expect(formatLatency(128)).toBe('128ms');
+    expect(formatLatency(999)).toBe('999ms');
+    expect(formatLatency(1000)).toBe('1.0s');
+    expect(formatLatency(1800)).toBe('1.8s');
+    expect(formatLatency(17696)).toBe('17.7s');
+    expect(formatLatency(60000)).toBe('1.0min');
+    expect(formatLatency(123456)).toBe('2.1min');
+  });
+
+  it('never introduces a space, so the KPI and the stat cell stay on one line', () => {
+    for (const ms of [0, 7, 300, 999, 1000, 1800, 17696, 59999, 60000, 3600000]) {
+      expect(formatLatency(ms)).not.toMatch(/\s/);
+    }
+  });
+});
+
+describe('RENG-77 — the latency reading', () => {
+  it('prefers the measured communication latency', () => {
+    expect(latencyReading(health('a', { avgTtfbMs: 17690, avgLatencyMs: 21000 }))).toEqual({
+      ms: 17690,
+      source: 'ttfb',
+    });
+  });
+
+  it('falls back to the recorded call latency when the TTFB is null', () => {
+    expect(latencyReading(health('a', { avgTtfbMs: null, avgLatencyMs: 300 }))).toEqual({
+      ms: 300,
+      source: 'latency',
+    });
+  });
+
+  it('falls back when the field is absent altogether — an older payload still reads', () => {
+    expect(latencyReading(health('a', { avgLatencyMs: 300 }))).toEqual({ ms: 300, source: 'latency' });
+  });
+
+  it('reports nothing measured as an empty reading, never a zero', () => {
+    expect(latencyReading(health('a', { avgTtfbMs: null, avgLatencyMs: null }))).toEqual({
+      ms: null,
+      source: null,
+    });
+    expect(latencyReading(undefined)).toEqual({ ms: null, source: null });
+  });
+
+  it('names the measurement so the card labels what it shows', () => {
+    expect(latencyLabelKey('ttfb')).toBe('llm.metrics.avgTtfb');
+    expect(latencyLabelKey('latency')).toBe('llm.metrics.avgLatency');
+    expect(latencyLabelKey(null)).toBe('llm.metrics.avgLatency');
+  });
+
+  it('puts the unrounded measurement in the stat tooltip', () => {
+    const [latency] = statsRow(health('a', { avgTtfbMs: 17690, avgLatencyMs: 21000 }));
+    expect(latency).toEqual({
+      key: 'avgLatency',
+      labelKey: 'llm.metrics.avgTtfb',
+      text: '17.7s',
+      empty: false,
+      exact: '17690 ms',
+    });
+    // The fallback keeps the old label and still carries its exact value.
+    const [fallback] = statsRow(health('a', { avgTtfbMs: null, avgLatencyMs: 300 }));
+    expect(fallback.labelKey).toBe('llm.metrics.avgLatency');
+    expect(fallback.exact).toBe('300 ms');
+    expect(fallback.text).toBe('300ms');
+  });
+});
+
 describe('footer slot', () => {
   it('is empty for a healthy enabled card', () => {
     expect(cardFooter(card('a'), health('a'), null)).toEqual({ kind: 'none', detail: '' });
@@ -169,19 +238,6 @@ describe('footer slot', () => {
       kind: 'testFail',
       detail: 'boom',
     });
-  });
-});
-
-describe('monogram', () => {
-  it('takes up to two alphanumerics, uppercased', () => {
-    expect(monogramOf('deepseek')).toBe('DE');
-    expect(monogramOf('xiaomi-token-plan-cn')).toBe('XI');
-    expect(monogramOf('ollama local')).toBe('OL');
-  });
-
-  it('falls back to a question mark for a name with nothing to show', () => {
-    expect(monogramOf('')).toBe('?');
-    expect(monogramOf('中文')).toBe('?');
   });
 });
 

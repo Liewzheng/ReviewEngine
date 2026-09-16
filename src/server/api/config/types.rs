@@ -100,6 +100,21 @@ pub struct UiLlmProviderConfig {
     /// `Some(_)`, so `GET /config` reports a concrete bool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
+    /// RENG-77: opt out of a reasoning model's chain-of-thought
+    /// (`"thinking": {"type": "disabled"}`), so a reasoning model cannot spend
+    /// its whole `max_tokens` budget on `reasoning_tokens` and answer with
+    /// empty content. The SAME keep semantics as [`Self::disabled`]: `None`
+    /// keeps the stored value of the same card (resolved through the
+    /// `(provider, apiBase, model)` triple), `Some(_)` sets it.
+    ///
+    /// Unlike `disabled` this stays a tri-state in the projection: the stored
+    /// domain value is itself an `Option`, and "never configured" is
+    /// meaningfully different from an explicit `false` (the flag is sent to
+    /// the provider only when `true`). A save that never mentions the key
+    /// therefore cannot turn an enabled opt-out off, and `GET /config` echoes
+    /// exactly what is stored — an absent key reads as "off" in the UI.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_thinking: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -285,6 +300,9 @@ impl UiConfig {
                 timeout_seconds: 60,
                 retry_attempts: 3,
                 disabled: Some(l.disabled),
+                // RENG-77: the tri-state is echoed as stored — see the field
+                // docs; the UI renders an absent key as "off".
+                disable_thinking: l.disable_thinking,
             });
         }
 

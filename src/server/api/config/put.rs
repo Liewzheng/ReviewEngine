@@ -225,6 +225,18 @@ fn resolve_git_platforms(
     Ok(resolved)
 }
 
+/// What one submitted `llm.providers[]` entry resolved to, aligned with the
+/// entry's index. Drives the masked/keep write-back in [`apply_ui_config`]:
+/// `key_present` is the masked API-key echo, and the two flags are the
+/// post-keep values `GET /config` reports (RENG-75's `disabled`, RENG-77's
+/// `disable_thinking`).
+#[derive(Debug, Clone, Copy, Default)]
+struct ResolvedEntry {
+    key_present: bool,
+    disabled: bool,
+    disable_thinking: Option<bool>,
+}
+
 /// The request-resolved configuration produced by [`apply_ui_config`]: the
 /// sets the UI actually submitted, with kept secrets resolved against stored
 /// values (the full-replace-with-secret-keep semantics). `put_config`
@@ -320,6 +332,13 @@ pub(crate) fn apply_ui_config(
     let resolve_disabled = |submitted: Option<bool>, kept: Option<&crate::models::LLMConfig>| -> bool {
         submitted.or_else(|| kept.map(|c| c.disabled)).unwrap_or(false)
     };
+    // RENG-77: `disable_thinking` keeps the same way, but its stored value is
+    // itself an `Option` (unset = the flag is not sent to the provider), so
+    // the resolution stays tri-state: an omitted key keeps the card's stored
+    // `Option` — including "never set" — instead of collapsing it to `false`.
+    let resolve_disable_thinking = |submitted: Option<bool>, kept: Option<&crate::models::LLMConfig>| -> Option<bool> {
+        submitted.or_else(|| kept.and_then(|c| c.disable_thinking))
+    };
 
     let mut new_llm_configs = Vec::new();
 
@@ -368,6 +387,13 @@ pub(crate) fn apply_ui_config(
             legacy_consumed.and_then(|i| body.llm.providers[i].disabled),
             stored_for(None, "openai", &body.llm.api_base_url, &body.llm.default_model).as_ref(),
         );
+        // Same source for the RENG-77 opt-out: the providers[] entry this
+        // scalar section consumes speaks for it, falling back to the stored
+        // value of the triple the scalars describe.
+        let disable_thinking = resolve_disable_thinking(
+            legacy_consumed.and_then(|i| body.llm.providers[i].disable_thinking),
+            stored_for(None, "openai", &body.llm.api_base_url, &body.llm.default_model).as_ref(),
+        );
         new_llm_configs.push(crate::models::LLMConfig {
             provider: "openai".to_string(),
             model: body.llm.default_model.clone(),
@@ -375,7 +401,7 @@ pub(crate) fn apply_ui_config(
             api_base: body.llm.api_base_url.clone(),
             max_tokens: body.llm.max_tokens,
             temperature: body.llm.temperature,
-            disable_thinking: None,
+            disable_thinking,
             disabled,
         });
     }
@@ -388,15 +414,26 @@ pub(crate) fn apply_ui_config(
     // INDEX, never merged by name (RENG-75).
     //
     // `resolved` is aligned with providers[] indices and feeds the masked
-    // write-back below: (key_present, disabled) per submitted entry.
-    let mut resolved: Vec<(bool, bool)> = Vec::with_capacity(body.llm.providers.len());
+    // write-back below: what each submitted entry resolved to (RENG-75's
+    // `disabled`, RENG-77's `disable_thinking`).
+    let mut resolved: Vec<ResolvedEntry> = Vec::with_capacity(body.llm.providers.len());
     for (i, p) in body.llm.providers.iter().enumerate() {
         if p.provider.is_empty() {
-            resolved.push((false, resolve_disabled(p.disabled, None)));
+            // A nameless entry names no card to keep from, so an omitted
+            // `disable_thinking` stays "never set".
+            resolved.push(ResolvedEntry {
+                key_present: false,
+                disabled: resolve_disabled(p.disabled, None),
+                disable_thinking: resolve_disable_thinking(p.disable_thinking, None),
+            });
             continue;
         }
         if primary_provider == Some(p.provider.as_str()) && legacy_consumed == Some(i) {
-            resolved.push((true, new_llm_configs[0].disabled));
+            resolved.push(ResolvedEntry {
+                key_present: true,
+                disabled: new_llm_configs[0].disabled,
+                disable_thinking: new_llm_configs[0].disable_thinking,
+            });
             continue;
         }
         // Same "keep unchanged" semantics as the legacy field: a masked key
@@ -409,8 +446,16 @@ pub(crate) fn apply_ui_config(
             p.api_key.clone()
         };
         let disabled = resolve_disabled(p.disabled, kept.as_ref());
+        // RENG-77: the SAME `kept` card resolves the thinking opt-out, so a
+        // card edit that omits the key cannot silently re-enable thinking on
+        // the very card it edits.
+        let disable_thinking = resolve_disable_thinking(p.disable_thinking, kept.as_ref());
         if key.is_empty() {
-            resolved.push((false, disabled));
+            resolved.push(ResolvedEntry {
+                key_present: false,
+                disabled,
+                disable_thinking,
+            });
             continue;
         }
         new_llm_configs.push(crate::models::LLMConfig {
@@ -420,10 +465,14 @@ pub(crate) fn apply_ui_config(
             api_base: p.api_base_url.clone(),
             max_tokens: p.max_tokens,
             temperature: p.temperature,
-            disable_thinking: None,
+            disable_thinking,
             disabled,
         });
-        resolved.push((true, disabled));
+        resolved.push(ResolvedEntry {
+            key_present: true,
+            disabled,
+            disable_thinking,
+        });
     }
 
     // Sync the persisted UI config's key fields with what was actually stored:
@@ -454,15 +503,20 @@ pub(crate) fn apply_ui_config(
         String::new()
     };
     for (i, p) in body.llm.providers.iter_mut().enumerate() {
-        let (key_present, disabled) = resolved.get(i).copied().unwrap_or((false, false));
-        p.api_key = if key_present {
+        let entry = resolved.get(i).copied().unwrap_or_default();
+        p.api_key = if entry.key_present {
             API_KEY_MASK.to_string()
         } else {
             String::new()
         };
         // Store the RESOLVED flag (keep semantics applied) so `GET /config`
         // always reports a concrete bool and the next merge starts from it.
-        p.disabled = Some(disabled);
+        p.disabled = Some(entry.disabled);
+        // RENG-77: same rule for the thinking opt-out — the resolved
+        // (post-keep) value is what the projection echoes, so the next merge
+        // starts from what was actually applied. `None` stays `None` (the
+        // flag is not sent to the provider), never a fabricated `false`.
+        p.disable_thinking = entry.disable_thinking;
     }
 
     // RENG-75: the effective head is always an ENABLED provider. A recorded

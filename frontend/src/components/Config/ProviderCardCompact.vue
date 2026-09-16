@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { CircleCheck, Connection, CopyDocument, Delete, Edit, Remove } from '@element-plus/icons-vue'
+import { CircleCheck, Connection, CopyDocument, Delete, Edit, Rank, Remove } from '@element-plus/icons-vue'
 import type { TestResult } from '../../types/llm'
 import type { ProviderCardState } from '../../composables/llmPayload'
 import type { ContextMenuItem } from './contextMenu'
@@ -11,9 +11,9 @@ import {
   cardFooter,
   cardVisualState,
   formatUsagePercent,
-  monogramOf,
   statsRow,
   type CardHealth,
+  type StatCell,
 } from './providerCardState'
 import ProviderContextMenu from './ProviderContextMenu.vue'
 
@@ -49,7 +49,9 @@ const isDisabled = computed(() => state.value === 'disabled')
 const statusLabel = computed(() => t(`llm.status.${state.value}`))
 
 const displayName = computed(() => props.card.provider || EM_DASH)
-const monogram = computed(() => monogramOf(props.card.provider))
+/** The card's accessible name. The health is a dot now (RENG-77 mock v3), so
+ *  the status has to travel in the label instead of in a visible pill. */
+const cardAriaLabel = computed(() => `${displayName.value} · ${statusLabel.value}`)
 const chainLabel = computed(() =>
   props.health?.chainPosition != null
     ? t('config.providerCards.chainPosition', { n: props.health.chainPosition })
@@ -57,6 +59,13 @@ const chainLabel = computed(() =>
 )
 
 const stats = computed(() => statsRow(props.health))
+
+/** Label + the unrounded measurement, so the hover tooltip keeps the value
+ *  the compact single-token stat had to round. */
+function statTooltip(stat: StatCell): string {
+  const label = t(stat.labelKey)
+  return stat.exact ? `${label} · ${stat.exact}` : label
+}
 const usagePercent = computed(() => formatUsagePercent(props.health?.usageShare))
 const usageLabel = computed(() => {
   const percent = usagePercent.value
@@ -279,7 +288,7 @@ function onHeaderPointerDown(event: PointerEvent) {
       { 'is-saving': saving },
     ]"
     :data-index="index"
-    :aria-label="displayName"
+    :aria-label="cardAriaLabel"
     aria-haspopup="menu"
     role="group"
     tabindex="0"
@@ -288,33 +297,45 @@ function onHeaderPointerDown(event: PointerEvent) {
     @keydown.enter.prevent="onCardActivate"
   >
     <header class="provider-card__header" @pointerdown="onHeaderPointerDown">
-      <span class="provider-card__monogram" aria-hidden="true">{{ monogram }}</span>
       <span class="provider-card__name" :title="displayName">{{ displayName }}</span>
+      <el-tooltip v-if="accent !== 'none'" :content="statusLabel" placement="top" :show-after="200">
+        <span
+          class="provider-card__health"
+          :class="`provider-card__health--${accent}`"
+          aria-hidden="true"
+        />
+      </el-tooltip>
       <span v-if="chainLabel" class="provider-card__chain">{{ chainLabel }}</span>
-      <span class="provider-card__status">
-        <span class="provider-card__status-dot" aria-hidden="true" />
-        <span class="provider-card__status-text">{{ statusLabel }}</span>
-      </span>
+      <el-icon class="provider-card__grip" aria-hidden="true"><Rank /></el-icon>
     </header>
 
-    <div class="provider-card__row" :title="card.apiBaseUrl">{{ card.apiBaseUrl || EM_DASH }}</div>
-    <div class="provider-card__row" :title="card.defaultModel">{{ card.defaultModel || EM_DASH }}</div>
-    <div class="provider-card__row provider-card__row--key">••••••</div>
+    <div class="provider-card__row provider-card__row--url" :title="card.apiBaseUrl">
+      {{ card.apiBaseUrl || EM_DASH }}
+    </div>
+    <div class="provider-card__row provider-card__row--model" :title="card.defaultModel">
+      {{ card.defaultModel || EM_DASH }}
+    </div>
+    <div class="provider-card__row provider-card__row--key">**********</div>
 
     <div class="provider-card__stats">
       <template v-for="(stat, i) in stats" :key="stat.key">
         <span v-if="i > 0" class="provider-card__stat-sep" aria-hidden="true">|</span>
-        <el-tooltip :content="t(stat.labelKey)" placement="top" :show-after="200">
+        <el-tooltip :content="statTooltip(stat)" placement="top" :show-after="200">
           <span class="provider-card__stat" :class="{ 'is-empty': stat.empty }">{{ stat.text }}</span>
         </el-tooltip>
       </template>
     </div>
 
-    <div v-if="usagePercent !== null" class="provider-card__usage">
+    <div
+      v-if="usagePercent !== null"
+      class="provider-card__usage"
+      role="img"
+      :aria-label="usageLabel ?? ''"
+      :title="usageLabel ?? ''"
+    >
       <div class="provider-card__usage-bar">
         <div class="provider-card__usage-fill" :style="{ width: `${usagePercent}%` }" />
       </div>
-      <span class="provider-card__usage-label">{{ usageLabel }}</span>
     </div>
 
     <footer class="provider-card__footer" :class="`provider-card__footer--${footerTone}`">
@@ -368,10 +389,6 @@ function onHeaderPointerDown(event: PointerEvent) {
   cursor: default;
 }
 
-.provider-card--disabled .provider-card__monogram {
-  background: var(--text-tertiary);
-}
-
 .provider-card--dragging {
   opacity: 0.4;
 }
@@ -397,21 +414,6 @@ function onHeaderPointerDown(event: PointerEvent) {
   cursor: default;
 }
 
-.provider-card__monogram {
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  border-radius: 50%;
-  background: var(--accent-primary);
-  color: var(--text-on-accent);
-  font-family: var(--font-mono);
-  font-size: 11px;
-  font-weight: 700;
-}
-
 .provider-card__name {
   min-width: 0;
   flex: 0 1 auto;
@@ -423,6 +425,25 @@ function onHeaderPointerDown(event: PointerEvent) {
   text-overflow: ellipsis;
 }
 
+/* RENG-77: the health moved from a right-aligned pill to this dot beside the
+   name. Only a card that needs attention carries one — the same rule the
+   left-edge accent stripe follows, so a healthy card stays undecorated. */
+.provider-card__health {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-tertiary);
+}
+
+.provider-card__health--degraded {
+  background: var(--accent-warning);
+}
+
+.provider-card__health--error {
+  background: var(--accent-error);
+}
+
 .provider-card__chain {
   flex-shrink: 0;
   font-family: var(--font-mono);
@@ -430,34 +451,14 @@ function onHeaderPointerDown(event: PointerEvent) {
   color: var(--text-tertiary);
 }
 
-.provider-card__status {
+/* The mock's top-right affordance: the header IS the drag handle and the
+   right-click target, so this is the mark that says "draggable" — decorative,
+   never a control of its own. */
+.provider-card__grip {
   flex-shrink: 0;
   margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--space-1);
-  font-size: 11px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-}
-
-.provider-card__status-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-tertiary);
-}
-
-.provider-card--healthy .provider-card__status-dot {
-  background: var(--accent-success);
-}
-
-.provider-card--degraded .provider-card__status-dot {
-  background: var(--accent-warning);
-}
-
-.provider-card--error .provider-card__status-dot {
-  background: var(--accent-error);
+  font-size: 16px;
+  color: var(--text-tertiary);
 }
 
 .provider-card__row {
@@ -467,6 +468,14 @@ function onHeaderPointerDown(event: PointerEvent) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.provider-card__row--url {
+  color: var(--text-secondary);
+}
+
+.provider-card__row--model {
+  color: var(--text-primary);
 }
 
 .provider-card__row--key {
@@ -493,10 +502,9 @@ function onHeaderPointerDown(event: PointerEvent) {
   color: var(--text-tertiary);
 }
 
+/* RENG-77 (mock v3): the share is the bar alone — no caption line under it.
+   The percentage stays reachable on hover and to assistive tech. */
 .provider-card__usage {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-1);
   margin-top: var(--space-2);
 }
 
@@ -514,11 +522,6 @@ function onHeaderPointerDown(event: PointerEvent) {
 
 .provider-card--disabled .provider-card__usage-fill {
   background: var(--offline);
-}
-
-.provider-card__usage-label {
-  font-size: 12px;
-  color: var(--text-secondary);
 }
 
 .provider-card__footer {

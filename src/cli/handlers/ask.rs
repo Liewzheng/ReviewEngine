@@ -58,6 +58,7 @@ pub async fn run_ask(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -113,6 +114,7 @@ async fn run_ask_with_diff(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 
@@ -189,6 +191,7 @@ pub async fn run_ask_local_repo(
         aggregated: None,
         dropped_findings: vec![],
         consolidated: None,
+        errors: vec![],
     };
     write_output(&review_out, format, output, None, None, false)?;
 

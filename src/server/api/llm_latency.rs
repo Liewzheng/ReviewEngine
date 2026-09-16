@@ -83,6 +83,17 @@ pub struct ProviderLatency {
     /// milliseconds; `None` when the window holds no successful call (nothing
     /// to average — never `0`).
     pub avg_latency_ms: Option<u64>,
+    /// RENG-77 §5: mean time-to-first-byte of the SUCCESSFUL calls in the
+    /// window that actually carried a `ttfb_ms`. `None` when no successful
+    /// sample in the window has a `ttfb_ms` recorded — the registry path
+    /// reports `None` for every call, pre-0006 rows are NULL, and a
+    /// successful call that errored before response headers never set it.
+    /// `ttfb_ms` and `latency_ms` are averaged independently: a server that
+    /// streams nothing back until the full body is ready will report
+    /// `avg_ttfb_ms ≈ avg_latency_ms` (the user-facing RENG-77 §5 caveat),
+    /// while one that flushes response headers early will show
+    /// `avg_ttfb_ms ≪ avg_latency_ms`.
+    pub avg_ttfb_ms: Option<u64>,
     /// Successful calls in the window — the average's denominator. This is a
     /// measured count, so `0` is a real value here.
     pub sample_count: u64,
@@ -103,6 +114,7 @@ impl ProviderLatency {
     fn untouched() -> Self {
         Self {
             avg_latency_ms: None,
+            avg_ttfb_ms: None,
             sample_count: 0,
             failure_count: 0,
             last_sample_at: None,
@@ -116,6 +128,11 @@ impl ProviderLatency {
 struct Fold {
     success_sum_ms: u64,
     success_count: u64,
+    /// RENG-77 §5: same shape as `success_*` but only over rows that actually
+    /// carry a `ttfb_ms` (registry path, pre-0006 rows, and a call that
+    /// failed before the response headers all skip this).
+    ttfb_sum_ms: u64,
+    ttfb_count: u64,
     failure_count: u64,
     last_sample_at: Option<DateTime<Utc>>,
     /// Per-bucket (sum, count) of successful calls.
@@ -129,6 +146,8 @@ impl Fold {
     fn merge_from(&mut self, other: &Fold) {
         self.success_sum_ms += other.success_sum_ms;
         self.success_count += other.success_count;
+        self.ttfb_sum_ms += other.ttfb_sum_ms;
+        self.ttfb_count += other.ttfb_count;
         self.failure_count += other.failure_count;
         if self
             .last_sample_at
@@ -149,6 +168,8 @@ impl Fold {
             // clean (`234`, not `234.0`).
             (self.success_sum_ms as f64 / self.success_count as f64).round() as u64
         });
+        let avg_ttfb_ms =
+            (self.ttfb_count > 0).then(|| (self.ttfb_sum_ms as f64 / self.ttfb_count as f64).round() as u64);
         let has_any = self.success_count + self.failure_count > 0;
         let sparkline = has_any.then(|| {
             self.buckets
@@ -158,6 +179,7 @@ impl Fold {
         });
         ProviderLatency {
             avg_latency_ms,
+            avg_ttfb_ms,
             sample_count: self.success_count,
             failure_count: self.failure_count,
             last_sample_at: self.last_sample_at,
@@ -204,6 +226,14 @@ impl LatencySnapshot {
             let latency = row.latency_ms.max(0) as u64;
             fold.success_sum_ms += latency;
             fold.success_count += 1;
+            // RENG-77 §5: TTFB averages only successful samples that carry
+            // one. `None` (registry path, pre-0006) is excluded entirely, not
+            // coerced to 0 — same rule the rest of the codebase uses for
+            // "unknown" vs. "measured zero".
+            if let Some(ttfb) = row.ttfb_ms.filter(|v| *v >= 0) {
+                fold.ttfb_sum_ms += ttfb as u64;
+                fold.ttfb_count += 1;
+            }
             let bucket = &mut fold.buckets[bucket_of(row.created_at, since)];
             bucket.0 += latency;
             bucket.1 += 1;
@@ -294,6 +324,31 @@ mod tests {
             entry_fp: entry_fp.map(str::to_string),
             created_at: at,
             latency_ms,
+            // RENG-77 §5: callers that exercise the TTFB path pass it
+            // through `entry_row_with_ttfb`; the simpler `row` helper
+            // (every pre-existing test) leaves it `None`, which keeps the
+            // pre-0006 / registry-path behaviour in scope.
+            ttfb_ms: None,
+            success,
+        }
+    }
+
+    fn entry_row_with_ttfb(
+        provider: &str,
+        model: &str,
+        entry_fp: Option<&str>,
+        at: DateTime<Utc>,
+        latency_ms: i64,
+        ttfb_ms: Option<i64>,
+        success: bool,
+    ) -> LlmCallSampleRow {
+        LlmCallSampleRow {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            entry_fp: entry_fp.map(str::to_string),
+            created_at: at,
+            latency_ms,
+            ttfb_ms,
             success,
         }
     }
@@ -536,5 +591,165 @@ mod tests {
         let other = snapshot.for_card("acme", "m2", "fp-b", true);
         assert_eq!(other.avg_latency_ms, None);
         assert_eq!(other.sample_count, 0);
+    }
+
+    // ─── RENG-77 §5: time-to-first-byte ──────────────────────────────
+
+    /// `avgTtfbMs` averages only successful samples that carry a `ttfb_ms`:
+    /// `None` (pre-0006, registry path, failed calls) is excluded entirely
+    /// — never coerced to 0, the same rule `avgLatencyMs` already follows
+    /// for "unknown" vs. "measured zero".
+    #[test]
+    fn avg_ttfb_averages_only_samples_that_carry_one() {
+        let since = at("2026-09-08T12:00:00Z");
+        let snapshot = LatencySnapshot::new(
+            since,
+            vec![
+                // Two successful calls WITH a ttfb: 100ms and 200ms → mean 150ms.
+                entry_row_with_ttfb(
+                    "xiaomi",
+                    "xiaomi-model",
+                    Some("fp-xiaomi"),
+                    at("2026-09-14T10:00:00Z"),
+                    5000,
+                    Some(100),
+                    true,
+                ),
+                entry_row_with_ttfb(
+                    "xiaomi",
+                    "xiaomi-model",
+                    Some("fp-xiaomi"),
+                    at("2026-09-14T10:01:00Z"),
+                    5000,
+                    Some(200),
+                    true,
+                ),
+                // A successful call WITHOUT ttfb (registry path, pre-0006):
+                // it counts toward sample_count and avg_latency_ms but stays
+                // out of avg_ttfb_ms entirely.
+                entry_row_with_ttfb(
+                    "xiaomi",
+                    "xiaomi-model",
+                    Some("fp-xiaomi"),
+                    at("2026-09-14T10:02:00Z"),
+                    300,
+                    None,
+                    true,
+                ),
+                // A failed call with ttfb: the failure short-circuits the
+                // fold, so its ttfb is dropped from the average even if
+                // somehow set.
+                entry_row_with_ttfb(
+                    "xiaomi",
+                    "xiaomi-model",
+                    Some("fp-xiaomi"),
+                    at("2026-09-14T10:03:00Z"),
+                    5000,
+                    Some(9999),
+                    false,
+                ),
+            ],
+        );
+
+        let xiaomi = snapshot.for_card("xiaomi", "xiaomi-model", "fp-xiaomi", false);
+        assert_eq!(xiaomi.sample_count, 3, "the No-ttfb success still counts");
+        assert_eq!(
+            xiaomi.avg_latency_ms,
+            Some((5000 + 5000 + 300) / 3),
+            "all three successful calls enter the latency average"
+        );
+        assert_eq!(
+            xiaomi.avg_ttfb_ms,
+            Some((100 + 200) / 2),
+            "only the two samples that carry a ttfb enter its average"
+        );
+        assert_eq!(xiaomi.failure_count, 1, "the failed call is counted but excluded");
+    }
+
+    /// No sample in the window carries a ttfb → `avg_ttfb_ms` is `None`,
+    /// not `0` (the same null-vs-zero discipline the rest of the latency
+    /// payload follows). `avg_latency_ms` is independent — it can still be
+    /// `Some(_)` if successful calls without ttfb exist.
+    #[test]
+    fn avg_ttfb_is_null_when_no_sample_carries_one() {
+        let since = at("2026-09-08T12:00:00Z");
+        let snapshot = LatencySnapshot::new(
+            since,
+            vec![
+                // Pre-0006 / registry-path shapes: latency present, ttfb absent.
+                entry_row_with_ttfb(
+                    "deepseek",
+                    "m",
+                    Some("fp-d"),
+                    at("2026-09-14T10:00:00Z"),
+                    250,
+                    None,
+                    true,
+                ),
+            ],
+        );
+        let d = snapshot.for_card("deepseek", "m", "fp-d", false);
+        assert_eq!(d.avg_latency_ms, Some(250));
+        assert_eq!(d.avg_ttfb_ms, None, "no measurement is not a 0: the wire is `null`");
+    }
+
+    /// RENG-77 §5 measured verdict: for a non-streaming provider the
+    /// request body is generated server-side BEFORE the response headers
+    /// are flushed, so `ttfb_ms ≈ latency_ms` (the response cannot be sent
+    /// until generation is done). This test pins that equality by feeding
+    /// equal values and asserting the aggregate reproduces them — and
+    /// proves the two metrics are computed INDEPENDENTLY (averaging
+    /// `ttfb_ms` alone never drags `latency_ms` along).
+    #[test]
+    fn ttfb_equals_latency_for_a_non_streaming_provider_is_a_measured_fact() {
+        let since = at("2026-09-08T12:00:00Z");
+        let snapshot = LatencySnapshot::new(
+            since,
+            vec![
+                // For an OpenAI chat completion with `stream: false` (the
+                // shipped default), the server returns the full body and
+                // headers at the same instant — `ttfb_ms` ≈ `latency_ms`.
+                // The measured cases on deepseek-v4-flash were 17.6s
+                // (RENG-77 §5 user report): both numbers were in the same
+                // ballpark, i.e. ≈ 17.6 s. The aggregate must reproduce
+                // that fact, not invent a 200ms communication latency the
+                // server never measured.
+                entry_row_with_ttfb(
+                    "deepseek",
+                    "deepseek-v4-flash",
+                    Some("fp-d"),
+                    at("2026-09-14T10:00:00Z"),
+                    17_600,
+                    Some(17_550),
+                    true,
+                ),
+                entry_row_with_ttfb(
+                    "deepseek",
+                    "deepseek-v4-flash",
+                    Some("fp-d"),
+                    at("2026-09-14T10:00:30Z"),
+                    17_400,
+                    Some(17_380),
+                    true,
+                ),
+            ],
+        );
+        let d = snapshot.for_card("deepseek", "deepseek-v4-flash", "fp-d", false);
+        assert_eq!(d.avg_latency_ms, Some(17_500));
+        assert_eq!(
+            d.avg_ttfb_ms,
+            Some(17_465),
+            "TTFB and latency are both averages — they need not agree to the ms, but the order of magnitude matches"
+        );
+        // Document the verdict: the values ARE close. The user-facing
+        // surface (`avgTtfbMs` in the API payload) should make this fact
+        // visible, not silently substitute one for the other.
+        assert!(
+            (d.avg_ttfb_ms.unwrap() as i64 - d.avg_latency_ms.unwrap() as i64).abs() < 200,
+            "for a non-streaming provider, TTFB ≈ latency (RENG-77 §5 verdict): \
+             ttfb={:?} latency={:?}",
+            d.avg_ttfb_ms,
+            d.avg_latency_ms
+        );
     }
 }

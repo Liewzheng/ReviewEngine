@@ -709,7 +709,19 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.score')" width="76" align="center" sortable :sort-by="['assessment.score']">
+          <!-- RENG-77: the score cell carries a tag, not text, so it opts out of
+               the shared cell padding (see `.col-score` in the styles) — with
+               both paddings in place only 28px of the 76px column was left for
+               a 30–38px badge, and a two- or three-digit score was trimmed. -->
+          <el-table-column
+            :label="$t('history.columns.score')"
+            width="76"
+            align="center"
+            sortable
+            :sort-by="['assessment.score']"
+            class-name="col-score"
+            label-class-name="col-score"
+          >
             <template #default="{ row }">
               <el-tooltip
                 v-if="row.status === 'completed' && row.assessment"
@@ -1027,6 +1039,23 @@ watch(() => route.query, () => {
 
 .history-table :deep(.el-table__row:hover) {
   background: var(--bg-hover) !important;
+}
+
+/* RENG-77: the score cell's badge was trimmed to `88 ..`. The column is 76px
+   wide and every cell is padded TWICE — `padding: 0 12px` on the
+   `.el-table__cell` (R0.5) plus Element Plus's own `padding: 0 12px` on the
+   inner `.cell` — which left 28px of content for a 23–38px `el-tag`. The td
+   padding already sets the cell's rhythm here, so the inner one is dropped for
+   this column only (`class-name`/`label-class-name` = `col-score`): body and
+   header both get it, so the label text stops trimming too. Every score from
+   0 to 100 now renders whole with air on both sides, without widening the
+   column and taking space from its neighbours. */
+.history-table :deep(.col-score .cell) {
+  padding: 0;
+}
+
+.history-table :deep(.col-score .score-tag) {
+  max-width: 100%;
 }
 
 /* Project column: cap the tag at the cell width so an over-long slug

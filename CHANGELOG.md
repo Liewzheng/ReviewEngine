@@ -1,3 +1,11 @@
+## [0.10.37] - 2026-09-16
+
+### Fixed
+- **A finished task's elapsed time stops counting (RENG-89)**: the queue page's「最近完成任务」cards showed a timer that kept growing on every auto-refresh — the human measured **22m 42s / 26m 34s on reviews whose real duration was ~2 minutes** (both completed). Root cause, `TaskEntry::elapsed_ms`: the span was built as `now - started_at` **unconditionally**, so a terminal entry's value advanced with the wall clock; the same file eight lines above has the correct pattern (`duration_ms` uses `completed_at` when present). It now ends at `completed_at` whenever the entry carries one — which **every** terminal state does (`completed` / `failed` / `cancelled`) — and still tracks the clock while in flight. The two SSE event sites in the same file (progress updates, and the terminal-state event) reuse the entry's projection instead of open-coding it, so the API and the push event can no longer disagree.
+
+### Notes
+- **Test**: `elapsed_ms_freezes_once_the_task_settles` pins an exact frozen value (10 000 ms for a 10-second span whose `completed_at` is months in the past — a `now`-based implementation fails loudly), covers `failed` / `cancelled` as terminal too, and asserts an in-flight entry still reports ≥ its elapsed. Lib suite: **1880 passed**.
+- The bug and its fix share the same "snapshot vs. live" shape as RENG-87 (a KPI grid that reserved a track for a card that did not exist): in both, the computation kept its original assumption after the state it described had already changed.
 ## [0.10.36] - 2026-09-16
 
 ### Fixed

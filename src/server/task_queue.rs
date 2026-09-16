@@ -306,7 +306,11 @@ impl TaskStore {
         if let Some(entry) = self.inner.write().await.get_mut(&task_id) {
             entry.progress = Some(progress.min(100));
             entry.expert_name = expert_name.clone();
-            let elapsed = entry.started_at.map(|s| millis_between(s, chrono::Utc::now()));
+            // RENG-89: reuse the entry's own projection — an in-flight entry
+            // (no `completed_at`) tracks the wall clock, a terminal one
+            // (`update` sets `completed_at` before this line) carries the
+            // frozen span, exactly like `GET /queue/tasks`.
+            let elapsed = entry.elapsed_ms();
             let _ = self.tx.send(TaskEvent {
                 task_id,
                 status: "running",
@@ -388,7 +392,11 @@ impl TaskStore {
                 TaskState::Failed => "failed",
                 TaskState::Cancelled => "cancelled",
             };
-            let elapsed = entry.started_at.map(|s| millis_between(s, chrono::Utc::now()));
+            // RENG-89: reuse the entry's own projection — an in-flight entry
+            // (no `completed_at`) tracks the wall clock, a terminal one
+            // (`update` sets `completed_at` before this line) carries the
+            // frozen span, exactly like `GET /queue/tasks`.
+            let elapsed = entry.elapsed_ms();
             let _ = self.tx.send(TaskEvent {
                 task_id,
                 status,
@@ -851,8 +859,16 @@ impl TaskEntry {
         }
     }
 
+    /// Wall-clock elapsed for the queue card: from `started_at` to now while
+    /// the task is in flight, and **frozen at `completed_at`** once it settles.
+    /// RENG-89: an unconditionally `now`-based span kept counting after the
+    /// review finished (the page auto-refreshes, so a completed card showed a
+    /// timer that never stopped); the same `millis_between` clamp still covers
+    /// an inverted or skewed span.
     pub fn elapsed_ms(&self) -> Option<u64> {
-        self.started_at.map(|s| millis_between(s, chrono::Utc::now()))
+        let start = self.started_at?;
+        let end = self.completed_at.unwrap_or_else(chrono::Utc::now);
+        Some(millis_between(start, end))
     }
 }
 
@@ -1052,6 +1068,50 @@ mod tests {
         let mut ok = entry.clone();
         ok.completed_at = Some(base + chrono::Duration::milliseconds(1500));
         assert_eq!(ok.duration_ms(), Some(1500));
+    }
+
+    /// RENG-89: a settled entry's elapsed is frozen at `completed_at` — the
+    /// queue card must not keep counting after the review finished — while an
+    /// in-flight entry still tracks the wall clock.
+    #[test]
+    fn elapsed_ms_freezes_once_the_task_settles() {
+        let base = chrono::DateTime::parse_from_rfc3339("2026-09-03T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let mut settled = TaskEntry {
+            task_id: Uuid::new_v4(),
+            state: TaskState::Completed,
+            created_at: base,
+            started_at: Some(base - chrono::Duration::seconds(10)),
+            completed_at: Some(base),
+            result: None,
+            error: None,
+            request: None,
+            source_meta: SourceMeta::default(),
+            progress: None,
+            expert_name: None,
+            llm_summary: None,
+        };
+        // Exact: `base` is in the past, so a `now`-based span would report
+        // months here and fail loudly.
+        assert_eq!(
+            settled.elapsed_ms(),
+            Some(10_000),
+            "settled: the span ends at completed_at, never at now"
+        );
+
+        // Failed and cancelled are terminal too, and carry completed_at.
+        for state in [TaskState::Failed, TaskState::Cancelled] {
+            settled.state = state.clone();
+            assert_eq!(settled.elapsed_ms(), Some(10_000), "{state:?} must freeze as well");
+        }
+
+        // In flight: no completed_at, so the span follows the wall clock.
+        settled.completed_at = None;
+        settled.state = TaskState::Running;
+        settled.started_at = Some(chrono::Utc::now() - chrono::Duration::seconds(5));
+        let live = settled.elapsed_ms().expect("an in-flight entry has an elapsed");
+        assert!(live >= 5_000, "in-flight tracks now, got {live}");
     }
 
     #[tokio::test]

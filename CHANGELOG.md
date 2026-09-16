@@ -1,3 +1,12 @@
+## [0.10.39] - 2026-09-16
+
+### Fixed
+- **A review submitted or re-run from the WebUI now runs the aggregator expert (RENG-91)**: the experts page lists 12 experts enabled, yet every WebUI-submitted review came back with 11 reports and `aggregated: null` — the `aggregator` entry never ran. Whether it runs is gated by the separate `report.aggregated` flag (which has no WebUI control) plus the expert existing, and the three runners disagreed: the webhook path (`src/server/mod.rs`), the CLI MR path (`src/lib.rs`) and the local-checkout orchestrator (`src/team/orchestrator/mod.rs`) all call `select_aggregator_expert` → `run_aggregator`, while the REST path (`run_review`, i.e. `POST /api/v1/reviews` and `…/{id}/rerun`) built its output from `run_experts` alone and **never called the aggregator at all** — so `aggregated` was structurally `null` there whatever the flag said. The REST path now uses the same gate and the same `build_review_output_from_reports` helper, with the same fail-soft rule (an aggregation failure warns and falls back to a non-aggregated output; it never fails the review), and the `global_context` that `run_experts` already returned is threaded into the aggregator prompt instead of being discarded. (`src/server/api/review/resolve.rs`)
+
+### Notes
+- **Tests**: a REST review with `[report] aggregated = true` and an enabled aggregator produces a non-null `aggregated` — asserted through the production write-through into `reviews.result`, not just the in-memory value; with the flag off, `aggregated` stays `null` while the expert reports still come back; and an aggregator-only provider failure still yields a successful, non-aggregated review. Lib suite: **1889 passed** (2 ignored).
+- **The same hole in a different path (RENG-94)**: the CLI local-review entries (`run_local` / `run_local_repo` / `run_local_path` in `src/cli/handlers/review.rs`) also build `ReviewOutput::new(reports)` and never run the aggregator. Whether `--local-path` reviews are meant to aggregate is a separate decision, tracked in RENG-94.
+
 ## [0.10.38] - 2026-09-16
 
 ### Fixed

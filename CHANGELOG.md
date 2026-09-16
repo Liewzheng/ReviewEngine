@@ -1,3 +1,16 @@
+## [0.10.34] - 2026-09-16
+
+### Changed
+- **The review-detail drawer is a list, not a stack of boxes (RENG-84)**: the human reported it as "被改得太丑陋了". Two regions were rebuilt on the layering principle the card language already uses (spacing / weight / colour steps instead of borders and fills everywhere):
+  - **The metadata grid** (作者/项目/分支/创建时间/耗时/提交) was six 301×48 bordered tiles filled with `--bg-surface` — which, after RENG-76's R2.1 made the drawer surface `--bg-elevated`, read as six *darker* slabs floating on a lighter panel. Now six plain 295×30 fields: no fill, no frame, no padding; the grid separates them with a 24px column gap and a 12px row gap, the icon drops to 14px `--text-tertiary`.
+  - **The expert rows** were 614×49 slabs — Element Plus paints `--el-collapse-*-bg-color` into every header — with a hairline per row and the list bordered top *and* bottom. Now 614×45 **transparent** rows on the drawer surface: one hairline between neighbours, the list bordered top only, no hairline under the last row, a full-width `--bg-hover` tint on hover (table-row language, no radius/shadow), 44px header height, and EP's 25px content padding replaced by `--space-2`. The expanded report well is deliberately unchanged — it stays the one filled+framed box in the list, now reading as an inset on the lighter drawer.
+  - **Extra fix in scope**: the status-badge reservation selector (`:only-child` with a 50px right margin) was also true of a score-only row — the usual case — so those rows sat 50px short of the right edge. Retargeted at `.status-badge`, the score tag now right-aligns (measured 1332 → 1398); badge-only rows keep their reservation.
+- No interaction changed (collapse toggle, tabs, footer, drawer open/close): the template diff is one `class` attribute.
+
+### Notes
+- **Evidence**: 12+ before/after screenshots (dark + light, collapsed + expanded, forced `:hover`) plus computed-geometry JSON and a README, under `reports-reng84/` in the task's worktree. `kimi-webbridge` was unavailable (the daemon reported `extension_connected: false`), so the captures were produced by building HEAD and HEAD+change locally, serving each with `vite preview`, and driving an existing headless Chrome over CDP — **proven to show the committed code** (the served CSS chunk is md5-identical to a fresh build of the committed tree and carries the new declarations). The preview container was never written to.
+- **Tests**: new `frontend/src/views/reviewHistoryDrawer.spec.ts` (15 cases, stylesheet-text contract) — **mutation-checked**: reframing `.meta-item`, restoring the EP slab, reverting the reservation selector, restoring `--space-5`, restoring the last row's hairline, adding a per-row header rule, and putting a literal colour on the hover tint each fail exactly the corresponding test. Front-end suite: **162 passed** (was 147).
+- **Not verified**: the nine-row shape (the preview dataset has ≤2 experts per review — geometry is row-count independent); badge-only rows (verified by DOM injection under the real stylesheet); light theme relies on the hairline for the report well (no colour step exists there — unchanged from before, documented).
 ## [0.10.33] - 2026-09-16
 
 ### Fixed

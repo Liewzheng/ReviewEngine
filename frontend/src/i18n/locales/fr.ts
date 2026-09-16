@@ -392,6 +392,8 @@ export default {
       primaryBadge: 'Principal',
       chainPosition: 'Chaîne n° {n}',
       duplicate: 'Dupliquer la carte',
+      duplicateUnchanged:
+        'Aucune modification — une carte avec exactement cette configuration existe déjà. Créer une autre copie quand même ?',
       enable: 'Activer',
       disable: 'Désactiver',
       enabled: '« {name} » est maintenant activé',

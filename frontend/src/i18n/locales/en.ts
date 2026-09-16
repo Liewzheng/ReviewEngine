@@ -398,6 +398,8 @@ export default {
       primaryBadge: 'Primary',
       chainPosition: 'Chain #{n}',
       duplicate: 'Duplicate Card',
+      duplicateUnchanged:
+        'Nothing was changed — a card with this exact configuration already exists. Create another copy anyway?',
       enable: 'Enable',
       disable: 'Disable',
       enabled: '"{name}" is now enabled',

@@ -383,6 +383,7 @@ export default {
       primaryBadge: '主',
       chainPosition: '链序 #{n}',
       duplicate: '复制卡片',
+      duplicateUnchanged: '未做任何修改——已存在一张配置完全相同的卡片，仍要再创建一个副本吗？',
       enable: '启用',
       disable: '停用',
       enabled: '已启用“{name}”',

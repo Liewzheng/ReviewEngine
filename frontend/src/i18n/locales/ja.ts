@@ -388,6 +388,8 @@ export default {
       primaryBadge: 'プライマリ',
       chainPosition: 'チェーン #{n}',
       duplicate: 'カードを複製',
+      duplicateUnchanged:
+        '何も変更されていません——同じ設定のカードがすでに存在します。このまま複製を作成しますか？',
       enable: '有効化',
       disable: '無効化',
       enabled: '「{name}」を有効化しました',

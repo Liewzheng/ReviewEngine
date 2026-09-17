@@ -157,6 +157,7 @@ async fn run_webhook_review(
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
     gate: ContentGate,
 ) {
     // Resolve the MR metadata + diff up front: the diff doubles as the content
@@ -241,6 +242,7 @@ async fn run_webhook_review(
             server_llm_configs,
             llm_sink,
             server_expert_overrides,
+            server_aggregated,
         )
         .await
     }
@@ -273,6 +275,7 @@ pub fn spawn_mr_review_task(
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
     gate: ContentGate,
 ) {
     let d = dispatcher.clone();
@@ -288,6 +291,7 @@ pub fn spawn_mr_review_task(
             tap,
             server_llm_configs,
             server_expert_overrides,
+            server_aggregated,
             gate,
         )
         .await;
@@ -307,6 +311,7 @@ pub async fn handle_mr_in_progress(
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
     gate: ContentGate,
 ) {
     tracing::info!("MR !{} review in progress, waiting...", mr_iid);
@@ -325,6 +330,7 @@ pub async fn handle_mr_in_progress(
                 tap,
                 server_llm_configs,
                 server_expert_overrides,
+                server_aggregated,
                 gate,
             );
         }
@@ -352,6 +358,7 @@ pub async fn dispatch_mr_event(
     tap: Option<DiscussionTap>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
     gate: ContentGate,
 ) {
     match dispatcher.try_start(mr_url, sha).await {
@@ -367,6 +374,7 @@ pub async fn dispatch_mr_event(
                 tap,
                 server_llm_configs,
                 server_expert_overrides,
+                server_aggregated,
                 gate,
             );
         }
@@ -385,6 +393,7 @@ pub async fn dispatch_mr_event(
                 tap,
                 server_llm_configs,
                 server_expert_overrides,
+                server_aggregated,
                 gate,
             )
             .await;
@@ -477,6 +486,7 @@ pub async fn handle_mr_hook(
     db: Option<Arc<SqlxStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_mr_hook_payload(body, gitlab_token)?;
 
@@ -547,6 +557,7 @@ pub async fn handle_mr_hook(
             tap,
             server_llm_configs,
             server_expert_overrides,
+            server_aggregated,
             ContentGate::Enabled,
         )
         .await;
@@ -794,6 +805,7 @@ pub async fn handle_note_hook(
     db: Option<Arc<SqlxStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse Note hook: {}", e);
@@ -893,6 +905,7 @@ pub async fn handle_note_hook(
                             tap,
                             server_llm_configs,
                             server_expert_overrides,
+                            server_aggregated,
                             // An explicit `/review` / `/describe` command is
                             // user intent: it always reviews, even when the
                             // content is unchanged (RENG-62).
@@ -1210,9 +1223,19 @@ mod tests {
         platform: Option<crate::models::GitPlatformConfig>,
         db: &Arc<SqlxStore>,
     ) {
-        let _ = handle_note_hook(payload, dispatcher, token, platform, None, Some(db.clone()), None, None)
-            .await
-            .unwrap();
+        let _ = handle_note_hook(
+            payload,
+            dispatcher,
+            token,
+            platform,
+            None,
+            Some(db.clone()),
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
     }
 
     /// (a) a plain MR note is persisted with all fields, project from
@@ -1229,6 +1252,7 @@ mod tests {
             None,
             None,
             Some(db.clone()),
+            None,
             None,
             None,
         )
@@ -1276,6 +1300,7 @@ mod tests {
             None,
             None,
             Some(db.clone()),
+            None,
             None,
             None,
         )
@@ -1464,6 +1489,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .await
         .expect("hook must succeed without a DB");
@@ -1549,6 +1575,8 @@ mod tests {
             None,
             None,
             None,
+            // RENG-95: no WebUI aggregation override in this test.
+            None,
             ContentGate::Enabled,
         )
         .await;
@@ -1599,6 +1627,8 @@ mod tests {
             None,
             None,
             None,
+            // RENG-95: no WebUI aggregation override in this test.
+            None,
             ContentGate::Bypassed,
         )
         .await;
@@ -1635,6 +1665,8 @@ mod tests {
             hook_source_meta(&mr_url, "sha1"),
             None,
             None,
+            None,
+            // RENG-95: no WebUI aggregation override in this test.
             None,
             ContentGate::Bypassed,
         )
@@ -1691,6 +1723,8 @@ mod tests {
             hook_source_meta(&mr_url, "sha1"),
             None,
             None,
+            None,
+            // RENG-95: no WebUI aggregation override in this test.
             None,
             ContentGate::Enabled,
         )

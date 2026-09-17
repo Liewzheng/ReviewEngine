@@ -345,6 +345,10 @@ pub(crate) async fn enqueue_review(
     // resolves its own config (request TOML / config file) and re-applies this
     // map, so the edit reaches the review actually being enqueued.
     let expert_overrides = state.expert_overrides_snapshot();
+    // RENG-95: the aggregation-flag counterpart — snapshotted at enqueue time
+    // like the overrides, applied over the config `run_review` resolves for
+    // itself (that path never reads `app_config`).
+    let aggregation_override = state.aggregation_override();
 
     // 0.10.0 §7.2: pre-review discussion tap, GitLab MR sources only. Built
     // synchronously before the spawn so the git_platforms RwLock guard never
@@ -440,6 +444,9 @@ pub(crate) async fn enqueue_review(
                     // RENG-69: the persisted WebUI expert overrides, re-applied
                     // over the config this review resolves for itself.
                     expert_overrides,
+                    // RENG-95: the WebUI-set aggregation flag, applied the
+                    // same way (the review path never reads `app_config`).
+                    aggregation_override,
                 )
                 .await
             }

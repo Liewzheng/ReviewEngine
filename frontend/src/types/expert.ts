@@ -59,6 +59,17 @@ export interface ExpertUpdateResult extends Expert {
   persisted?: boolean
 }
 
+/**
+ * Response of `PUT /system/experts/aggregated` (RENG-95): the effective
+ * report-level aggregation flag plus whether it is durable. `persisted`
+ * follows the expert PUT's contract — `false` means memory-only (lost on
+ * restart) and must be surfaced as a warning, never a clean success.
+ */
+export interface AggregatedUpdateResult {
+  aggregated: boolean
+  persisted?: boolean
+}
+
 /** Maps each expert category to its human-readable label. */
 export const categoryLabelMap: Record<ExpertCategory, string> = {
   security: 'Security',

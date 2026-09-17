@@ -373,6 +373,7 @@ impl GitLabWebhookHandler {
         db: Option<Arc<crate::store::SqlxStore>>,
         server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
         server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+        server_aggregated: Option<bool>,
     ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
         let event_name = system_hook_event_name(body);
         match event_name.as_str() {
@@ -385,6 +386,7 @@ impl GitLabWebhookHandler {
                 db.clone(),
                 server_llm_configs,
                 server_expert_overrides,
+                server_aggregated,
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -397,6 +399,7 @@ impl GitLabWebhookHandler {
                 db,
                 server_llm_configs,
                 server_expert_overrides,
+                server_aggregated,
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -497,6 +500,10 @@ impl WebhookHandler for GitLabWebhookHandler {
         // RENG-69: the WebUI-managed expert overrides travel the same way
         // (`AppState::expert_overrides_snapshot`), so an expert disabled in
         // the WebUI is skipped by webhook-triggered reviews too.
+        //
+        // RENG-95: the WebUI-set aggregation flag (`AppState::aggregation_override`)
+        // travels the same way, so a toggle on the experts page reaches
+        // webhook-triggered reviews without a restart.
         match event {
             "Merge Request Hook" => super::handle_mr_hook(
                 body,
@@ -507,6 +514,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 db.clone(),
                 app_state.as_ref().map(|s| s.ordered_llm_configs()),
                 app_state.as_ref().map(|s| s.expert_overrides_snapshot()),
+                app_state.as_ref().and_then(|s| s.aggregation_override()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -519,6 +527,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 db.clone(),
                 app_state.as_ref().map(|s| s.ordered_llm_configs()),
                 app_state.as_ref().map(|s| s.expert_overrides_snapshot()),
+                app_state.as_ref().and_then(|s| s.aggregation_override()),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -530,6 +539,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                 // route to review dispatch only for merge_request/note events.
                 let server_llm_configs = app_state.as_ref().map(|s| s.ordered_llm_configs());
                 let server_expert_overrides = app_state.as_ref().map(|s| s.expert_overrides_snapshot());
+                let server_aggregated = app_state.as_ref().and_then(|s| s.aggregation_override());
                 self.handle_system_hook(
                     body,
                     &token,
@@ -538,6 +548,7 @@ impl WebhookHandler for GitLabWebhookHandler {
                     db,
                     server_llm_configs,
                     server_expert_overrides,
+                    server_aggregated,
                 )
                 .await
             }

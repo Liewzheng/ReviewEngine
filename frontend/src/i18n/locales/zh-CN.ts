@@ -620,6 +620,21 @@ export default {
     memoryOnlyTitle: '仅在内存中生效',
     memoryOnlyMessage:
       '{name} 已更新，但该服务未连接配置数据库，服务重启后该修改将丢失。请以数据库模式启动服务（指定数据目录，且不设置 REVIEW_DISABLE_DB=1），专家配置才能持久化。',
+    aggregation: {
+      label: '聚合报告',
+      hint: '将所有专家的评审结果合并为一份聚合报告。仅当聚合器专家也已启用时生效。',
+      toggleAria: '切换聚合报告',
+      enabledTitle: '已开启聚合报告',
+      enabledMessage: '下次评审将运行聚合器。',
+      disabledTitle: '已关闭聚合报告',
+      disabledMessage: '从下次评审起聚合器将不再运行。',
+      updateFailed: '更新聚合报告设置失败，已还原。',
+      memoryOnlyTitle: '仅在内存中生效',
+      memoryOnlyMessage:
+        '聚合报告设置已应用，但该服务未连接配置数据库，重启后该设置将丢失。请以数据库模式启动服务（指定数据目录，且不设置 REVIEW_DISABLE_DB=1）以持久化。',
+      rowEnabledButOff: '已启用但聚合未开启',
+      rowOn: '聚合报告已开启',
+    },
   },
   upgrade: {
     title: '升级 Review Engine',

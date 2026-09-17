@@ -23,6 +23,14 @@ pub struct UiConfig {
     /// live values live in `AppState::git_platforms` (see `put_config`).
     #[serde(default)]
     pub git_platforms: Vec<UiGitPlatformConfig>,
+    /// RENG-95: the report-level aggregation toggle (experts page),
+    /// `report.aggregated`. Tri-state so a `PUT /config` that omits it keeps
+    /// the stored value (the merge over this projection carries it) and the
+    /// startup replay applies it through the same `apply_ui_config` path as
+    /// the config page. `Some(_)` means the WebUI (or a persisted row) decided
+    /// the flag; `None` means only the config file speaks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregated: Option<bool>,
 }
 
 /// REST shape of one git platform entry (camelCase contract, e.g.
@@ -309,6 +317,13 @@ impl UiConfig {
         // Map advanced settings
         ui.advanced.max_concurrent_reviews = app.max_concurrent_llm_calls.unwrap_or(5) as u32;
         ui.advanced.enable_metrics = true; // Default, overridden at runtime if needed
+
+        // RENG-95: the projection seeds the config-file value so the merged
+        // `PUT /config` body keeps it even when the payload never mentions
+        // aggregation (a save that does not speak for the flag must not reset
+        // it). The persisted `ui` row's explicit value wins over this seed on
+        // the replay (DB over file).
+        ui.aggregated = Some(app.report.aggregated);
 
         // Apply defaults for fields not mapped from AppConfig
         if ui.llm.temperature == 0.0 {

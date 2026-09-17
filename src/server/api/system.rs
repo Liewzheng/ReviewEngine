@@ -12,10 +12,12 @@ use std::sync::Arc;
 
 use crate::server::auth::AuthConfig;
 use crate::server::AppState;
+use crate::store::traits::ConfigStore;
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/experts", get(list_experts))
+        .route("/experts/aggregated", put(update_aggregated))
         .route("/experts/{id}", put(update_expert))
         .route("/version", get(version_info))
         .route("/health", get(system_health))
@@ -51,7 +53,11 @@ async fn list_experts(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         .map(|(name, e)| expert_view(&slugify(name), name, e, prompt_overridden(&overrides, name)))
         .collect();
 
-    Json(serde_json::json!({ "experts": experts })).into_response()
+    // RENG-95: the effective report-level aggregation flag — the value the
+    // review paths feed to `select_aggregator_expert` — so the page can show
+    // the "aggregator enabled but aggregation off" state that used to surprise
+    // silently (12 experts enabled, 11 participating, `aggregated` null).
+    Json(serde_json::json!({ "experts": experts, "aggregated": cfg.report.aggregated })).into_response()
 }
 
 async fn version_info() -> Json<serde_json::Value> {
@@ -271,6 +277,127 @@ fn expert_view(
         "promptOverride": prompt_overridden,
         "lastReviews": [],
     })
+}
+
+/// Body for `PUT /api/v1/system/experts/aggregated`.
+#[derive(Debug, serde::Deserialize)]
+struct AggregatedFlagRequest {
+    aggregated: bool,
+}
+
+/// `PUT /api/v1/system/experts/aggregated` — flip the report-level
+/// `report.aggregated` flag from the experts page (RENG-95).
+///
+/// The aggregator expert runs only when BOTH conditions hold: the `aggregator`
+/// expert is enabled AND this flag is true (see
+/// [`crate::server::select_aggregator_expert`]). Before this endpoint the flag
+/// had no WebUI control at all and defaulted to `false`, so a deployment
+/// without a config file could enable every expert and still get no aggregated
+/// report — the page promised 12 participating experts while 11 reported and
+/// `aggregated` stayed `null`.
+///
+/// The change is applied in three places:
+/// - the running `app_config.report.aggregated` (so `GET /system/experts` and
+///   the `app_config`-consuming paths see it immediately),
+/// - the persisted `ui` row (the same row `PUT /config` writes — the flag is a
+///   tri-state `Option<bool>` field, so a config-page save that never mentions
+///   aggregation keeps the stored value; see [`super::config::types::UiConfig`]),
+/// - the runtime override ([`AppState::set_aggregation_override`]) that review
+///   dispatches re-apply over the config they resolve for themselves — every
+///   review path (REST `run_review`, webhook `run_review_common`) re-resolves
+///   the config file and never reads `app_config`, so this is what makes the
+///   next review actually see the flag.
+///
+/// **Ordering and honesty follow `PUT /experts/{id}`** (RENG-69): persist
+/// first — a `500` here means the request changed nothing anywhere, and the
+/// answer and the process state always agree. With no database attached
+/// (`REVIEW_DISABLE_DB=1`, tests, embedded use) the change is memory-only and
+/// the response says so honestly as `"persisted": false` plus a warning log —
+/// it never implies the flag survives a restart.
+async fn update_aggregated(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<AggregatedFlagRequest>,
+) -> impl IntoResponse {
+    {
+        let cfg_opt = state.app_config.read().unwrap();
+        if cfg_opt.as_ref().is_none() {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({"error": "config not loaded"})),
+            )
+                .into_response();
+        }
+    }
+
+    // Persist FIRST (the RENG-69 ordering): a failure here returns before the
+    // runtime is mutated, so there is no rollback to get wrong and no window in
+    // which the API's answer and the process state disagree.
+    let persisted = match state.db.as_ref() {
+        Some(db) => {
+            // The `ui` row holds the masked UI projection; patch the flag onto
+            // the in-memory mirror and upsert the row — the same shape
+            // `PUT /config` writes via `UiStateFile::from_applied`, so a later
+            // config-page save merges over it and cannot clobber the toggle.
+            let mut ui = state.ui_config.read().unwrap().clone();
+            ui.aggregated = Some(body.aggregated);
+            let value = match serde_json::to_value(&ui) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "failed to serialize the ui projection");
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": format!("failed to serialize the ui projection: {e}")
+                        })),
+                    )
+                        .into_response();
+                }
+            };
+            if let Err(e) = db.save_setting("ui", &value).await {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "failed to persist the aggregation flag to the database; \
+                     the running configuration is unchanged"
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "failed to persist the aggregation flag to the database: {e}"
+                        )
+                    })),
+                )
+                    .into_response();
+            }
+            true
+        }
+        None => {
+            tracing::warn!(
+                "aggregation flag applied in memory only: no database is attached \
+                 (REVIEW_DISABLE_DB=1 or embedded use) — it will be lost on restart"
+            );
+            false
+        }
+    };
+
+    // Durable (or deliberately volatile): apply + publish. Lock order is fixed
+    // (no guard crosses an await, one lock at a time) and the override is
+    // published before the response, so a review enqueued after this PUT
+    // returns sees the new value.
+    {
+        let mut cfg_opt = state.app_config.write().unwrap();
+        if let Some(arc) = cfg_opt.as_mut() {
+            Arc::make_mut(arc).report.aggregated = body.aggregated;
+        }
+    }
+    state.ui_config.write().unwrap().aggregated = Some(body.aggregated);
+    state.set_aggregation_override(Some(body.aggregated));
+
+    Json(serde_json::json!({
+        "aggregated": body.aggregated,
+        "persisted": persisted,
+    }))
+    .into_response()
 }
 
 /// `PUT /api/v1/system/experts/{id}` — enable/disable an expert, change its
@@ -541,6 +668,20 @@ mod tests {
             weight,
             prompt: Some(format!("{title} prompt")),
             ..Default::default()
+        }
+    }
+
+    /// Guard restoring the global GitLab runtime after a test that drives
+    /// `PUT /config` (its apply path always resolves the gitlab section).
+    struct RuntimeGuard(crate::server::gitlab::GitLabRuntimeConfig);
+    impl RuntimeGuard {
+        fn new() -> Self {
+            Self(crate::server::gitlab::gitlab_runtime().read().unwrap().clone())
+        }
+    }
+    impl Drop for RuntimeGuard {
+        fn drop(&mut self) {
+            *crate::server::gitlab::gitlab_runtime().write().unwrap() = self.0.clone();
         }
     }
 
@@ -1358,5 +1499,261 @@ mod tests {
         state.db = Some(Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap()));
         let body = health_json(state).await;
         assert_eq!(body["storage_backend"], "sqlite", "sqlite store attached: {body}");
+    }
+
+    // ─── RENG-95: the report-level aggregation toggle ───
+
+    /// A fixture with an ENABLED `aggregator` expert (the default team ships
+    /// one, disabled — see `defaults.rs`), so the two-condition rule can be
+    /// exercised end to end: the aggregator runs only when `report.aggregated`
+    /// AND an enabled aggregator expert both hold.
+    fn expert_state_with_aggregator(db: Option<Arc<crate::store::SqlxStore>>) -> Arc<AppState> {
+        let mut review_experts = HashMap::new();
+        review_experts.insert(
+            "Lead".to_string(),
+            expert_def("Lead Reviewer", "Overall review lead", 40, true),
+        );
+        review_experts.insert(
+            "Security".to_string(),
+            expert_def("Security Lead", "Security vulnerabilities", 30, true),
+        );
+        review_experts.insert(
+            "Performance".to_string(),
+            expert_def("Performance", "Performance optimization", 20, true),
+        );
+        review_experts.insert(
+            "Docs".to_string(),
+            expert_def("Docs", "Documentation and comments", 10, true),
+        );
+        review_experts.insert(
+            "aggregator".to_string(),
+            expert_def("Technical Writer", "Report Consolidator", 0, true),
+        );
+        let config = AppConfig {
+            project: None,
+            report: ReportConfig::default(),
+            review_experts,
+            commands: HashMap::new(),
+            scoring: ScoringConfig::default(),
+            llm: Vec::new(),
+            max_team_size: None,
+            max_concurrent_llm_calls: None,
+            output_dir: String::new(),
+            diff: DiffConfig::default(),
+            rate_limit: RateLimitConfig::default(),
+            languages: LanguagesConfig::default(),
+        };
+        let mut state = AppState::new(vec![]);
+        *state.app_config.write().unwrap() = Some(Arc::new(config.clone()));
+        // `serve` seeds the UI projection the same way; the toggle handler
+        // patches it, and `PUT /config` merges over it.
+        *state.ui_config.write().unwrap() = crate::server::api::config::UiConfig::from_app_config(&config);
+        state.db = db;
+        Arc::new(state)
+    }
+
+    async fn put_aggregated(state: &Arc<AppState>, aggregated: bool) -> axum::response::Response {
+        update_aggregated(State(state.clone()), Json(AggregatedFlagRequest { aggregated }))
+            .await
+            .into_response()
+    }
+
+    /// GET reports the effective `report.aggregated` flag — the value the
+    /// review paths feed `select_aggregator_expert` — for both settings.
+    #[tokio::test]
+    async fn list_experts_reports_the_effective_aggregated_flag() {
+        // Default `ReportConfig` → the flag is off, and GET says so.
+        let state = expert_state_with_aggregator(None);
+        let body = experts_body(state.clone()).await;
+        assert_eq!(body["aggregated"], false, "default flag is false: {body}");
+
+        // The toggle handler's flip is reflected by GET.
+        assert_eq!(put_aggregated(&state, true).await.status(), StatusCode::OK);
+        let body = experts_body(state).await;
+        assert_eq!(body["aggregated"], true, "GET follows the running flag: {body}");
+    }
+
+    /// The PUT flips the running `app_config.report.aggregated` AND the
+    /// review-side gate: `select_aggregator_expert(app_config.report.aggregated,
+    /// &experts)` — the exact decision every review path makes — picks up the
+    /// aggregator after the flip and never before it.
+    #[tokio::test]
+    async fn update_aggregated_flips_the_flag_and_the_review_path_sees_it() {
+        let db = fresh_store().await;
+        let state = expert_state_with_aggregator(Some(db));
+
+        let resp = put_aggregated(&state, true).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = body_json(resp).await;
+        assert_eq!(body["aggregated"], true);
+        assert_eq!(body["persisted"], true, "a store write must be reported: {body}");
+
+        // The running config the app_config-consumers read.
+        assert!(state.app_config.read().unwrap().as_ref().unwrap().report.aggregated);
+        // The override review dispatches re-apply over the config they resolve.
+        assert_eq!(state.aggregation_override(), Some(true));
+        // GET agrees with the PUT.
+        assert_eq!(experts_body(state.clone()).await["aggregated"], true);
+
+        // The review-path decision: flag on + enabled aggregator → Some.
+        let defs = state.app_config.read().unwrap().as_ref().unwrap().build_expert_defs();
+        assert!(
+            crate::server::select_aggregator_expert(
+                state.app_config.read().unwrap().as_ref().unwrap().report.aggregated,
+                &defs
+            )
+            .is_some(),
+            "flag on + aggregator enabled → the review runs it"
+        );
+        assert!(
+            crate::server::select_aggregator_expert(false, &defs).is_none(),
+            "flag off → never runs even with the aggregator enabled"
+        );
+    }
+
+    /// The toggle persists into the `ui` app_settings row (the same row
+    /// `PUT /config` writes) and a restart replays it over the file values —
+    /// both the running `app_config` and the dispatch-time override.
+    #[tokio::test]
+    async fn update_aggregated_persists_and_survives_a_restart() {
+        let db = fresh_store().await;
+        let state = expert_state_with_aggregator(Some(db.clone()));
+        assert_eq!(put_aggregated(&state, true).await.status(), StatusCode::OK);
+
+        // The durable form: the `ui` row carries `aggregated: true` next to the
+        // rest of the masked projection.
+        let stored = db
+            .load_setting("ui")
+            .await
+            .expect("the ui row must exist")
+            .expect("the toggle must write the ui row");
+        assert_eq!(stored["aggregated"], true, "the ui row holds the flag: {stored}");
+
+        // "Restart": a brand-new state from the same store, before any replay —
+        // the file value (false) is what the fresh boot sees.
+        let restarted = expert_state_with_aggregator(Some(db.clone()));
+        assert!(
+            !restarted.app_config.read().unwrap().as_ref().unwrap().report.aggregated,
+            "the fresh boot starts from the config-file value"
+        );
+        assert_eq!(restarted.aggregation_override(), None);
+
+        let applied = crate::server::api::config::persist::load_and_apply_ui_state_from_db(
+            &restarted,
+            &db,
+            &crate::server::api::config::persist::UiStateEnvOverrides::default(),
+        )
+        .await
+        .expect("the replay must apply");
+        assert!(applied, "the store holds UI state");
+        assert!(
+            restarted.app_config.read().unwrap().as_ref().unwrap().report.aggregated,
+            "the flag survived the restart"
+        );
+        assert_eq!(
+            restarted.aggregation_override(),
+            Some(true),
+            "the dispatch-time override is re-seeded from the persisted row"
+        );
+    }
+
+    /// A config-page save that never mentions aggregation does NOT reset the
+    /// toggle: `PUT /config` merges over the stored projection (which carries
+    /// the flag), keeps it in the applied config, and re-persists it.
+    #[tokio::test]
+    async fn update_aggregated_survives_a_config_save_that_omits_it() {
+        let _lock = crate::server::gitlab::RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let db = fresh_store().await;
+        let state = expert_state_with_aggregator(Some(db.clone()));
+        assert_eq!(put_aggregated(&state, true).await.status(), StatusCode::OK);
+
+        // The config page's sparse save: rules only, aggregation unmentioned.
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state.clone()),
+            axum::Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK, "the sparse save succeeds");
+
+        // The running flag and the dispatch-time override both stand.
+        assert!(
+            state.app_config.read().unwrap().as_ref().unwrap().report.aggregated,
+            "the config-page save must not reset the toggle"
+        );
+        assert_eq!(state.aggregation_override(), Some(true));
+        assert_eq!(experts_body(state.clone()).await["aggregated"], true);
+
+        // The persisted row still carries it, and a restart keeps it.
+        let stored = db.load_setting("ui").await.unwrap().expect("ui row");
+        assert_eq!(stored["aggregated"], true, "the row survives the save: {stored}");
+        let restarted = expert_state_with_aggregator(Some(db.clone()));
+        crate::server::api::config::persist::load_and_apply_ui_state_from_db(
+            &restarted,
+            &db,
+            &crate::server::api::config::persist::UiStateEnvOverrides::default(),
+        )
+        .await
+        .unwrap();
+        assert!(restarted.app_config.read().unwrap().as_ref().unwrap().report.aggregated);
+        assert_eq!(restarted.aggregation_override(), Some(true));
+    }
+
+    /// Without a store (`REVIEW_DISABLE_DB=1`, embedded use) the endpoint
+    /// keeps the experts contract: applied in memory, but the response says
+    /// honestly that it is not persisted.
+    #[tokio::test]
+    async fn update_aggregated_without_a_store_is_memory_only_and_says_so() {
+        let state = expert_state_with_aggregator(None);
+
+        let resp = put_aggregated(&state, true).await;
+        assert_eq!(resp.status(), StatusCode::OK, "no-store mode still applies the change");
+        let body = body_json(resp).await;
+        assert_eq!(body["aggregated"], true);
+        assert_eq!(
+            body["persisted"], false,
+            "without a store the change is memory-only and must say so: {body}"
+        );
+        assert!(state.app_config.read().unwrap().as_ref().unwrap().report.aggregated);
+        assert_eq!(state.aggregation_override(), Some(true));
+        assert_eq!(experts_body(state).await["aggregated"], true);
+    }
+
+    /// A failing store write is answered 500, never reports success, and leaves
+    /// the process state untouched — persist-then-apply, like the expert PUT.
+    #[tokio::test]
+    async fn update_aggregated_surfaces_a_failed_store_write() {
+        let db = fresh_store().await;
+        let state = expert_state_with_aggregator(Some(db.clone()));
+        // A first, successful flip: the failed one below must leave THIS value
+        // in place, not the file's.
+        assert_eq!(put_aggregated(&state, true).await.status(), StatusCode::OK);
+        // Break the store's schema out from under it: every subsequent write
+        // fails, exactly like an unreachable database.
+        ::sqlx::query("DROP TABLE app_settings")
+            .execute(db.pool())
+            .await
+            .expect("dropping the settings table must succeed");
+
+        let resp = put_aggregated(&state, false).await;
+        assert_eq!(
+            resp.status(),
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "a failed persist must be an error response"
+        );
+        let body = body_json(resp).await;
+        let error = body["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains("failed to persist"),
+            "the error must name the persistence failure: {body}"
+        );
+        assert_ne!(body["persisted"], true, "a failed write must not report success");
+
+        // Nothing was applied: the earlier flip stands, the request's value
+        // never reached the runtime.
+        assert!(state.app_config.read().unwrap().as_ref().unwrap().report.aggregated);
+        assert_eq!(state.aggregation_override(), Some(true));
+        assert_eq!(experts_body(state).await["aggregated"], true);
     }
 }

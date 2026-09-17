@@ -620,6 +620,21 @@ export default {
     memoryOnlyTitle: '僅在記憶體中生效',
     memoryOnlyMessage:
       '{name} 已更新，但此服務未連接設定資料庫，服務重啟後此變更將會遺失。請以資料庫模式啟動服務（指定資料目錄，且不要設定 REVIEW_DISABLE_DB=1），專家設定才能持久化。',
+    aggregation: {
+      label: '聚合報告',
+      hint: '將所有專家的審查結果合併為一份聚合報告。僅當聚合器專家也已啟用時生效。',
+      toggleAria: '切換聚合報告',
+      enabledTitle: '已開啟聚合報告',
+      enabledMessage: '下次審查將執行聚合器。',
+      disabledTitle: '已關閉聚合報告',
+      disabledMessage: '從下次審查起聚合器將不再執行。',
+      updateFailed: '更新聚合報告設定失敗，已還原。',
+      memoryOnlyTitle: '僅在記憶體中生效',
+      memoryOnlyMessage:
+        '聚合報告設定已套用，但此服務未連接設定資料庫，重新啟動後此設定將遺失。請以資料庫模式啟動服務（指定資料目錄，且不要設定 REVIEW_DISABLE_DB=1）以持久化。',
+      rowEnabledButOff: '已啟用但聚合未開啟',
+      rowOn: '聚合報告已開啟',
+    },
   },
   upgrade: {
     title: '升級 Review Engine',

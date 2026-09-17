@@ -131,6 +131,14 @@ impl WebhookHandler for GitHubWebhookHandler {
                 .and_then(|w| w.upgrade())
                 .map(|s| s.expert_overrides_snapshot())
         };
+        // RENG-95: the WebUI-set aggregation flag, threaded the same way so a
+        // toggle on the experts page reaches webhook-triggered reviews.
+        let server_aggregated = || {
+            self.app_state
+                .as_ref()
+                .and_then(|w| w.upgrade())
+                .and_then(|s| s.aggregation_override())
+        };
 
         let result = match event {
             "ping" => {
@@ -144,6 +152,7 @@ impl WebhookHandler for GitHubWebhookHandler {
                 self.task_store.clone(),
                 server_llm_configs(),
                 server_expert_overrides(),
+                server_aggregated(),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -154,6 +163,7 @@ impl WebhookHandler for GitHubWebhookHandler {
                 self.task_store.clone(),
                 server_llm_configs(),
                 server_expert_overrides(),
+                server_aggregated(),
             )
             .await
             .map_err(|status| (status, Json(serde_json::json!({"error": "request failed"})))),
@@ -297,6 +307,7 @@ async fn run_webhook_pr_review(
     source_meta: SourceMeta,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
     gate: ContentGate,
 ) {
     // Resolve the PR metadata + diff up front: the diff doubles as the content
@@ -361,6 +372,7 @@ async fn run_webhook_pr_review(
             server_llm_configs,
             llm_sink,
             server_expert_overrides,
+            server_aggregated,
         )
         .await
     }
@@ -383,6 +395,7 @@ async fn handle_pull_request(
     task_store: Option<Arc<TaskStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
 ) -> Result<Json<Value>, StatusCode> {
     let payload = parse_pr_hook_payload(body)?;
 
@@ -417,6 +430,7 @@ async fn handle_pull_request(
                         source_meta,
                         server_llm_configs,
                         server_expert_overrides,
+                        server_aggregated,
                         ContentGate::Enabled,
                     )
                     .await;
@@ -451,6 +465,7 @@ async fn handle_pull_request(
                                 source_meta,
                                 server_llm_configs,
                                 server_expert_overrides,
+                                server_aggregated,
                                 ContentGate::Enabled,
                             )
                             .await;
@@ -488,6 +503,7 @@ async fn handle_issue_comment(
     task_store: Option<Arc<TaskStore>>,
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
 ) -> Result<Json<Value>, StatusCode> {
     let parsed: Value = serde_json::from_str(body).map_err(|e| {
         tracing::error!("Failed to parse issue_comment webhook: {}", e);
@@ -538,6 +554,7 @@ async fn handle_issue_comment(
                             source_meta,
                             server_llm_configs,
                             server_expert_overrides,
+                            server_aggregated,
                             // An explicit `/review` / `/describe` command is
                             // user intent: it always reviews, even when the
                             // content is unchanged (RENG-62).

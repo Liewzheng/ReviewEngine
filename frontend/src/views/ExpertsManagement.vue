@@ -25,6 +25,12 @@ const expertsStore = useExperts()
 
 // ========== State ==========
 const experts = expertsStore.experts
+/* RENG-95: the effective report-level aggregation flag — the value the review
+ * paths feed `select_aggregator_expert`. The aggregator expert runs only when
+ * this is on AND the `aggregator` expert is enabled; this page surfaces both
+ * sides of that rule so the "12 enabled, 11 participated" surprise cannot
+ * recur silently. */
+const aggregated = expertsStore.aggregated
 const loading = expertsStore.loading
 const detailModalVisible = ref(false)
 const selectedExpert = ref<Expert | null>(null)
@@ -115,6 +121,50 @@ const handleToggle = async (id: string, enabled: boolean) => {
   } finally {
     savesInFlight.value--
   }
+}
+
+/* RENG-95: the report-level aggregation toggle. The same optimistic pattern as
+ * the per-expert switch: `setAggregated` flips the local value synchronously,
+ * PUTs, adopts the server echo, and on failure reverts + rethrows (the view
+ * only notifies). `savesInFlight` pauses the background poll, so a tick can
+ * never snap the switch back to the pre-PUT server value. `persisted ===
+ * false` means the change is memory-only (no store attached) — warn, never
+ * report a clean success. */
+const handleAggregationToggle = async (val: boolean) => {
+  savesInFlight.value++
+  try {
+    const updated = await expertsStore.setAggregated(val)
+    if (updated.persisted === false) {
+      ElNotification({
+        title: t('experts.aggregation.memoryOnlyTitle'),
+        message: t('experts.aggregation.memoryOnlyMessage'),
+        type: 'warning',
+        duration: 5000,
+      })
+    } else {
+      ElNotification({
+        title: val ? t('experts.aggregation.enabledTitle') : t('experts.aggregation.disabledTitle'),
+        message: val ? t('experts.aggregation.enabledMessage') : t('experts.aggregation.disabledMessage'),
+        type: val ? 'success' : 'warning',
+        duration: 2000,
+      })
+    }
+  } catch (e) {
+    // `setAggregated` already reverted `aggregated` to the previous value.
+    notifyAggregationUpdateFailed(e)
+  } finally {
+    savesInFlight.value--
+  }
+}
+
+function notifyAggregationUpdateFailed(error: unknown) {
+  console.error('Failed to update the aggregated report setting', error)
+  ElNotification({
+    title: t('common.error'),
+    message: t('experts.aggregation.updateFailed'),
+    type: 'error',
+    duration: 5000,
+  })
 }
 
 /* Weight slider drags emit per pixel: debounce the PUT (500ms after the last
@@ -306,6 +356,26 @@ onBeforeUnmount(() => {
       </el-card>
     </div>
 
+    <!-- Aggregation toggle (RENG-95): the report-level `aggregated` flag, on
+         the page itself — the aggregator expert runs only when this is on AND
+         the `aggregator` expert is enabled, and the two-condition rule must
+         not live in a drawer nobody opens. -->
+    <el-card class="aggregation-bar" shadow="never">
+      <div class="aggregation-bar__body">
+        <el-switch
+          :model-value="aggregated"
+          :aria-label="$t('experts.aggregation.toggleAria')"
+          @update:model-value="handleAggregationToggle"
+          :active-color="'var(--accent-success)'"
+          :inactive-color="'var(--offline)'"
+        />
+        <div class="aggregation-bar__text">
+          <span class="aggregation-bar__label">{{ $t('experts.aggregation.label') }}</span>
+          <span class="aggregation-bar__hint">{{ $t('experts.aggregation.hint') }}</span>
+        </div>
+      </div>
+    </el-card>
+
     <!-- Filters -->
     <div class="filters-bar">
       <el-input
@@ -369,6 +439,7 @@ onBeforeUnmount(() => {
         :key="expert.id"
         :expert="expert"
         :index="index"
+        :aggregated="aggregated"
         @toggle="handleToggle"
         @weight-change="handleWeightChange"
         @view-details="handleViewDetails"
@@ -406,6 +477,18 @@ onBeforeUnmount(() => {
               :model-value="selectedExpert.enabled"
               @update:model-value="(val: boolean) => handleToggle(selectedExpert!.id, val)"
               :active-color="'var(--success)'"
+              :inactive-color="'var(--offline)'"
+            />
+          </div>
+          <!-- RENG-95: the report-level aggregation flag, bound to the
+               aggregator expert — the two-condition rule in one place. -->
+          <div v-if="selectedExpert.id === 'aggregator'" class="detail-row">
+            <span class="detail-label">{{ $t('experts.aggregation.label') }}</span>
+            <el-switch
+              :aria-label="$t('experts.aggregation.toggleAria')"
+              :model-value="aggregated"
+              @update:model-value="handleAggregationToggle"
+              :active-color="'var(--accent-success)'"
               :inactive-color="'var(--offline)'"
             />
           </div>
@@ -546,6 +629,39 @@ onBeforeUnmount(() => {
   font-size: 13px;
   color: var(--text-secondary);
   font-weight: 500;
+}
+
+/* RENG-95: the report-level aggregation toggle bar. Sits between the stats and
+   the filters so the two-condition rule (flag AND aggregator expert) is on the
+   page itself, never only in a drawer. */
+.aggregation-bar {
+  margin-bottom: var(--space-5);
+  background-color: var(--bg-card);
+  border-color: var(--border-color);
+}
+
+.aggregation-bar__body {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.aggregation-bar__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.aggregation-bar__label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.aggregation-bar__hint {
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
 }
 
 /* Filters */

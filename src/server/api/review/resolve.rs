@@ -111,6 +111,13 @@ pub(crate) struct ReviewOutcome {
 /// here — otherwise disabling an expert in the WebUI would keep affecting
 /// nothing but the management page.
 ///
+/// `aggregated` (RENG-95) is the aggregation-flag counterpart of
+/// `expert_overrides`: the WebUI-set `report.aggregated`, `Some(_)` when the
+/// experts page (or a persisted `ui` row) decided it. Applied the same way —
+/// over the config this path resolves for itself — because this path never
+/// reads `AppState::app_config` either. `None` (CLI/legacy/tests) leaves the
+/// resolved config's value in force.
+///
 /// `llm_sink` (RENG-57) receives one latency sample per LLM call attempt and is
 /// forwarded to the orchestrator unchanged.
 pub(crate) async fn run_review(
@@ -119,6 +126,7 @@ pub(crate) async fn run_review(
     llm_configs: Vec<crate::models::LLMConfig>,
     llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
     expert_overrides: Arc<crate::config::ExpertOverrides>,
+    aggregated: Option<bool>,
 ) -> anyhow::Result<ReviewOutcome> {
     let config_source = config_toml.map(crate::models::ConfigSource::Inline);
     let mut app_config = crate::config::resolve_config(config_source).await?;
@@ -127,6 +135,11 @@ pub(crate) async fn run_review(
     let applied = expert_overrides.apply_to(&mut app_config);
     if applied > 0 {
         tracing::debug!(applied, "applied persisted expert overrides to the REST review config");
+    }
+    // RENG-95: the WebUI's aggregation decision (when there is one) wins over
+    // the resolved config's `[report] aggregated`, the same DB-over-file rule.
+    if let Some(aggregated) = aggregated {
+        app_config.report.aggregated = aggregated;
     }
 
     let experts = app_config.build_expert_defs();
@@ -391,6 +404,8 @@ mod tests {
             // RENG-57: no store in this test → no latency samples to record.
             None,
             Arc::new(overrides),
+            // RENG-95: no WebUI aggregation override in this test.
+            None,
         )
         .await
         .expect("an empty expert team is a legitimate (empty) review");
@@ -455,6 +470,8 @@ mod tests {
             // RENG-57: no store in this test → no latency samples to record.
             None,
             Arc::new(crate::config::ExpertOverrides::default()),
+            // RENG-95: no WebUI aggregation override in this test.
+            None,
         )
         .await;
         assert!(
@@ -532,6 +549,8 @@ mod tests {
             // RENG-57: no sample sink here — the usage summary is the subject.
             None,
             Arc::new(ExpertOverrides::default()),
+            // RENG-95: no WebUI aggregation override in these tests.
+            None,
         )
         .await
         .expect("the mock provider answers every expert");
@@ -672,6 +691,8 @@ mod tests {
             vec![aggregator_card(&server)],
             None,
             Arc::new(ExpertOverrides::default()),
+            // RENG-95: no WebUI aggregation override in these tests.
+            None,
         )
         .await
         .expect("the mock answers every expert AND the aggregator");
@@ -743,6 +764,8 @@ mod tests {
             vec![aggregator_card(&server)],
             None,
             Arc::new(ExpertOverrides::default()),
+            // RENG-95: no WebUI aggregation override in these tests.
+            None,
         )
         .await
         .expect("the mock answers every expert");
@@ -787,6 +810,8 @@ mod tests {
             vec![aggregator_card(&server)],
             None,
             Arc::new(ExpertOverrides::default()),
+            // RENG-95: no WebUI aggregation override in these tests.
+            None,
         )
         .await
         .expect("an aggregator failure must never fail the review");

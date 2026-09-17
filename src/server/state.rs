@@ -279,6 +279,13 @@ pub struct AppState {
     /// the state was seeded with IS the base (the startup replay runs before
     /// any PUT, and tests seed the file values directly).
     pub expert_base: RwLock<Option<HashMap<String, ExpertTomlDef>>>,
+    /// RENG-95: the WebUI-set report-level aggregation flag (`report.aggregated`).
+    /// `Some(_)` when the experts page (or a persisted `ui` row) decided it;
+    /// `None` when only the config file / inline request TOML speaks. Every
+    /// review path re-resolves its config from the file and never reads
+    /// `app_config`, so this override is threaded to them exactly like
+    /// [`Self::expert_overrides`] and applied over the config they resolve.
+    pub report_aggregated: RwLock<Option<bool>>,
 }
 
 impl AppState {
@@ -311,6 +318,7 @@ impl AppState {
             llm_health: Arc::new(crate::server::api::llm_health::LlmHealthStore::new()),
             expert_overrides: RwLock::new(Arc::new(crate::config::ExpertOverrides::default())),
             expert_base: RwLock::new(None),
+            report_aggregated: RwLock::new(None),
         }
     }
 
@@ -336,6 +344,22 @@ impl AppState {
     /// to the config they resolve themselves.
     pub fn expert_overrides_snapshot(&self) -> Arc<crate::config::ExpertOverrides> {
         self.expert_overrides.read().unwrap().clone()
+    }
+
+    /// The WebUI-set report-level aggregation override (RENG-95): `Some(_)`
+    /// when the experts page (or a persisted `ui` row) decided
+    /// `report.aggregated`, `None` when only the config file / inline request
+    /// TOML speaks. Review dispatches snapshot it at enqueue time and apply it
+    /// over the config they resolve for themselves — the aggregation-flag
+    /// counterpart of [`Self::expert_overrides_snapshot`].
+    pub fn aggregation_override(&self) -> Option<bool> {
+        *self.report_aggregated.read().unwrap()
+    }
+
+    /// Set the WebUI report-level aggregation override (RENG-95). `None`
+    /// clears it — only the config file / inline request TOML decides again.
+    pub fn set_aggregation_override(&self, value: Option<bool>) {
+        *self.report_aggregated.write().unwrap() = value;
     }
 
     /// Publish `overrides` as the runtime override map AND apply them to the

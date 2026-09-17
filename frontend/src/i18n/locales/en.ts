@@ -645,6 +645,22 @@ export default {
     memoryOnlyTitle: 'Applied in memory only',
     memoryOnlyMessage:
       '{name} was updated, but this server has no configuration database, so the change will be lost when the server restarts. Start the server with a data directory (and without REVIEW_DISABLE_DB=1) to keep expert settings.',
+    aggregation: {
+      label: 'Aggregated report',
+      hint:
+        'Merges the experts’ findings into one aggregated report. Only takes effect when the aggregator expert is also enabled.',
+      toggleAria: 'Toggle aggregated report',
+      enabledTitle: 'Aggregated Report Enabled',
+      enabledMessage: 'The aggregator will run on the next review.',
+      disabledTitle: 'Aggregated Report Disabled',
+      disabledMessage: 'The aggregator will stop running from the next review.',
+      updateFailed: 'Failed to update the aggregated report setting. Change reverted.',
+      memoryOnlyTitle: 'Applied in memory only',
+      memoryOnlyMessage:
+        'The aggregated report setting was applied, but this server has no configuration database, so it will be lost when the server restarts. Start the server with a data directory (and without REVIEW_DISABLE_DB=1) to keep it.',
+      rowEnabledButOff: 'Enabled but aggregation is off',
+      rowOn: 'Aggregated report on',
+    },
   },
   upgrade: {
     title: 'Upgrade Review Engine',

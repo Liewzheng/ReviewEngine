@@ -551,6 +551,15 @@ pub(crate) fn apply_ui_config(
         }
         new_cfg.max_concurrent_llm_calls = Some(body.advanced.max_concurrent_reviews as usize);
         new_cfg.max_team_size = Some(body.advanced.max_concurrent_reviews as usize);
+        // RENG-95: the aggregation flag is part of the UI projection, so a
+        // `PUT /config` that mentions it applies it here (the config page never
+        // sends it — it is controlled from the experts page — and a save that
+        // omits it keeps the merged stored value, see the `Option`). The
+        // startup replay lands here too, which is what restores a persisted
+        // toggle after a restart.
+        if let Some(aggregated) = body.aggregated {
+            new_cfg.report.aggregated = aggregated;
+        }
         *cfg_opt = Some(Arc::new(new_cfg));
     } else {
         return Err((

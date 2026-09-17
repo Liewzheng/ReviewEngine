@@ -33,6 +33,7 @@ import { CHART_PALETTE_FALLBACKS, CHART_SERIES_FALLBACK } from '../chartPalette'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
+import EllipsisText from '../components/common/EllipsisText.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import LastUpdated from '../components/common/LastUpdated.vue'
 import type { HealthStatus, KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
@@ -596,13 +597,15 @@ onUnmounted(() => {
                 :class="{ 'last-row': idx === health.integrations.length - 1 }"
               >
                 <div class="health-row-left">
-                  <span class="health-service">{{ item.service }}</span>
+                  <span class="health-service"><EllipsisText :text="item.service" /></span>
                 </div>
                 <div class="health-row-right">
                   <StatusBadge :status="item.status" show-text size="small" />
-                  <span v-if="integrationMessage(item)" class="health-latency">{{ integrationMessage(item) }}</span>
-                  <span v-if="integrationCheckedAt(item)" class="health-latency">
-                    {{ $t('common.lastTest', { date: integrationCheckedAt(item) }) }}
+                  <span v-if="integrationMessage(item)" class="health-latency">
+                    <EllipsisText :text="integrationMessage(item) ?? ''" />
+                  </span>
+                  <span v-if="integrationCheckedAt(item)" class="health-latency health-latency-ts">
+                    <EllipsisText :text="$t('common.lastTest', { date: integrationCheckedAt(item) })" />
                   </span>
                 </div>
               </div>
@@ -618,11 +621,13 @@ onUnmounted(() => {
                 :class="{ 'last-row': idx === health.llmProviders.length - 1 }"
               >
                 <div class="health-row-left">
-                  <span class="health-service">{{ item.service }}</span>
+                  <span class="health-service"><EllipsisText :text="item.service" /></span>
                 </div>
                 <div class="health-row-right">
                   <StatusBadge :status="item.status" show-text size="small" />
-                  <span v-if="item.message" class="health-latency">{{ item.message }}</span>
+                  <span v-if="item.message" class="health-latency">
+                    <EllipsisText :text="item.message ?? ''" />
+                  </span>
                 </div>
               </div>
             </div>
@@ -890,6 +895,12 @@ onUnmounted(() => {
   padding-left: var(--space-1);
 }
 
+.health-row-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .health-row {
   display: flex;
   justify-content: space-between;
@@ -906,12 +917,22 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--text-primary);
   font-weight: 500;
+  min-width: 0;
 }
 
 .health-row-right {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+}
+
+.health-row-right :deep(.status-badge) {
+  flex: 0 0 auto;
+}
+
+.health-row-right :deep(.status-text) {
+  white-space: nowrap;
 }
 
 .health-latency {
@@ -920,6 +941,10 @@ onUnmounted(() => {
   font-family: var(--font-mono);
   min-width: 48px;
   text-align: right;
+}
+
+.health-latency-ts {
+  flex: 0 0 auto;
 }
 
 .health-overall {

@@ -2,9 +2,10 @@
 
 ### Changed
 - **The Dashboard's 「系统健康」 card is 20% wider (RENG-102)**: on wide screens long provider labels (e.g. `xiaomi-token-plan-cn mimo-v2.5-pro`) wrapped onto two lines inside the too-narrow right column. The health card's share of row two grows 30% → 36% (`grid-template-columns: 7fr 3fr` → `16fr 9fr`), and in the ≤1279px layout 40% → 48% (`3fr 2fr` → `13fr 12fr`). The ≤1023px stacked layout and the KPI grid are unchanged.
+- **Health-row text that is too long now truncates to one line and reveals the full value on hover (RENG-103)**: provider names (`xiaomi mimo-v2.5`) no longer break across lines, the 「错误」 badge no longer stacks into 错/误, and error details (e.g. `error sending request for url (https://…)`) no longer take 2–3 lines. A new shared `EllipsisText` component renders `el-tooltip` around the text, measures `scrollWidth > clientWidth` on `mouseenter`, and stays disabled while the text fits — so short rows get no redundant bubble. The rows' flex levels gained `min-width: 0` so the ellipsis can engage, the badge is `flex: 0 0 auto` with a nowrap label, and the 上次测试 timestamp keeps its natural width.
 
 ### Notes
-- **Tests**: change is CSS-only; no test pins the old grid values. Frontend **214 passed**; Rust lib and CLI suites unchanged (0 Rust source touched).
+- **Tests**: change is CSS + template wiring; the new `dashboardHealthWiring.spec.ts` pins the ellipsis hooks in `EllipsisText.vue` and the shrink/badge rules in `Dashboard.vue` (verified to fail without the fix: 3 of its 4 assertions go red). Frontend **218 passed**; Rust lib and CLI suites unchanged (0 Rust source touched).
 
 ## [0.10.44] - 2026-09-17
 

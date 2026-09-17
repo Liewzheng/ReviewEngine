@@ -3004,3 +3004,268 @@ async fn delete_review_409_for_terminal_history_row() {
         "a rejected cancel must leave the row untouched"
     );
 }
+
+// ─── RENG-98: the REST review path publishes gitlab_mr results ──
+
+/// Every expert answers with one finding anchored at `src/a.rs:1` — inside
+/// the diff the review is given, so the default publish policy (High +
+/// confidence ≥ 8 + a recommendation) admits it as an inline note.
+fn chat_completions_mock() -> wiremock::Mock {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "choices": [{"message": {"content": "review:\n  findings:\n    - file: src/a.rs\n      line: 1\n      severity: high\n      confidence: 8\n      title: An issue\n      summary: found it\n      recommendation: fix it\n"}}],
+            "usage": {"total_tokens": 64},
+            "model": "deepseek-v4-flash",
+        })))
+}
+
+/// The GitLab endpoints a REST `gitlab_mr` review touches once the experts
+/// finish: the MR info + diff the review resolves, then the publish path's
+/// `GET /user`, the discussion list, the board note and the inline
+/// discussion — the exact endpoints the webhook path hits. `post_status`
+/// answers BOTH POSTs, so a test can fail the publish with a 500 and prove
+/// the review still completes.
+async fn mount_gitlab_review_and_publish_mocks(server: &wiremock::MockServer, post_status: u16) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "title": "Add login endpoint",
+            "description": "desc",
+            "source_branch": "feature/login",
+            "target_branch": "main",
+            "author": {"id": 7, "username": "alice", "name": "Alice A"},
+            "diff_refs": {"base_sha": "base1", "start_sha": "start1", "head_sha": "deadbeef"}
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/raw_diffs"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(
+            "diff --git a/src/a.rs b/src/a.rs\nindex 1111111..2222222 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,1 +1,2 @@\n+changed\n",
+        ))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/user"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 1})))
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/discussions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/notes"))
+        .respond_with(ResponseTemplate::new(post_status).set_body_json(serde_json::json!({"id": 7})))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/discussions"))
+        .respond_with(ResponseTemplate::new(post_status).set_body_json(serde_json::json!({"id": 8})))
+        .mount(server)
+        .await;
+}
+
+/// State whose server-side LLM answers against `server` and whose platform
+/// routes the submitted (unreachable) `base_url` host onto the mock's URI —
+/// so a request arriving at the mock proves the routed URL was used.
+fn state_with_mock_llm_and_routed_platform(server: &wiremock::MockServer) -> Arc<AppState> {
+    let mut llm = usable_llm_config();
+    llm.provider = "deepseek".to_string();
+    llm.model = "deepseek-v4-flash".to_string();
+    llm.api_base = server.uri();
+    let state = state_without_usable_llm(vec![llm]);
+    *state.git_platforms.write().unwrap() =
+        vec![review_platform("testbed", "http://gitlab.invalid:8443", &server.uri())];
+    state
+}
+
+async fn wait_for_requests(
+    server: &wiremock::MockServer,
+    predicate: impl Fn(&[wiremock::Request]) -> bool,
+    what: &str,
+) -> Vec<wiremock::Request> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let requests = server.received_requests().await.unwrap_or_default();
+        if predicate(&requests) {
+            return requests;
+        }
+        assert!(std::time::Instant::now() < deadline, "timed out waiting for: {what}");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+async fn wait_for_completed(store: &TaskStore, task_id: Uuid) -> crate::server::task_queue::TaskEntry {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let entry = store.get(task_id).await.expect("task must be stored");
+        if entry.state == TaskState::Completed {
+            return entry;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the review must complete, got {:?}",
+            entry.state
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// RENG-98 end-to-end: a REST-submitted `gitlab_mr` review publishes back to
+/// the MR. The GitLab mock is mounted ONLY at the platform's routed address
+/// (the `internal_base_url`), so the inline-note POST arriving there proves
+/// the publish used the platform-routed URL the review fetched — and its
+/// credential header carries the EXACT token the submit resolved from the
+/// request header (never a re-resolved weaker value). The task still records
+/// `completed` with its result stored.
+#[tokio::test]
+async fn submit_gitlab_mr_review_publishes_with_the_routed_url_and_resolved_credential() {
+    use wiremock::MockServer;
+    let server = MockServer::start().await;
+    chat_completions_mock().mount(&server).await;
+    mount_gitlab_review_and_publish_mocks(&server, 201).await;
+
+    let state = state_with_mock_llm_and_routed_platform(&server);
+    let store = state.task_store.clone().unwrap();
+
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-rest-publish"),
+        Ok(Json(gitlab_mr_url_body(
+            "http://gitlab.invalid:8443/group/project/-/merge_requests/1",
+        ))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    // The publish happened: an inline note POST to the MR discussions
+    // endpoint (the board note POST to /notes precedes it).
+    let requests = wait_for_requests(
+        &server,
+        |requests| {
+            requests
+                .iter()
+                .any(|r| r.method == "POST" && r.url.path().ends_with("/merge_requests/1/discussions"))
+        },
+        "the inline-note POST to the discussions endpoint",
+    )
+    .await;
+    let inline = requests
+        .iter()
+        .find(|r| r.method == "POST" && r.url.path().ends_with("/merge_requests/1/discussions"))
+        .expect("the wait predicate guarantees this request");
+    // The routed URL: the mock is only reachable through the platform's
+    // `internal_base_url` — a publish against the submitted (unreachable)
+    // `base_url` host could never arrive here — and the path is the MR's.
+    assert_eq!(
+        inline.url.path(),
+        "/api/v4/projects/group%2Fproject/merge_requests/1/discussions"
+    );
+    // The resolved credential: the request header's token, verbatim
+    // (the provider's POSTs carry it as PRIVATE-TOKEN).
+    assert_eq!(
+        inline.headers.get("private-token").and_then(|v| v.to_str().ok()),
+        Some("glpat-rest-publish"),
+        "the publish must carry the credential the fetch used"
+    );
+
+    // The review is still a normal completed task with its result stored.
+    let entry = wait_for_completed(&store, task_id).await;
+    assert!(entry.result.is_some(), "a completed review stores its result");
+}
+
+/// RENG-98 fail-soft: when the publish itself fails (the GitLab API answers
+/// 500 for the board note POST), the review must still complete with its
+/// result stored — the failure is a warning, exactly the webhook path's rule
+/// (`src/server/mod.rs` warns and continues).
+#[tokio::test]
+async fn submit_gitlab_mr_review_with_a_publish_failure_still_completes() {
+    use wiremock::MockServer;
+    let server = MockServer::start().await;
+    chat_completions_mock().mount(&server).await;
+    mount_gitlab_review_and_publish_mocks(&server, 500).await;
+
+    let state = state_with_mock_llm_and_routed_platform(&server);
+    let store = state.task_store.clone().unwrap();
+
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-rest-publish"),
+        Ok(Json(gitlab_mr_url_body(
+            "http://gitlab.invalid:8443/group/project/-/merge_requests/1",
+        ))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    // The publish WAS attempted — the board note POST reached the API and
+    // was answered with the 500.
+    wait_for_requests(
+        &server,
+        |requests| {
+            requests
+                .iter()
+                .any(|r| r.method == "POST" && r.url.path().ends_with("/merge_requests/1/notes"))
+        },
+        "the board note POST that fails with 500",
+    )
+    .await;
+
+    // …but the review still completes with its result stored.
+    let entry = wait_for_completed(&store, task_id).await;
+    assert!(entry.result.is_some(), "a publish failure must not lose the result");
+}
+
+/// RENG-98: a static-diff REST review has no MR to publish to — the runner
+/// must not call the provider at all (no `/api/v4` request reaches the mock),
+/// while the review itself completes normally.
+#[tokio::test]
+async fn submit_static_diff_review_performs_no_publish_call() {
+    use wiremock::MockServer;
+    let server = MockServer::start().await;
+    chat_completions_mock().mount(&server).await;
+
+    let mut llm = usable_llm_config();
+    llm.provider = "deepseek".to_string();
+    llm.model = "deepseek-v4-flash".to_string();
+    llm.api_base = server.uri();
+    let state = state_without_usable_llm(vec![llm]);
+    let store = state.task_store.clone().unwrap();
+
+    let resp = submit_review(
+        State(state),
+        HeaderMap::new(),
+        Ok(Json(serde_json::json!({
+            "source": {"type": "static_diff", "diff": "diff --git a/src/a.rs b/src/a.rs\n@@ -1 +1 @@\n-old\n+new\n"}
+        }))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    wait_for_completed(&store, task_id).await;
+
+    // The only traffic was the experts' LLM calls — no provider API request,
+    // i.e. no publish attempt.
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        !requests.iter().any(|r| r.url.path().starts_with("/api/v4/")),
+        "a static-diff review must not publish: {requests:?}"
+    );
+}

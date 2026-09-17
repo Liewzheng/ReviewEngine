@@ -14,6 +14,7 @@
          from the row being edited (or blanks for add). -->
     <GitPlatformForm
       v-if="open"
+      ref="formRef"
       :mode="mode"
       :platform="platform"
       :platforms="platforms"

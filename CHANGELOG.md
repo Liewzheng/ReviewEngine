@@ -1,3 +1,11 @@
+## [0.10.45] - 2026-09-17
+
+### Changed
+- **The Dashboard's 「系统健康」 card is 20% wider (RENG-102)**: on wide screens long provider labels (e.g. `xiaomi-token-plan-cn mimo-v2.5-pro`) wrapped onto two lines inside the too-narrow right column. The health card's share of row two grows 30% → 36% (`grid-template-columns: 7fr 3fr` → `16fr 9fr`), and in the ≤1279px layout 40% → 48% (`3fr 2fr` → `13fr 12fr`). The ≤1023px stacked layout and the KPI grid are unchanged.
+
+### Notes
+- **Tests**: change is CSS-only; no test pins the old grid values. Frontend **214 passed**; Rust lib and CLI suites unchanged (0 Rust source touched).
+
 ## [0.10.44] - 2026-09-17
 
 ### Fixed

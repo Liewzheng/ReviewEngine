@@ -748,10 +748,10 @@ onUnmounted(() => {
   box-shadow: var(--shadow-card);
 }
 
-/* Row 2 */
+/* Row 2: 16fr/9fr = chart 64% / health 36% (health +20% vs 7fr/3fr's 30%) */
 .row-two {
   display: grid;
-  grid-template-columns: 7fr 3fr;
+  grid-template-columns: 16fr 9fr;
   gap: var(--space-4);
   margin-bottom: var(--space-5);
 }
@@ -1033,8 +1033,9 @@ onUnmounted(() => {
 
 /* Responsive */
 @media (max-width: 1279px) {
+  /* 13fr/12fr = chart 52% / health 48% (health +20% vs 3fr/2fr's 40%) */
   .row-two {
-    grid-template-columns: 3fr 2fr;
+    grid-template-columns: 13fr 12fr;
   }
 }
 

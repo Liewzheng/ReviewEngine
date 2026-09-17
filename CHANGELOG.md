@@ -1,3 +1,11 @@
+## [0.10.43] - 2026-09-17
+
+### Fixed
+- **The Git-platform dialog's Save button did nothing (RENG-100, hotfix)**: 0.10.42 split the editor into `GitPlatformDialog` (the shell, whose footer owns the Save button) and `GitPlatformForm` (the form itself, exposing `save()`), and the shell called `formRef?.save()` while the form never carried `ref="formRef"` — so `formRef.value` stayed `undefined` and the optional call swallowed every click. Adding or editing a platform was silently impossible: the dialog stayed open, no request left the page, and the one screen whose entire job is storing credentials could not store them. The binding is restored, and the new `gitPlatformDialogWiring.spec.ts` pins the class of mistake — every `xxxRef?.…` a template calls must have a matching `ref="xxxRef"` binding (verified to fail without the fix: 2 of its 4 assertions go red).
+
+### Notes
+- **Why the suites missed it**: the frontend suite renders through SSR — there is no DOM to click — so the link between a shell button and a child component's exposed method had no coverage at all. This hotfix therefore also lands the process change: `AGENTS.md` now makes a **kimi-webbridge pass on the exact build** a release gate (see §Verification Commands → *Release gate: kimi-webbridge verification*), and hotfixes obey it too.
+
 ## [0.10.42] - 2026-09-17
 
 ### Fixed

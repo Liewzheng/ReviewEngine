@@ -265,9 +265,10 @@ async fn webhook_created_review_can_be_rerun() {
         .await;
 
     let payload_url = "http://gitlab.reng88.invalid:8929/group/proj/-/merge_requests/7";
-    // The URL the review actually fetches: the payload URL re-hosted onto the
-    // registered platform's `internalBaseUrl` (the mock).
-    let review_url = format!("{}/group/proj/-/merge_requests/7", gitlab.uri());
+    // The mock IS the registered platform's `internalBaseUrl`: the address the
+    // webhook review (and the replayed one) fetches — the payload URL re-hosted
+    // onto it. The mock's MR endpoints are all mounted below, so a review that
+    // reaches the LLM stage must have fetched the MR + diff here.
     let llm_config_env = unreachable_llm_config_env();
     let port = find_free_port();
     let _guard = spawn_server_inner_with_env(
@@ -402,7 +403,11 @@ async fn webhook_created_review_can_be_rerun() {
     );
     assert_eq!(
         settled["gitlabMrUrl"].as_str(),
-        Some(review_url.as_str()),
+        Some(payload_url),
+        // RENG-101: the record's MR URL is the EXTERNAL (browseable) display
+        // address — the same MR the webhook review fetched, in the form the
+        // user's browser opens (the row's `request.source.url` re-hosts it
+        // onto the internal base for the fetch itself).
         "the replayed review must target the same MR the webhook review fetched, got {settled:?}"
     );
 }

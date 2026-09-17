@@ -60,7 +60,7 @@ pub(crate) fn build_review_participants(meta: &SourceMeta) -> Vec<ReviewParticip
         .collect()
 }
 
-pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
+pub(crate) fn build_review_detail(entry: &TaskEntry, platforms: &[crate::models::GitPlatformConfig]) -> ReviewDetail {
     let meta = &entry.source_meta;
     let status = task_status_str(&entry.state);
 
@@ -127,11 +127,20 @@ pub(crate) fn build_review_detail(entry: &TaskEntry) -> ReviewDetail {
         errors,
         raw_comment,
         raw_api_response: entry.result.clone(),
-        gitlab_mr_url: meta.gitlab_mr_url.clone(),
+        // RENG-101: the history link is the external address — a row written
+        // before the fix stored the internal fetch URL, so re-host it onto
+        // the matched platform's external base for display.
+        gitlab_mr_url: meta
+            .gitlab_mr_url
+            .as_deref()
+            .map(|u| crate::models::display_mr_url(platforms, u)),
     }
 }
 
-pub(crate) fn build_review_list_item(entry: &TaskEntry) -> ReviewListItem {
+pub(crate) fn build_review_list_item(
+    entry: &TaskEntry,
+    platforms: &[crate::models::GitPlatformConfig],
+) -> ReviewListItem {
     let meta = &entry.source_meta;
     ReviewListItem {
         id: entry.task_id.to_string(),
@@ -148,7 +157,11 @@ pub(crate) fn build_review_list_item(entry: &TaskEntry) -> ReviewListItem {
         status: task_status_str(&entry.state).to_string(),
         duration_ms: entry.duration_ms(),
         created_at: entry.created_at.to_rfc3339(),
-        gitlab_mr_url: meta.gitlab_mr_url.clone(),
+        // RENG-101 (see `build_review_detail`): external display URL.
+        gitlab_mr_url: meta
+            .gitlab_mr_url
+            .as_deref()
+            .map(|u| crate::models::display_mr_url(platforms, u)),
         // RENG-38: the snapshot column is TEXT JSON; a corrupt value degrades
         // to None (the list shows "unknown") instead of failing the page.
         llm_summary: entry
@@ -314,8 +327,19 @@ pub(crate) async fn enqueue_review(
     request: crate::server::api::types::ReviewRequest,
     mut request_json: serde_json::Value,
     gitlab_token: Option<String>,
+    display_url: Option<String>,
 ) -> uuid::Uuid {
-    let source_meta = source_meta_from_request(&request.source);
+    let mut source_meta = source_meta_from_request(&request.source);
+    // RENG-101: the record's MR URL — the history link — is the address the
+    // user's browser can open: the display URL (the submitted URL re-hosted
+    // onto the matched platform's external `base_url`), NOT the rewritten
+    // fetch address. Webhook rows already store the external payload URL;
+    // this converges REST-submitted and re-run rows onto the same semantics.
+    // `project`/`repository` stay derived from the fetch URL (API paths, not
+    // links). `None` (no platform matched) keeps the fetch URL as-is.
+    if let Some(display_url) = display_url {
+        source_meta.gitlab_mr_url = Some(display_url);
+    }
     // `request_json` is serialized from the `ReviewRequest` struct, which
     // never carries the GitLab token: it travels only in the `gitlab_token`
     // parameter (resolved from the X-Gitlab-Token header / server config) and
@@ -611,7 +635,7 @@ mod tests {
                 .to_string(),
         ];
         let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
-        let detail = build_review_detail(&entry);
+        let detail = build_review_detail(&entry, &[]);
         assert_eq!(detail.errors.len(), 1, "the failing expert is reported to the UI");
         assert!(
             detail.errors[0].contains("empty completion"),
@@ -627,7 +651,7 @@ mod tests {
             "dropped_findings": [],
             "consolidated": null,
         });
-        let detail = build_review_detail(&entry_with_result(Some(legacy)));
+        let detail = build_review_detail(&entry_with_result(Some(legacy)), &[]);
         assert!(detail.errors.is_empty());
         assert!(detail.raw_api_response.is_some(), "the legacy result still renders");
     }
@@ -640,7 +664,7 @@ mod tests {
         output.consolidated = Some(consolidated_with_tl_dr("tldr"));
         let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
 
-        let detail = build_review_detail(&entry);
+        let detail = build_review_detail(&entry, &[]);
         assert_eq!(detail.raw_comment.as_deref(), Some("# Aggregated"));
     }
 
@@ -652,7 +676,7 @@ mod tests {
         output.consolidated = Some(consolidated_with_tl_dr("TL;DR: looks fine"));
         let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
 
-        let detail = build_review_detail(&entry);
+        let detail = build_review_detail(&entry, &[]);
         assert_eq!(detail.raw_comment.as_deref(), Some("TL;DR: looks fine"));
     }
 
@@ -663,18 +687,18 @@ mod tests {
         // Both absent.
         let output = ReviewOutput::new(Vec::new());
         let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
-        assert!(build_review_detail(&entry).raw_comment.is_none());
+        assert!(build_review_detail(&entry, &[]).raw_comment.is_none());
 
         // Present but empty → filtered out, same empty state.
         let mut output = ReviewOutput::new(Vec::new());
         output.aggregated = Some(aggregated_with_markdown(""));
         output.consolidated = Some(consolidated_with_tl_dr(""));
         let entry = entry_with_result(Some(serde_json::to_value(output).unwrap()));
-        assert!(build_review_detail(&entry).raw_comment.is_none());
+        assert!(build_review_detail(&entry, &[]).raw_comment.is_none());
 
         // No parseable result at all.
         let entry = entry_with_result(None);
-        assert!(build_review_detail(&entry).raw_comment.is_none());
+        assert!(build_review_detail(&entry, &[]).raw_comment.is_none());
     }
 
     // ─── RENG-39: persistence-time api_key masking ──────────────────
@@ -823,5 +847,69 @@ mod tests {
         ];
         let resolved = resolve_masked_api_keys(request_configs, &server_configs);
         assert_eq!(resolved[0].api_key, crate::models::API_KEY_MASK);
+    }
+
+    // ─── RENG-101: list/detail MR links are external display URLs ────
+
+    fn entry_with_meta_mr_url(url: &str) -> TaskEntry {
+        let mut meta = SourceMeta::default();
+        meta.gitlab_mr_url = Some(url.to_string());
+        TaskEntry {
+            source_meta: meta,
+            ..entry_with_result(None)
+        }
+    }
+
+    fn nas_platform() -> crate::models::GitPlatformConfig {
+        crate::models::GitPlatformConfig {
+            id: String::new(),
+            name: "nas".to_string(),
+            platform_type: "gitlab".to_string(),
+            base_url: "https://gitlab.islet.space:8443".to_string(),
+            internal_base_url: "https://gitlab.islet.space".to_string(),
+            token: "glpat-platform".to_string(),
+            webhook_secret: String::new(),
+            webhook_signing_secret: String::new(),
+            allowed_projects: Vec::new(),
+        }
+    }
+
+    /// The read-path mapping is wired into BOTH builders: a row whose stored
+    /// MR URL carries the internal address renders the external one (a row
+    /// written before this fix), while external/webhook rows pass through
+    /// unchanged.
+    #[test]
+    fn list_and_detail_items_expose_external_display_mr_url() {
+        let platforms = vec![nas_platform()];
+
+        // Stored internal → rendered external.
+        let entry = entry_with_meta_mr_url("https://gitlab.islet.space/group/proj/-/merge_requests/1");
+        assert_eq!(
+            build_review_list_item(&entry, &platforms).gitlab_mr_url.as_deref(),
+            Some("https://gitlab.islet.space:8443/group/proj/-/merge_requests/1")
+        );
+        assert_eq!(
+            build_review_detail(&entry, &platforms).gitlab_mr_url.as_deref(),
+            Some("https://gitlab.islet.space:8443/group/proj/-/merge_requests/1")
+        );
+
+        // Stored external (webhook rows) → byte-identical.
+        let entry = entry_with_meta_mr_url("https://gitlab.islet.space:8443/group/proj/-/merge_requests/1");
+        assert_eq!(
+            build_review_list_item(&entry, &platforms).gitlab_mr_url.as_deref(),
+            Some("https://gitlab.islet.space:8443/group/proj/-/merge_requests/1")
+        );
+
+        // Unmatched and platform-less → unchanged.
+        let entry = entry_with_meta_mr_url("https://gitlab.com/owner/repo/-/merge_requests/9");
+        assert_eq!(
+            build_review_detail(&entry, &platforms).gitlab_mr_url.as_deref(),
+            Some("https://gitlab.com/owner/repo/-/merge_requests/9")
+        );
+        let entry = entry_with_meta_mr_url("https://gitlab.islet.space/group/proj/-/merge_requests/1");
+        assert_eq!(
+            build_review_detail(&entry, &[]).gitlab_mr_url.as_deref(),
+            Some("https://gitlab.islet.space/group/proj/-/merge_requests/1")
+        );
     }
 }

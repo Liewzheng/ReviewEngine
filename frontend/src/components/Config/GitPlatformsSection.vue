@@ -216,13 +216,25 @@ async function testPlatform(index: number) {
       baseUrl: platform.baseUrl,
       token: platform.token,
       id: platform.id,
+      internalBaseUrl: platform.internalBaseUrl,
     });
     testResults.set(platform.name, result);
+    // RENG-101: name the probed address — the internal one when set — so the
+    // toast cannot be mistaken for a verdict about Base URL.
     if (result.ok) {
-      ElMessage.success(t('config.gitPlatforms.testOk', { version: result.version ?? '?' }));
+      ElMessage.success(
+        result.probedUrl
+          ? t('config.gitPlatforms.testOkUrl', { url: result.probedUrl, version: result.version ?? '?' })
+          : t('config.gitPlatforms.testOk', { version: result.version ?? '?' })
+      );
     } else {
       ElMessage.error(
-        t('config.gitPlatforms.testFailed', { error: result.error ?? t('errors.unknown') })
+        result.probedUrl
+          ? t('config.gitPlatforms.testFailedUrl', {
+              url: result.probedUrl,
+              error: result.error ?? t('errors.unknown'),
+            })
+          : t('config.gitPlatforms.testFailed', { error: result.error ?? t('errors.unknown') })
       );
     }
   } catch (e) {

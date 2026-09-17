@@ -219,6 +219,28 @@ pub fn find_git_platform_for_review_url<'a>(
     Some(hit)
 }
 
+/// RENG-101: the DISPLAY URL for a stored MR URL. Rows written before the
+/// display-URL fix (REST-submitted and re-run reviews) stored the rewritten
+/// (internal, container-reachable) address in `source_meta.gitlab_mr_url`,
+/// which a user's browser cannot open; webhook rows always stored the
+/// payload's original external address. When `url` matches exactly one entry's
+/// configured `internal_base_url` (strict `host[:port]` identity via
+/// [`host_port`], the same comparison as [`GitPlatformConfig::matches_review_url`]'s
+/// strict half — no host-only fold), the same path is re-hosted onto that
+/// entry's EXTERNAL `base_url` for display. Every other input passes through
+/// byte-identical: a URL already on the external base (webhook rows), a URL
+/// matching no entry (or only through the port fold), and the empty platform
+/// list.
+pub fn display_mr_url(platforms: &[GitPlatformConfig], url: &str) -> String {
+    if let Some(platform) = platforms
+        .iter()
+        .find(|p| !p.internal_base_url.is_empty() && same_instance(&p.internal_base_url, url))
+    {
+        return crate::server::gitlab::rewrite_url_to_platform(url, &platform.base_url);
+    }
+    url.to_string()
+}
+
 /// Normalise a URL to its scheme-less `(host, port)` identity.
 ///
 /// The host is lowercased (DNS is case-insensitive). Port matching is
@@ -633,5 +655,60 @@ base_url = "http://gitlab.internal"
         )
         .unwrap();
         assert!(legacy.internal_base_url.is_empty());
+    }
+
+    /// RENG-101: the read-path mapping — a stored MR URL that carries a
+    /// platform's INTERNAL address is re-hosted onto that platform's external
+    /// base for display (the browser-openable address). Everything else passes
+    /// through byte-identical.
+    #[test]
+    fn display_mr_url_rehosts_stored_internal_onto_external_base() {
+        let mut nas = platform("https://gitlab.islet.space:8443");
+        nas.internal_base_url = "https://gitlab.islet.space".to_string();
+        let platforms = vec![nas];
+
+        // Stored internal → rendered external.
+        assert_eq!(
+            display_mr_url(&platforms, "https://gitlab.islet.space/g/proj/-/merge_requests/1"),
+            "https://gitlab.islet.space:8443/g/proj/-/merge_requests/1"
+        );
+        // Stored external (webhook rows) → unchanged.
+        assert_eq!(
+            display_mr_url(&platforms, "https://gitlab.islet.space:8443/g/proj/-/merge_requests/1"),
+            "https://gitlab.islet.space:8443/g/proj/-/merge_requests/1"
+        );
+        // A URL matching no entry → unchanged.
+        assert_eq!(
+            display_mr_url(&platforms, "https://gitlab.com/owner/repo/-/merge_requests/9"),
+            "https://gitlab.com/owner/repo/-/merge_requests/9"
+        );
+        // No platforms → unchanged.
+        assert_eq!(
+            display_mr_url(&[], "https://gitlab.islet.space/g/proj/-/merge_requests/1"),
+            "https://gitlab.islet.space/g/proj/-/merge_requests/1"
+        );
+    }
+
+    /// The mapping is gated on the entry's configured INTERNAL address: an
+    /// entry without one never re-hosts anything (its URLs identify it via
+    /// base_url, which is already the display address).
+    #[test]
+    fn display_mr_url_ignores_entry_without_internal_base() {
+        // No internal_base_url → the stored URL passes through even though it
+        // carries the platform's own host.
+        let plain = vec![platform("https://gitlab.islet.space:8443")];
+        assert_eq!(
+            display_mr_url(&plain, "https://gitlab.islet.space:8443/g/proj/-/merge_requests/1"),
+            "https://gitlab.islet.space:8443/g/proj/-/merge_requests/1"
+        );
+        // A port-folded match (stored :8443 vs a port-less entry) is NOT a
+        // strict internal-identity match — unchanged, never guessed.
+        let portless = vec![platform("https://gitlab.islet.space")];
+        assert_eq!(
+            display_mr_url(&portless, "https://gitlab.islet.space:8443/g/proj/-/merge_requests/1"),
+            "https://gitlab.islet.space:8443/g/proj/-/merge_requests/1"
+        );
+        // Garbage stays garbage.
+        assert_eq!(display_mr_url(&plain, "not-a-url"), "not-a-url");
     }
 }

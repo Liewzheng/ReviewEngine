@@ -152,6 +152,12 @@ pub struct TestGitPlatformRequest {
     /// `baseUrl` does not orphan the probe.
     #[serde(default)]
     id: String,
+    /// RENG-101: the container-reachable address of a possibly-unsaved edit.
+    /// When set (and non-empty after trimming), it is the address the probe
+    /// hits — mirroring `review_base_url()` — falling back to the matched
+    /// stored entry's `internal_base_url`, then to `base_url`.
+    #[serde(default)]
+    internal_base_url: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -177,6 +183,15 @@ struct GitLabVersionResponse {
 /// when the caller carries it), else the same baseUrl (the same fallback
 /// pattern as the `fetch_models` fix). An explicit token is used as-is, and
 /// a masked token with no matching platform keeps the old behavior.
+///
+/// RENG-101: the probed address is NOT necessarily `baseUrl`. It mirrors
+/// `review_base_url()` — the submitted `internalBaseUrl` (a possibly-unsaved
+/// edit) wins, else the matched stored entry's `internal_base_url`, else
+/// `baseUrl` — so the probe exercises the address the review would actually
+/// fetch. The health verdict is still recorded under the entry's external
+/// `base_url` (the store's cache key and `(base_url, token)` fingerprint),
+/// and every response carries `probedUrl` = the address that was actually
+/// hit.
 pub async fn test_git_platform(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TestGitPlatformRequest>,
@@ -185,33 +200,68 @@ pub async fn test_git_platform(
     if base.is_empty() {
         return Json(serde_json::json!({"ok": false, "error": "baseUrl is required"})).into_response();
     }
+
+    // Resolve the stored entry ONCE (id first, then baseUrl — the same
+    // identity rule as the config save path) and reuse it for both the
+    // masked-token fallback and the probe-target fallback.
+    let stored = {
+        let platforms = state.git_platforms.read().unwrap();
+        if body.id.is_empty() {
+            platforms.iter().find(|p| p.base_url == base).cloned()
+        } else {
+            platforms
+                .iter()
+                .find(|p| p.id == body.id)
+                .or_else(|| platforms.iter().find(|p| p.base_url == base))
+                .cloned()
+        }
+    };
+
+    // Probe target resolution order (mirrors `review_base_url()`): submitted
+    // internalBaseUrl → matched stored entry's internal_base_url → baseUrl,
+    // each trimmed of whitespace and trailing `/` before the non-empty check.
+    let submitted_internal = body.internal_base_url.trim().trim_end_matches('/').to_string();
+    let probe_target = if !submitted_internal.is_empty() {
+        submitted_internal
+    } else if let Some(entry) = &stored {
+        let entry_internal = entry.internal_base_url.trim().trim_end_matches('/').to_string();
+        if entry_internal.is_empty() {
+            base.clone()
+        } else {
+            entry_internal
+        }
+    } else {
+        base.clone()
+    };
+
     // Same SSRF policy as review webhook callbacks (see the module docs):
     // subsumes the syntactic checks (parseable, http(s), host present) and
-    // adds the address-range policy on the literal/resolved IPs.
-    if let Err(reason) = crate::server::api::callback::validate_callback_url(&base).await {
+    // adds the address-range policy on the literal/resolved IPs. The error
+    // names which field supplied the invalid target.
+    let target_field = if probe_target == base {
+        "baseUrl"
+    } else {
+        "internalBaseUrl"
+    };
+    if let Err(reason) = crate::server::api::callback::validate_callback_url(&probe_target).await {
         return Json(serde_json::json!({
             "ok": false,
-            "error": format!("invalid baseUrl: {reason}")
+            "error": format!("invalid {target_field}: {reason}"),
+            "probedUrl": probe_target,
         }))
         .into_response();
     }
 
     let token = if super::is_blank_or_masked(&body.token) {
-        let stored = state.git_platforms.read().unwrap();
-        let matched = if body.id.is_empty() {
-            stored.iter().find(|p| p.base_url == base)
-        } else {
-            stored
-                .iter()
-                .find(|p| p.id == body.id)
-                .or_else(|| stored.iter().find(|p| p.base_url == base))
-        };
-        matched.map(|p| p.token.clone()).unwrap_or_else(|| body.token.clone())
+        stored
+            .as_ref()
+            .map(|p| p.token.clone())
+            .unwrap_or_else(|| body.token.clone())
     } else {
         body.token.clone()
     };
 
-    let url = format!("{base}/api/v4/version");
+    let url = format!("{probe_target}/api/v4/version");
     let request = reqwest::Client::new()
         .get(&url)
         .timeout(std::time::Duration::from_secs(10));
@@ -232,7 +282,9 @@ pub async fn test_git_platform(
                 // RENG-97: this probe IS the single source of truth for the
                 // integration's health — record the outcome so the dashboard
                 // and `/system/health` report the same failure instead of
-                // "Configured" from entry presence.
+                // "Configured" from entry presence. RENG-101: keyed on the
+                // entry's external base_url, not the (possibly internal)
+                // probed address.
                 state.git_health.record(
                     &base,
                     &token,
@@ -241,6 +293,7 @@ pub async fn test_git_platform(
                 return Json(serde_json::json!({
                     "ok": false,
                     "error": error,
+                    "probedUrl": probe_target,
                 }))
                 .into_response();
             }
@@ -255,7 +308,8 @@ pub async fn test_git_platform(
                             latency_ms,
                         ),
                     );
-                    Json(serde_json::json!({ "ok": true, "version": parsed.version })).into_response()
+                    Json(serde_json::json!({ "ok": true, "version": parsed.version, "probedUrl": probe_target }))
+                        .into_response()
                 }
                 Err(e) => {
                     let error = format!("failed to parse response: {}", e);
@@ -267,6 +321,7 @@ pub async fn test_git_platform(
                     Json(serde_json::json!({
                         "ok": false,
                         "error": error,
+                        "probedUrl": probe_target,
                     }))
                     .into_response()
                 }
@@ -282,6 +337,7 @@ pub async fn test_git_platform(
             Json(serde_json::json!({
                 "ok": false,
                 "error": error,
+                "probedUrl": probe_target,
             }))
             .into_response()
         }

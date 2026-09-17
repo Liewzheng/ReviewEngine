@@ -1,3 +1,13 @@
+## [0.10.44] - 2026-09-17
+
+### Fixed
+- **The configuration probe and the history link now follow the review's own address semantics (RENG-101)**: the Configuration page's 测试 (probe) used to hit the submitted `baseUrl` while the review itself fetches the internal address — so on a NAS deployment (external `https://gitlab.islet.space:8443`, container-internal `https://gitlab.islet.space`) the "Test" button verified the wrong endpoint, and a REST-submitted or re-run review stored its MR link as the rewritten internal address, so 「查看原始评论」 opened a URL the user's browser could not reach. Two fixes:
+  - The probe target mirrors `review_base_url()`: the submitted `internalBaseUrl` wins, then the matched stored entry's `internal_base_url` (the entry resolved once, by `id` then by `baseUrl`, and reused for the masked-token fallback), then `baseUrl`. The target passes the same SSRF validation, with the error naming the offending field (`invalid internalBaseUrl: …` vs `invalid baseUrl: …`); every response carries `probedUrl` = the address actually hit. Health recording keeps its identity — still keyed on the entry's external `base_url` with the `(base_url, token)` fingerprint — so the dashboard and `/system/health` report the same verdict.
+  - A matched platform's rewritten route now carries a display URL: the same path re-hosted onto the platform's EXTERNAL `base_url` (the webhook-path semantics webhook rows always stored). The review still fetches `request.source.url` on the internal base, while `source_meta.gitlab_mr_url` (the list/detail `gitlabMrUrl`) is the external, browser-openable address. Rows written before the fix (stored internal) are re-hosted onto their platform's external base by the list/detail read path — strictly only when the stored URL matches that entry's `internal_base_url` (`host[:port]`), everything else passes through byte-identical — so old history links work without a migration. RENG-88 replay keeps working (the rerun re-applies the route from the external meta URL and the new row again stores the external URL).
+
+### Notes
+- **Tests**: probe priority (submitted internal → stored entry's internal by id → base; unsaved-edit; base-only unchanged), health still keyed on `base_url` after an internal probe, submit/rerun persisting the internal fetch URL + external display URL (NAS shape), the read-path mapping (internal → external; external/matchless/platformless unchanged), and the RENG-88 rerun-from-external-meta regression. Rust lib **1961 passed** (2 ignored); the server/webhook rerun integration test now asserts the external display URL; frontend **214 passed**.
+
 ## [0.10.43] - 2026-09-17
 
 ### Fixed

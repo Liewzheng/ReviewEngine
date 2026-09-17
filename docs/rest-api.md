@@ -125,7 +125,7 @@ Response 202:
 手动提交的 `source.url` 通常是调用方浏览器能打开的地址（即 GitLab 的 `external_url`），而 review-engine 自己（常常跑在容器里）未必能访问它——容器内的 `localhost` 指向容器自身。webhook 路径早已按「匹配到的 Git 平台」把 payload URL 改写到可达地址（见 `docs/integrations/gitlab.md` 的 Internal URL 一节）；REST 提交路径自 0.10.15 起遵循同一套规则、复用同一个改写函数 `rewrite_url_to_platform`：
 
 1. **主机匹配**：把提交 URL 的 `host[:port]` 身份（scheme 不参与、host 大小写不敏感、显式写出的默认端口 80/443 折叠为「未写」、其余端口严格比对）与每个 Git 平台条目比对，命中其 `base_url` 或（已配置的）`internal_base_url` 即视为同一实例；按配置顺序取第一个命中项。URL 的路径、查询串、尾部 `/` 都不参与匹配。RENG-90 起，无严格命中时还有一次 **主机折叠**：URL 的主机（忽略端口）恰好对应**唯一一个**条目的已配置主机（`base_url` 或 `internal_base_url`）时也视为命中——历史行里保存的 MR URL 常带 GitLab `external_url` 的端口（如 `https://host:8443`）而条目配置的是无端口的 `baseUrl`（或反之），这类对不上的地址同样能路由到自己的平台；主机对应零个或两个以上条目（或 URL 无法解析）时不命中，绝不猜测。
-2. **改写**：命中后，提交 URL 的路径与查询串被重新挂到该平台的可达地址（`internal_base_url`，未配置则 `base_url`）。改写后的 URL 既是异步评审实际抓取的地址，也是任务记录里保存的 MR URL（`GET /api/v1/reviews/:task_id` 的 `gitlabMrUrl` 因此始终是「实际抓取的那个地址」）；调用方提交的原始 URL 不入库，仅在服务端日志中与命中的平台名一起记录一次。
+2. **改写**：命中后，提交 URL 的路径与查询串被重新挂到该平台的可达地址（`internal_base_url`，未配置则 `base_url`）——这是异步评审实际抓取的地址，也是任务记录持久化的 `request.source.url`。记录里的 MR URL（`GET /api/v1/reviews/:task_id` 的 `gitlabMrUrl`，RENG-101）则是**外部展示地址**：同一路径重新挂到该条目的 `base_url` 上（用户浏览器能打开的那个地址），与 webhook 行一直保存的 payload 原始外部 URL 语义一致。调用方提交的原始 URL 不入库，仅在服务端日志中与命中的平台名一起记录一次。
 3. **未命中且为本地地址**：没有任何平台命中、且 URL 主机是众所周知的本地地址（`localhost`、`*.localhost`、任意 `127.0.0.0/8`、`0.0.0.0`、`::1`、`::`）时，**在入队之前**以 `400` 拒绝。这类地址在容器内指向容器自身，放行只会得到一个晚到的、含义不明的 `Failed to send GET`：
 
 ```
@@ -217,6 +217,10 @@ Response 200:
   "gitlabMrUrl": "https://gitlab.com/owner/repo/-/merge_requests/23"
 }
 ```
+
+**`gitlabMrUrl` 语义（RENG-101）**
+
+详情与列表项的 `gitlabMrUrl` 是**外部展示地址**：用户浏览器能打开的那个地址。Webhook 创建的行保存 payload 的原始外部 URL；REST 提交与重新评审的行保存同一路径重新挂到命中平台 `base_url` 上的外部地址（评审实际抓取的是 `internal_base_url` 上的内部地址，见 §1「`gitlab_mr` URL 的主机改写」）。读取路径对**本修复之前**写入的行（保存的是内部地址）做一次只读映射：存储的 MR URL 若严格命中某平台条目的 `internal_base_url`（同 `host[:port]`），则展示为挂到该条目 `base_url` 上的外部地址；其余情况（webhook 外部行、无命中、无平台）原样返回。存储本身从不改写。
 
 **`errors` 字段（RENG-77）**
 
@@ -454,6 +458,38 @@ Response 200:
   "models": ["gpt-4o", "..."]
 }
 ```
+
+#### `POST /api/v1/config/git-platforms/test`
+
+测试一个 Git 平台实例的连通性：向目标实例发 `GET {target}/api/v4/version`（10s 超时），用提交的 token（`***` 掩码或空串时回退到匹配条目的已存 token，先按 `id` 匹配（RENG-96）再按 `baseUrl`）。恒返回 200，探测失败在响应体里报告。
+
+RENG-101：探测的**目标地址**遵循评审抓取时的同一规则（`internal_base_url` 优先于 `base_url`）——先取请求里的 `internalBaseUrl`（编辑中的新条目），未设置则取匹配到的已存条目的 `internal_base_url`，再否则取 `baseUrl`。每个响应都带 `probedUrl` = 实际探测的地址。健康记录的缓存键仍是条目的外部 `base_url`（`GET /api/v1/system/health` 的 `health.integrations` 与 Dashboard 据此报告该条目已探测）。
+
+```
+Request:
+{
+  "baseUrl": "https://gitlab.islet.space:8443",
+  "token": "***",
+  "id": "5e3a1c8e-...",
+  "internalBaseUrl": "https://gitlab.islet.space"
+}
+
+Response 200 (success):
+{
+  "ok": true,
+  "version": "19.2.4-ee",
+  "probedUrl": "https://gitlab.islet.space"
+}
+
+Response 200 (failure):
+{
+  "ok": false,
+  "error": "HTTP 401 Unauthorized",
+  "probedUrl": "https://gitlab.islet.space"
+}
+```
+
+目标地址与 review webhook 回调同一套 SSRF 校验：`http` 仅允许回环/私网目标，link-local / 元数据 / unspecified 地址一律拦截；非法目标返回 `{"ok": false, "error": "invalid internalBaseUrl: ..."}`（目标来自 `internalBaseUrl` 时）或 `"invalid baseUrl: ..."`（来自 `baseUrl` 时）。
 
 #### `GET /api/v1/config/schema`
 

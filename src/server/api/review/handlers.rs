@@ -216,22 +216,34 @@ fn plan_gitlab_mr_url_route(state: &AppState, source: &ReviewSource) -> Result<M
 }
 
 /// Apply a planned route: the rewritten URL is what the async review fetches
-/// (and, via `source_meta_from_request`, what the task record stores as its MR
-/// URL). The user-entered URL is not preserved in the record; it is logged
-/// here together with the platform that claimed it.
-fn apply_gitlab_mr_url_route(source: &mut ReviewSource, route: MrUrlRoute) {
-    let MrUrlRoute::Rewritten { url, platform } = route else {
-        return;
+/// (and what the persisted `request.source.url` replays). The task record's MR
+/// URL — the history link — is the DISPLAY URL instead (RENG-101): the same
+/// path re-hosted onto the matched platform's EXTERNAL `base_url`, the address
+/// the user's browser can open (the semantics webhook rows already store).
+/// Returns the display URL; `None` for the unchanged route, where the fetch
+/// URL IS the display URL (behaviour unchanged). The user-entered URL is not
+/// otherwise preserved in the record; it is logged here together with the
+/// platform that claimed it.
+fn apply_gitlab_mr_url_route(source: &mut ReviewSource, route: MrUrlRoute) -> Option<String> {
+    let MrUrlRoute::Rewritten {
+        url,
+        display_url,
+        platform,
+    } = route
+    else {
+        return None;
     };
     if let ReviewSource::GitLabMr { url: submitted } = source {
         tracing::info!(
             platform = %platform,
             submitted = %submitted,
             review_url = %url,
+            display_url = %display_url,
             "gitlab_mr url rewritten onto the matched git platform's review base"
         );
         *submitted = url;
     }
+    Some(display_url)
 }
 
 /// Validate the optional webhook callback URL (SSRF protection, async DNS).
@@ -328,8 +340,9 @@ pub(crate) async fn submit_review(
 
     // The plan applies here: the credential lookup above keyed on the URL the
     // user submitted, everything below (the persisted request, the fetch) uses
-    // the reachable URL.
-    apply_gitlab_mr_url_route(&mut request.source, url_route);
+    // the reachable URL. The display URL (the same path on the platform's
+    // external base) is what the record stores as its MR URL — RENG-101.
+    let display_url = apply_gitlab_mr_url_route(&mut request.source, url_route);
 
     // The persisted request parameters are serialized from a struct that
     // never carries the GitLab token, so it can never land in the task store;
@@ -339,7 +352,7 @@ pub(crate) async fn submit_review(
         Ok(v) => v,
         Err(_) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, "failed to serialize review request"),
     };
-    let task_id = enqueue_review(&state, &store, request, request_json, gitlab_token).await;
+    let task_id = enqueue_review(&state, &store, request, request_json, gitlab_token, display_url).await;
 
     let status = task_to_status(&TaskEntry {
         task_id,
@@ -397,11 +410,18 @@ pub(crate) async fn get_review(State(state): State<Arc<AppState>>, Path(task_id)
             None => return error_response(StatusCode::NOT_FOUND, "task not found"),
         }
     };
-    let mut status_value = serde_json::to_value(task_to_status(&entry)).unwrap_or_default();
-    if let Ok(detail_value) = serde_json::to_value(build_review_detail(&entry)) {
-        merge_camel_case_fields(&mut status_value, &detail_value);
+    // RENG-101: the list/detail items re-host a stored internal MR URL onto
+    // the matched platform's external base for display, so the history link
+    // opens in the user's browser. The read guard lives outside the builder
+    // calls (never held across an await).
+    {
+        let platforms = state.git_platforms.read().unwrap();
+        let mut status_value = serde_json::to_value(task_to_status(&entry)).unwrap_or_default();
+        if let Ok(detail_value) = serde_json::to_value(build_review_detail(&entry, &platforms)) {
+            merge_camel_case_fields(&mut status_value, &detail_value);
+        }
+        (StatusCode::OK, Json(status_value)).into_response()
     }
-    (StatusCode::OK, Json(status_value)).into_response()
 }
 
 pub(crate) async fn rerun_review(
@@ -510,18 +530,19 @@ pub(crate) async fn rerun_review(
     }
 
     // Apply the route: a rewritten URL must be what the new task fetches AND
-    // stores, so the persisted request is re-serialized in that case — the
-    // stored JSON is replayed byte-identically otherwise (it preserves fields
-    // this build may not model).
+    // the persisted request replays, so the persisted JSON is re-serialized in
+    // that case — the stored JSON is replayed byte-identically otherwise (it
+    // preserves fields this build may not model). The new record's MR URL is
+    // the display URL (RENG-101) when a platform matched.
     let rewritten = matches!(url_route, MrUrlRoute::Rewritten { .. });
-    apply_gitlab_mr_url_route(&mut request.source, url_route);
+    let display_url = apply_gitlab_mr_url_route(&mut request.source, url_route);
     let request_json = if rewritten {
         serde_json::to_value(&request).unwrap_or(request_json)
     } else {
         request_json
     };
 
-    let new_task_id = enqueue_review(&state, &store, request, request_json, gitlab_token).await;
+    let new_task_id = enqueue_review(&state, &store, request, request_json, gitlab_token, display_url).await;
     (StatusCode::ACCEPTED, Json(serde_json::json!({"task_id": new_task_id}))).into_response()
 }
 
@@ -591,11 +612,14 @@ pub(crate) async fn list_reviews(
             )
             .await
     };
+    // RENG-101 (see `get_review`): display MR URLs re-hosted onto the matched
+    // platform's external base. The read guard is taken once, before the map.
+    let platforms = state.git_platforms.read().unwrap();
     let items: Vec<serde_json::Value> = entries
         .iter()
         .map(|entry| {
             let mut status_value = serde_json::to_value(task_to_status(entry)).unwrap_or_default();
-            if let Ok(item_value) = serde_json::to_value(build_review_list_item(entry)) {
+            if let Ok(item_value) = serde_json::to_value(build_review_list_item(entry, &platforms)) {
                 merge_camel_case_fields(&mut status_value, &item_value);
             }
             status_value

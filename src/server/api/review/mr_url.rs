@@ -32,20 +32,32 @@
 //!    submission is rejected up front with an actionable 400 instead.
 //! 3. **Unmatched otherwise** — fetched exactly as submitted (unchanged).
 //!
-//! The rewritten URL is what the review fetches AND what the task record
-//! stores as its MR URL; the URL the user typed is not preserved (it is
-//! logged at submit time with the platform it matched).
+//! The rewritten URL is what the review fetches. The task record stores the
+//! fetch URL as its persisted `request.source.url`, while its MR URL — the
+//! history link — is the display URL (RENG-101): the same path re-hosted onto
+//! the matched platform's EXTERNAL `base_url`, the address the user's browser
+//! can open (matching what webhook-created rows already store). The URL the
+//! user typed is not otherwise preserved (it is logged at submit time with
+//! the platform it matched).
 
 use crate::models::GitPlatformConfig;
 
 /// The routing decision for one `gitlab_mr` submission URL.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum MrUrlRoute {
-    /// No platform owns the URL: fetch it exactly as submitted.
+    /// No platform owns the URL: fetch it exactly as submitted (display ==
+    /// the URL as-is).
     Unchanged,
     /// `platform` owns the URL: fetch it re-hosted onto that platform's
-    /// review-time base (`internal_base_url`, else `base_url`).
-    Rewritten { url: String, platform: String },
+    /// review-time base (`internal_base_url`, else `base_url`), while
+    /// `display_url` is the same path re-hosted onto the platform's EXTERNAL
+    /// `base_url` — the address the user's browser opens, and what the
+    /// history row shows (RENG-101).
+    Rewritten {
+        url: String,
+        display_url: String,
+        platform: String,
+    },
 }
 
 /// Route one manual `gitlab_mr` URL (rule list in the module docs).
@@ -56,12 +68,17 @@ pub(crate) enum MrUrlRoute {
 pub(crate) fn route_gitlab_mr_url(platforms: &[GitPlatformConfig], url: &str) -> Result<MrUrlRoute, String> {
     if let Some(platform) = crate::models::find_git_platform_for_review_url(platforms, url) {
         // Same rewrite the webhook path applies: the submitted path (query
-        // included) re-hosted onto the platform's reachable base. Fail-safe:
-        // an unparseable target keeps the submitted URL verbatim.
+        // included) re-hosted onto the platform's review-time base — the
+        // fetch target. The display URL is the same path re-hosted onto the
+        // platform's EXTERNAL base_url (RENG-101): what a user's browser can
+        // open, and what history rows store/show. Fail-safe: an unparseable
+        // target keeps the submitted URL verbatim.
         let rewritten =
             crate::server::gitlab::rewrite_url_to_platform(url, crate::server::gitlab::review_base_url(platform));
+        let display_url = crate::server::gitlab::rewrite_url_to_platform(url, &platform.base_url);
         return Ok(MrUrlRoute::Rewritten {
             url: rewritten,
+            display_url,
             platform: platform.name.clone(),
         });
     }
@@ -148,6 +165,7 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "https://gitlab.islet.space/group/proj/-/merge_requests/2".to_string(),
+                display_url: "https://gitlab.islet.space:8443/group/proj/-/merge_requests/2".to_string(),
                 platform: "nas".to_string(),
             }
         );
@@ -168,6 +186,7 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "https://gitlab.islet.space/group/proj/-/merge_requests/7".to_string(),
+                display_url: "https://gitlab.islet.space/group/proj/-/merge_requests/7".to_string(),
                 platform: "nas".to_string(),
             }
         );
@@ -190,6 +209,7 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "http://host.docker.internal:8929/review-lab/demo-app/-/merge_requests/1".to_string(),
+                display_url: "http://localhost:8929/review-lab/demo-app/-/merge_requests/1".to_string(),
                 platform: "testbed".to_string(),
             }
         );
@@ -203,6 +223,7 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "http://localhost:8929/review-lab/demo-app/-/merge_requests/1".to_string(),
+                display_url: "http://localhost:8929/review-lab/demo-app/-/merge_requests/1".to_string(),
                 platform: "testbed".to_string(),
             },
             "a matched platform is trusted: its configured target is what the server reaches"
@@ -231,6 +252,7 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "https://gitlab.example.com/g/p/-/merge_requests/9".to_string(),
+                display_url: "https://gitlab.example.com:8443/g/p/-/merge_requests/9".to_string(),
                 platform: "nas".to_string(),
             }
         );
@@ -245,6 +267,7 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "https://gitlab.internal/group/proj/-/merge_requests/9".to_string(),
+                display_url: "https://gitlab.com/group/proj/-/merge_requests/9".to_string(),
                 platform: "web".to_string(),
             }
         );
@@ -257,6 +280,7 @@ mod tests {
             .unwrap(),
             MrUrlRoute::Rewritten {
                 url: "https://gitlab.example.com/group/proj/-/merge_requests/9?note_id=3".to_string(),
+                display_url: "https://gitlab.example.com:8443/group/proj/-/merge_requests/9?note_id=3".to_string(),
                 platform: "nas".to_string(),
             }
         );

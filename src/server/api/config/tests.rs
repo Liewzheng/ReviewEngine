@@ -7,6 +7,7 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use wiremock::MockServer;
 
 /// Seed an `AppState` with one openai provider carrying `key`, wired the
 /// same way `serve` does: `app_config.llm` + `ui_config` built from it.
@@ -2137,6 +2138,11 @@ async fn git_platform_probe_reports_version_on_success() {
     let body = probe_git_platform(Arc::new(AppState::new(vec![])), &server.uri(), "glpat-explicit").await;
     assert_eq!(body["ok"], true);
     assert_eq!(body["version"], "19.2.4-ee");
+    assert_eq!(
+        body["probedUrl"],
+        server.uri(),
+        "the response must name the address the probe hit"
+    );
 }
 
 /// The masked-token fallback: a blank/masked probe token resolves to the
@@ -2242,6 +2248,11 @@ async fn git_platform_probe_reports_http_errors() {
     let body = probe_git_platform(Arc::new(AppState::new(vec![])), &server.uri(), API_KEY_MASK).await;
     assert_eq!(body["ok"], false);
     assert_eq!(body["error"], "HTTP 401 Unauthorized");
+    assert_eq!(
+        body["probedUrl"],
+        server.uri(),
+        "a failure response also names the address that was probed"
+    );
 }
 
 #[tokio::test]
@@ -2295,6 +2306,203 @@ async fn git_platform_probe_blocks_ssrf_targets() {
         body["error"].as_str().unwrap().contains("loopback/private"),
         "public http must be rejected: {body}"
     );
+}
+
+// ─── RENG-101: the probe targets the address the review uses ─────────
+
+/// Full probe helper: lets the test pass `internalBaseUrl` and `id`.
+async fn probe_git_platform_full(
+    state: Arc<AppState>,
+    base_url: &str,
+    token: &str,
+    internal_base_url: Option<&str>,
+    id: Option<&str>,
+) -> serde_json::Value {
+    let mut req = serde_json::json!({ "baseUrl": base_url, "token": token });
+    if let Some(internal) = internal_base_url {
+        req["internalBaseUrl"] = serde_json::json!(internal);
+    }
+    if let Some(id) = id {
+        req["id"] = serde_json::json!(id);
+    }
+    let req: super::helpers::TestGitPlatformRequest =
+        serde_json::from_value(req).expect("TestGitPlatformRequest must deserialize");
+    let resp = super::helpers::test_git_platform(State(state), Json(req))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK, "probe errors stay in the body");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// A stored git platform entry, token only (the shape a REST-routing entry
+/// has).
+fn stored_probe_platform(
+    id: &str,
+    name: &str,
+    base_url: &str,
+    internal_base_url: &str,
+    token: &str,
+) -> crate::models::GitPlatformConfig {
+    crate::models::GitPlatformConfig {
+        id: id.to_string(),
+        name: name.to_string(),
+        platform_type: "gitlab".to_string(),
+        base_url: base_url.to_string(),
+        internal_base_url: internal_base_url.to_string(),
+        token: token.to_string(),
+        webhook_secret: String::new(),
+        webhook_signing_secret: String::new(),
+        allowed_projects: Vec::new(),
+    }
+}
+
+async fn version_mock(server: &wiremock::MockServer, expected_token: &str) {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, ResponseTemplate};
+    Mock::given(method("GET"))
+        .and(path("/api/v4/version"))
+        .and(header("Authorization", format!("Bearer {expected_token}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "version": "19.2.4-ee" })))
+        .mount(server)
+        .await;
+}
+
+/// The submitted `internalBaseUrl` wins over every other source: the probe
+/// hits it (never the base) and `probedUrl` reports it.
+#[tokio::test]
+async fn git_platform_probe_prefers_submitted_internal_base_url() {
+    let base_server = MockServer::start().await;
+    let internal_server = MockServer::start().await;
+    version_mock(&internal_server, "glpat-explicit").await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    let body = probe_git_platform_full(
+        state.clone(),
+        &base_server.uri(),
+        "glpat-explicit",
+        Some(&internal_server.uri()),
+        None,
+    )
+    .await;
+    assert_eq!(
+        body["ok"], true,
+        "the submitted internal address must be probed: {body}"
+    );
+    assert_eq!(body["probedUrl"], internal_server.uri());
+    assert_eq!(body["version"], "19.2.4-ee");
+    assert!(
+        base_server.received_requests().await.unwrap_or_default().is_empty(),
+        "the probe must not touch the base address while an internal one is submitted"
+    );
+}
+
+/// The submitted internal base also wins for an UNSAVED edit — no stored entry
+/// matches the id or the base, and the probe still goes to the internal
+/// address the user is about to save.
+#[tokio::test]
+async fn git_platform_probe_uses_submitted_internal_for_unsaved_entry() {
+    let base_server = MockServer::start().await;
+    let internal_server = MockServer::start().await;
+    version_mock(&internal_server, "glpat-candidate").await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    let body = probe_git_platform_full(
+        state.clone(),
+        &base_server.uri(),
+        "glpat-candidate",
+        Some(&internal_server.uri()),
+        None,
+    )
+    .await;
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["probedUrl"], internal_server.uri());
+    assert!(
+        base_server.received_requests().await.unwrap_or_default().is_empty(),
+        "an unsaved entry's base must not be probed"
+    );
+}
+
+/// No submitted internal → the matched STORED entry's `internal_base_url`
+/// (resolved by id, the RENG-96 identity rule) becomes the probe target, and
+/// its stored token is the one sent.
+#[tokio::test]
+async fn git_platform_probe_uses_stored_internal_base_url_matched_by_id() {
+    let internal_server = MockServer::start().await;
+    version_mock(&internal_server, "glpat-stored").await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    let id = "5e3a1c8e-0000-4000-8000-0000000000bb";
+    *state.git_platforms.write().unwrap() = vec![stored_probe_platform(
+        id,
+        "testbed",
+        "https://external.invalid:8443",
+        &internal_server.uri(),
+        "glpat-stored",
+    )];
+
+    let body = probe_git_platform_full(
+        state.clone(),
+        "https://external.invalid:8443",
+        API_KEY_MASK,
+        None,
+        Some(id),
+    )
+    .await;
+    assert_eq!(body["ok"], true, "the stored internal address must be probed: {body}");
+    assert_eq!(body["probedUrl"], internal_server.uri());
+    assert_eq!(body["version"], "19.2.4-ee");
+}
+
+/// No internal anywhere (submitted or stored) → the base address is probed,
+/// exactly as before RENG-101.
+#[tokio::test]
+async fn git_platform_probe_falls_back_to_stored_base_url_without_internal() {
+    let server = MockServer::start().await;
+    version_mock(&server, "glpat-stored").await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    *state.git_platforms.write().unwrap() =
+        vec![stored_probe_platform("", "testbed", &server.uri(), "", "glpat-stored")];
+    let body = probe_git_platform(state.clone(), &server.uri(), API_KEY_MASK).await;
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(
+        body["probedUrl"],
+        server.uri(),
+        "no internal → the base is the probe target"
+    );
+}
+
+/// RENG-101: the health verdict is recorded under the entry's EXTERNAL
+/// `base_url` (the cache key and `(base_url, token)` fingerprint), even though
+/// the probe hit the internal address — so the dashboard and `/system/health`
+/// still report this entry as probed.
+#[tokio::test]
+async fn git_platform_probe_records_health_under_base_url_not_probe_target() {
+    let internal_server = MockServer::start().await;
+    version_mock(&internal_server, "glpat-stored").await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    let stored = stored_probe_platform(
+        "5e3a1c8e-0000-4000-8000-0000000000cc",
+        "testbed",
+        "https://external.invalid:8443",
+        &internal_server.uri(),
+        "glpat-stored",
+    );
+    *state.git_platforms.write().unwrap() = vec![stored.clone()];
+
+    let body = probe_git_platform_full(state.clone(), &stored.base_url, API_KEY_MASK, None, Some(&stored.id)).await;
+    assert_eq!(body["ok"], true, "{body}");
+    assert_eq!(body["probedUrl"], internal_server.uri());
+
+    use crate::server::api::git_health::GitPlatformStatus;
+    let health = state
+        .git_health
+        .lookup(&stored)
+        .expect("the verdict must be answerable for the stored entry (keyed on base_url)");
+    assert_eq!(health.status, GitPlatformStatus::Healthy);
+    assert_eq!(health.version.as_deref(), Some("19.2.4-ee"));
 }
 
 /// The guard must not be stricter than the review webhook policy: loopback

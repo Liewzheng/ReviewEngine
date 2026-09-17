@@ -2447,14 +2447,22 @@ async fn submit_gitlab_mr_rewrites_host_onto_matched_platform_internal_base_url(
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    // The rewritten URL is the persisted MR URL, and the submitted host is
-    // nowhere in the stored task (the original is not preserved — docs/rest-api.md).
+    // The rewritten (internal) URL is what the review fetches and what the
+    // persisted request replays; the record's MR URL — the history link — is
+    // the EXTERNAL display URL (the submitted address re-hosted onto the
+    // platform's base_url), and the submitted host is nowhere in the stored
+    // REQUEST (the original is not preserved — docs/rest-api.md).
     let entry = store.get(task_id).await.expect("task must be stored");
     let expected = format!("{}/group/project/-/merge_requests/1", server.uri());
     assert_eq!(
+        entry.request.as_ref().unwrap()["source"]["url"],
+        expected,
+        "the persisted request must replay the rewritten (internal) fetch URL"
+    );
+    assert_eq!(
         entry.source_meta.gitlab_mr_url.as_deref(),
-        Some(expected.as_str()),
-        "the task record must carry the URL the review fetched"
+        Some(submitted),
+        "the record's MR URL must be the EXTERNAL display address the user's browser opens"
     );
     assert_eq!(entry.source_meta.project.as_deref(), Some("group/project"));
     let stored = serde_json::to_string(&entry.request).unwrap();
@@ -2603,7 +2611,9 @@ async fn unmatched_reachable_host_passes_through_unchanged() {
 }
 
 /// A URL already on the platform's `internal_base_url` (e.g. pasted from inside
-/// the network) identifies its platform and settles on the same address.
+/// the network) identifies its platform and settles on the same address for the
+/// fetch — while the record's MR URL is the EXTERNAL display address the
+/// browser opens (RENG-101).
 #[tokio::test]
 async fn submit_gitlab_mr_on_internal_base_url_is_kept_and_routed_to_its_platform() {
     let state = state_with_platforms(vec![review_platform(
@@ -2624,7 +2634,16 @@ async fn submit_gitlab_mr_on_internal_base_url_is_kept_and_routed_to_its_platfor
     assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
     let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
     let entry = store.get(task_id).await.expect("task must be stored");
-    assert_eq!(entry.source_meta.gitlab_mr_url.as_deref(), Some(submitted));
+    assert_eq!(
+        entry.request.as_ref().unwrap()["source"]["url"],
+        submitted,
+        "the fetch stays on the internal address"
+    );
+    assert_eq!(
+        entry.source_meta.gitlab_mr_url.as_deref(),
+        Some("https://gitlab.example.com:8443/group/project/-/merge_requests/2"),
+        "the history link is the external display address"
+    );
 }
 
 /// The enqueue-time routing gate re-applies on rerun, exactly like the URL
@@ -2660,6 +2679,145 @@ async fn rerun_reapplies_the_mr_url_routing_gate() {
         store.get(original_id).await.unwrap().state,
         TaskState::Failed,
         "the original record must be untouched"
+    );
+}
+
+// ─── RENG-101: fetch via the internal address, display the external one ──
+
+/// NAS shape (the deployment that motived RENG-101): `base_url` is the
+/// account GitLab reports in payloads and the user's browser opens
+/// (`:8443`), `internal_base_url` is the container-reachable address (443).
+/// A REST submit must persist the INTERNAL address as the fetch URL
+/// (`request.source.url`) while the record's MR URL — the history link — is
+/// the EXTERNAL display address.
+#[tokio::test]
+async fn submit_stores_internal_fetch_url_and_external_display_url() {
+    let state = state_with_platforms(vec![review_platform(
+        "nas",
+        "https://gitlab.islet.space:8443",
+        "https://gitlab.islet.space",
+    )]);
+    let store = state.task_store.clone().unwrap();
+    let submitted = "https://gitlab.islet.space:8443/group/proj/-/merge_requests/2";
+    let resp = submit_review(
+        State(state),
+        headers_with_gitlab_token("glpat-header-token"),
+        Ok(Json(gitlab_mr_url_body(submitted))),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let task_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    let entry = store.get(task_id).await.expect("task must be stored");
+    assert_eq!(
+        entry.request.as_ref().unwrap()["source"]["url"],
+        "https://gitlab.islet.space/group/proj/-/merge_requests/2",
+        "the persisted request must carry the internal fetch URL"
+    );
+    assert_eq!(
+        entry.source_meta.gitlab_mr_url.as_deref(),
+        Some(submitted),
+        "the record's MR URL must be the external display URL"
+    );
+}
+
+/// A RERUN re-applies the route, so the same split holds for the new record:
+/// the fetch stays on the internal address and the MR URL is the external
+/// display one.
+#[tokio::test]
+async fn rerun_stores_internal_fetch_url_and_external_display_url() {
+    let state = state_with_platforms(vec![review_platform(
+        "nas",
+        "https://gitlab.islet.space:8443",
+        "https://gitlab.islet.space",
+    )]);
+    let store = state.task_store.clone().unwrap();
+    // A row already rewritten onto the internal base (the shape this fix
+    // rewrites: request.source.url AND meta both internal).
+    let stored = gitlab_mr_url_body("https://gitlab.islet.space/group/proj/-/merge_requests/3");
+    let original_id = store
+        .create_with_request(Some(SourceMeta::default()), Some(stored))
+        .await;
+    store
+        .update(original_id, TaskState::Failed, None, Some("boom".to_string()))
+        .await;
+
+    let resp = rerun_review(
+        State(state),
+        Path(original_id),
+        headers_with_gitlab_token("glpat-rerun-token"),
+    )
+    .await
+    .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "got {json}");
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+
+    let new_entry = store.get(new_id).await.expect("the rerun task must be stored");
+    assert_eq!(
+        new_entry.request.as_ref().unwrap()["source"]["url"],
+        "https://gitlab.islet.space/group/proj/-/merge_requests/3",
+        "the rerun still fetches the internal address"
+    );
+    assert_eq!(
+        new_entry.source_meta.gitlab_mr_url.as_deref(),
+        Some("https://gitlab.islet.space:8443/group/proj/-/merge_requests/3"),
+        "the rerun record's MR URL is the external display URL"
+    );
+}
+
+/// RENG-88 regression with the RENG-101 semantics: a request-less row whose
+/// meta carries the EXTERNAL MR URL (webhook shape) replays successfully —
+/// the route re-applies and rewrites the fetch onto the internal address —
+/// and the NEW row again stores the external URL.
+#[tokio::test]
+async fn rerun_recovers_request_from_external_meta_url_and_stores_external_display_url() {
+    let (_state, db) = state_with_db().await;
+    let id = Uuid::new_v4();
+    let external = "https://gitlab.islet.space:8443/owner/repo/-/merge_requests/5";
+    // Seeded exactly like a pre-RENG-88 write-through row: no `request`
+    // column, meta carries the payload's EXTERNAL url.
+    seed_review_row(
+        &db,
+        id,
+        "failed",
+        "2026-09-02T09:00:00.000000Z",
+        Some("2026-09-02T09:01:00.000000Z"),
+        &webhook_source_meta(external),
+        None,
+    )
+    .await;
+
+    let state = state_after_restart(db);
+    *state.git_platforms.write().unwrap() = vec![review_platform(
+        "nas",
+        "https://gitlab.islet.space:8443",
+        "https://gitlab.islet.space",
+    )];
+    let store = state.task_store.clone().unwrap();
+    let resp = rerun_review(State(state), Path(id), headers_with_gitlab_token("glpat-rerun-token"))
+        .await
+        .into_response();
+    let (status, json) = response_json(resp).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "a request-less row with an external MR URL must re-run, got {json}"
+    );
+
+    let new_id = Uuid::parse_str(json["task_id"].as_str().unwrap()).unwrap();
+    let new_entry = store.get(new_id).await.expect("the rerun must be enqueued");
+    assert_eq!(
+        new_entry.request.as_ref().unwrap()["source"]["url"],
+        "https://gitlab.islet.space/owner/repo/-/merge_requests/5",
+        "the recovered external URL is re-written onto the internal fetch address"
+    );
+    assert_eq!(
+        new_entry.source_meta.gitlab_mr_url.as_deref(),
+        Some(external),
+        "the new row again stores the external display URL"
     );
 }
 

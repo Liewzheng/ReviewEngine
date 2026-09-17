@@ -59,6 +59,13 @@ export interface GitPlatformTestResult {
   version?: string;
   /** Error description when the probe failed. */
   error?: string;
+  /**
+   * The address that was actually probed (RENG-101): the submitted
+   * internalBaseUrl when set, else the matched entry's internal URL, else
+   * baseUrl — the same internal-when-set-else-base rule the review fetch
+   * uses. Absent only from pre-0.10.44 servers.
+   */
+  probedUrl?: string;
 }
 
 /**
@@ -67,17 +74,25 @@ export interface GitPlatformTestResult {
  * as `{ ok: false, error }`. A blank or masked (`***`) token falls back
  * server-side to the stored token of the platform, matched by `id` first
  * (RENG-96) then by baseUrl, so callers can pass the masked value as-is.
- * @param data - Instance base URL, (possibly masked) access token, and the
- * entry's stable `id` when known.
+ * @param data - Instance base URL, (possibly masked) access token, the
+ * entry's stable `id` when known, and the internal base URL to probe when
+ * set (RENG-101) — otherwise the server probes the internal/stored address
+ * it would actually fetch from.
  */
 export async function testGitPlatform(data: {
   baseUrl: string;
   token: string;
   id?: string;
+  internalBaseUrl?: string;
 }): Promise<GitPlatformTestResult> {
   return request('/config/git-platforms/test', {
     method: 'POST',
-    body: JSON.stringify({ baseUrl: data.baseUrl, token: data.token, id: data.id }),
+    body: JSON.stringify({
+      baseUrl: data.baseUrl,
+      token: data.token,
+      id: data.id,
+      internalBaseUrl: data.internalBaseUrl,
+    }),
   });
 }
 

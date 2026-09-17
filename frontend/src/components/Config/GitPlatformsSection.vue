@@ -69,159 +69,29 @@
     </div>
   </el-card>
 
-  <!-- Add / Edit Git Platform Dialog -->
-  <el-dialog
-    v-model="showDialog"
-    :title="
-      dialogMode === 'add'
-        ? $t('config.gitPlatforms.addDialogTitle')
-        : $t('config.gitPlatforms.editDialogTitle')
-    "
-    width="var(--modal-w-lg)"
-    append-to-body
-  >
-    <el-form
-      ref="dialogFormRef"
-      :model="draft"
-      :rules="dialogRules"
-      label-position="top"
-      size="default"
-    >
-      <el-row :gutter="20">
-        <el-col :span="12">
-          <el-form-item :label="$t('config.gitPlatforms.name')" prop="name">
-            <el-input
-              v-model="draft.name"
-              :placeholder="$t('config.gitPlatforms.namePlaceholder')"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :span="12">
-          <!-- Single-option select today; gitea/gitee slot in as options later. -->
-          <el-form-item :label="$t('config.gitPlatforms.type')" prop="type">
-            <el-select v-model="draft.type" style="width: 100%">
-              <el-option label="GitLab" value="gitlab" />
-            </el-select>
-          </el-form-item>
-        </el-col>
-        <el-col :span="24">
-          <el-form-item :label="$t('config.gitPlatforms.baseUrl')" prop="baseUrl">
-            <el-input
-              v-model="draft.baseUrl"
-              :placeholder="$t('config.gitPlatforms.baseUrlPlaceholder')"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :span="24">
-          <el-form-item prop="internalBaseUrl">
-            <template #label>
-              {{ $t('config.gitPlatforms.internalBaseUrl') }}
-              <HelpTip :tip="$t('config.gitPlatforms.internalBaseUrlHelp')" />
-            </template>
-            <el-input
-              v-model="draft.internalBaseUrl"
-              :placeholder="$t('config.gitPlatforms.internalBaseUrlPlaceholder')"
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :span="24">
-          <el-form-item :label="$t('config.gitPlatforms.token')" prop="token">
-            <el-input
-              v-model="draft.token"
-              show-password
-              :placeholder="
-                dialogMode === 'edit'
-                  ? hasSavedToken
-                    ? SAVED_SECRET_PLACEHOLDER
-                    : $t('config.gitPlatforms.keepTokenPlaceholder')
-                  : $t('config.gitPlatforms.tokenPlaceholder')
-              "
-            />
-          </el-form-item>
-        </el-col>
-        <!-- Field order mirrors the GitLab 19+ webhook form: Signing token
-             (recommended) before Secret token (optional fallback). -->
-        <el-col :span="24">
-          <el-form-item prop="webhookSigningSecret">
-            <template #label>
-              {{ $t('config.gitPlatforms.webhookSigningSecret') }}
-              <HelpTip :tip="$t('config.gitPlatforms.webhookSigningSecretHelp')" />
-            </template>
-            <el-input
-              v-model="draft.webhookSigningSecret"
-              show-password
-              :placeholder="
-                dialogMode === 'edit'
-                  ? hasSavedWebhookSigningSecret
-                    ? SAVED_SECRET_PLACEHOLDER
-                    : $t('config.gitPlatforms.keepSecretPlaceholder')
-                  : $t('common.optional')
-              "
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :span="24">
-          <el-form-item prop="webhookSecret">
-            <template #label>
-              {{ $t('config.gitPlatforms.webhookSecret') }}
-              <HelpTip :tip="$t('config.gitPlatforms.webhookSecretHelp')" />
-            </template>
-            <el-input
-              v-model="draft.webhookSecret"
-              show-password
-              :placeholder="
-                dialogMode === 'edit'
-                  ? hasSavedWebhookSecret
-                    ? SAVED_SECRET_PLACEHOLDER
-                    : $t('config.gitPlatforms.keepSecretPlaceholder')
-                  : $t('common.optional')
-              "
-            />
-          </el-form-item>
-        </el-col>
-        <el-col :span="24">
-          <el-form-item prop="allowedProjects">
-            <template #label>
-              {{ $t('config.gitPlatforms.allowedProjects') }}
-              <HelpTip :tip="$t('config.gitPlatforms.allowedProjectsHelp')" />
-            </template>
-            <el-input
-              v-model="draft.allowedProjectsText"
-              type="textarea"
-              :rows="3"
-              resize="vertical"
-              :placeholder="$t('config.gitPlatforms.allowedProjectsPlaceholder')"
-            />
-          </el-form-item>
-        </el-col>
-      </el-row>
-    </el-form>
-    <template #footer>
-      <el-button @click="showDialog = false">{{ $t('common.cancel') }}</el-button>
-      <el-button type="primary" :loading="savingDialog" @click="confirmDialog">
-        <el-icon v-if="dialogMode === 'add'"><Plus /></el-icon>
-        {{ dialogMode === 'add' ? $t('config.gitPlatforms.addBtn') : $t('common.save') }}
-      </el-button>
-    </template>
-  </el-dialog>
+  <!-- Add / Edit Git Platform Dialog (RENG-96: secret fields show the `***`
+       mask for a configured value, with an explicit clear button). -->
+  <GitPlatformDialog
+    :open="showDialog"
+    :mode="dialogMode"
+    :platform="dialogMode === 'edit' ? props.platforms[editingIndex] : undefined"
+    :platforms="props.platforms"
+    :editing-index="editingIndex"
+    @save="onDialogSave"
+    @close="showDialog = false"
+  />
 </template>
 
 <script setup lang="ts">
-import { computed, h, reactive, ref, type FunctionalComponent } from 'vue';
+import { computed, ref } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { Connection, Delete, InfoFilled, Plus } from '@element-plus/icons-vue';
-import {
-  ElIcon,
-  ElMessage,
-  ElMessageBox,
-  ElTooltip,
-  type FormInstance,
-  type FormRules,
-} from 'element-plus';
+import { Connection, Delete, Plus } from '@element-plus/icons-vue';
+import { ElMessage, ElMessageBox } from 'element-plus';
 import type { GitPlatformConfig } from '../../types/config';
 import { testGitPlatform, type GitPlatformTestResult } from '../../services/config';
 import { useTransientResult } from '../../composables/useTransientResult';
 import TestResultLine from '../common/TestResultLine.vue';
+import GitPlatformDialog from './GitPlatformDialog.vue';
 
 const props = defineProps<{
   /** Configured git platform entries (secrets masked as returned by GET /config). */
@@ -239,71 +109,11 @@ const emit = defineEmits<{
 
 const { t } = useI18n();
 
-// --- Add / Edit dialog state ---
+// --- Add / Edit dialog state (the form itself lives in GitPlatformDialog) ---
 const showDialog = ref(false);
-const savingDialog = ref(false);
 const dialogMode = ref<'add' | 'edit'>('add');
 /** Index of the row being edited; -1 when adding. */
 const editingIndex = ref(-1);
-const dialogFormRef = ref<FormInstance>();
-/** Draft state for the add/edit dialog: the `GitPlatformConfig` contract plus
- * the newline-joined textarea mirror of `allowedProjects`. */
-type GitPlatformDraft = GitPlatformConfig & { allowedProjectsText: string };
-const draft = reactive<GitPlatformDraft>({
-  name: '',
-  type: 'gitlab',
-  baseUrl: '',
-  internalBaseUrl: '',
-  token: '',
-  webhookSecret: '',
-  webhookSigningSecret: '',
-  allowedProjects: [],
-  allowedProjectsText: '',
-});
-
-/** Placeholder shown for a secret that already has a stored value. */
-const SAVED_SECRET_PLACEHOLDER = '••••••••••';
-
-/** 与后端 API_KEY_MASK（src/server/api/config/types.rs）的契约：已保存密钥以掩码返回 */
-const SECRET_MASK = '***';
-
-// GET /config masks saved secrets as the SECRET_MASK literal (unsaved = '').
-// openEditDialog blanks the draft but keeps the masked value in
-// props.platforms[editingIndex], so SECRET_MASK there means "this field is stored".
-const hasSavedSecret = (field: string | undefined) => field === SECRET_MASK;
-
-const hasSavedToken = computed(
-  () => dialogMode.value === 'edit' && hasSavedSecret(props.platforms[editingIndex.value]?.token)
-);
-const hasSavedWebhookSecret = computed(
-  () =>
-    dialogMode.value === 'edit' &&
-    hasSavedSecret(props.platforms[editingIndex.value]?.webhookSecret)
-);
-const hasSavedWebhookSigningSecret = computed(
-  () =>
-    dialogMode.value === 'edit' &&
-    hasSavedSecret(props.platforms[editingIndex.value]?.webhookSigningSecret)
-);
-
-/**
- * ⓘ help tooltip shown next to a form label. Focusable (tabindex=0) and
- * triggered by both hover and focus, so keyboard users can reveal it too.
- */
-const HelpTip: FunctionalComponent<{ tip: string }> = (props) =>
-  h(
-    ElTooltip,
-    { content: props.tip, placement: 'top', trigger: ['hover', 'focus'] },
-    {
-      default: () =>
-        h(
-          ElIcon,
-          { class: 'help-icon', tabindex: 0, 'aria-label': props.tip },
-          { default: () => h(InfoFilled) }
-        ),
-    }
-  );
-HelpTip.props = ['tip'];
 
 // --- Test state ---
 /** Row whose connectivity probe is in flight (null when idle). */
@@ -354,144 +164,45 @@ function platformTestLine(name: string) {
   };
 }
 
-function blankDraft(): GitPlatformDraft {
-  return {
-    name: '',
-    type: 'gitlab',
-    baseUrl: '',
-    internalBaseUrl: '',
-    token: '',
-    webhookSecret: '',
-    webhookSigningSecret: '',
-    allowedProjects: [],
-    allowedProjectsText: '',
-  };
-}
-
 function openAddDialog() {
-  Object.assign(draft, blankDraft());
   dialogMode.value = 'add';
   editingIndex.value = -1;
   showDialog.value = true;
 }
 
 function openEditDialog(index: number) {
-  const platform = props.platforms[index];
-  // Secret fields start blank: the backend keeps the stored secret for a
-  // matching name when the submitted value is empty or the `***` mask, so a
-  // blank field here means "leave unchanged" (see the placeholder text).
-  // allowedProjects round-trips through the textarea as one path per line;
-  // an empty (or previously empty) list shows an empty textarea (= all).
-  Object.assign(draft, {
-    name: platform.name,
-    type: platform.type,
-    baseUrl: platform.baseUrl,
-    // internalBaseUrl is plain config, never masked: empty means "fall back to
-    // baseUrl", so it round-trips as-is (old entries may lack the field).
-    internalBaseUrl: platform.internalBaseUrl ?? '',
-    token: '',
-    webhookSecret: '',
-    webhookSigningSecret: '',
-    allowedProjects: platform.allowedProjects ?? [],
-    allowedProjectsText: (platform.allowedProjects ?? []).join('\n'),
-  });
   dialogMode.value = 'edit';
   editingIndex.value = index;
   showDialog.value = true;
 }
 
-/** Name must be unique across rows (excluding the row being edited). */
-function validateUniqueName(_rule: unknown, value: string, callback: (error?: Error) => void) {
-  const name = (value ?? '').trim();
-  const duplicated = props.platforms.some((p, i) => i !== editingIndex.value && p.name === name);
-  if (duplicated) {
-    callback(new Error(t('config.gitPlatforms.nameDuplicate')));
+/** The dialog emitted a validated entry: stage it on the page's config (the
+ * debounced auto-save PUTs it). RENG-96: the entry carries the row's `id`
+ * (echoed from GET), so the backend updates that entry — and keeps its
+ * credentials — however name/baseUrl changed. */
+function onDialogSave(entry: GitPlatformConfig) {
+  if (dialogMode.value === 'edit') {
+    const original = props.platforms[editingIndex.value];
+    emit('edit', editingIndex.value, entry);
+    // The configuration that was probed just changed, so the recorded
+    // result no longer describes this platform (RENG-54). The dialog can
+    // also RENAME the row — the result key is the name — so drop both: the
+    // old identity must not linger, and the renamed row must not inherit a
+    // probe it never ran.
+    testResults.clear(original.name);
+    testResults.clear(entry.name);
   } else {
-    callback();
+    emit('add', entry);
   }
-}
-
-function validateUrl(_rule: unknown, value: string, callback: (error?: Error) => void) {
-  try {
-    new URL(value);
-    callback();
-  } catch {
-    callback(new Error(t('config.validation.invalidUrl')));
-  }
-}
-
-const dialogRules = computed<FormRules>(() => ({
-  name: [
-    { required: true, message: t('config.gitPlatforms.nameRequired'), trigger: 'blur' },
-    { validator: validateUniqueName, trigger: 'blur' },
-  ],
-  baseUrl: [
-    { required: true, message: t('config.gitPlatforms.baseUrlRequired'), trigger: 'blur' },
-    { validator: validateUrl, trigger: 'blur' },
-  ],
-}));
-
-async function confirmDialog() {
-  if (!dialogFormRef.value) return;
-  const valid = await dialogFormRef.value.validate().catch(() => false);
-  if (!valid) return;
-
-  savingDialog.value = true;
-  try {
-    const entry: GitPlatformConfig = {
-      name: draft.name.trim(),
-      type: draft.type,
-      // Strip trailing slashes so the stored entry matches the server-side
-      // probe's normalized form (the masked-token fallback matches on the
-      // exact baseUrl string).
-      baseUrl: draft.baseUrl.trim().replace(/\/+$/, ''),
-      // Internal URL is submitted trimmed but otherwise verbatim: the backend
-      // treats it as "reng's reachable address", empty = fall back to baseUrl.
-      internalBaseUrl: draft.internalBaseUrl.trim(),
-      token: draft.token,
-      webhookSecret: draft.webhookSecret,
-      webhookSigningSecret: draft.webhookSigningSecret,
-      // One project path per line; trim whitespace, drop blank lines, and
-      // keep the first occurrence of each path. Empty result = all projects.
-      allowedProjects: Array.from(
-        new Set(
-          draft.allowedProjectsText
-            .split('\n')
-            .map((line) => line.trim())
-            .filter(Boolean)
-        )
-      ),
-    };
-    if (dialogMode.value === 'edit') {
-      const original = props.platforms[editingIndex.value];
-      // A secret left blank while editing carries over the previously loaded
-      // value (the `***` mask or empty), so the row display keeps reporting
-      // the correct configured state and the PUT keeps the stored secret.
-      if (!entry.token) entry.token = original.token;
-      if (!entry.webhookSecret) entry.webhookSecret = original.webhookSecret;
-      if (!entry.webhookSigningSecret) entry.webhookSigningSecret = original.webhookSigningSecret;
-      emit('edit', editingIndex.value, entry);
-      // The configuration that was probed just changed, so the recorded
-      // result no longer describes this platform (RENG-54). The dialog can
-      // also RENAME the row — the result key is the name — so drop both: the
-      // old identity must not linger, and the renamed row must not inherit a
-      // probe it never ran.
-      testResults.clear(original.name);
-      testResults.clear(entry.name);
-    } else {
-      emit('add', entry);
-    }
-    showDialog.value = false;
-  } finally {
-    savingDialog.value = false;
-  }
+  showDialog.value = false;
 }
 
 /**
  * Probe a platform's connectivity. The row's token is sent as-is: a masked
  * (`***`) or blank token falls back server-side to the stored token of the
- * platform with the matching baseUrl. The endpoint always answers HTTP 200,
- * so probe failures arrive in the body; only network/HTTP errors hit catch.
+ * platform — matched by id first (RENG-96), else by baseUrl. The endpoint
+ * always answers HTTP 200, so probe failures arrive in the body; only
+ * network/HTTP errors hit catch.
  *
  * The outcome — either path — is recorded against the platform name as
  * page-session state, next to the toast, so the row keeps showing the result
@@ -501,7 +212,11 @@ async function testPlatform(index: number) {
   const platform = props.platforms[index];
   testingIndex.value = index;
   try {
-    const result = await testGitPlatform({ baseUrl: platform.baseUrl, token: platform.token });
+    const result = await testGitPlatform({
+      baseUrl: platform.baseUrl,
+      token: platform.token,
+      id: platform.id,
+    });
     testResults.set(platform.name, result);
     if (result.ok) {
       ElMessage.success(t('config.gitPlatforms.testOk', { version: result.version ?? '?' }));

@@ -9,7 +9,7 @@ use crate::server::AppState;
 use crate::store::traits::ConfigStore;
 
 use super::is_blank_or_masked;
-use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK};
+use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK, CLEAR_SECRET_SENTINEL};
 
 /// Deep-merge `patch` into `base` (both JSON values), returning the result.
 ///
@@ -122,22 +122,35 @@ fn is_absolute_http_url(raw: &str) -> bool {
 ///
 /// Semantics: when the `gitPlatforms` key is present, the submitted array
 /// REPLACES the full configured set (to delete an entry, submit the array
-/// without it) — except that a blank or masked (`***`) token / webhookSecret
-/// / webhookSigningSecret on an entry keeps the stored secret of the SAME
-/// (name, baseUrl) entry, identical to how additional LLM providers save.
-/// Matching on the pair, not the name alone, is deliberate: a same-named
-/// entry pointing at a DIFFERENT instance must not silently inherit the old
-/// instance's credentials (cross-instance secret leakage), and renaming an
-/// entry (name change, same baseUrl) likewise drops the secrets — the user
-/// re-enters them after a rename or a baseUrl change. When the key is absent
-/// from the PUT payload, the merge with the stored config carries the
-/// existing (masked) list over, so the set round-trips unchanged. Duplicate
-/// names in one submission: last write wins.
+/// without it). Each entry's secrets resolve as:
+/// - a real value replaces the stored secret;
+/// - blank (`""`) or the mask sentinel (`***`) KEEPS the stored secret of
+///   the entry this submission is about (the UI shows the mask for a
+///   configured secret and submits it unchanged);
+/// - the clear sentinel ([`CLEAR_SECRET_SENTINEL`]) explicitly CLEARS it —
+///   the one affordance "blank = keep" leaves no room for.
+///
+/// Identity (RENG-96): which stored entry a submission is about is decided
+/// by the entry's stable `id` when the payload carries one, falling back to
+/// `name` for pre-RENG-96 clients. `baseUrl` is NEVER part of the match —
+/// it is an editable address, so repointing an entry keeps its credentials
+/// (a same-named entry pointing at a different instance is a DIFFERENT
+/// entry exactly when the payload says so: different id or, for legacy
+/// clients, a name with no stored match). A stored entry the payload
+/// matches keeps its own id; a truly new entry gets a freshly generated id.
+/// Existing databases keep working: a row whose id was never threaded
+/// through (legacy rows/files) gets one on the next write, and its
+/// credentials survive that write because the name fallback resolves them
+/// before the fresh id is assigned. Duplicate submission identities in one
+/// array: last write wins.
 fn resolve_git_platforms(
     submitted: &[UiGitPlatformConfig],
     existing: &[crate::models::GitPlatformConfig],
 ) -> Result<Vec<crate::models::GitPlatformConfig>, (StatusCode, Json<serde_json::Value>)> {
     let mut resolved: Vec<crate::models::GitPlatformConfig> = Vec::new();
+    // Submission identity per resolved entry: `(has_id, key)` — the id when
+    // the payload carried one, else the name (legacy clients).
+    let mut identities: Vec<(bool, String)> = Vec::new();
     for p in submitted {
         let name = p.name.trim();
         if name.is_empty() {
@@ -163,10 +176,10 @@ fn resolve_git_platforms(
             ));
         }
         let base_url = p.base_url.trim().trim_end_matches('/').to_string();
-        // baseUrl keys both the credential routing (host:port matching at
-        // review/webhook time) and the secret-keep below, so an empty,
-        // unparseable, or non-http(s) value is a hard 422 — never a silently
-        // stored broken entry.
+        // baseUrl keys the credential routing (host:port matching at
+        // review/webhook time), so an empty, unparseable, or non-http(s)
+        // value is a hard 422 — never a silently stored broken entry. It is
+        // NOT part of the secret-keep identity (see below).
         if !is_absolute_http_url(&base_url) {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -182,8 +195,8 @@ fn resolve_git_platforms(
         // back to baseUrl) and validated with the same rule as baseUrl when
         // non-empty: a non-http(s) / unparseable value is a hard 422. It is
         // NOT part of the secret-keep match key below — changing it does not
-        // change which instance an entry is (payload matching keys off
-        // baseUrl), so credentials carry over across an internalBaseUrl edit.
+        // change which instance an entry is (identity keys off `id`), so
+        // credentials carry over across an internalBaseUrl edit.
         let internal_base_url = p.internal_base_url.trim().trim_end_matches('/').to_string();
         if !internal_base_url.is_empty() && !is_absolute_http_url(&internal_base_url) {
             return Err((
@@ -196,18 +209,40 @@ fn resolve_git_platforms(
                 })),
             ));
         }
-        // Secret-keep matches on the (name, baseUrl) PAIR: pointing an entry
-        // at a different instance makes it a different platform as far as
-        // credentials are concerned.
-        let stored = existing.iter().find(|e| e.name == name && e.base_url == base_url);
+        // Secret-keep identity (RENG-96): the entry's stable `id` when the
+        // payload carries one (the UI echoes it from GET /config), falling
+        // back to `name` for pre-RENG-96 clients. `baseUrl` is NEVER part of
+        // the match: it is an editable address, so repointing an entry must
+        // keep its credentials, and an id-carrying payload updates THAT entry
+        // however its name/baseUrl changed. An id no stored entry carries is
+        // treated like an absent one (name fallback) — a stale/deleted id
+        // must not silently become a new entry.
+        let stored = if p.id.is_empty() {
+            existing.iter().find(|e| e.name == name)
+        } else {
+            existing
+                .iter()
+                .find(|e| e.id == p.id)
+                .or_else(|| existing.iter().find(|e| e.name == name))
+        };
+        // The matched stored entry keeps its own id; a brand-new entry (or a
+        // legacy row that never carried one) gets a freshly generated id.
+        let id = stored
+            .map(|s| s.id.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let keep = |submitted: &str, pick: fn(&crate::models::GitPlatformConfig) -> &str| -> String {
-            if is_blank_or_masked(submitted) {
+            if submitted == CLEAR_SECRET_SENTINEL {
+                // The UI's explicit clear affordance; blank/mask mean "keep".
+                String::new()
+            } else if is_blank_or_masked(submitted) {
                 stored.map(|s| pick(s).to_string()).unwrap_or_default()
             } else {
                 submitted.to_string()
             }
         };
         let entry = crate::models::GitPlatformConfig {
+            id,
             name: name.to_string(),
             platform_type,
             base_url,
@@ -217,9 +252,22 @@ fn resolve_git_platforms(
             webhook_signing_secret: keep(&p.webhook_signing_secret, |s| &s.webhook_signing_secret),
             allowed_projects: sanitize_allowed_projects(&p.allowed_projects),
         };
-        match resolved.iter_mut().find(|e| e.name == entry.name) {
-            Some(slot) => *slot = entry,
-            None => resolved.push(entry),
+        // Dedupe by the identity the SUBMISSION carries — the id when set,
+        // the name for pre-RENG-96 (id-less) clients. Two id-carrying
+        // entries may share a name (distinct entries); two id-less entries
+        // with the same name are the same legacy submission. Last write
+        // wins, as before.
+        let sub_key = if p.id.is_empty() {
+            (false, name.to_string())
+        } else {
+            (true, p.id.clone())
+        };
+        match identities.iter().position(|k| k == &sub_key) {
+            Some(i) => resolved[i] = entry,
+            None => {
+                identities.push(sub_key);
+                resolved.push(entry);
+            }
         }
     }
     Ok(resolved)
@@ -310,7 +358,7 @@ pub(crate) fn apply_ui_config(
     //      indistinguishable in a masked payload) → keep NOTHING. Rule 3 is
     //      what can never mis-assign one account's key to the other; it also
     //      means editing a card's URL or model with a masked key clears the
-    //      key (re-enter it — the same rule git platforms use).
+    //      key (re-enter it).
     let stored_for =
         |idx: Option<usize>, provider: &str, api_base: &str, model: &str| -> Option<crate::models::LLMConfig> {
             let triple =
@@ -575,6 +623,7 @@ pub(crate) fn apply_ui_config(
     body.git_platforms = new_platforms
         .iter()
         .map(|p| UiGitPlatformConfig {
+            id: p.id.clone(),
             name: p.name.clone(),
             platform_type: p.platform_type.clone(),
             base_url: p.base_url.clone(),

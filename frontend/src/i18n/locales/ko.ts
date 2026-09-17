@@ -447,6 +447,7 @@ export default {
       nameRequired: '이름을 입력하세요',
       nameDuplicate: '같은 이름의 플랫폼이 이미 있습니다',
       baseUrlRequired: '기본 URL을 입력하세요',
+      clearSecret: '지우기',
       removeTitle: '플랫폼 제거',
       removeConfirm: 'Git 플랫폼 “{name}”을(를) 제거하시겠습니까?',
       addedTitle: '플랫폼이 추가됨',

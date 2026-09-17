@@ -65,17 +65,19 @@ export interface GitPlatformTestResult {
  * Probe a git platform instance (`POST /config/git-platforms/test`).
  * The endpoint always answers HTTP 200 — probe failures arrive in the body
  * as `{ ok: false, error }`. A blank or masked (`***`) token falls back
- * server-side to the stored token of the platform with the matching
- * baseUrl, so callers can pass the masked value as-is.
- * @param data - Instance base URL and (possibly masked) access token.
+ * server-side to the stored token of the platform, matched by `id` first
+ * (RENG-96) then by baseUrl, so callers can pass the masked value as-is.
+ * @param data - Instance base URL, (possibly masked) access token, and the
+ * entry's stable `id` when known.
  */
 export async function testGitPlatform(data: {
   baseUrl: string;
   token: string;
+  id?: string;
 }): Promise<GitPlatformTestResult> {
   return request('/config/git-platforms/test', {
     method: 'POST',
-    body: JSON.stringify({ baseUrl: data.baseUrl, token: data.token }),
+    body: JSON.stringify({ baseUrl: data.baseUrl, token: data.token, id: data.id }),
   });
 }
 

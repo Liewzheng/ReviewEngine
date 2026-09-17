@@ -240,7 +240,7 @@ A running server (`review-engine serve`, default port 8080) also exposes a brows
 
 The page has no edit mode — every field is editable and saves itself (see [Editing and saving](#editing-and-saving)). It is organized into cards:
 
-- **Git 平台 (Git Platforms)** — one entry per configured Git host: name, type, Base URL, internal URL (optional), access token, Secret token / Signing token (`whsec_...`, see [GitLab webhook](integrations/gitlab.md)), and the allowed-projects allowlist. Entries are hot-effective: they drive both webhook verification and review-time GitLab API pulls without a restart.
+- **Git 平台 (Git Platforms)** — one entry per configured Git host: name, type, Base URL, internal URL (optional), access token, Secret token / Signing token (`whsec_...`, see [GitLab webhook](integrations/gitlab.md)), and the allowed-projects allowlist. Entries are hot-effective: they drive both webhook verification and review-time GitLab API pulls without a restart. Each entry carries a **hidden stable identity** (a random UUID the UI echoes but never displays): editing a URL, renaming the entry, or repointing it never orphans its credentials — as long as the entry is not deleted, its secrets follow it (see [Secret handling](#secret-handling)).
 - **Review rules** — minimum passing score (`minScore`), max review duration, block-on-critical, auto-comment-on-pass, comment template, excluded file patterns, and required experts.
 - **Advanced** (collapsed by default) — log level and retention, SSE heartbeat interval, max concurrent reviews, request timeout, metrics toggle, debug mode.
 
@@ -250,11 +250,14 @@ The status each card shows is **probed, not inferred** (0.10.18, RENG-36): the s
 
 ### Secret handling
 
-`GET /api/v1/config` never returns a live secret: a configured LLM API key, Git platform access token, or webhook secret comes back as the mask sentinel `***`. A secret field therefore shows either what you are typing or that mask — the reveal control only toggles the draft in the input, never a stored value. On save:
+`GET /api/v1/config` never returns a live secret: a configured LLM API key, Git platform access token, or webhook secret comes back as the mask sentinel `***`. The Git platform edit dialog shows that mask **in the input box** for a configured secret (never an empty box); the reveal control only toggles the draft in the input, never a stored value. On save:
 
-- `***` (or leaving the field blank for LLM keys) means **keep the stored value**;
+- `***` (or leaving the field blank) means **keep the stored value** — for LLM keys and for every git-platform secret;
 - a real value replaces the stored secret;
-- an empty Git platform access token explicitly **clears** the token.
+- a git-platform secret can be explicitly **cleared** with the dialog's **Clear** button, which submits a reserved clear sentinel (`__reng_clear_secret__`) that the server maps to an empty stored value — without it there would be no way to remove a saved secret, because blank and `***` both mean "keep". The sentinel never reaches storage or `GET /config` (the field simply comes back empty);
+- the legacy GitLab `apiToken` (the `gitlab` section, distinct from git platforms) keeps its own rule: `***` keeps, an empty string explicitly clears.
+
+**Which entry a secret is kept for** (RENG-96): git-platform resolution matches the submitted entry on its hidden **id** first, falling back to the entry **name** for clients that predate the id (the pre-RENG-96 payload). `baseUrl` is never part of the match. A save therefore updates the entry it belongs to — changing the URL, renaming the entry, or editing the internal URL keeps every stored credential; only deleting the entry (or re-entering a real value) removes them. A brand-new entry gets a freshly generated id on its first save, and an existing row that never carried one (a legacy database/file) gets one on the next write without losing its credentials.
 
 A token set via `--gitlab-token` / `GITLAB_TOKEN` at startup (or a webhook secret via `--gitlab-webhook-secret`, `--gitlab-webhook-signing-secret`, or the `GITLAB_WEBHOOK_*` variables) also appears as `***`, so an unrelated UI save cannot silently wipe it.
 

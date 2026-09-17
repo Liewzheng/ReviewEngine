@@ -704,6 +704,7 @@ fn replay_payload(file: &UiStateFile, overrides: &UiStateEnvOverrides) -> serde_
             .git_platforms
             .iter()
             .map(|p| UiGitPlatformConfig {
+                id: p.id.clone(),
                 name: p.name.clone(),
                 platform_type: p.platform_type.clone(),
                 base_url: p.base_url.clone(),
@@ -761,6 +762,7 @@ mod tests {
                 disabled: false,
             }],
             git_platforms: vec![GitPlatformConfig {
+                id: String::new(),
                 name: "testbed".to_string(),
                 platform_type: "gitlab".to_string(),
                 base_url: "http://gitlab.internal:8929".to_string(),
@@ -1737,14 +1739,44 @@ webhook_secret = "legacy-wh-plain"
         assert_eq!(db_llm.len(), 1);
         assert_eq!(db_llm[0].api_key, "sk-live");
         assert_eq!(db_llm[0].api_key, file_llm[0].api_key);
+        // Platform sets are semantically identical; the RENG-96 entry ids are
+        // freshly assigned per replay path (the id-less sample file), so
+        // compare everything but the id.
+        let db_gp = state_db.git_platforms.read().unwrap().clone();
+        let file_gp = state_file.git_platforms.read().unwrap().clone();
+        assert_eq!(db_gp.len(), file_gp.len());
+        for (db, file) in db_gp.iter().zip(&file_gp) {
+            assert!(!db.id.is_empty() && !file.id.is_empty(), "every replay assigns an id");
+            assert_eq!(db.name, file.name);
+            assert_eq!(db.base_url, file.base_url);
+            assert_eq!(db.internal_base_url, file.internal_base_url);
+            assert_eq!(db.token, file.token);
+            assert_eq!(db.webhook_secret, file.webhook_secret);
+            assert_eq!(db.webhook_signing_secret, file.webhook_signing_secret);
+            assert_eq!(db.allowed_projects, file.allowed_projects);
+        }
+        // GET /config projection: identical apart from the (hidden) entry ids.
+        let db_ui = serde_json::to_value(&*state_db.ui_config.read().unwrap()).unwrap();
+        let file_ui = serde_json::to_value(&*state_file.ui_config.read().unwrap()).unwrap();
+        let strip_ids = |v: &serde_json::Value| -> serde_json::Value {
+            let mut v = v.clone();
+            if let Some(platforms) = v.get_mut("gitPlatforms").and_then(serde_json::Value::as_array_mut) {
+                for p in platforms {
+                    if let Some(obj) = p.as_object_mut() {
+                        obj.remove("id");
+                    }
+                }
+            }
+            v
+        };
         assert_eq!(
-            state_db.git_platforms.read().unwrap().clone(),
-            state_file.git_platforms.read().unwrap().clone()
-        );
-        assert_eq!(
-            serde_json::to_value(&*state_db.ui_config.read().unwrap()).unwrap(),
-            serde_json::to_value(&*state_file.ui_config.read().unwrap()).unwrap(),
+            strip_ids(&db_ui),
+            strip_ids(&file_ui),
             "GET /config projection must be identical for DB and file replay"
+        );
+        assert!(
+            db_ui["gitPlatforms"][0]["id"].as_str().map_or(false, |s| !s.is_empty()),
+            "the id is present (and hidden) in the projection"
         );
     }
 
@@ -1930,6 +1962,121 @@ webhook_secret = "legacy-wh-plain"
                 .unwrap()
         );
         assert_eq!(state2.llm_configs.read().unwrap()[0].api_key, "sk-live-db");
+    }
+
+    /// RENG-96 end-to-end-most: resolve → persist → read back through the
+    /// same path `GET /config` uses, against a live DB. A created entry gets
+    /// an id; an edit by id (rename + repoint) keeps every secret and the id,
+    /// updates the SAME row (no duplicates); a restart replays it; and the
+    /// replay's own GET → PUT round trip still keeps the secrets.
+    #[tokio::test]
+    async fn git_platform_id_keeps_secrets_through_db_persist_and_restart() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(UI_STATE_FILE_NAME);
+        let store = fresh_db().await;
+
+        let mut state = fresh_state(vec![]);
+        state.ui_state_path = Some(path.clone());
+        state.db = Some(Arc::new(store.clone()));
+        let state = Arc::new(state);
+
+        // Create: no id, all three secrets.
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state.clone()),
+            axum::Json(serde_json::json!({
+                "gitPlatforms": [{
+                    "name": "testbed",
+                    "type": "gitlab",
+                    "baseUrl": "http://gitlab.internal:8929",
+                    "token": "glpat-platform",
+                    "webhookSecret": "wh-platform",
+                    "webhookSigningSecret": "whsec_signing"
+                }]
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert!(!path.exists(), "the DB is the sink, not the file");
+        assert_eq!(
+            store.load_git_platforms().await.unwrap().len(),
+            1,
+            "one DB row after create"
+        );
+        let first = stored_gp(&state, "testbed");
+        assert!(!first.id.is_empty(), "the created row gets an id");
+
+        // Edit by id (rename + repoint baseUrl, secrets masked as GET echoes):
+        // one row, same id, secrets kept.
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state.clone()),
+            axum::Json(serde_json::json!({
+                "gitPlatforms": [{
+                    "id": first.id,
+                    "name": "renamed",
+                    "type": "gitlab",
+                    "baseUrl": "http://gitlab.internal:9443",
+                    "token": API_KEY_MASK,
+                    "webhookSecret": "",
+                    "webhookSigningSecret": API_KEY_MASK
+                }]
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let rows = store.load_git_platforms().await.unwrap();
+        assert_eq!(rows.len(), 1, "an edit by id must never duplicate the row");
+        assert_eq!(rows[0].id, first.id, "the id is stable across the edit");
+        assert_eq!(rows[0].name, "renamed");
+        assert_eq!(rows[0].base_url, "http://gitlab.internal:9443");
+        assert_eq!(rows[0].token, "glpat-platform");
+        assert_eq!(rows[0].webhook_secret, "wh-platform");
+        assert_eq!(rows[0].webhook_signing_secret, "whsec_signing");
+
+        // Restart: a fresh state replays from the DB and GET /config reads
+        // back through the same projection path the UI uses. The replayed
+        // entry gets its own fresh id (the replay store starts empty; the
+        // id is a session-stable identity), with the secrets intact.
+        let state2 = Arc::new(fresh_state(vec![]));
+        assert!(
+            load_and_apply_ui_state_from_db(&state2, &store, &UiStateEnvOverrides::default())
+                .await
+                .unwrap()
+        );
+        let ui = state2.ui_config.read().unwrap().clone();
+        assert_eq!(ui.git_platforms.len(), 1);
+        assert!(
+            !ui.git_platforms[0].id.is_empty(),
+            "the replayed entry must carry an id"
+        );
+        assert_eq!(ui.git_platforms[0].token, API_KEY_MASK);
+        assert_eq!(ui.git_platforms[0].webhook_secret, API_KEY_MASK);
+
+        // The replayed GET → PUT round trip (the UI's actual save) keeps the
+        // secrets too.
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state2.clone()),
+            axum::Json(serde_json::to_value(&ui).unwrap()),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(stored_gp(&state2, "renamed").token, "glpat-platform");
+        assert_eq!(stored_gp(&state2, "renamed").webhook_secret, "wh-platform");
+    }
+
+    fn stored_gp(state: &AppState, name: &str) -> crate::models::GitPlatformConfig {
+        state
+            .git_platforms
+            .read()
+            .unwrap()
+            .iter()
+            .find(|p| p.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("platform '{name}' not stored"))
     }
 
     /// (d) The escape hatch: REVIEW_DISABLE_DB parsing. Behavioural 0.9

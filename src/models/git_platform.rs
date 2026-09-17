@@ -16,7 +16,17 @@ use serde::{Deserialize, Serialize};
 /// One configured Git host (e.g. a self-hosted GitLab instance).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GitPlatformConfig {
-    /// Unique, user-chosen instance name; the merge key for `PUT /config`.
+    /// Stable entry identity (a UUID; RENG-96). The UI carries it between
+    /// `GET /config` and `PUT /config` but never displays it — `name` is a
+    /// user-editable label and `base_url` is an editable address, so neither
+    /// is a safe key for keeping credentials across an edit. The secret-keep
+    /// resolution matches stored entries on this id first, falling back to
+    /// `name` for pre-RENG-96 clients. Empty (legacy rows/files) gets a fresh
+    /// id on the next write; the credentials survive that write.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
+    /// Unique, user-chosen instance name; a display label and the legacy
+    /// secret-keep fallback key for `PUT /config`.
     #[serde(default)]
     pub name: String,
     /// Platform kind. Only `"gitlab"` is implemented today.
@@ -29,7 +39,7 @@ pub struct GitPlatformConfig {
     /// `https://gitlab.islet.space` on the NAS's container-internal 443 when
     /// `base_url` is the payload's external `https://gitlab.islet.space:8443`).
     /// Optional — empty means "unconfigured": review pulls fall back to
-    /// `base_url`. NOT part of the payload-matching identity (`base_url` is);
+    /// `base_url`. NOT part of the payload-matching identity (`id` is);
     /// changing it does not change which instance a webhook matches.
     #[serde(default)]
     pub internal_base_url: String,
@@ -240,6 +250,7 @@ mod tests {
 
     fn platform(base_url: &str) -> GitPlatformConfig {
         GitPlatformConfig {
+            id: "5e3a1c8e-0000-4000-8000-000000000001".to_string(),
             name: "testbed".to_string(),
             platform_type: "gitlab".to_string(),
             base_url: base_url.to_string(),
@@ -564,6 +575,36 @@ base_url = "http://gitlab.internal"
         .unwrap();
         assert_eq!(parsed.platform_type, "gitlab");
         assert!(parsed.token.is_empty());
+    }
+
+    /// RENG-96: the entry `id` round-trips through TOML once assigned, and a
+    /// legacy file without the key deserializes as unconfigured (empty) — the
+    /// next write assigns a fresh id and keeps the credentials.
+    #[test]
+    fn toml_round_trip_persists_id_when_set_and_defaults_when_absent() {
+        let p = platform("http://gitlab.internal:8929");
+        let text = toml::to_string(&p).unwrap();
+        assert!(
+            text.contains(r#"id = "5e3a1c8e-0000-4000-8000-000000000001""#),
+            "a set id must be persisted: {text}"
+        );
+        let back: GitPlatformConfig = toml::from_str(&text).unwrap();
+        assert_eq!(back.id, p.id);
+
+        // Legacy file (no id key): deserializes as unconfigured, and the
+        // serialized form does not fabricate an empty id line.
+        let legacy: GitPlatformConfig = toml::from_str(
+            r#"
+name = "x"
+base_url = "http://gitlab.internal"
+"#,
+        )
+        .unwrap();
+        assert!(legacy.id.is_empty());
+        let mut empty = legacy.clone();
+        empty.name = "y".to_string();
+        let text = toml::to_string(&empty).unwrap();
+        assert!(!text.contains("id ="), "an empty id must not be written: {text}");
     }
 
     #[test]

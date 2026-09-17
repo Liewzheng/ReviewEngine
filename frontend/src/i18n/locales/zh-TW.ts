@@ -442,6 +442,7 @@ export default {
       nameRequired: '請輸入名稱',
       nameDuplicate: '已存在同名平台',
       baseUrlRequired: '請輸入 Base URL',
+      clearSecret: '清除',
       removeTitle: '移除平台',
       removeConfirm: '移除 Git 平台「{name}」？',
       addedTitle: '已新增平台',

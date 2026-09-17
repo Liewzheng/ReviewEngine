@@ -378,6 +378,7 @@ mod tests {
             // Hot-write a platform with a webhook secret AFTER the handler was
             // constructed with empty startup secrets — no restart involved.
             *state.git_platforms.write().unwrap() = vec![crate::models::GitPlatformConfig {
+                id: String::new(),
                 name: "testbed".to_string(),
                 platform_type: "gitlab".to_string(),
                 base_url: "http://gitlab.internal:8929".to_string(),

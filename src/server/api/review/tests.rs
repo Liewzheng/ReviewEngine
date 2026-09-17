@@ -1002,6 +1002,7 @@ async fn gitlab_token_resolution_precedence() {
 
 fn testbed_platform() -> crate::models::GitPlatformConfig {
     crate::models::GitPlatformConfig {
+        id: String::new(),
         name: "testbed".to_string(),
         platform_type: "gitlab".to_string(),
         base_url: "http://gitlab.internal:8929".to_string(),
@@ -2347,6 +2348,7 @@ async fn list_reviews_db_drifted_row_projects_materialized_column() {
 /// REST-routing entry actually has — no webhook credentials).
 fn review_platform(name: &str, base_url: &str, internal_base_url: &str) -> crate::models::GitPlatformConfig {
     crate::models::GitPlatformConfig {
+        id: String::new(),
         name: name.to_string(),
         platform_type: "gitlab".to_string(),
         base_url: base_url.to_string(),

@@ -458,6 +458,7 @@ export default {
       nameRequired: 'Please enter a name',
       nameDuplicate: 'A platform with this name already exists',
       baseUrlRequired: 'Please enter the base URL',
+      clearSecret: 'Clear',
       removeTitle: 'Remove Platform',
       removeConfirm: 'Remove Git platform "{name}"?',
       addedTitle: 'Platform Added',

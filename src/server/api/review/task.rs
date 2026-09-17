@@ -398,7 +398,18 @@ pub(crate) async fn enqueue_review(
         // later fails. Fill happens before the (possibly long) expert run and
         // only touches fields still blank, so enqueue-time values win.
         let inject_agents_md = cfg.as_ref().map(|c| c.report.inject_agents_md).unwrap_or(true);
-        let outcome = match super::resolve::resolve_source(source, gitlab_token, &cfg, inject_agents_md).await {
+        // RENG-98: a completed gitlab_mr review is published back to the MR
+        // exactly like the webhook path does. The publish inputs are captured
+        // here — the platform-routed URL the resolve call is about to fetch,
+        // the SAME credential resolved for that fetch (the REST path resolves
+        // a token per request and never persists it, so this is the only value
+        // that exists; re-resolving would be weaker), and the diff the review
+        // will actually review (the inline-note gate's anchor) — because
+        // `source` is consumed by the resolve call and `resolved.diff` by
+        // `run_review`. Local/static-diff sources carry no MR (`mr_url` is
+        // `None` for them) and stay untouched.
+        let mut publish_input: Option<(String, String, String)> = None;
+        let outcome = match super::resolve::resolve_source(source, gitlab_token.clone(), &cfg, inject_agents_md).await {
             Ok(mut resolved) => {
                 // RENG-18: persist the rendered AGENTS.md context so re-runs can
                 // reuse it. Best-effort; injection itself happens in run_review.
@@ -432,6 +443,9 @@ pub(crate) async fn enqueue_review(
                         }
                     }
                 }
+                if let (Some(url), Some(token)) = (mr_url.as_deref(), gitlab_token.as_deref()) {
+                    publish_input = Some((url.to_string(), token.to_string(), resolved.diff.clone()));
+                }
                 super::resolve::run_review(
                     resolved,
                     config_toml,
@@ -455,6 +469,24 @@ pub(crate) async fn enqueue_review(
 
         match outcome {
             Ok(outcome) => {
+                // RENG-98: publish before the task is recorded as completed —
+                // the webhook path's order (publish, then persist). A publish
+                // failure must NOT fail the review: it only logs a warning,
+                // exactly like `src/server/mod.rs` on the webhook path.
+                if let Some((url, token, diff)) = publish_input {
+                    match serde_json::from_value::<crate::models::ReviewOutput>(outcome.value.clone()) {
+                        Ok(output) => {
+                            if let Err(e) = crate::publish_review_with_diff(&token, &url, &output, Some(&diff)).await {
+                                tracing::warn!("Publish failed: {:?}", e);
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "Publish skipped: could not decode the review result for the MR comment: {e}"
+                            );
+                        }
+                    }
+                }
                 crate::server::log_collector::push_global_entry(
                     "INFO",
                     format!("Review task {} completed: {}", task_id, outcome.summary),

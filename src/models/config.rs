@@ -303,6 +303,14 @@ impl Default for RiskThresholdConfig {
 /// `--api-key` semantics).
 pub const API_KEY_MASK: &str = "***";
 
+/// Sentinel a UI submits to EXPLICITLY CLEAR a stored secret on a field
+/// whose blank/`***` conventions mean "keep" (RENG-96: the git platform
+/// token / webhook secrets — `resolve_git_platforms` in `put.rs`). The
+/// value never reaches storage or an echo: the resolver maps it to an empty
+/// secret before persisting, so `GET /config` answers `""` afterwards.
+/// Deliberately not a plausible credential format (`glpat-…` / hex / `whsec_…`).
+pub const CLEAR_SECRET_SENTINEL: &str = "__reng_clear_secret__";
+
 /// Project a secret for display: the [`API_KEY_MASK`] sentinel when set, an
 /// empty string when unset. Never returns the live secret, so it is safe to
 /// use for any output a user (or log) may see.

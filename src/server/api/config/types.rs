@@ -8,6 +8,11 @@ use crate::models::AppConfig;
 /// shared with the CLI `config provider` output.
 pub use crate::models::API_KEY_MASK;
 
+/// Sentinel a UI submits to explicitly CLEAR a stored git-platform secret
+/// (see [`crate::models::CLEAR_SECRET_SENTINEL`]). `""` and `***` both mean
+/// "keep", so the clear path needs a value that is neither.
+pub use crate::models::CLEAR_SECRET_SENTINEL;
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiConfig {
@@ -41,6 +46,14 @@ pub struct UiConfig {
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UiGitPlatformConfig {
+    /// Stable entry identity (RENG-96). `GET /config` echoes it; a `PUT`
+    /// payload carrying a well-formed id is that entry — the id is kept
+    /// even when the store does not carry it yet (cold-start replay), so it
+    /// never drifts across restarts, and the entry's credentials follow it
+    /// however `name`/`baseUrl` changed. Absent or malformed ids fall back
+    /// to matching by `name` (pre-RENG-96 clients). Never displayed by the UI.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub id: String,
     #[serde(default)]
     pub name: String,
     /// Platform kind; only `"gitlab"` is implemented today.

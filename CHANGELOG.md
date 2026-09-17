@@ -1,3 +1,15 @@
+## [0.10.42] - 2026-09-17
+
+### Fixed
+- **Editing a git platform can no longer destroy its credentials (RENG-96)**: a live deployment lost its GitLab token, signing secret and webhook secret because the user changed the entry's `baseUrl` and changed it back — the database row went to zero-length on all three, and the platform answered `401` ever after. Root cause: the secret-keep match keyed on the `(name, baseUrl)` **pair** (`src/server/api/config/put.rs`), so touching the URL made the stored entry unmatchable and the blank/masked secret fields resolved to **empty strings**. Entries now carry a stable, user-invisible `id` (the `git_platforms` row's UUID, threaded through the model, the UI payload, the persist path and the probe), and secrets match by **id → name**, never by an editable address: changing the URL, the name or the internal address keeps every credential.
+
+### Added
+- **A visible mask and an explicit clear (RENG-96)**: a configured secret now renders as `***` in the dialog rather than an empty box that merely looks unset, and "blank or mask = keep" keeps its meaning. Since "blank" can no longer double as "clear", every configured secret gains an explicit **Clear** affordance (a reserved sentinel the backend maps to an empty value; it never reaches storage or `GET /config`).
+
+### Notes
+- **Identity is stable for as long as the entry exists**: a well-formed id is never re-minted — not on a cold-start replay, not on a rename — which is what gives `id → name` matching something durable to work from. A fresh id is minted in exactly one case: a genuinely new entry. (Two edge cases remain, both requiring a hand-crafted payload rather than the UI: an explicit *different* well-formed id re-labels the entry, and a malformed id with no name match is treated as a new entry.)
+- **Tests**: changing `baseUrl` / `name` / `internalBaseUrl` keeps all three secrets; a save by id updates in place with no duplicate rows; two entries may share a name with distinct ids; an unknown-but-well-formed id keeps its identity and still keeps secrets via the name fallback; a malformed id counts as absent; the clear sentinel clears; the probe resolves a masked token by id after a repoint; and the end-to-end `git_platform_id_is_stable_across_a_restart_and_a_rename` (DB-backed: restart-replay → id unchanged → rename → all three secrets intact, one row). Rust lib **1924 passed** (2 ignored); frontend **197 passed**.
+
 ## [0.10.41] - 2026-09-17
 
 ### Added

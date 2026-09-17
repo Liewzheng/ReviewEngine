@@ -1365,26 +1365,29 @@ async fn put_git_platforms_masked_secret_keeps_stored() {
     assert_eq!(stored_platform(&state, "testbed").unwrap().token, "glpat-new");
 }
 
-/// Secret-keep matches on the (name, baseUrl) PAIR: re-pointing the
-/// same-named entry at a DIFFERENT instance must NOT inherit the old
-/// instance's credentials (cross-instance secret leakage). The entry is
-/// saved with empty secrets; the user re-enters them explicitly.
+/// RENG-96: editing only `baseUrl` (re-pointing the entry) and saving with
+/// masked/blank secrets KEEPS all three stored secrets — the entry's
+/// identity is the stable `id` (fallback `name`), never the URL, so an
+/// address edit must not orphan its credentials. The old (name, baseUrl)
+/// pair rule is the data-loss bug this replaces.
 #[tokio::test]
-async fn put_git_platforms_base_url_change_does_not_inherit_secrets() {
+async fn put_git_platforms_base_url_change_keeps_secrets() {
     let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
     let _guard = GitLabRuntimeGuard::new();
     let state = state_with_openai("sk-primary");
 
+    let mut initial = testbed_platform_json();
+    initial["webhookSigningSecret"] = serde_json::json!("whsec_signing");
     let resp = put_config(
         State(state.clone()),
-        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+        Json(serde_json::json!({ "gitPlatforms": [initial] })),
     )
     .await
     .into_response();
     assert_eq!(resp.status(), StatusCode::OK);
 
-    // Same name, different baseUrl, masked secrets → secrets are NOT carried
-    // over from the other instance.
+    // Same name, different baseUrl, all three secrets masked/blank → every
+    // stored secret carries over to the re-pointed entry.
     let resp = put_config(
         State(state.clone()),
         Json(serde_json::json!({
@@ -1393,7 +1396,8 @@ async fn put_git_platforms_base_url_change_does_not_inherit_secrets() {
                 "type": "gitlab",
                 "baseUrl": "http://gitlab.internal:9000",
                 "token": API_KEY_MASK,
-                "webhookSecret": API_KEY_MASK
+                "webhookSecret": API_KEY_MASK,
+                "webhookSigningSecret": ""
             }]
         })),
     )
@@ -1402,27 +1406,28 @@ async fn put_git_platforms_base_url_change_does_not_inherit_secrets() {
     assert_eq!(resp.status(), StatusCode::OK);
     let stored = stored_platform(&state, "testbed").unwrap();
     assert_eq!(stored.base_url, "http://gitlab.internal:9000");
-    assert!(
-        stored.token.is_empty(),
-        "changed baseUrl must not inherit the old instance's token, got {:?}",
-        stored.token
+    assert_eq!(stored.token, "glpat-platform", "token survives a baseUrl edit");
+    assert_eq!(
+        stored.webhook_secret, "wh-platform",
+        "webhook secret survives a baseUrl edit"
     );
-    assert!(
-        stored.webhook_secret.is_empty(),
-        "changed baseUrl must not inherit the old instance's webhook secret"
+    assert_eq!(
+        stored.webhook_signing_secret, "whsec_signing",
+        "signing secret survives a baseUrl edit"
     );
 
-    // The GET projection shows empty (unconfigured) secrets — not a `***`
-    // mask that would imply a stored secret exists.
+    // The GET projection still masks every secret (never leaks, never shows
+    // empty for a configured value).
     let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
     let entry = &body["gitPlatforms"][0];
-    assert_eq!(entry["token"], "");
-    assert_eq!(entry["webhookSecret"], "");
+    assert_eq!(entry["token"], API_KEY_MASK);
+    assert_eq!(entry["webhookSecret"], API_KEY_MASK);
+    assert_eq!(entry["webhookSigningSecret"], API_KEY_MASK);
     let serialized = serde_json::to_string(&body).unwrap();
     assert!(!serialized.contains("glpat-platform"), "secret leaked in {serialized}");
-    assert!(!serialized.contains("wh-platform"), "secret leaked in {serialized}");
+    assert!(!serialized.contains("whsec_signing"), "secret leaked in {serialized}");
 
-    // Explicitly re-entered secrets on the new baseUrl save normally.
+    // A real value still replaces the stored secret on the new baseUrl.
     let resp = put_config(
         State(state.clone()),
         Json(serde_json::json!({
@@ -1430,16 +1435,18 @@ async fn put_git_platforms_base_url_change_does_not_inherit_secrets() {
                 "name": "testbed",
                 "type": "gitlab",
                 "baseUrl": "http://gitlab.internal:9000",
-                "token": "glpat-other-instance"
+                "token": "glpat-new"
             }]
         })),
     )
     .await
     .into_response();
     assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert_eq!(stored.token, "glpat-new");
     assert_eq!(
-        stored_platform(&state, "testbed").unwrap().token,
-        "glpat-other-instance"
+        stored.webhook_secret, "wh-platform",
+        "an unrelated secret keeps across the token edit"
     );
 }
 
@@ -1660,6 +1667,443 @@ async fn put_git_platforms_skips_nameless_and_dedupes() {
     assert_eq!(platforms[0].token, "glpat-b");
 }
 
+// ── RENG-96: stable entry identity and secret-keep across edits ────
+
+/// Editing only `name` and saving with masked/blank secrets keeps every
+/// stored secret: the name is a display label, the stable id is the
+/// identity (the UI carries it from GET /config on every save).
+#[tokio::test]
+async fn put_git_platforms_name_change_keeps_secrets() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first = stored_platform(&state, "testbed").unwrap();
+    assert!(!first.id.is_empty());
+
+    // The exact payload the UI would send after a rename: id echoed from GET,
+    // new name, secrets still masked as GET returned them.
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let mut entry = body["gitPlatforms"][0].clone();
+    entry["name"] = serde_json::json!("renamed");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [entry] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "renamed").expect("renamed entry must be stored");
+    assert_eq!(stored.token, "glpat-platform", "token survives a rename");
+    assert_eq!(stored.webhook_secret, "wh-platform", "webhook secret survives a rename");
+    assert_eq!(stored.base_url, "http://gitlab.internal:8929");
+    assert_eq!(stored.id, first.id, "the id is stable across the rename");
+    assert_eq!(state.git_platforms.read().unwrap().len(), 1);
+}
+
+/// Editing only `internalBaseUrl` keeps the secrets — the documented rule
+/// before RENG-96, now anchored on the same stable identity.
+#[tokio::test]
+async fn put_git_platforms_internal_base_url_change_keeps_secrets() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "internalBaseUrl": "https://gitlab.islet.space",
+                "token": API_KEY_MASK,
+                "webhookSecret": API_KEY_MASK
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert_eq!(stored.internal_base_url, "https://gitlab.islet.space");
+    assert_eq!(stored.token, "glpat-platform");
+    assert_eq!(stored.webhook_secret, "wh-platform");
+}
+
+/// GET /config echoes the entry `id` (masked secrets as usual): the id is
+/// what the UI carries back on the next save.
+#[tokio::test]
+async fn put_get_git_platforms_echoes_id() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert!(!stored.id.is_empty(), "a new entry gets an id on first save");
+
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let entry = &body["gitPlatforms"][0];
+    assert_eq!(entry["id"], stored.id, "GET must echo the entry id");
+    assert_eq!(entry["token"], API_KEY_MASK);
+}
+
+/// A payload carrying a known id updates THAT entry however name/baseUrl
+/// changed — rename + repoint in one save keeps the secrets and the id; a
+/// second save by id updates in place (one row, no duplicates).
+#[tokio::test]
+async fn put_git_platforms_save_by_id_updates_in_place() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first = stored_platform(&state, "testbed").unwrap();
+    assert!(!first.id.is_empty());
+
+    // The GET projection is the exact payload the UI would send back.
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let mut entry = body["gitPlatforms"][0].clone();
+    // Edit name AND baseUrl together, secrets left masked as GET returned.
+    entry["name"] = serde_json::json!("renamed");
+    entry["baseUrl"] = serde_json::json!("http://gitlab.internal:9443");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [entry] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "renamed").unwrap();
+    assert_eq!(stored.base_url, "http://gitlab.internal:9443");
+    assert_eq!(stored.token, "glpat-platform", "secrets survive rename + repoint by id");
+    assert_eq!(stored.webhook_secret, "wh-platform");
+    assert_eq!(stored.id, first.id, "the id is stable across the edit");
+    assert_eq!(
+        state.git_platforms.read().unwrap().len(),
+        1,
+        "saving by id must update in place, never duplicate the row"
+    );
+}
+
+/// Two same-named entries with DIFFERENT ids are distinct entries and both
+/// survive — identity is the id, not the name.
+#[tokio::test]
+async fn put_git_platforms_same_name_different_ids_are_distinct() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let mut a = testbed_platform_json();
+    a["id"] = serde_json::json!("11111111-1111-4111-8111-111111111111");
+    a["name"] = serde_json::json!("shared-name");
+    a["baseUrl"] = serde_json::json!("http://a.internal");
+    a["token"] = serde_json::json!("glpat-a");
+    let mut b = testbed_platform_json();
+    b["id"] = serde_json::json!("22222222-2222-4222-8222-222222222222");
+    b["name"] = serde_json::json!("shared-name");
+    b["baseUrl"] = serde_json::json!("http://b.internal");
+    b["token"] = serde_json::json!("glpat-b");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [a, b] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    {
+        // Scoped so the read guard drops before the next put_config (an
+        // await while holding `git_platforms`' read lock would deadlock
+        // against the resolver's write lock).
+        let platforms = state.git_platforms.read().unwrap();
+        assert_eq!(platforms.len(), 2, "two distinct entries may share a name");
+        assert_ne!(platforms[0].id, platforms[1].id);
+        assert_eq!(platforms[0].token, "glpat-a");
+        assert_eq!(platforms[1].token, "glpat-b");
+    }
+
+    // Each entry keeps ITS OWN secret when masked-secrets save goes by id.
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let mut entries: Vec<serde_json::Value> = body["gitPlatforms"].as_array().unwrap().clone();
+    for e in &mut entries {
+        e["token"] = serde_json::json!(API_KEY_MASK);
+    }
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": entries })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let platforms = state.git_platforms.read().unwrap();
+    assert_eq!(platforms.len(), 2);
+    assert_eq!(platforms[0].token, "glpat-a");
+    assert_eq!(platforms[1].token, "glpat-b");
+}
+
+/// A well-formed id no stored entry carries (e.g. the cold-start replay,
+/// where the persisted ids are re-fed into an empty store) is KEPT as the
+/// entry's identity — the id is never re-minted just because this session
+/// cannot look it up. Secrets still keep via the name fallback, so a
+/// stale-id payload that names an existing entry keeps its credentials.
+#[tokio::test]
+async fn put_git_platforms_unknown_id_keeps_secrets_and_identity() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first = stored_platform(&state, "testbed").unwrap();
+    assert_ne!(first.id, "00000000-0000-4000-8000-000000000000");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "id": "00000000-0000-4000-8000-000000000000",
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": API_KEY_MASK,
+                "webhookSecret": API_KEY_MASK
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert_eq!(
+        stored.id, "00000000-0000-4000-8000-000000000000",
+        "a well-formed submitted id is the identity and is kept verbatim"
+    );
+    assert_eq!(
+        stored.token, "glpat-platform",
+        "the name fallback still keeps the secrets for an id-carrying payload"
+    );
+    assert_eq!(state.git_platforms.read().unwrap().len(), 1);
+}
+
+/// A malformed id (not a UUID) is not a usable identity: it is treated like
+/// an absent one — name fallback, adopting the stored entry's id and
+/// keeping its secrets. Only an entry that genuinely has no id (or a
+/// malformed one with no name match) ever gets a freshly generated id.
+#[tokio::test]
+async fn put_git_platforms_malformed_id_treated_as_absent() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first = stored_platform(&state, "testbed").unwrap();
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "id": "not-a-uuid",
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": API_KEY_MASK,
+                "webhookSecret": API_KEY_MASK
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert_eq!(
+        stored.id, first.id,
+        "a malformed id is discarded; the stored entry keeps its own id"
+    );
+    assert_eq!(stored.token, "glpat-platform", "secrets survive via the name fallback");
+    assert_eq!(state.git_platforms.read().unwrap().len(), 1);
+}
+
+/// A brand-new entry with NO id gets a freshly generated one — the only
+/// case an id is minted — and the minted id survives a rename in place.
+#[tokio::test]
+async fn put_git_platforms_new_entry_gets_and_keeps_a_minted_id() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let created = stored_platform(&state, "testbed").unwrap();
+    assert!(
+        uuid::Uuid::parse_str(&created.id).is_ok(),
+        "a minted id must be a well-formed UUID: {}",
+        created.id
+    );
+
+    // The GET echo (id now present) renamed → the minted id is stable.
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let mut entry = body["gitPlatforms"][0].clone();
+    entry["name"] = serde_json::json!("renamed");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [entry] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let renamed = stored_platform(&state, "renamed").unwrap();
+    assert_eq!(renamed.id, created.id, "the minted id is stable across a rename");
+    assert_eq!(renamed.token, "glpat-platform");
+    assert_eq!(state.git_platforms.read().unwrap().len(), 1);
+}
+
+/// The explicit clear path: the clear sentinel (the UI's clear button)
+/// removes a stored secret, while `""` and `***` still keep it. The sentinel
+/// never reaches storage or GET — the field comes back empty.
+#[tokio::test]
+async fn put_git_platforms_clear_sentinel_clears_secret() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let mut initial = testbed_platform_json();
+    initial["webhookSigningSecret"] = serde_json::json!("whsec_signing");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [initial] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": super::types::CLEAR_SECRET_SENTINEL,
+                "webhookSecret": "",
+                "webhookSigningSecret": API_KEY_MASK
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert!(stored.token.is_empty(), "the clear sentinel clears the token");
+    assert_eq!(
+        stored.webhook_secret, "wh-platform",
+        "blank keeps — only the sentinel field is cleared"
+    );
+    assert_eq!(
+        stored.webhook_signing_secret, "whsec_signing",
+        "mask keeps — only the sentinel field is cleared"
+    );
+
+    // GET shows the cleared field as empty (unconfigured), never the sentinel.
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let entry = &body["gitPlatforms"][0];
+    assert_eq!(entry["token"], "");
+    assert_eq!(entry["webhookSecret"], API_KEY_MASK);
+    let serialized = serde_json::to_string(&body).unwrap();
+    assert!(
+        !serialized.contains("__reng_clear_secret__"),
+        "the sentinel must never be echoed: {serialized}"
+    );
+}
+
+/// The legacy client contract: an id-less payload with an unchanged name
+/// keeps every stored secret (name fallback). This is the round trip a
+/// pre-RENG-96 UI performs.
+#[tokio::test]
+async fn put_git_platforms_legacy_client_without_id_keeps_secrets() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let mut initial = testbed_platform_json();
+    initial["webhookSigningSecret"] = serde_json::json!("whsec_signing");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [initial] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Exactly what the old client sends: name, type, baseUrl, masked token.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": API_KEY_MASK
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
+    assert_eq!(stored.token, "glpat-platform");
+    assert_eq!(stored.webhook_secret, "wh-platform");
+    assert_eq!(stored.webhook_signing_secret, "whsec_signing");
+    assert!(!stored.id.is_empty(), "the legacy row keeps/adopts an id");
+}
+
 // ── POST /config/git-platforms/test probe ─────────────────────────
 
 async fn probe_git_platform(state: Arc<AppState>, base_url: &str, token: &str) -> serde_json::Value {
@@ -1712,6 +2156,7 @@ async fn git_platform_probe_falls_back_to_stored_token_when_masked() {
 
     let state = Arc::new(AppState::new(vec![]));
     *state.git_platforms.write().unwrap() = vec![crate::models::GitPlatformConfig {
+        id: String::new(),
         name: "testbed".to_string(),
         platform_type: "gitlab".to_string(),
         base_url: server.uri(),
@@ -1730,6 +2175,53 @@ async fn git_platform_probe_falls_back_to_stored_token_when_masked() {
         );
         assert_eq!(body["version"], "19.2.4-ee");
     }
+}
+
+/// RENG-96: the masked-token fallback matches by the entry's stable `id`
+/// first, so a probe against a NEW address still resolves the stored token
+/// of the (repointed) entry — repointing baseUrl must not orphan the probe.
+#[tokio::test]
+async fn git_platform_probe_resolves_masked_token_by_id() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/version"))
+        .and(header("Authorization", "Bearer glpat-stored-by-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "version": "19.2.4-ee" })))
+        .mount(&server)
+        .await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    *state.git_platforms.write().unwrap() = vec![crate::models::GitPlatformConfig {
+        id: "5e3a1c8e-0000-4000-8000-0000000000aa".to_string(),
+        name: "testbed".to_string(),
+        platform_type: "gitlab".to_string(),
+        // The entry was repointed: its stored baseUrl no longer matches the
+        // probed address — only the id ties the probe to the entry.
+        base_url: "http://old-address.invalid".to_string(),
+        internal_base_url: String::new(),
+        token: "glpat-stored-by-id".to_string(),
+        webhook_secret: String::new(),
+        webhook_signing_secret: String::new(),
+        allowed_projects: Vec::new(),
+    }];
+
+    let req: super::helpers::TestGitPlatformRequest = serde_json::from_value(serde_json::json!({
+        "baseUrl": server.uri(),
+        "token": API_KEY_MASK,
+        "id": "5e3a1c8e-0000-4000-8000-0000000000aa"
+    }))
+    .expect("TestGitPlatformRequest must deserialize");
+    let resp = super::helpers::test_git_platform(State(state), Json(req))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK, "probe errors stay in the body");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["ok"], true, "the id match must resolve the stored token: {body}");
+    assert_eq!(body["version"], "19.2.4-ee");
 }
 
 /// Probe failures surface in the body: HTTP errors as `HTTP <status>`, and

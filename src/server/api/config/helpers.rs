@@ -146,6 +146,12 @@ pub struct TestGitPlatformRequest {
     base_url: String,
     #[serde(default)]
     token: String,
+    /// RENG-96: the entry's stable id, when the caller knows it. Used first
+    /// to resolve a masked/blank probe token to the stored secret — the same
+    /// id-first identity rule as the config save path, so repointing
+    /// `baseUrl` does not orphan the probe.
+    #[serde(default)]
+    id: String,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -167,10 +173,10 @@ struct GitLabVersionResponse {
 ///
 /// The UI never sees real tokens (`GET /config` masks them as `***`), so a
 /// blank or masked probe token means "use the server-side one": fall back to
-/// the stored token of the configured platform with the same baseUrl (the
-/// same fallback pattern as the `fetch_models` fix). An explicit token is
-/// used as-is, and a masked token with no matching platform keeps the old
-/// behavior.
+/// the stored token of the configured platform with the same id (RENG-96,
+/// when the caller carries it), else the same baseUrl (the same fallback
+/// pattern as the `fetch_models` fix). An explicit token is used as-is, and
+/// a masked token with no matching platform keeps the old behavior.
 pub async fn test_git_platform(
     State(state): State<Arc<AppState>>,
     Json(body): Json<TestGitPlatformRequest>,
@@ -191,14 +197,16 @@ pub async fn test_git_platform(
     }
 
     let token = if super::is_blank_or_masked(&body.token) {
-        state
-            .git_platforms
-            .read()
-            .unwrap()
-            .iter()
-            .find(|p| p.base_url == base)
-            .map(|p| p.token.clone())
-            .unwrap_or_else(|| body.token.clone())
+        let stored = state.git_platforms.read().unwrap();
+        let matched = if body.id.is_empty() {
+            stored.iter().find(|p| p.base_url == base)
+        } else {
+            stored
+                .iter()
+                .find(|p| p.id == body.id)
+                .or_else(|| stored.iter().find(|p| p.base_url == base))
+        };
+        matched.map(|p| p.token.clone()).unwrap_or_else(|| body.token.clone())
     } else {
         body.token.clone()
     };

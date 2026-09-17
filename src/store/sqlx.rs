@@ -51,7 +51,7 @@ async fn replace_git_platforms_in(
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     for platform in platforms {
-        let row = rows::git_platform_to_row(platform, uuid::Uuid::new_v4().to_string(), now.clone(), key)?;
+        let row = rows::git_platform_to_row(platform, now.clone(), key)?;
         ::sqlx::query(&insert)
             .bind(&row.id)
             .bind(&row.name)
@@ -842,6 +842,7 @@ mod tests {
     fn sample_platforms() -> Vec<GitPlatformConfig> {
         vec![
             GitPlatformConfig {
+                id: String::new(),
                 name: "internal".into(),
                 platform_type: "gitlab".into(),
                 base_url: "https://gitlab.internal.example".into(),
@@ -894,16 +895,40 @@ mod tests {
         let raw_json: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(raw_json["allowed_projects"], serde_json::json!(["group/a", "group/b"]));
 
-        // Read back: field-level equality, deterministic name order.
+        // Read back: field-level equality (ids are freshly assigned to the
+        // id-less sample entries — RENG-96), deterministic name order.
         let loaded = store.load_git_platforms().await.unwrap();
         let mut expected = platforms.clone();
         expected.sort_by(|a, b| a.name.cmp(&b.name));
-        assert_eq!(loaded, expected);
+        for (loaded, expected) in loaded.iter().zip(&expected) {
+            assert!(!loaded.id.is_empty(), "every stored row must carry an id");
+            assert_eq!(loaded.name, expected.name);
+            assert_eq!(loaded.base_url, expected.base_url);
+            assert_eq!(loaded.internal_base_url, expected.internal_base_url);
+            assert_eq!(loaded.token, expected.token);
+            assert_eq!(loaded.webhook_secret, expected.webhook_secret);
+            assert_eq!(loaded.webhook_signing_secret, expected.webhook_signing_secret);
+            assert_eq!(loaded.allowed_projects, expected.allowed_projects);
+        }
+
+        // The assigned id is stable across writes: a second save re-uses it
+        // instead of minting a new row identity.
+        let first_id = loaded[0].id.clone();
+        store.replace_git_platforms(&loaded).await.unwrap();
+        let reloaded = store.load_git_platforms().await.unwrap();
+        assert_eq!(
+            reloaded.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            loaded.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            "ids must survive a rewrite"
+        );
+        assert!(!first_id.is_empty());
 
         // Replace semantics: second replace swaps the whole set atomically.
         store.replace_git_platforms(&platforms[1..]).await.unwrap();
         let loaded = store.load_git_platforms().await.unwrap();
-        assert_eq!(loaded, vec![platforms[1].clone()]);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].name, "public");
+        assert_eq!(loaded[0].token, platforms[1].token);
     }
 
     #[tokio::test]

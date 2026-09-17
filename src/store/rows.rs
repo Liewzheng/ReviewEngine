@@ -65,7 +65,6 @@ fn encrypt_non_empty(value: &str, key: &[u8; 32]) -> Result<String> {
 
 pub(crate) fn git_platform_to_row(
     platform: &GitPlatformConfig,
-    id: String,
     updated_at: String,
     key: &[u8; 32],
 ) -> Result<GitPlatformRow> {
@@ -75,6 +74,14 @@ pub(crate) fn git_platform_to_row(
         json!({})
     } else {
         json!({ "allowed_projects": platform.allowed_projects })
+    };
+    // RENG-96: the entry's own id is the stable identity — reuse it so an
+    // edit by id keeps the same row. A legacy id-less entry (file import,
+    // direct construction) gets a fresh one on this write.
+    let id = if platform.id.is_empty() {
+        uuid::Uuid::new_v4().to_string()
+    } else {
+        platform.id.clone()
     };
     Ok(GitPlatformRow {
         id,
@@ -100,6 +107,7 @@ pub(crate) fn git_platform_from_row(row: GitPlatformRow, key: &[u8; 32]) -> Resu
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
     Ok(GitPlatformConfig {
+        id: row.id,
         name: row.name,
         platform_type: row.platform_type,
         base_url: row.base_url,

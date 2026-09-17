@@ -103,11 +103,22 @@ export type GitPlatformType = 'gitlab'
  * A configured Git platform instance (webhook receiver + API credentials).
  * Mirrors the backend's `UiGitPlatformConfig` camelCase contract. Secret
  * fields arrive masked as `***` from `GET /config` when configured and as
- * `""` when unset; submitting `""`/`"***"` keeps the stored secret for the
- * entry with the matching `name` (see `PUT /config`).
+ * `""` when unset; submitting `""`/`"***"` keeps the stored secret of the
+ * entry this payload carries (matched by `id`, falling back to `name` for
+ * legacy payloads — see `PUT /config`), and the clear sentinel
+ * (`CLEAR_SECRET_SENTINEL`) removes a stored secret.
  */
 export interface GitPlatformConfig {
-  /** Unique instance name; also the match key for secret preservation. */
+  /**
+   * Stable entry identity (a UUID the backend assigns; RENG-96). `GET
+   * /config` echoes it; the UI carries it on every save but never displays
+   * it. A save with a known `id` updates that entry — and keeps its
+   * credentials — however `name`/`baseUrl` changed. Absent for brand-new
+   * entries (the backend assigns the id on the first save).
+   */
+  id?: string
+  /** Unique instance name; a display label (the legacy secret-keep fallback
+   * key when a payload carries no `id`). */
   name: string
   /** Platform kind. */
   type: GitPlatformType
@@ -128,6 +139,15 @@ export interface GitPlatformConfig {
    */
   allowedProjects: string[]
 }
+
+/**
+ * Sentinel submitted to explicitly CLEAR a stored git-platform secret
+ * (RENG-96). `""` and `***` both mean "keep the stored value", so clearing
+ * needs a value that is neither. Mirrors the backend's
+ * `CLEAR_SECRET_SENTINEL`; the backend maps it to an empty secret before
+ * persisting, so it never appears in `GET /config`.
+ */
+export const CLEAR_SECRET_SENTINEL = '__reng_clear_secret__'
 
 /** Complete application configuration combining all config sections. */
 export interface AppConfig {

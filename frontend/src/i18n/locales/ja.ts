@@ -448,6 +448,7 @@ export default {
       nameRequired: '名前を入力してください',
       nameDuplicate: '同じ名前のプラットフォームが既に存在します',
       baseUrlRequired: 'ベース URL を入力してください',
+      clearSecret: 'クリア',
       removeTitle: 'プラットフォームを削除',
       removeConfirm: 'Git プラットフォーム「{name}」を削除しますか？',
       addedTitle: 'プラットフォームを追加しました',

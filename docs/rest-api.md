@@ -393,7 +393,7 @@ Response 404:   // task_id 不存在
 
 返回当前生效的配置（UI 兼容的 `UiConfig` 结构，camelCase 字段）。
 
-敏感字段永不回显真实值：已配置的 GitLab `apiToken` 与 LLM `apiKey` 一律以 `***` 掩码返回。`PUT /api/v1/config` 时：LLM key 传空串或 `***` 均表示「保持现有值」；GitLab token 传 `***` 表示保持，传空串表示显式清除。
+敏感字段永不回显真实值：已配置的 GitLab `apiToken`、LLM `apiKey` 与每个 git 平台条目的密钥一律以 `***` 掩码返回；`gitPlatforms[]` 每个条目额外回显隐藏的稳定身份 `id`（UI 携带回传、不展示，见 `PUT /api/v1/config` 的 RENG-96 规则）。`PUT /api/v1/config` 时：LLM key 传空串或 `***` 均表示「保持现有值」；GitLab token 传 `***` 表示保持，传空串表示显式清除。
 
 #### `PUT /api/v1/config`
 
@@ -413,6 +413,8 @@ Response 200:
 `llm.providers[]` 每个条目还带 `disableThinking`（bool，可选，RENG-77）：`true` 时请求体带 `"thinking": {"type": "disabled"}`，让推理模型不要消耗整个 `max_tokens` 预算去思考（实测 `deepseek-v4-flash` 会因此返回**空 content**，评审变成「无问题、满分」的空转）。它是**三态**而非 bool：**不带**该键 = 「不表态」，保留该卡已存的值（包括「从未设置」——此时请求体不带 `thinking` 字段，与显式 `false` 不是一回事）；显式 `true` / `false` 才写入。`GET /api/v1/config` 原样回显已存值，缺省时不出现该键。保活语义与 `disabled`、掩码 key 完全一致（按同一条目的四元组指纹解析）。
 
 provider 名只是展示标签、**可以重复**（RENG-75 身份批）：`providers[]` 的解析全程按下标，不做任何「按名合并」。掩码/空 key 的「保持不变」解析跟随条目而不是名字：payload 第 `i` 条若与库中第 `i` 条的 `(provider, apiBaseUrl, defaultModel)` 三元组一致 → 用库中第 `i` 条的 key；否则若库中**恰好一条**匹配该三元组 → 用它的 key（纯顺序调整时 key 跟随卡片）；否则置空（两个同三元组不同 key 的账户在掩码 payload 里不可区分，绝不会把甲的 key 错放给乙；改 model / 改 URL 且 key 留空 = key 被清除，需重新输入 —— 与 git 平台改 baseUrl 的规则一致）。`disabled` 的 keep 用同一条目跟随规则。被记录的 `primaryProvider` 按名解析到第一个同名启用条目 —— 与「链首 = 第一张启用卡」同义（同名时不需要索引回声）。
+
+`gitPlatforms[]` 每个条目（RENG-96）带隐藏**稳定身份** `id`（UUID，`GET /api/v1/config` 回显、UI 永不展示；旧客户端可不带）：保存时「掩码/空 = 保持密钥」的解析**先按 `id` 匹配**——携带已知 `id` 的 payload 无论 `name`/`baseUrl` 怎么改都更新该条目（改 URL、改名、改 `internalBaseUrl` 均不会丢密钥）；`id` 缺失或**格式非法**（不是合法 UUID）时**回退按 `name` 匹配**（RENG-96 之前的客户端）。**格式合法的 `id` 一律保留为条目身份**——即使本会话的存储里查不到它（冷启动回放就是把持久化的 id 重新喂进空 store，重新生成会让 id 每次重启都漂移，改名 + 重启仍会丢数据），因此 `id` 只在条目真正没有时才会新生成，永远不会因为「查不到」而被重铸；密钥的 keep 从 id 匹配的条目来，其次 name 匹配的条目，再其次置空。`baseUrl` **永不**参与密钥保持的匹配。三个密钥字段（`token` / `webhookSecret` / `webhookSigningSecret`）的保存语义：`""` 或 `***` = 保持已存值；真实值 = 替换；保留哨兵 `__reng_clear_secret__` = **显式清除**（UI 的 Clear 按钮提交它，服务端映射为空值；哨兵不会落库、不会被 `GET /config` 回显——字段回显为空串）。老库/老文件里没有 `id` 的行在下次写入时补上 `id`，且该次写入不丢密钥（按 `name` 回退先解析出密钥）。
 
 #### `POST /api/v1/config/test`
 

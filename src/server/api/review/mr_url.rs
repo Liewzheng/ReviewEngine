@@ -119,6 +119,7 @@ mod tests {
 
     fn platform(name: &str, base_url: &str, internal_base_url: &str) -> GitPlatformConfig {
         GitPlatformConfig {
+            id: String::new(),
             name: name.to_string(),
             platform_type: "gitlab".to_string(),
             base_url: base_url.to_string(),

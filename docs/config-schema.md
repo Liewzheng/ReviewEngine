@@ -241,7 +241,8 @@ Git platform instances are **not** read from `.code-audit-config.toml`: they are
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `name` | string | `""` | Unique, user-chosen instance name; the merge key for `PUT /api/v1/config` |
+| `id` | string (UUID, optional) | `""` | **Stable entry identity** (RENG-96). Assigned on first save; never shown in the UI. `PUT /api/v1/config` secret-keep matches on this id first, falling back to `name` for pre-RENG-96 (id-less) payloads; a well-formed id is kept even on a cold-start replay, so it never drifts across restarts. A legacy row without one gets it on the next write without losing its credentials |
+| `name` | string | `""` | Unique, user-chosen instance name; a display label and the secret-keep fallback key for id-less payloads |
 | `type` | string | `"gitlab"` | Platform kind; only `gitlab` is implemented |
 | `base_url` | string | `""` | Instance URL as it appears in GitLab payloads and pasted MR URLs (`external_url`); used to **match** inbound webhooks and REST `gitlab_mr` submissions (Web UI field `baseUrl`) |
 | `internal_base_url` | string (optional) | `""` | Container-reachable URL for review-time GitLab API pulls (Web UI field `internalBaseUrl`). Empty = fall back to `base_url`, then to the payload/submitted URL. Not part of webhook matching; a REST `gitlab_mr` URL on this address also identifies the entry (RENG-33), and a URL whose host matches this entry's host with a different port does too when the host is unique (RENG-90) |
@@ -255,6 +256,7 @@ Non-empty secrets are stored encrypted; on-disk values carry an `enc:` prefix an
 ```toml
 # ui-state.toml (Web-UI-managed; do not hand-edit secrets)
 [[git_platforms]]
+id = "3f8a2c9e-…"                     # stable identity (RENG-96); auto-assigned, never shown in the UI
 name = "gitlab-main"
 type = "gitlab"
 base_url = "https://gitlab.example.com"

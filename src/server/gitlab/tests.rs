@@ -652,6 +652,7 @@ impl Drop for EmptyRuntimeGuard {
 
 fn platform_entry(name: &str, base_url: &str, token: &str, webhook_secret: &str) -> crate::models::GitPlatformConfig {
     crate::models::GitPlatformConfig {
+        id: String::new(),
         name: name.to_string(),
         platform_type: "gitlab".to_string(),
         base_url: base_url.to_string(),

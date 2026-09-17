@@ -23,6 +23,7 @@ pub mod config;
 pub mod dashboard;
 pub mod events;
 pub mod feedback;
+pub mod git_health;
 pub mod llm;
 pub mod llm_health;
 pub mod llm_latency;

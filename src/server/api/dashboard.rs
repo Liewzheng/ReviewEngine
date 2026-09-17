@@ -424,44 +424,18 @@ fn compute_trend_daily(items: &[TaskEntry], now: DateTime<Local>) -> Vec<serde_j
 }
 
 async fn compute_health(state: &AppState) -> serde_json::Value {
-    // RENG-32: integration status reflects the ACTUALLY configured git
-    // integrations, which arrive through two channels:
-    //   1. `state.git_platforms` — the runtime mirror of the `git_platforms`
-    //      DB table (startup replay + hot updates by `PUT /api/v1/config`);
-    //   2. the startup-recorded env/CLI flags (`env_gitlab_configured` /
-    //      `env_github_configured`): the classic `--gitlab-token` /
-    //      `GITLAB_TOKEN` / `--github-token` / `GITHUB_TOKEN` configuration
-    //      wires webhook/MR-fetch clients directly and never appears in
-    //      `git_platforms` — without this OR, a working env-configured
-    //      integration read as "offline" (verified on a real deployment).
-    // The previous implementation grepped LLM provider NAMES for
-    // "gitlab"/"github", so a working integration showed "offline" unless
-    // an LLM happened to be named after it. Only "gitlab" exists as a
-    // platform type today; the "github" check is the same honest lookup,
-    // ready for when that platform lands.
-    // Scoped so the `git_platforms` guard is out of scope (not merely dropped)
-    // before the health probe below awaits: a std guard alive at an await point
-    // makes the handler future non-`Send` and axum silently refuses the route.
-    let integrations = {
-        let platforms = state.git_platforms.read().unwrap();
-        let mut integrations = Vec::new();
-        for (service, platform_type, env_configured) in [
-            ("GitLab API", "gitlab", state.env_gitlab_configured),
-            ("GitHub API", "github", state.env_github_configured),
-        ] {
-            let configured = env_configured
-                || platforms
-                    .iter()
-                    .any(|p| p.platform_type.eq_ignore_ascii_case(platform_type));
-            integrations.push(serde_json::json!({
-                "service": service,
-                "type": "integration",
-                "status": if configured { "success" } else { "offline" },
-                "message": if configured { "Configured" } else { "Not configured" },
-            }));
-        }
-        integrations
-    };
+    // RENG-97: the integration rows report the platform probe cache — the
+    // Configuration page's `POST /config/git-platforms/test` is the only real
+    // authenticated check, so it is the single source of truth the dashboard
+    // and `GET /system/health` both read. Entry presence (a `git_platforms`
+    // row, or the startup env/CLI token flags) is never health: an
+    // unprobed-but-configured integration reads `unknown`, and a failed probe
+    // reads `error` with the failure. The rows are built outside any guard
+    // (each reads its own lock internally, never across an await).
+    let integrations = vec![
+        super::git_health::integration_row(state, "GitLab API", "gitlab", state.env_gitlab_configured),
+        super::git_health::integration_row(state, "GitHub API", "github", state.env_github_configured),
+    ];
 
     // LLM provider health: the probe cache (RENG-36) — one report per
     // configured provider, sharing `GET /api/v1/llm/providers`' source so the
@@ -1102,9 +1076,10 @@ mod tests {
         );
     }
 
-    /// Health panel: integration detection reads the configured git
-    /// platform instances (not LLM provider names); the fabricated
-    /// `latencyMs` field is gone from every health row.
+    /// Health panel (RENG-97): integration detection reads the platform probe
+    /// cache, NOT entry presence — a configured-but-never-probed instance
+    /// reads `unknown` (honest), never `success`. No fabricated `latencyMs`
+    /// appears on an unprobed row (the only latency is a real probe's).
     #[tokio::test]
     async fn dashboard_health_detects_configured_git_platforms() {
         let (state, _db) = state_with_db().await;
@@ -1125,10 +1100,17 @@ mod tests {
             .iter()
             .map(|i| (i["service"].as_str().unwrap(), i))
             .collect();
-        assert_eq!(by_service["GitLab API"]["status"], "success");
+        assert_eq!(
+            by_service["GitLab API"]["status"], "unknown",
+            "an entry that was never probed must not read success: {json}"
+        );
+        assert_eq!(by_service["GitLab API"]["message"], "Not probed yet");
         assert_eq!(by_service["GitHub API"]["status"], "offline");
         for item in integrations {
-            assert!(item.get("latencyMs").is_none(), "latencyMs must be dropped: {item}");
+            assert!(
+                item.get("latencyMs").is_none(),
+                "an unprobed row has no latency: {item}"
+            );
         }
         // LLM rows are absent here (no provider configured) and carry no latencyMs.
         let llm = json["health"]["llmProviders"].as_array().unwrap();
@@ -1137,11 +1119,11 @@ mod tests {
     }
 
     /// The env/CLI channel alone (`GITLAB_TOKEN` / `--gitlab-token` recorded
-    /// at startup) marks the integration configured even when no
-    /// `git_platforms` entry exists — the deployment shape verified by
-    /// human testing.
+    /// at startup) configures an integration with no `git_platforms` entry —
+    /// and therefore nothing the Configuration probe can test. Presence must
+    /// not read as health: the row is `unknown` (never probed), not `success`.
     #[tokio::test]
-    async fn dashboard_health_env_flag_marks_gitlab_configured() {
+    async fn dashboard_health_env_flag_alone_reads_unknown() {
         let (mut state, _db) = state_with_db().await;
         // No git_platforms entries; only the startup-recorded env flag.
         Arc::get_mut(&mut state).unwrap().env_gitlab_configured = true;
@@ -1153,9 +1135,86 @@ mod tests {
             .iter()
             .map(|i| (i["service"].as_str().unwrap(), i))
             .collect();
-        assert_eq!(by_service["GitLab API"]["status"], "success");
-        assert_eq!(by_service["GitLab API"]["message"], "Configured");
+        assert_eq!(
+            by_service["GitLab API"]["status"], "unknown",
+            "env-configured-but-never-probed must not read success: {json}"
+        );
+        assert_eq!(by_service["GitLab API"]["message"], "Not probed yet");
         assert_eq!(by_service["GitHub API"]["status"], "offline");
+    }
+
+    /// RENG-97: an entry whose probe failed reads `error` on the dashboard —
+    /// the same 401 the Configuration page showed — never `success` from the
+    /// entry still existing.
+    #[tokio::test]
+    async fn dashboard_health_failed_probe_reports_error_not_success() {
+        let (state, _db) = state_with_db().await;
+        let gitlab = crate::models::GitPlatformConfig {
+            name: "testbed".to_string(),
+            platform_type: "gitlab".to_string(),
+            base_url: "https://gitlab.example".to_string(),
+            token: "glpat-broken".to_string(),
+            ..Default::default()
+        };
+        *state.git_platforms.write().unwrap() = vec![gitlab.clone()];
+        state.git_health.record(
+            &gitlab.base_url,
+            &gitlab.token,
+            crate::server::api::git_health::GitPlatformHealth::error("HTTP 401 Unauthorized"),
+        );
+
+        let (status, json) = dashboard_json(state).await;
+        assert_eq!(status, StatusCode::OK);
+        let integrations = json["health"]["integrations"].as_array().unwrap();
+        let by_service: std::collections::HashMap<&str, &serde_json::Value> = integrations
+            .iter()
+            .map(|i| (i["service"].as_str().unwrap(), i))
+            .collect();
+        assert_eq!(
+            by_service["GitLab API"]["status"], "error",
+            "a failed probe must not read success: {json}"
+        );
+        assert_eq!(by_service["GitLab API"]["message"], "HTTP 401 Unauthorized");
+        assert!(
+            by_service["GitLab API"]["checkedAt"].as_str().is_some(),
+            "a failure carries its probe time: {json}"
+        );
+        assert!(by_service["GitLab API"].get("latencyMs").is_none());
+    }
+
+    /// RENG-97: after a successful probe the dashboard row reports the real
+    /// latency and timestamp — the same verdict the Configuration page showed.
+    #[tokio::test]
+    async fn dashboard_health_successful_probe_reports_success_with_latency() {
+        let (state, _db) = state_with_db().await;
+        let gitlab = crate::models::GitPlatformConfig {
+            name: "testbed".to_string(),
+            platform_type: "gitlab".to_string(),
+            base_url: "https://gitlab.example".to_string(),
+            token: "glpat-good".to_string(),
+            ..Default::default()
+        };
+        *state.git_platforms.write().unwrap() = vec![gitlab.clone()];
+        state.git_health.record(
+            &gitlab.base_url,
+            &gitlab.token,
+            crate::server::api::git_health::GitPlatformHealth::healthy(Some("16.9.0".to_string()), 37),
+        );
+
+        let (status, json) = dashboard_json(state).await;
+        assert_eq!(status, StatusCode::OK);
+        let integrations = json["health"]["integrations"].as_array().unwrap();
+        let by_service: std::collections::HashMap<&str, &serde_json::Value> = integrations
+            .iter()
+            .map(|i| (i["service"].as_str().unwrap(), i))
+            .collect();
+        assert_eq!(by_service["GitLab API"]["status"], "success");
+        assert_eq!(by_service["GitLab API"]["latencyMs"], 37);
+        assert!(by_service["GitLab API"]["checkedAt"].as_str().is_some());
+        assert_eq!(
+            by_service["GitHub API"]["status"], "offline",
+            "the unconfigured platform stays offline: {json}"
+        );
     }
 
     /// Neither channel configured (no platform entries, no env/CLI tokens)

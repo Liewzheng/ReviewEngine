@@ -57,6 +57,7 @@ export default {
       degraded: '性能低下',
       error: 'エラー',
       offline: 'オフライン',
+      unknown: '不明',
       inProgress: '処理中',
       running: '実行中',
       queued: '待機中',
@@ -130,6 +131,8 @@ export default {
     health: {
       title: 'システム状態',
       integrations: '統合ステータス',
+      notProbed: '未検出',
+      notConfigured: '未構成',
       llmProviders: 'LLM プロバイダー',
       allOperational: '全システム稼働中',
       someDegraded: '一部システムで性能低下',

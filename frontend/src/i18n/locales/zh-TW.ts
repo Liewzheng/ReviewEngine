@@ -57,6 +57,7 @@ export default {
       degraded: '效能下降',
       error: '錯誤',
       offline: '離線',
+      unknown: '未知',
       inProgress: '處理中',
       running: '執行中',
       queued: '排隊中',
@@ -127,6 +128,8 @@ export default {
     health: {
       title: '系統健康狀態',
       integrations: '整合狀態',
+      notProbed: '未探測',
+      notConfigured: '未配置',
       llmProviders: 'LLM 提供者',
       allOperational: '所有系統運作正常',
       someDegraded: '部分系統效能下降',

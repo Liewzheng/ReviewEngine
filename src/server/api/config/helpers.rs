@@ -223,29 +223,67 @@ pub async fn test_git_platform(
         request.header("Authorization", format!("Bearer {token}"))
     };
 
+    let started = std::time::Instant::now();
     match request.send().await {
         Ok(resp) => {
             if !resp.status().is_success() {
                 let status = resp.status();
+                let error = format!("HTTP {}", status);
+                // RENG-97: this probe IS the single source of truth for the
+                // integration's health — record the outcome so the dashboard
+                // and `/system/health` report the same failure instead of
+                // "Configured" from entry presence.
+                state.git_health.record(
+                    &base,
+                    &token,
+                    crate::server::api::git_health::GitPlatformHealth::error(error.clone()),
+                );
                 return Json(serde_json::json!({
                     "ok": false,
-                    "error": format!("HTTP {}", status),
+                    "error": error,
                 }))
                 .into_response();
             }
             match resp.json::<GitLabVersionResponse>().await {
-                Ok(parsed) => Json(serde_json::json!({ "ok": true, "version": parsed.version })).into_response(),
-                Err(e) => Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("failed to parse response: {}", e),
-                }))
-                .into_response(),
+                Ok(parsed) => {
+                    let latency_ms = started.elapsed().as_millis() as u64;
+                    state.git_health.record(
+                        &base,
+                        &token,
+                        crate::server::api::git_health::GitPlatformHealth::healthy(
+                            Some(parsed.version.clone()),
+                            latency_ms,
+                        ),
+                    );
+                    Json(serde_json::json!({ "ok": true, "version": parsed.version })).into_response()
+                }
+                Err(e) => {
+                    let error = format!("failed to parse response: {}", e);
+                    state.git_health.record(
+                        &base,
+                        &token,
+                        crate::server::api::git_health::GitPlatformHealth::error(error.clone()),
+                    );
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": error,
+                    }))
+                    .into_response()
+                }
             }
         }
-        Err(e) => Json(serde_json::json!({
-            "ok": false,
-            "error": e.to_string(),
-        }))
-        .into_response(),
+        Err(e) => {
+            let error = e.to_string();
+            state.git_health.record(
+                &base,
+                &token,
+                crate::server::api::git_health::GitPlatformHealth::error(error.clone()),
+            );
+            Json(serde_json::json!({
+                "ok": false,
+                "error": error,
+            }))
+            .into_response()
+        }
     }
 }

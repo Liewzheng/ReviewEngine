@@ -35,7 +35,7 @@ import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import LastUpdated from '../components/common/LastUpdated.vue'
-import type { KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
+import type { HealthStatus, KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -117,6 +117,24 @@ function timeAgo(iso: string): string {
   const hrs = Math.floor(mins / 60)
   if (hrs < 24) return t('dashboard.time.hoursAgo', { n: hrs })
   return t('dashboard.time.daysAgo', { n: Math.floor(hrs / 24) })
+}
+
+/**
+ * The detail line of an integration row (RENG-97). The two NEW static states
+ * are i18n'd here — the backend's English "Not configured" / "Not probed yet"
+ * are not locale-aware — while a probe's own words ("Configured", the 401
+ * text) stay raw, exactly like the LLM rows' `message`.
+ */
+function integrationMessage(item: HealthStatus): string | undefined {
+  if (item.status === 'unknown') return t('dashboard.health.notProbed')
+  if (item.status === 'offline') return t('dashboard.health.notConfigured')
+  return item.message
+}
+
+/** The timestamp of the probe behind an integration row, in the row's own
+ *  relative words — the "stale result" signal RENG-97 requires. */
+function integrationCheckedAt(item: HealthStatus): string | null {
+  return item.checkedAt ? timeAgo(item.checkedAt) : null
 }
 
 function formatTime(iso: string): string {
@@ -582,6 +600,10 @@ onUnmounted(() => {
                 </div>
                 <div class="health-row-right">
                   <StatusBadge :status="item.status" show-text size="small" />
+                  <span v-if="integrationMessage(item)" class="health-latency">{{ integrationMessage(item) }}</span>
+                  <span v-if="integrationCheckedAt(item)" class="health-latency">
+                    {{ $t('common.lastTest', { date: integrationCheckedAt(item) }) }}
+                  </span>
                 </div>
               </div>
             </div>

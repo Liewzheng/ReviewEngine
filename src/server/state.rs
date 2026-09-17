@@ -262,6 +262,12 @@ pub struct AppState {
     /// with so a credential change can never be answered by the previous
     /// config's status.
     pub llm_health: Arc<crate::server::api::llm_health::LlmHealthStore>,
+    /// Cached per-entry git platform connectivity health (RENG-97): the
+    /// single source the Configuration page's probe (`POST
+    /// /config/git-platforms/test`) writes and the dashboard / `/system/health`
+    /// integration rows read, so a broken credential can never read
+    /// "Configured" from mere entry presence anywhere else.
+    pub git_health: crate::server::api::git_health::GitHealthStore,
     /// WebUI expert overrides (RENG-69), keyed by expert name. The source of
     /// truth for what `PUT /api/v1/system/experts/{id}` changed, kept beside
     /// the persisted `app_settings` row so every review dispatch can re-apply
@@ -316,6 +322,7 @@ impl AppState {
             upgrade: UpgradeStore::new(),
             catalog: CatalogStore::new(),
             llm_health: Arc::new(crate::server::api::llm_health::LlmHealthStore::new()),
+            git_health: crate::server::api::git_health::GitHealthStore::new(),
             expert_overrides: RwLock::new(Arc::new(crate::config::ExpertOverrides::default())),
             expert_base: RwLock::new(None),
             report_aggregated: RwLock::new(None),

@@ -57,6 +57,7 @@ export default {
       degraded: '성능 저하',
       error: '오류',
       offline: '오프라인',
+      unknown: '알 수 없음',
       inProgress: '진행 중',
       running: '실행 중',
       queued: '대기 중',
@@ -129,6 +130,8 @@ export default {
     health: {
       title: '시스템 상태',
       integrations: '통합 상태',
+      notProbed: '아직 검사되지 않음',
+      notConfigured: '구성되지 않음',
       llmProviders: 'LLM 제공자',
       allOperational: '모든 시스템 정상',
       someDegraded: '일부 시스템 성능 저하',

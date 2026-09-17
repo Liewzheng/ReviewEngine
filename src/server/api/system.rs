@@ -80,36 +80,23 @@ async fn version_info() -> Json<serde_json::Value> {
 }
 
 async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut integrations = Vec::new();
     let mut llm_providers = Vec::new();
 
     // Clone out of the lock: the LLM rows below probe (`await`) and no std
     // guard may be held across an await point.
     let llm_configs: Vec<crate::models::LLMConfig> = state.llm_configs.read().unwrap().clone();
 
-    // GitLab integration check
-    let gitlab_configured = llm_configs
-        .iter()
-        .any(|c| c.provider.to_lowercase().contains("gitlab") || c.api_base.to_lowercase().contains("gitlab"));
-    integrations.push(serde_json::json!({
-        "service": "GitLab API",
-        "type": "integration",
-        "status": if gitlab_configured { "success" } else { "offline" },
-        "latencyMs": 0,
-        "message": if gitlab_configured { "Configured" } else { "Not configured" },
-    }));
-
-    // GitHub integration check
-    let github_configured = llm_configs
-        .iter()
-        .any(|c| c.provider.to_lowercase().contains("github") || c.api_base.to_lowercase().contains("github"));
-    integrations.push(serde_json::json!({
-        "service": "GitHub API",
-        "type": "integration",
-        "status": if github_configured { "success" } else { "offline" },
-        "latencyMs": 0,
-        "message": if github_configured { "Configured" } else { "Not configured" },
-    }));
+    // Integration rows (RENG-97): the platform probe cache — the same single
+    // source the dashboard health section and the Configuration page's probe
+    // write/read — never the LLM provider list (which previously guessed
+    // "gitlab"/"github" from provider names, near-always `offline` even for a
+    // working integration). `unknown` when configured but never probed,
+    // `error` with the failure after a failed probe, `success` with the real
+    // latency only when a probe succeeded.
+    let integrations = vec![
+        super::git_health::integration_row(&state, "GitLab API", "gitlab", state.env_gitlab_configured),
+        super::git_health::integration_row(&state, "GitHub API", "github", state.env_github_configured),
+    ];
 
     // LLM rows come from the shared probe cache (RENG-36), exactly like
     // `GET /api/v1/llm/providers` and the dashboard's health section: a
@@ -1487,6 +1474,128 @@ mod tests {
     async fn system_health_reports_storage_backend_disabled_without_db() {
         let body = health_json(AppState::new(vec![])).await;
         assert_eq!(body["storage_backend"], "disabled", "no db attached: {body}");
+    }
+
+    // ─── RENG-97: integration rows share the platform probe cache ───
+
+    fn gitlab_entry(base_url: &str, token: &str) -> crate::models::GitPlatformConfig {
+        crate::models::GitPlatformConfig {
+            name: "testbed".to_string(),
+            platform_type: "gitlab".to_string(),
+            base_url: base_url.to_string(),
+            token: token.to_string(),
+            ..Default::default()
+        }
+    }
+
+    async fn health_json_arc(state: Arc<AppState>) -> serde_json::Value {
+        let resp = system_health(State(state)).await.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        body_json(resp).await
+    }
+
+    fn by_service(body: &serde_json::Value) -> std::collections::HashMap<&str, &serde_json::Value> {
+        body["integrations"]
+            .as_array()
+            .expect("integrations array")
+            .iter()
+            .map(|i| (i["service"].as_str().unwrap(), i))
+            .collect()
+    }
+
+    /// No git platform configured → both integrations `offline`.
+    #[tokio::test]
+    async fn system_health_integrations_offline_without_config() {
+        let body = health_json_arc(Arc::new(AppState::new(vec![]))).await;
+        let rows = by_service(&body);
+        assert_eq!(rows["GitLab API"]["status"], "offline");
+        assert_eq!(rows["GitLab API"]["message"], "Not configured");
+        assert_eq!(rows["GitHub API"]["status"], "offline");
+    }
+
+    /// An entry that was never probed reads `unknown`, never `success` —
+    /// `GET /system/health` must agree with the dashboard, not invent health
+    /// from entry presence.
+    #[tokio::test]
+    async fn system_health_integration_never_probed_is_unknown() {
+        let state = AppState::new(vec![]);
+        state
+            .git_platforms
+            .write()
+            .unwrap()
+            .push(gitlab_entry("https://gitlab.example", "t"));
+        let body = health_json_arc(Arc::new(state)).await;
+        let rows = by_service(&body);
+        assert_eq!(
+            rows["GitLab API"]["status"], "unknown",
+            "configured-but-never-probed must not read success: {body}"
+        );
+        assert_eq!(rows["GitLab API"]["message"], "Not probed yet");
+        assert!(rows["GitLab API"].get("checkedAt").is_none());
+    }
+
+    /// The previous source was the LLM provider list — an LLM named after
+    /// GitLab made a working integration show success, and most deployments
+    /// read near-always `offline`. The integration rows must NOT follow LLM
+    /// configs at all now.
+    #[tokio::test]
+    async fn system_health_integrations_ignore_llm_config_names() {
+        // An LLM whose provider/apiBase mention gitlab — the old signal — with
+        // no git platform configured: the integration rows must stay `offline`.
+        let body = health_json_arc(Arc::new(AppState::new(vec![llm_config(
+            "https://gitlab-llm.example/v1",
+        )])))
+        .await;
+        let rows = by_service(&body);
+        assert_eq!(
+            rows["GitLab API"]["status"], "offline",
+            "LLM names are not git platforms: {body}"
+        );
+        assert_eq!(rows["GitHub API"]["status"], "offline");
+    }
+
+    /// An entry whose probe failed reads `error` with the failure and its
+    /// timestamp — the same 401 the Configuration page showed — never `success`.
+    #[tokio::test]
+    async fn system_health_integration_failed_probe_is_error() {
+        let state = AppState::new(vec![]);
+        let gitlab = gitlab_entry("https://gitlab.example", "glpat-broken");
+        state.git_platforms.write().unwrap().push(gitlab.clone());
+        state.git_health.record(
+            &gitlab.base_url,
+            &gitlab.token,
+            crate::server::api::git_health::GitPlatformHealth::error("HTTP 401 Unauthorized"),
+        );
+        let body = health_json_arc(Arc::new(state)).await;
+        let rows = by_service(&body);
+        assert_eq!(
+            rows["GitLab API"]["status"], "error",
+            "a failed probe must not read success: {body}"
+        );
+        assert_eq!(rows["GitLab API"]["message"], "HTTP 401 Unauthorized");
+        assert!(rows["GitLab API"]["checkedAt"].as_str().is_some());
+        assert!(rows["GitLab API"].get("latencyMs").is_none());
+    }
+
+    /// A successful probe makes `/system/health` agree with the dashboard and
+    /// the Configuration page: same status, same source, real latency and
+    /// timestamp on the row.
+    #[tokio::test]
+    async fn system_health_integration_successful_probe_is_success() {
+        let state = AppState::new(vec![]);
+        let gitlab = gitlab_entry("https://gitlab.example", "glpat-good");
+        state.git_platforms.write().unwrap().push(gitlab.clone());
+        state.git_health.record(
+            &gitlab.base_url,
+            &gitlab.token,
+            crate::server::api::git_health::GitPlatformHealth::healthy(Some("16.9.0".to_string()), 29),
+        );
+        let body = health_json_arc(Arc::new(state)).await;
+        let rows = by_service(&body);
+        assert_eq!(rows["GitLab API"]["status"], "success");
+        assert_eq!(rows["GitLab API"]["latencyMs"], 29);
+        assert!(rows["GitLab API"]["checkedAt"].as_str().is_some());
+        assert_eq!(rows["GitHub API"]["status"], "offline");
     }
 
     /// With an in-memory SQLite store attached, `storage_backend` reports

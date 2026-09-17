@@ -19,7 +19,7 @@ export interface TrendPoint {
 }
 
 export type HealthStatusType = 'integration' | 'llm';
-export type HealthState = 'success' | 'warning' | 'error' | 'offline';
+export type HealthState = 'success' | 'warning' | 'error' | 'offline' | 'unknown';
 
 export interface HealthStatus {
   service: string;
@@ -27,6 +27,11 @@ export interface HealthStatus {
   status: HealthState;
   /** Free-form probe detail (e.g. "Configured" / "Missing API key"). */
   message?: string;
+  /** Real round-trip of a successful probe; absent when none ran (RENG-97). */
+  latencyMs?: number;
+  /** When the last probe ran (success or failure) — a stale result is visible
+   *  through this timestamp (RENG-97). Absent when nothing was probed. */
+  checkedAt?: string;
 }
 
 /**

@@ -220,7 +220,16 @@ interface ExpertReviewSummary {
 }
 
 // API endpoints (0.10.x: the toggle/weight POST endpoints were folded into
-// one PUT per expert; the response carries `persisted`, see §3.3)
-GET /api/v1/system/experts             → { experts: Expert[] }
-PUT /api/v1/system/experts/{id}        → Expert & { persisted: boolean }  // enabled and/or weight and/or prompt (RENG-93)
+// one PUT per expert; the response carries `persisted`, see §3.3; RENG-95 adds
+// the report-level aggregation flag)
+GET /api/v1/system/experts                 → { experts: Expert[], aggregated: boolean }
+PUT /api/v1/system/experts/{id}            → Expert & { persisted: boolean }  // enabled and/or weight and/or prompt (RENG-93)
+PUT /api/v1/system/experts/aggregated      → { aggregated: boolean, persisted: boolean }  // RENG-95
 ```
+
+### 3.6 Aggregation toggle (RENG-95)
+
+- A page-level switch「聚合报告 / Aggregated report」controls the report-level `report.aggregated` flag. The aggregator expert runs only when this flag **and** the `aggregator` expert's enabled state both hold (`select_aggregator_expert`); the switch's hint states the rule.
+- The aggregator's card shows the two-condition state on the row itself: a warning tag「已启用但聚合未开启」when the expert is enabled but the flag is off, a success tag when both are on. The detail drawer of the aggregator carries the same switch, tying the flag to the expert it gates.
+- `PUT /api/v1/system/experts/aggregated` with body `{ "aggregated": bool }`: hot-applies to the running config, persists to the same `ui` row `PUT /config` writes (a config-page save that omits it keeps the stored value — tri-state `Option<bool>`), and publishes the dispatch-time override review paths re-apply over the config they resolve. Without a DB the response is `persisted: false` (memory-only, lost on restart) — the same honesty rule as §3.3.
+- Optimistic UI, identical to the per-expert switch: flip locally, PUT, adopt the server echo, revert + error notification on failure; the in-flight guard pauses the background poll so a tick cannot snap the switch back.

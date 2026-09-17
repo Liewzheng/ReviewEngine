@@ -20,6 +20,9 @@ import { categoryLabelMap } from '../../types/expert'
 const props = defineProps<{
   expert: Expert
   index: number
+  /* RENG-95: the effective report-level aggregation flag, so the aggregator
+   * card can surface the "enabled but aggregation off" state on the row. */
+  aggregated?: boolean
 }>()
 
 const emit = defineEmits<{
@@ -27,6 +30,11 @@ const emit = defineEmits<{
   (e: 'weight-change', id: string, weight: number): void
   (e: 'view-details', expert: Expert): void
 }>()
+
+/* RENG-95: the aggregator expert's slug id. The card carries the two-condition
+ * rule's flag side: the aggregator runs only when the expert is enabled AND
+ * the report-level aggregation flag is on. */
+const isAggregator = computed(() => props.expert.id === 'aggregator')
 
 const cardStyle = computed(() => ({
   opacity: props.expert.enabled ? 1 : 0.6,
@@ -88,6 +96,27 @@ const handleViewDetails = () => {
             <el-tag v-if="!expert.enabled" type="info" size="small" effect="plain" class="status-tag">
               <el-icon><WarningFilled /></el-icon>
               {{ $t('common.disabled') }}
+            </el-tag>
+            <!-- RENG-95: the two-condition rule on the aggregator's row — the
+                 "12 enabled, 11 participated" surprise must be visible on the
+                 page, not only inside a drawer. -->
+            <el-tag
+              v-if="isAggregator && expert.enabled && !aggregated"
+              type="warning"
+              size="small"
+              effect="plain"
+              class="aggregation-tag"
+            >
+              {{ $t('experts.aggregation.rowEnabledButOff') }}
+            </el-tag>
+            <el-tag
+              v-if="isAggregator && expert.enabled && aggregated"
+              type="success"
+              size="small"
+              effect="plain"
+              class="aggregation-tag"
+            >
+              {{ $t('experts.aggregation.rowOn') }}
             </el-tag>
           </div>
         </div>
@@ -239,6 +268,15 @@ const handleViewDetails = () => {
   gap: var(--space-1);
   border-color: var(--offline);
   color: var(--offline);
+}
+
+/* RENG-95: the aggregator's two-condition hint. A warning fill carries the
+   "enabled but aggregation off" surprise; a success fill the healthy state. */
+.aggregation-tag {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  font-weight: 500;
 }
 
 .header-right {

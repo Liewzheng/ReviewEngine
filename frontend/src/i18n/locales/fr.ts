@@ -633,6 +633,22 @@ export default {
     memoryOnlyTitle: 'Appliqué en mémoire uniquement',
     memoryOnlyMessage:
       '{name} a été mis à jour, mais ce serveur n’a pas de base de configuration : la modification sera perdue au redémarrage. Démarrez le serveur avec un répertoire de données (sans REVIEW_DISABLE_DB=1) pour conserver les réglages des experts.',
+    aggregation: {
+      label: 'Rapport agrégé',
+      hint:
+        'Fusionne les constats des experts en un rapport agrégé. Ne s’applique que lorsque l’expert agrégateur est également activé.',
+      toggleAria: 'Activer/désactiver le rapport agrégé',
+      enabledTitle: 'Rapport agrégé activé',
+      enabledMessage: 'L’agrégateur s’exécutera lors du prochain examen.',
+      disabledTitle: 'Rapport agrégé désactivé',
+      disabledMessage: 'L’agrégateur ne s’exécutera plus dès le prochain examen.',
+      updateFailed: 'Échec de la mise à jour du réglage du rapport agrégé. Modification annulée.',
+      memoryOnlyTitle: 'Appliqué en mémoire uniquement',
+      memoryOnlyMessage:
+        'Le réglage du rapport agrégé a été appliqué, mais ce serveur n’a pas de base de configuration : il sera perdu au redémarrage. Démarrez le serveur avec un répertoire de données (sans REVIEW_DISABLE_DB=1) pour le conserver.',
+      rowEnabledButOff: 'Activé mais agrégation désactivée',
+      rowOn: 'Rapport agrégé activé',
+    },
   },
   upgrade: {
     title: 'Mettre à niveau Review Engine',

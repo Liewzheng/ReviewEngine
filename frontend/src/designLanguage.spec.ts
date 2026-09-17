@@ -638,6 +638,82 @@ describe('RENG-93 — the editable expert prompt', () => {
 });
 
 /**
+ * RENG-95 — the report-level aggregation toggle on the experts page.
+ *
+ * The aggregator expert runs only when BOTH hold: the `aggregator` expert is
+ * enabled AND the report-level `aggregated` flag is on. The flag previously
+ * had no WebUI control, so a deployment without a config file could enable
+ * every expert and still get no aggregated report (12 enabled, 11
+ * participating, `aggregated` null). The switch sits on the page itself, and
+ * the aggregator's card surfaces the two-condition rule as a row tag — the
+ * "enabled but aggregation off" state must not be hidden in a drawer.
+ *
+ * The behaviour (optimistic flip, server echo, revert) lives in
+ * `composables/useExperts.spec.ts`; here the surface is pinned: every new key
+ * in all six locales, the switch's bindings, and the card tag's exact
+ * conditions (shown only when `aggregator.enabled && !aggregated`).
+ */
+describe('RENG-95 — the aggregation toggle', () => {
+  const keys = [
+    'label:',
+    'hint:',
+    'toggleAria:',
+    'enabledTitle:',
+    'enabledMessage:',
+    'disabledTitle:',
+    'disabledMessage:',
+    'updateFailed:',
+    'memoryOnlyTitle:',
+    'memoryOnlyMessage:',
+    'rowEnabledButOff:',
+    'rowOn:',
+  ];
+
+  it('labels the toggle and the two-condition hints in all six locales', () => {
+    for (const locale of ['en', 'zh-CN', 'zh-TW', 'ja', 'ko', 'fr']) {
+      const file = source(`i18n/locales/${locale}.ts`);
+      for (const key of keys) {
+        expect(file, `${locale} is missing aggregation.${key}`).toContain(key);
+      }
+    }
+  });
+
+  it('puts the switch on the page itself, not only in a drawer', () => {
+    const view = source('views/ExpertsManagement.vue');
+    expect(view).toContain('experts.aggregation.label');
+    expect(view).toContain('experts.aggregation.hint');
+    expect(view).toContain('@update:model-value="handleAggregationToggle"');
+    expect(view).toContain('handleAggregationToggle');
+    expect(view).toContain(':aggregated="aggregated"');
+    // The aggregator's detail drawer carries the same control, tied to the
+    // expert the flag gates.
+    expect(view).toContain("selectedExpert.id === 'aggregator'");
+    expect(view).toContain('experts.aggregation.toggleAria');
+  });
+
+  it('shows the "enabled but aggregation off" hint on the aggregator row, and only there', () => {
+    const card = source('components/ExpertsManagement/ExpertCard.vue');
+    // The warning hint is bound to exactly the surprise state.
+    expect(card).toContain('isAggregator && expert.enabled && !aggregated');
+    expect(card).toContain('experts.aggregation.rowEnabledButOff');
+    // The healthy state is its own tag, so the warning cannot linger on.
+    expect(card).toContain('isAggregator && expert.enabled && aggregated');
+    expect(card).toContain('experts.aggregation.rowOn');
+    // The card must know the flag and which expert is the aggregator.
+    expect(card).toContain("props.expert.id === 'aggregator'");
+    expect(card).toContain('aggregated?: boolean');
+  });
+
+  it('adopts the effective flag from GET and reverts a failed flip', () => {
+    const composable = source('composables/useExperts.ts');
+    expect(composable).toContain('aggregated.value = response.aggregated');
+    expect(composable).toContain('aggregated.value = value');
+    expect(composable).toContain('aggregated.value = previous');
+    expect(composable).toContain('updateAggregatedService');
+  });
+});
+
+/**
  * RENG-87 — the KPI strip on the LLM Status page: it fills the row it sits in,
  * its numbers are legible, and its labels are readable in every locale.
  *

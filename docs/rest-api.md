@@ -639,13 +639,39 @@ Response 200:
       "promptOverride": false,
       "lastReviews": []
     }
-  ]
+  ],
+  "aggregated": false
 }
 ```
 
 `prompt` 是专家当前**生效**的完整提示词（WebUI 覆盖 > 配置文件 `[review_experts.*].prompt` > 触发器派生的默认值，见 RENG-93），不是截断预览；`promptOverride` 为 `true` 表示该文本来自 WebUI 覆盖，`false` 表示来自配置文件/内置默认 —— 前端据此如实标注提示词来源。
 
+`aggregated`（RENG-95）是报告级聚合标志 `report.aggregated` 的**生效值**——即 review 路径喂给 `select_aggregator_expert` 的那个布尔值：聚合器专家只有在「该标志为 true **且** `aggregator` 专家已启用」两个条件同时成立时才会运行。它由专家页的开关控制（见下面的 `PUT /system/experts/aggregated`），并可在专家列表/卡片上直接展示「已启用但聚合未开启」的状态。
+
 VSCode Extension 可用此接口展示可选专家、让用户开关。
+
+#### `PUT /api/v1/system/experts/aggregated`
+
+翻转报告级聚合标志（RENG-95）。专家页的「聚合报告」开关调用它；聚合器专家是否真正运行由该标志 **和** `aggregator` 专家是否启用共同决定（`select_aggregator_expert`）。
+
+```
+Request:
+{
+  "aggregated": true
+}
+
+Response 200:
+{
+  "aggregated": true,
+  "persisted": true
+}
+Response 404: { "error": "config not loaded" }   // 配置尚未加载时
+Response 500: { "error": "failed to persist the aggregation flag to the database: ..." }
+```
+
+`persisted` 的语义与 `PUT /system/experts/{id}` 完全一致（RENG-69/RENG-95）：`true` = 已写入配置数据库，重启后仍生效；`false` = 未挂数据库（`REVIEW_DISABLE_DB=1`、嵌入式使用），改动只在内存里生效、重启即丢失，前端据此显示警告而不是成功提示；写库失败返回 `500` 且**什么都没改**（先落库、再生效的次序，与专家 PUT 相同）。
+
+该标志同时作用于三处：运行中的 `app_config.report.aggregated`（`GET /system/experts` 与消费 `app_config` 的路径立即可见）、持久化的 `ui` 行（与 `PUT /config` 写的同一行，字段是三态 `Option<bool>`，配置页保存时未提及聚合也不会把它重置）、以及分发给 review 的运行时覆盖（REST 的 `run_review` 与 webhook 的 `run_review_common` 都重新解析配置文件、不读 `app_config`，所以这个覆盖是让下一次 review 真正看到该标志的机制）。
 
 #### `PUT /api/v1/system/experts/{id}`
 

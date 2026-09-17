@@ -625,6 +625,21 @@ export default {
     memoryOnlyTitle: '메모리에만 적용됨',
     memoryOnlyMessage:
       '{name}이(가) 업데이트되었지만 이 서버에는 설정 데이터베이스가 연결되어 있지 않아 다시 시작하면 변경 사항이 사라집니다. 전문가 설정을 유지하려면 데이터 디렉터리를 지정하고 REVIEW_DISABLE_DB=1 없이 서버를 시작하세요.',
+    aggregation: {
+      label: '집계 보고서',
+      hint: '모든 전문가의 리뷰 결과를 하나의 집계 보고서로 병합합니다. 집계기 전문가가 활성화된 경우에만 적용됩니다.',
+      toggleAria: '집계 보고서 전환',
+      enabledTitle: '집계 보고서 활성화됨',
+      enabledMessage: '다음 리뷰부터 집계가 실행됩니다.',
+      disabledTitle: '집계 보고서 비활성화됨',
+      disabledMessage: '다음 리뷰부터 집계가 실행되지 않습니다.',
+      updateFailed: '집계 보고서 설정을 업데이트하지 못했습니다. 변경을 되돌렸습니다.',
+      memoryOnlyTitle: '메모리에만 적용됨',
+      memoryOnlyMessage:
+        '집계 보고서 설정이 적용되었지만 이 서버에는 설정 데이터베이스가 연결되어 있지 않아 다시 시작하면 사라집니다. 유지하려면 데이터 디렉터리를 지정하고 REVIEW_DISABLE_DB=1 없이 서버를 시작하세요.',
+      rowEnabledButOff: '활성화되었지만 집계가 꺼져 있음',
+      rowOn: '집계 보고서 켜짐',
+    },
   },
   upgrade: {
     title: 'Review Engine 업그레이드',

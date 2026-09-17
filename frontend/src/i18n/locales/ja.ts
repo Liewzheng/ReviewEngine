@@ -626,6 +626,21 @@ export default {
     memoryOnlyTitle: 'メモリ上のみに適用されました',
     memoryOnlyMessage:
       '{name} を更新しましたが、このサーバーには設定データベースが接続されていないため、再起動すると変更は失われます。専門家の設定を永続化するには、データディレクトリを指定して（REVIEW_DISABLE_DB=1 を付けずに）サーバーを起動してください。',
+    aggregation: {
+      label: '集約レポート',
+      hint: 'すべての専門家のレビュー結果を1つの集約レポートにまとめます。集約エキスパートが有効な場合にのみ有効です。',
+      toggleAria: '集約レポートを切り替え',
+      enabledTitle: '集約レポートを有効化',
+      enabledMessage: '次のレビューから集約が実行されます。',
+      disabledTitle: '集約レポートを無効化',
+      disabledMessage: '次のレビューから集約は実行されません。',
+      updateFailed: '集約レポート設定の更新に失敗しました。元に戻しました。',
+      memoryOnlyTitle: 'メモリ上でのみ有効',
+      memoryOnlyMessage:
+        '集約レポート設定は適用されましたが、このサーバーには設定データベースが接続されていないため、再起動すると失われます。永続化するにはデータディレクトリを指定して（REVIEW_DISABLE_DB=1 を付けずに）サーバーを起動してください。',
+      rowEnabledButOff: '有効だが集約はオフ',
+      rowOn: '集約レポートがオン',
+    },
   },
   upgrade: {
     title: 'Review Engine をアップグレード',

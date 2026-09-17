@@ -1,3 +1,15 @@
+## [0.10.41] - 2026-09-17
+
+### Added
+- **The aggregation toggle lives on the experts page, and it reaches the review (RENG-95)**: whether the `aggregator` expert runs is decided by two independent things — that expert being enabled AND the report-level `report.aggregated` flag — but the flag had **no WebUI control at all** and defaults to `false`, so the page advertised 12 participating experts while 11 reported and `aggregated` stayed `null`. `GET /system/experts` now answers `{experts, aggregated}` (the array shape is unchanged) and a new `PUT /system/experts/aggregated` flips it — hot-applied and persisted, with the same honest `persisted: false` contract as the per-expert endpoint when no store is attached. The page carries a switch above the list, and the aggregator's card shows a warning tag (「已启用但聚合未开启」) when it is enabled while aggregation is off, so the mismatch cannot recur silently; the aggregator's drawer carries the same switch. (`src/server/api/system.rs`, `frontend/src/views/ExpertsManagement.vue`)
+
+### Fixed
+- **The flag is threaded into every review path instead of only landing in `app_config` (RENG-95)**: both review runners (`run_review` for REST, `run_review_common` for the webhook and GitHub chains) resolve their own config and never read `AppState::app_config` — the same reason RENG-69 had to thread the expert overrides. A toggle that only updated `app_config` would flip, persist, render on the page, and change **no review**. The WebUI decision is now published as `AppState::report_aggregated: RwLock<Option<bool>>` and applied over the config each runner resolves; `None` (nothing set in the UI) leaves the config file / inline request TOML in charge, so a request that asks for aggregation in its own TOML is never overridden by a user who never touched the switch.
+- **A configuration-page save can no longer turn aggregation off**: the value rides the existing `ui` app_settings projection as a tri-state `Option<bool>` — a payload that omits it keeps the stored value (the `disable_thinking` rule), pinned by a test that saves an unrelated config payload afterwards.
+
+### Notes
+- **Tests**: `GET /system/experts` reports the effective flag; the toggle flips the running value and the review path that consumes it sees it; it survives a restart and an unrelated `PUT /config`; a no-DB server answers memory-only; a failed store write surfaces as a 500 with nothing changed anywhere. Frontend: 5 composable tests (GET echo, optimistic flip, a diverging echo, failure reverts and rethrows, memory-only is not a clean success) plus four six-locale/pin cases. Rust lib **1916 passed** (2 ignored); frontend **196 passed** (10 files).
+
 ## [0.10.40] - 2026-09-16
 
 ### Added

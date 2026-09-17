@@ -389,6 +389,11 @@ pub fn load_and_apply_ui_state(state: &AppState, path: &Path, overrides: &UiStat
     let Some(file) = load_ui_state(path)? else {
         return Ok(false);
     };
+    // RENG-95: seed the runtime aggregation override from the persisted
+    // projection — `Some(_)` when the file carries the experts-page toggle,
+    // `None` when it predates the flag (the config file decides then). The
+    // replay below lands the same value on `app_config.report.aggregated`.
+    state.set_aggregation_override(file.ui.as_ref().and_then(|u| u.aggregated));
     apply_replay(state, &file, overrides, &path.display().to_string())?;
     Ok(true)
 }
@@ -511,6 +516,10 @@ pub async fn load_and_apply_ui_state_from_db(
         git_platforms: store.load_git_platforms().await?,
         gitlab: store.load_legacy_gitlab().await?,
     };
+    // RENG-95: seed the runtime aggregation override from the persisted `ui`
+    // row — the DB-over-file source of the experts-page toggle (see
+    // [`AppState::set_aggregation_override`]).
+    state.set_aggregation_override(file.ui.as_ref().and_then(|u| u.aggregated));
     let gitlab = &file.gitlab;
     let empty = file.ui.is_none()
         && file.llm.is_empty()

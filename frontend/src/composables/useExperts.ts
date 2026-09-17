@@ -1,7 +1,7 @@
 import { ref, computed } from 'vue';
-import { getExperts, updateExpert } from '../services/experts';
+import { getExperts, updateAggregated as updateAggregatedService, updateExpert } from '../services/experts';
 import { i18n } from '../i18n';
-import type { Expert, ExpertUpdateResult } from '../types/expert';
+import type { AggregatedUpdateResult, Expert, ExpertUpdateResult } from '../types/expert';
 
 /**
  * Composable for managing expert definitions and their configurations.
@@ -12,6 +12,13 @@ import type { Expert, ExpertUpdateResult } from '../types/expert';
 export function useExperts() {
   /** All expert definitions from the server. */
   const experts = ref<Expert[]>([]);
+  /**
+   * Effective report-level aggregation flag (RENG-95) — the value the review
+   * paths feed `select_aggregator_expert`, carried by `GET /system/experts`.
+   * The aggregator expert runs only when this is true AND the `aggregator`
+   * expert is enabled.
+   */
+  const aggregated = ref(false);
   /** True while the expert list is being fetched. */
   const loading = ref(false);
   /** Last error message. */
@@ -33,6 +40,7 @@ export function useExperts() {
     try {
       const response = await getExperts();
       reconcileExperts(response.experts);
+      aggregated.value = response.aggregated;
       if (silent) {
         error.value = null;
       }
@@ -99,6 +107,37 @@ export function useExperts() {
     }
   }
 
+  /**
+   * Flip the report-level aggregation flag (RENG-95).
+   *
+   * Optimistic, exactly like the per-expert enable switch: the local
+   * `aggregated` value flips synchronously (the view's switch follows
+   * immediately), the PUT goes out, and on success the server's echo is
+   * adopted. On failure the previous value is restored and the error rethrown,
+   * so the view only has to notify. The caller gates the surrounding poll via
+   * its in-flight guard (`savesInFlight`), so a background tick can never snap
+   * the switch back to the pre-PUT value mid-flight.
+   *
+   * The returned `persisted` flag follows the expert PUT's contract: `false`
+   * means the change is memory-only (no store attached) and the caller must
+   * warn instead of reporting a clean success.
+   */
+  async function setAggregated(value: boolean): Promise<AggregatedUpdateResult> {
+    const previous = aggregated.value;
+    // Optimistic flip before the request goes out.
+    aggregated.value = value;
+    error.value = null;
+    try {
+      const updated = await updateAggregatedService(value);
+      aggregated.value = updated.aggregated;
+      return updated;
+    } catch (e) {
+      aggregated.value = previous;
+      error.value = e instanceof Error ? e.message : i18n.global.t('errors.unknown');
+      throw e;
+    }
+  }
+
   /** Experts that are currently enabled. */
   const enabledExperts = computed(() => experts.value.filter((e) => e.enabled));
   /** Sum of weights for all enabled experts. */
@@ -108,9 +147,11 @@ export function useExperts() {
     experts,
     enabledExperts,
     totalWeight,
+    aggregated,
     loading,
     error,
     fetch,
     update,
+    setAggregated,
   };
 }

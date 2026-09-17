@@ -203,6 +203,12 @@ pub(crate) async fn gate_unchanged_content(
 /// config file, so the overrides are re-applied over `[review_experts]` here.
 /// `None` = no server state (CLI/tests) → the file values stand, exactly as
 /// before 0.10.24.
+///
+/// `server_aggregated` (RENG-95) is the aggregation-flag counterpart of
+/// `server_expert_overrides`: the WebUI-set `report.aggregated`, applied over
+/// the config this function resolves for itself (which never reads
+/// `AppState::app_config`). `None` = no server state → the resolved value
+/// stands.
 pub(crate) async fn run_review_common(
     url: &str,
     token: &str,
@@ -214,12 +220,18 @@ pub(crate) async fn run_review_common(
     server_llm_configs: Option<Vec<crate::models::LLMConfig>>,
     llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
     server_expert_overrides: Option<Arc<crate::config::ExpertOverrides>>,
+    server_aggregated: Option<bool>,
 ) -> anyhow::Result<crate::models::ReviewOutput> {
     use crate::config;
     use crate::team::orchestrator;
 
     let mut config = config::resolve_config(None).await?;
     apply_server_expert_overrides(&mut config, server_expert_overrides.as_deref());
+    // RENG-95: the WebUI's aggregation decision (when there is one) wins over
+    // the resolved config's `[report] aggregated`, the same DB-over-file rule.
+    if let Some(aggregated) = server_aggregated {
+        config.report.aggregated = aggregated;
+    }
 
     if diff.is_empty() {
         tracing::info!("No diff changes, skipping review");

@@ -131,18 +131,23 @@ fn is_absolute_http_url(raw: &str) -> bool {
 ///   the one affordance "blank = keep" leaves no room for.
 ///
 /// Identity (RENG-96): which stored entry a submission is about is decided
-/// by the entry's stable `id` when the payload carries one, falling back to
-/// `name` for pre-RENG-96 clients. `baseUrl` is NEVER part of the match —
-/// it is an editable address, so repointing an entry keeps its credentials
-/// (a same-named entry pointing at a different instance is a DIFFERENT
-/// entry exactly when the payload says so: different id or, for legacy
-/// clients, a name with no stored match). A stored entry the payload
-/// matches keeps its own id; a truly new entry gets a freshly generated id.
-/// Existing databases keep working: a row whose id was never threaded
-/// through (legacy rows/files) gets one on the next write, and its
-/// credentials survive that write because the name fallback resolves them
-/// before the fresh id is assigned. Duplicate submission identities in one
-/// array: last write wins.
+/// by the entry's stable `id`. A well-formed submitted id is the entry's
+/// identity and is ALWAYS kept — even when no stored entry carries it yet
+/// (a cold-start replay re-feeds the persisted ids into an empty store;
+/// re-minting there would make ids drift on every restart). `baseUrl` is
+/// NEVER part of the match — it is an editable address, so repointing an
+/// entry keeps its credentials (a same-named entry pointing at a different
+/// instance is a DIFFERENT entry exactly when the payload says so:
+/// different id or, for legacy clients, a name with no stored match).
+/// Secrets keep from the id-matched stored entry, else the name-matched
+/// one, else nothing. An absent or malformed id falls back to the legacy
+/// `name` matching (pre-RENG-96 clients), adopting the matched stored
+/// entry's id; a truly new entry gets a freshly generated id — the ONLY
+/// case an id is ever minted. Existing databases keep working: a row whose
+/// id was never threaded through (legacy rows/files) gets one on the next
+/// write, and its credentials survive that write because the name fallback
+/// resolves them before the fresh id is assigned. Duplicate submission
+/// identities in one array: last write wins.
 fn resolve_git_platforms(
     submitted: &[UiGitPlatformConfig],
     existing: &[crate::models::GitPlatformConfig],
@@ -209,28 +214,36 @@ fn resolve_git_platforms(
                 })),
             ));
         }
-        // Secret-keep identity (RENG-96): the entry's stable `id` when the
-        // payload carries one (the UI echoes it from GET /config), falling
-        // back to `name` for pre-RENG-96 clients. `baseUrl` is NEVER part of
-        // the match: it is an editable address, so repointing an entry must
-        // keep its credentials, and an id-carrying payload updates THAT entry
-        // however its name/baseUrl changed. An id no stored entry carries is
-        // treated like an absent one (name fallback) — a stale/deleted id
-        // must not silently become a new entry.
-        let stored = if p.id.is_empty() {
-            existing.iter().find(|e| e.name == name)
-        } else {
+        // Secret-keep identity (RENG-96): the entry's stable `id`. A
+        // well-formed submitted id IS the entry's identity — it is kept even
+        // when this session's store cannot look it up, because a cold-start
+        // replay re-feeds the persisted ids into an empty store and
+        // re-minting would make the id drift on every restart (the one
+        // remaining way a rename + restart could lose credentials). Secrets
+        // keep from the id-matched stored entry, else the name-matched one,
+        // else nothing. An absent or malformed id falls back to the legacy
+        // `name` matching (pre-RENG-96 clients), adopting the matched stored
+        // entry's id; a genuinely new entry gets a freshly generated id.
+        let id_raw = p.id.trim();
+        let id_is_well_formed = uuid::Uuid::parse_str(id_raw).is_ok();
+        let stored = if id_is_well_formed {
             existing
                 .iter()
-                .find(|e| e.id == p.id)
+                .find(|e| e.id == id_raw)
                 .or_else(|| existing.iter().find(|e| e.name == name))
+        } else {
+            existing.iter().find(|e| e.name == name)
         };
-        // The matched stored entry keeps its own id; a brand-new entry (or a
-        // legacy row that never carried one) gets a freshly generated id.
-        let id = stored
-            .map(|s| s.id.clone())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let id = if id_is_well_formed {
+            id_raw.to_string()
+        } else {
+            // Absent or malformed: adopt the name-matched entry's id (legacy
+            // round trip) or mint one for a genuinely new entry.
+            stored
+                .map(|s| s.id.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+        };
         let keep = |submitted: &str, pick: fn(&crate::models::GitPlatformConfig) -> &str| -> String {
             if submitted == CLEAR_SECRET_SENTINEL {
                 // The UI's explicit clear affordance; blank/mask mean "keep".

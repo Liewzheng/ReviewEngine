@@ -1873,11 +1873,13 @@ async fn put_git_platforms_same_name_different_ids_are_distinct() {
     assert_eq!(platforms[1].token, "glpat-b");
 }
 
-/// An id no stored entry carries falls back to matching by name (a legacy
-/// client's id-less save behaves the same): the stored entry is updated,
-/// keeps its secrets, and keeps its OWN id.
+/// A well-formed id no stored entry carries (e.g. the cold-start replay,
+/// where the persisted ids are re-fed into an empty store) is KEPT as the
+/// entry's identity — the id is never re-minted just because this session
+/// cannot look it up. Secrets still keep via the name fallback, so a
+/// stale-id payload that names an existing entry keeps its credentials.
 #[tokio::test]
-async fn put_git_platforms_unknown_id_falls_back_to_name_match() {
+async fn put_git_platforms_unknown_id_keeps_secrets_and_identity() {
     let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
     let _guard = GitLabRuntimeGuard::new();
     let state = state_with_openai("sk-primary");
@@ -1890,6 +1892,7 @@ async fn put_git_platforms_unknown_id_falls_back_to_name_match() {
     .into_response();
     assert_eq!(resp.status(), StatusCode::OK);
     let first = stored_platform(&state, "testbed").unwrap();
+    assert_ne!(first.id, "00000000-0000-4000-8000-000000000000");
 
     let resp = put_config(
         State(state.clone()),
@@ -1908,11 +1911,97 @@ async fn put_git_platforms_unknown_id_falls_back_to_name_match() {
     .into_response();
     assert_eq!(resp.status(), StatusCode::OK);
     let stored = stored_platform(&state, "testbed").unwrap();
-    assert_eq!(stored.token, "glpat-platform", "name fallback keeps the secrets");
+    assert_eq!(
+        stored.id, "00000000-0000-4000-8000-000000000000",
+        "a well-formed submitted id is the identity and is kept verbatim"
+    );
+    assert_eq!(
+        stored.token, "glpat-platform",
+        "the name fallback still keeps the secrets for an id-carrying payload"
+    );
+    assert_eq!(state.git_platforms.read().unwrap().len(), 1);
+}
+
+/// A malformed id (not a UUID) is not a usable identity: it is treated like
+/// an absent one — name fallback, adopting the stored entry's id and
+/// keeping its secrets. Only an entry that genuinely has no id (or a
+/// malformed one with no name match) ever gets a freshly generated id.
+#[tokio::test]
+async fn put_git_platforms_malformed_id_treated_as_absent() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let first = stored_platform(&state, "testbed").unwrap();
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "gitPlatforms": [{
+                "id": "not-a-uuid",
+                "name": "testbed",
+                "type": "gitlab",
+                "baseUrl": "http://gitlab.internal:8929",
+                "token": API_KEY_MASK,
+                "webhookSecret": API_KEY_MASK
+            }]
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let stored = stored_platform(&state, "testbed").unwrap();
     assert_eq!(
         stored.id, first.id,
-        "the stored entry keeps its own id (the unknown submitted id is discarded)"
+        "a malformed id is discarded; the stored entry keeps its own id"
     );
+    assert_eq!(stored.token, "glpat-platform", "secrets survive via the name fallback");
+    assert_eq!(state.git_platforms.read().unwrap().len(), 1);
+}
+
+/// A brand-new entry with NO id gets a freshly generated one — the only
+/// case an id is minted — and the minted id survives a rename in place.
+#[tokio::test]
+async fn put_git_platforms_new_entry_gets_and_keeps_a_minted_id() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let _guard = GitLabRuntimeGuard::new();
+    let state = state_with_openai("sk-primary");
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [testbed_platform_json()] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let created = stored_platform(&state, "testbed").unwrap();
+    assert!(
+        uuid::Uuid::parse_str(&created.id).is_ok(),
+        "a minted id must be a well-formed UUID: {}",
+        created.id
+    );
+
+    // The GET echo (id now present) renamed → the minted id is stable.
+    let body = config_response_body(get_config(State(state.clone())).await.into_response()).await;
+    let mut entry = body["gitPlatforms"][0].clone();
+    entry["name"] = serde_json::json!("renamed");
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "gitPlatforms": [entry] })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let renamed = stored_platform(&state, "renamed").unwrap();
+    assert_eq!(renamed.id, created.id, "the minted id is stable across a rename");
+    assert_eq!(renamed.token, "glpat-platform");
     assert_eq!(state.git_platforms.read().unwrap().len(), 1);
 }
 
@@ -2086,6 +2175,53 @@ async fn git_platform_probe_falls_back_to_stored_token_when_masked() {
         );
         assert_eq!(body["version"], "19.2.4-ee");
     }
+}
+
+/// RENG-96: the masked-token fallback matches by the entry's stable `id`
+/// first, so a probe against a NEW address still resolves the stored token
+/// of the (repointed) entry — repointing baseUrl must not orphan the probe.
+#[tokio::test]
+async fn git_platform_probe_resolves_masked_token_by_id() {
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v4/version"))
+        .and(header("Authorization", "Bearer glpat-stored-by-id"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "version": "19.2.4-ee" })))
+        .mount(&server)
+        .await;
+
+    let state = Arc::new(AppState::new(vec![]));
+    *state.git_platforms.write().unwrap() = vec![crate::models::GitPlatformConfig {
+        id: "5e3a1c8e-0000-4000-8000-0000000000aa".to_string(),
+        name: "testbed".to_string(),
+        platform_type: "gitlab".to_string(),
+        // The entry was repointed: its stored baseUrl no longer matches the
+        // probed address — only the id ties the probe to the entry.
+        base_url: "http://old-address.invalid".to_string(),
+        internal_base_url: String::new(),
+        token: "glpat-stored-by-id".to_string(),
+        webhook_secret: String::new(),
+        webhook_signing_secret: String::new(),
+        allowed_projects: Vec::new(),
+    }];
+
+    let req: super::helpers::TestGitPlatformRequest = serde_json::from_value(serde_json::json!({
+        "baseUrl": server.uri(),
+        "token": API_KEY_MASK,
+        "id": "5e3a1c8e-0000-4000-8000-0000000000aa"
+    }))
+    .expect("TestGitPlatformRequest must deserialize");
+    let resp = super::helpers::test_git_platform(State(state), Json(req))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK, "probe errors stay in the body");
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["ok"], true, "the id match must resolve the stored token: {body}");
+    assert_eq!(body["version"], "19.2.4-ee");
 }
 
 /// Probe failures surface in the body: HTTP errors as `HTTP <status>`, and

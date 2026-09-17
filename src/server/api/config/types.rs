@@ -47,10 +47,11 @@ pub struct UiConfig {
 #[serde(rename_all = "camelCase")]
 pub struct UiGitPlatformConfig {
     /// Stable entry identity (RENG-96). `GET /config` echoes it; a `PUT`
-    /// payload carrying a known id updates THAT entry (and keeps its
-    /// credentials) regardless of `name`/`baseUrl` changes. Absent or
-    /// unknown ids fall back to matching by `name` (pre-RENG-96 clients).
-    /// Never displayed by the UI.
+    /// payload carrying a well-formed id is that entry — the id is kept
+    /// even when the store does not carry it yet (cold-start replay), so it
+    /// never drifts across restarts, and the entry's credentials follow it
+    /// however `name`/`baseUrl` changed. Absent or malformed ids fall back
+    /// to matching by `name` (pre-RENG-96 clients). Never displayed by the UI.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     #[serde(default)]

@@ -241,7 +241,7 @@ Git platform instances are **not** read from `.code-audit-config.toml`: they are
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `id` | string (UUID, optional) | `""` | **Stable entry identity** (RENG-96). Assigned on first save; never shown in the UI. `PUT /api/v1/config` secret-keep matches on this id first, falling back to `name` for pre-RENG-96 payloads. A legacy row without one gets it on the next write without losing its credentials |
+| `id` | string (UUID, optional) | `""` | **Stable entry identity** (RENG-96). Assigned on first save; never shown in the UI. `PUT /api/v1/config` secret-keep matches on this id first, falling back to `name` for pre-RENG-96 (id-less) payloads; a well-formed id is kept even on a cold-start replay, so it never drifts across restarts. A legacy row without one gets it on the next write without losing its credentials |
 | `name` | string | `""` | Unique, user-chosen instance name; a display label and the secret-keep fallback key for id-less payloads |
 | `type` | string | `"gitlab"` | Platform kind; only `gitlab` is implemented |
 | `base_url` | string | `""` | Instance URL as it appears in GitLab payloads and pasted MR URLs (`external_url`); used to **match** inbound webhooks and REST `gitlab_mr` submissions (Web UI field `baseUrl`) |

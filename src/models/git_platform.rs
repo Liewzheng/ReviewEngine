@@ -21,8 +21,11 @@ pub struct GitPlatformConfig {
     /// user-editable label and `base_url` is an editable address, so neither
     /// is a safe key for keeping credentials across an edit. The secret-keep
     /// resolution matches stored entries on this id first, falling back to
-    /// `name` for pre-RENG-96 clients. Empty (legacy rows/files) gets a fresh
-    /// id on the next write; the credentials survive that write.
+    /// `name` for pre-RENG-96 clients; a well-formed submitted id is kept
+    /// even when no stored entry carries it yet (cold-start replays re-feed
+    /// the persisted ids, so ids never drift across restarts). Empty (legacy
+    /// rows/files) gets a fresh id on the next write; the credentials
+    /// survive that write.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub id: String,
     /// Unique, user-chosen instance name; a display label and the legacy

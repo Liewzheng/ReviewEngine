@@ -633,6 +633,22 @@ pub(crate) fn apply_ui_config(
     // Store the resolved live platform set and project the masked shape into
     // the UI config (which `GET /config` serializes).
     *state.git_platforms.write().unwrap() = new_platforms.clone();
+
+    // RENG-97: a cached probe outcome describes the entry it probed — a
+    // removed entry must not keep serving its old verdict (a changed token is
+    // already invalidated at lookup time by the fingerprint). The next read of
+    // the dashboard / `/system/health` reports the removed entry as
+    // never-probed again instead of the pre-change status.
+    {
+        let dropped = state.git_health.retain_live(&new_platforms);
+        if dropped > 0 {
+            tracing::debug!(
+                dropped,
+                "dropped cached git platform health for removed entries (RENG-97)"
+            );
+        }
+    }
+
     body.git_platforms = new_platforms
         .iter()
         .map(|p| UiGitPlatformConfig {

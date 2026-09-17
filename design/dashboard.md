@@ -110,9 +110,10 @@ interface TrendPoint {
 **Layout**:
 ```
 System Health
-├── Integration Status
-│   ├── GitLab API      [green dot]  Connected
-│   └── GitHub API      [gray dot]   Not Configured
+├── Integration Status   (RENG-97: probe-cache verdicts, never entry presence)
+│   ├── GitLab API      [green dot]  Configured · Last test: 3 min ago
+│   ├── GitHub API      [gray dot]   Not configured
+│   └── GitLab API      [blue dot]   Not probed yet
 │
 ├── LLM Providers
 │   ├── OpenAI GPT-4    [green dot]  Healthy  ·  234ms
@@ -128,6 +129,15 @@ System Health
 - Left: icon (16px) + service name (13px, `--text-primary`) + optional config badge (12px, `--text-secondary`)
 - Right: `StatusBadge` (dot-only or text) + latency (12px, JetBrains Mono, `--text-secondary`)
 
+**Integration status source (RENG-97)**: the integration rows report the
+platform probe cache — the Configuration page's `POST /config/git-platforms/test`
+is the single source of truth that the dashboard and `GET /system/health` both
+read. Entry presence (a `git_platforms` row, or a startup env/CLI token flag)
+is never health: a configured-but-unprobed integration reads `unknown`
+("Not probed yet"), a failed probe reads `error` with the failure message, and
+only a real successful probe reads `success` (carrying the probe's `latencyMs`
+and `checkedAt`, so a stale result is visible).
+
 **Overall status**: Full `StatusBadge` at bottom of card, centered or right-aligned.
 
 **Data structure**:
@@ -135,8 +145,9 @@ System Health
 interface HealthStatus {
   service: string;
   type: 'integration' | 'llm';
-  status: 'success' | 'warning' | 'error' | 'offline';
-  latencyMs?: number;
+  status: 'success' | 'warning' | 'error' | 'offline' | 'unknown';
+  latencyMs?: number;  // real probe round-trip; present only after a successful probe
+  checkedAt?: string;  // probe timestamp (RFC3339); absent when nothing was probed
   message?: string;
 }
 

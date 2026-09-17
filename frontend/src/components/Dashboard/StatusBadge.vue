@@ -28,6 +28,7 @@ const statusTextKeys: Record<string, string> = {
   warning: 'common.status.degraded',
   error: 'common.status.error',
   offline: 'common.status.offline',
+  unknown: 'common.status.unknown',
   running: 'common.status.inProgress',
   queued: 'common.status.queued',
   completed: 'common.status.completed',
@@ -70,6 +71,10 @@ const displayText = computed(() => {
 .status-dot.status-offline {
   background: var(--offline);
   box-shadow: 0 0 0 2px var(--accent-offline-ring);
+}
+.status-dot.status-unknown {
+  background: var(--text-secondary);
+  box-shadow: 0 0 0 2px var(--text-secondary-ring);
 }
 .status-dot.status-running {
   background: var(--accent-success);

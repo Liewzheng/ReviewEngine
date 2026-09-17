@@ -57,6 +57,7 @@ export default {
       degraded: 'Dégradé',
       error: 'Erreur',
       offline: 'Hors ligne',
+      unknown: 'Inconnu',
       inProgress: 'En cours',
       running: "En cours d'exécution",
       queued: 'En file',
@@ -131,6 +132,8 @@ export default {
     health: {
       title: 'État du système',
       integrations: 'État des intégrations',
+      notProbed: 'Pas encore testé',
+      notConfigured: 'Non configuré',
       llmProviders: 'Fournisseurs LLM',
       allOperational: 'Tous les systèmes opérationnels',
       someDegraded: 'Certains systèmes dégradés',

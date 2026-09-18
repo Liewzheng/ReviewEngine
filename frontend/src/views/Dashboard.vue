@@ -33,9 +33,10 @@ import { CHART_PALETTE_FALLBACKS, CHART_SERIES_FALLBACK } from '../chartPalette'
 import KpiCard from '../components/Dashboard/KpiCard.vue'
 import StatusBadge from '../components/Dashboard/StatusBadge.vue'
 import CardPanel from '../components/common/CardPanel.vue'
+import EllipsisText from '../components/common/EllipsisText.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import LastUpdated from '../components/common/LastUpdated.vue'
-import type { HealthStatus, KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
+import type { HealthStatus, HealthState, KpiData, TrendPoint, SystemHealth, StorageHealth, RecentReview } from '../types/dashboard'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -135,6 +136,23 @@ function integrationMessage(item: HealthStatus): string | undefined {
  *  relative words — the "stale result" signal RENG-97 requires. */
 function integrationCheckedAt(item: HealthStatus): string | null {
   return item.checkedAt ? timeAgo(item.checkedAt) : null
+}
+
+/**
+ * The 存储 row's detail (RENG-106). A healthy verdict is a static state, so it
+ * is i18n'd here and the raw backend words stay out of the UI — the same rule
+ * the integration rows follow. A failure keeps the probe's own words: sqlite's
+ * error plus the ownership cause (`review.db-wal 属主 uid 1026…`), which is the
+ * whole diagnosis and never locale-aware.
+ */
+function storageMessage(item: StorageHealth): string {
+  return item.status === 'healthy' ? t('dashboard.health.storageWritable') : item.message
+}
+
+/** The badge's vocabulary for the storage verdict: the backend says
+ *  `healthy`/`error`, `StatusBadge` speaks `success`/`error`. */
+function storageState(item: StorageHealth): HealthState {
+  return item.status === 'healthy' ? 'success' : 'error'
 }
 
 function formatTime(iso: string): string {
@@ -596,13 +614,15 @@ onUnmounted(() => {
                 :class="{ 'last-row': idx === health.integrations.length - 1 }"
               >
                 <div class="health-row-left">
-                  <span class="health-service">{{ item.service }}</span>
+                  <span class="health-service"><EllipsisText :text="item.service" /></span>
                 </div>
                 <div class="health-row-right">
                   <StatusBadge :status="item.status" show-text size="small" />
-                  <span v-if="integrationMessage(item)" class="health-latency">{{ integrationMessage(item) }}</span>
-                  <span v-if="integrationCheckedAt(item)" class="health-latency">
-                    {{ $t('common.lastTest', { date: integrationCheckedAt(item) }) }}
+                  <span v-if="integrationMessage(item)" class="health-latency">
+                    <EllipsisText :text="integrationMessage(item) ?? ''" />
+                  </span>
+                  <span v-if="integrationCheckedAt(item)" class="health-latency health-latency-ts">
+                    <EllipsisText :text="$t('common.lastTest', { date: integrationCheckedAt(item) })" />
                   </span>
                 </div>
               </div>
@@ -618,12 +638,39 @@ onUnmounted(() => {
                 :class="{ 'last-row': idx === health.llmProviders.length - 1 }"
               >
                 <div class="health-row-left">
-                  <span class="health-service">{{ item.service }}</span>
+                  <span class="health-service"><EllipsisText :text="item.service" /></span>
                 </div>
                 <div class="health-row-right">
                   <StatusBadge :status="item.status" show-text size="small" />
-                  <span v-if="item.message" class="health-latency">{{ item.message }}</span>
+                  <span v-if="item.message" class="health-latency">
+                    <EllipsisText :text="item.message ?? ''" />
+                  </span>
                 </div>
+              </div>
+            </div>
+
+            <!-- Storage (RENG-106): the database's own write test, so a
+                 deployment losing every write cannot look healthy. -->
+            <div v-if="health.storage" class="health-section">
+              <div class="health-section-title">{{ $t('dashboard.health.storage') }}</div>
+              <div class="health-row last-row">
+                <div class="health-row-left">
+                  <span class="health-service">{{ $t('dashboard.health.database') }}</span>
+                </div>
+                <div class="health-row-right">
+                  <StatusBadge :status="storageState(health.storage)" show-text size="small" />
+                  <span class="health-latency">
+                    <EllipsisText :text="storageMessage(health.storage)" />
+                  </span>
+                  <span v-if="health.storage.checkedAt" class="health-latency health-latency-ts">
+                    <EllipsisText :text="$t('common.lastTest', { date: timeAgo(health.storage.checkedAt) })" />
+                  </span>
+                </div>
+              </div>
+              <!-- The remedy only appears when there is something to remedy:
+                   the write test failing is what the doctor repairs. -->
+              <div v-if="health.storage.status === 'error'" class="health-hint">
+                {{ $t('dashboard.health.storageHint') }}
               </div>
             </div>
 
@@ -748,10 +795,10 @@ onUnmounted(() => {
   box-shadow: var(--shadow-card);
 }
 
-/* Row 2 */
+/* Row 2: 16fr/9fr = chart 64% / health 36% (health +20% vs 7fr/3fr's 30%) */
 .row-two {
   display: grid;
-  grid-template-columns: 7fr 3fr;
+  grid-template-columns: 16fr 9fr;
   gap: var(--space-4);
   margin-bottom: var(--space-5);
 }
@@ -890,6 +937,12 @@ onUnmounted(() => {
   padding-left: var(--space-1);
 }
 
+.health-row-left {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
 .health-row {
   display: flex;
   justify-content: space-between;
@@ -906,12 +959,22 @@ onUnmounted(() => {
   font-size: 13px;
   color: var(--text-primary);
   font-weight: 500;
+  min-width: 0;
 }
 
 .health-row-right {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
+}
+
+.health-row-right :deep(.status-badge) {
+  flex: 0 0 auto;
+}
+
+.health-row-right :deep(.status-text) {
+  white-space: nowrap;
 }
 
 .health-latency {
@@ -920,6 +983,19 @@ onUnmounted(() => {
   font-family: var(--font-mono);
   min-width: 48px;
   text-align: right;
+}
+
+.health-latency-ts {
+  flex: 0 0 auto;
+}
+
+/* The 存储 row's remedy (RENG-106) — a hint, not a status: it only appears
+   when the write test failed, so a healthy card carries no extra line. */
+.health-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  padding-top: var(--space-1);
 }
 
 .health-overall {
@@ -1033,8 +1109,9 @@ onUnmounted(() => {
 
 /* Responsive */
 @media (max-width: 1279px) {
+  /* 13fr/12fr = chart 52% / health 48% (health +20% vs 3fr/2fr's 40%) */
   .row-two {
-    grid-template-columns: 3fr 2fr;
+    grid-template-columns: 13fr 12fr;
   }
 }
 

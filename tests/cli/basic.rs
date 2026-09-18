@@ -76,6 +76,27 @@ fn audit_is_visible_alias_of_repo_review() {
     }
 }
 
+/// RENG-106: the doctor's clap surface. `--fix` and `--quiet` are documented
+/// and accepted on the binary itself (the container entrypoint calls
+/// `doctor --fix --quiet`, so the flags must exist in the shipped CLI).
+#[test]
+fn doctor_help_exposes_fix_and_quiet() {
+    let output = run(&["doctor", "--help"], None);
+    assert!(output.status.success(), "doctor --help failed: {:?}", output);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for key in ["--fix", "--quiet", "doctor [OPTIONS]"] {
+        assert!(stdout.contains(key), "doctor --help missing {:?}: {}", key, stdout);
+    }
+    // The subcommand is discoverable from the root help.
+    let root = run(&["--help"], None);
+    let root_stdout = String::from_utf8_lossy(&root.stdout);
+    assert!(
+        root_stdout.contains("doctor"),
+        "root --help missing doctor: {}",
+        root_stdout
+    );
+}
+
 /// The displayed program name follows argv[0]'s basename, so a `reng`
 /// symlink shows `reng` in help/usage instead of `review-engine`.
 #[cfg(unix)]

@@ -19,6 +19,8 @@ pub mod config;
 pub mod context;
 pub mod coverage;
 pub mod diff;
+/// Storage diagnosis and self-repair: `reng doctor [--fix]` (RENG-106).
+pub mod doctor;
 pub mod error;
 pub mod expert;
 pub mod feedback;

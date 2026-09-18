@@ -133,6 +133,36 @@ fn serve_data_dir_parses_and_repoints_the_whole_state_layout() {
     assert!(parse(&["--data-dir", root, "serve"]).is_err());
 }
 
+/// RENG-106: `reng doctor [--fix] [--quiet]` — both flags optional, neither
+/// implied, and `--fix` is not the default (a bare `reng doctor` must never
+/// mutate anything).
+#[test]
+fn doctor_parses_fix_and_quiet_independently() {
+    match parse_ok(&["doctor"]).command {
+        Some(Commands::Doctor { fix, quiet }) => {
+            assert!(!fix, "a bare `reng doctor` only diagnoses");
+            assert!(!quiet);
+        }
+        other => panic!("expected Doctor, got {other:?}"),
+    }
+    match parse_ok(&["doctor", "--fix"]).command {
+        Some(Commands::Doctor { fix, quiet }) => {
+            assert!(fix);
+            assert!(!quiet);
+        }
+        other => panic!("expected Doctor, got {other:?}"),
+    }
+    match parse_ok(&["doctor", "--fix", "--quiet"]).command {
+        Some(Commands::Doctor { fix, quiet }) => {
+            assert!(fix);
+            assert!(quiet);
+        }
+        other => panic!("expected Doctor, got {other:?}"),
+    }
+    // The flags belong to `doctor` alone.
+    assert!(parse(&["validate", "--fix"]).is_err());
+}
+
 #[test]
 fn validate_accepts_config_path() {
     let cli = parse_ok(&["validate", "--config", "/tmp/.code-audit-config.toml"]);

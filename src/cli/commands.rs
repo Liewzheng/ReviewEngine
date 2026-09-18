@@ -107,6 +107,33 @@ pub enum Commands {
         publish: bool,
     },
 
+    /// Diagnose the persistent store, and optionally repair it
+    ///
+    /// Checks the config directory, `review.db` and its WAL sidecars
+    /// (`review.db-wal` / `review.db-shm`), then runs a real, harmless write
+    /// test — the definitive "can the database be written" verdict. Exits
+    /// non-zero when any check fails.
+    ///
+    /// `--fix` repairs the one failure an unprivileged user can repair: a
+    /// sidecar owned by another uid (e.g. a host process touched it) makes
+    /// every write fail with `attempt to write a readonly database`. Deleting
+    /// a sidecar only needs write permission on the DIRECTORY, so it works
+    /// without root; SQLite recreates it with the current uid on the next
+    /// write, and a running server recovers without a restart. A non-empty
+    /// `-wal` may hold uncommitted transactions and is therefore never
+    /// deleted — stop reng gracefully and re-run. `review.db` itself is never
+    /// modified, moved or chmod-ed.
+    Doctor {
+        /// Repair what can be repaired without root (see above)
+        #[arg(long)]
+        fix: bool,
+
+        /// Print nothing while every check passes; report only the failures
+        /// (used by the container entrypoint's startup self-heal)
+        #[arg(long)]
+        quiet: bool,
+    },
+
     /// Validate a .code-audit-config.toml file
     Validate {
         /// Path to config file

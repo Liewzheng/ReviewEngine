@@ -84,6 +84,9 @@ fn backend_kind_of(url: &str) -> BackendKind {
 pub struct SqlxStore {
     pool: ::sqlx::AnyPool,
     kind: BackendKind,
+    /// `sqlite::memory:` (tests, embedded use): there is no file behind the
+    /// pool, so nothing on disk can be checked (RENG-106's storage probe asks).
+    in_memory: bool,
     pub(crate) key: [u8; 32],
 }
 
@@ -119,7 +122,12 @@ impl SqlxStore {
         if kind == BackendKind::Sqlite {
             apply_sqlite_pragmas(&pool).await?;
         }
-        Ok(Self { pool, kind, key })
+        Ok(Self {
+            pool,
+            kind,
+            in_memory: url.contains(":memory:"),
+            key,
+        })
     }
 
     /// Connect to the default embedded SQLite database under `config_dir`
@@ -154,6 +162,7 @@ impl SqlxStore {
         Ok(Self {
             pool,
             kind: BackendKind::Sqlite,
+            in_memory: true,
             key,
         })
     }
@@ -169,6 +178,12 @@ impl SqlxStore {
     /// (PostgreSQL or SQLite).
     pub fn backend_kind(&self) -> BackendKind {
         self.kind
+    }
+
+    /// True for `sqlite::memory:` — no file behind the pool, so a
+    /// file-permission diagnosis has nothing to inspect (RENG-106).
+    pub fn is_in_memory(&self) -> bool {
+        self.in_memory
     }
 
     /// Access the underlying pool (used by trait implementations in

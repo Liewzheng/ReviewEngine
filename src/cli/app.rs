@@ -192,6 +192,15 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Review { .. } => {
             anyhow::bail!("Please specify --mr-url, --diff, --stdin, --local-path, or --path");
         }
+        Commands::Doctor { fix, quiet } => {
+            // The doctor prints its own report (and its own failures); all this
+            // layer owns is the exit code, which is what scripts and the
+            // entrypoint's `|| true` read.
+            let code = review_engine::doctor::run(fix, quiet).await;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
         Commands::Validate { config } => {
             let config = match config {
                 Some(path) => path,

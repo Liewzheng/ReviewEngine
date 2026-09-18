@@ -152,12 +152,22 @@ async fn system_health(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         .map(|db| db.backend_kind().as_str())
         .unwrap_or("disabled");
 
+    // RENG-106: the 存储 row — a REAL write test through the store's own pool
+    // (`PRAGMA user_version=<current>`), cached for ~60 s so a polling client
+    // does not write to the WAL on every request. On failure it carries
+    // sqlite's own error plus the ownership/mode cause, because
+    // `attempt to write a readonly database` never names the file.
+    let storage = super::storage_health::storage_health(&state).await;
+
     Json(serde_json::json!({
         "integrations": integrations,
         "llmProviders": llm_providers,
         "llmConfigured": llm_configured,
         "storage_backend": storage_backend,
-        "overall": overall,
+        "storage": storage.to_json(),
+        // A database that cannot be written is losing reviews right now, which
+        // no LLM row can outrank.
+        "overall": super::storage_health::overall_with_storage(overall, &storage),
         "lastChecked": chrono::Utc::now().to_rfc3339(),
     }))
     .into_response()
@@ -1474,6 +1484,90 @@ mod tests {
     async fn system_health_reports_storage_backend_disabled_without_db() {
         let body = health_json(AppState::new(vec![])).await;
         assert_eq!(body["storage_backend"], "disabled", "no db attached: {body}");
+    }
+
+    // ─── RENG-106: the 存储 entry is a real write test ───
+
+    /// A real SQLite store passes the write test, so the 存储 entry is
+    /// `healthy` with a timestamp and the panel keeps its LLM verdict.
+    #[tokio::test]
+    async fn system_health_storage_entry_reports_a_writable_database() {
+        let mut state = AppState::new(vec![]);
+        state.db = Some(Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap()));
+        let body = health_json(state).await;
+        let storage = &body["storage"];
+        assert_eq!(storage["status"], "healthy", "a writable store must pass: {body}");
+        assert_eq!(
+            storage["message"], "SQLite in memory",
+            "an in-memory store is reported as such, not as a file: {storage}"
+        );
+        assert!(
+            storage["checkedAt"].as_str().is_some_and(|at| at.contains('T')),
+            "the entry carries an iso8601 timestamp: {storage}"
+        );
+        // The pre-existing backend field is untouched by the new entry.
+        assert_eq!(body["storage_backend"], "sqlite");
+    }
+
+    /// A failing write test reads `error` with sqlite's own words — never
+    /// `healthy` — and drags `overall` to `error` even while every provider is
+    /// fine. This is the incident: reviews kept running and posting while the
+    /// database silently lost every write.
+    #[tokio::test]
+    async fn system_health_storage_failure_degrades_overall() {
+        let mut state = AppState::new(vec![llm_config("https://api.openai.example/v1")]);
+        state.db = Some(Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap()));
+        state.storage_health = Arc::new(crate::server::api::storage_health::StorageHealthStore::with_probe(
+            Arc::new(|_target| {
+                Box::pin(async {
+                    crate::server::api::storage_health::StorageHealth::error(
+                        "attempt to write a readonly database（review.db-wal 属主 uid 1026，当前进程 uid 9001 无法写入）",
+                    )
+                })
+            }),
+            std::time::Duration::from_secs(60),
+        ));
+
+        let body = health_json(state).await;
+        assert_eq!(
+            body["storage"]["status"], "error",
+            "a database losing writes must not read healthy: {body}"
+        );
+        let message = body["storage"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("attempt to write a readonly database"), "{message}");
+        assert!(message.contains("uid 1026"), "the cause names the owner: {message}");
+        assert_eq!(
+            body["overall"], "error",
+            "storage must outrank the LLM rows in the aggregate: {body}"
+        );
+    }
+
+    /// The probe is CACHED: the health poll must not write to the WAL on every
+    /// request. Five reads inside the TTL share one probe.
+    #[tokio::test]
+    async fn system_health_storage_probe_is_cached_across_requests() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let calls = Arc::new(AtomicU32::new(0));
+        let counter = calls.clone();
+        let mut state = AppState::new(vec![]);
+        state.db = Some(Arc::new(crate::store::SqlxStore::new_in_memory().await.unwrap()));
+        state.storage_health = Arc::new(crate::server::api::storage_health::StorageHealthStore::with_probe(
+            Arc::new(move |_target| {
+                let counter = counter.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    crate::server::api::storage_health::StorageHealth::healthy("Write test passed")
+                })
+            }),
+            std::time::Duration::from_secs(60),
+        ));
+
+        let state = Arc::new(state);
+        for _ in 0..5 {
+            let body = health_json_arc(state.clone()).await;
+            assert_eq!(body["storage"]["status"], "healthy");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "one real write test per TTL");
     }
 
     // ─── RENG-97: integration rows share the platform probe cache ───

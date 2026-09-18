@@ -474,10 +474,17 @@ async fn compute_health(state: &AppState) -> serde_json::Value {
         "error"
     };
 
+    // RENG-106: the 存储 row — the same cached real write test
+    // `/system/health` reports, so the two surfaces cannot disagree. It
+    // outranks the LLM rows in `overall`: a database that cannot be written is
+    // losing reviews right now, whatever the providers say.
+    let storage = super::storage_health::storage_health(state).await;
+
     serde_json::json!({
         "integrations": integrations,
         "llmProviders": llm_providers,
-        "overall": overall,
+        "storage": storage.to_json(),
+        "overall": super::storage_health::overall_with_storage(overall, &storage),
         "lastChecked": chrono::Utc::now().to_rfc3339(),
     })
 }
@@ -1338,6 +1345,70 @@ mod tests {
         let (_, json) = dashboard_json(Arc::new(state)).await;
         assert_eq!(json["health"]["llmProviders"][0]["status"], "disabled");
         assert_eq!(json["health"]["overall"], "offline");
+    }
+
+    /// RENG-106: the dashboard carries the same 存储 verdict `/system/health`
+    /// reports — a real write test through the store's pool, cached — and a
+    /// failure governs `overall`: a database losing every write is worse than
+    /// any provider verdict, and the card must say so.
+    #[tokio::test]
+    async fn dashboard_health_carries_the_storage_row_and_fails_with_it() {
+        let llm = |provider: &str| crate::models::LLMConfig {
+            provider: provider.to_string(),
+            model: format!("{provider}-model"),
+            api_key: "sk-a".to_string(),
+            api_base: format!("https://api.{provider}.example/v1"),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+            disabled: false,
+        };
+        let db = || async {
+            let db = SqlxStore::new_in_memory().await.unwrap();
+            db.migrate().await.unwrap();
+            Arc::new(db)
+        };
+
+        // A writable store: the row is healthy, with a timestamp, and the
+        // panel keeps its provider verdict.
+        let mut state = AppState::new(vec![llm("openai")]);
+        state.llm_health = Arc::new(stub_health_store(true));
+        state.db = Some(db().await);
+        let (status, json) = dashboard_json(Arc::new(state)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json["health"]["storage"]["status"], "healthy");
+        // The store is an in-memory one in this fixture, so the row says so
+        // instead of claiming a file-based write test ran.
+        assert_eq!(json["health"]["storage"]["message"], "SQLite in memory");
+        assert!(json["health"]["storage"]["checkedAt"].as_str().is_some());
+        assert_eq!(json["health"]["overall"], "success");
+
+        // A failing write test: the row carries sqlite's words plus the cause,
+        // and `overall` degrades even though every provider is healthy.
+        let mut state = AppState::new(vec![llm("openai")]);
+        state.llm_health = Arc::new(stub_health_store(true));
+        state.db = Some(db().await);
+        state.storage_health = Arc::new(crate::server::api::storage_health::StorageHealthStore::with_probe(
+            Arc::new(|_target| {
+                Box::pin(async {
+                    crate::server::api::storage_health::StorageHealth::error(
+                        "attempt to write a readonly database（review.db-wal 属主 uid 1026，当前进程 uid 9001 无法写入）",
+                    )
+                })
+            }),
+            std::time::Duration::from_secs(60),
+        ));
+        let (_, json) = dashboard_json(Arc::new(state)).await;
+        assert_eq!(
+            json["health"]["storage"]["status"], "error",
+            "a database losing writes must not read healthy: {json}"
+        );
+        assert_eq!(
+            json["health"]["storage"]["message"],
+            "attempt to write a readonly database（review.db-wal 属主 uid 1026，当前进程 uid 9001 无法写入）",
+            "the row must carry the failure verbatim"
+        );
+        assert_eq!(json["health"]["overall"], "error", "{json}");
     }
 
     /// `None` fallback: without ANY store the dashboard serves documented

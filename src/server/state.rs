@@ -268,6 +268,14 @@ pub struct AppState {
     /// integration rows read, so a broken credential can never read
     /// "Configured" from mere entry presence anywhere else.
     pub git_health: crate::server::api::git_health::GitHealthStore,
+    /// Cached storage-writability verdict (RENG-106): a REAL, harmless write
+    /// test on the SQLite file (`PRAGMA user_version`, unchanged), cached for
+    /// ~60 s so the health poll does not write to the WAL on every request.
+    /// Read by the dashboard's 「存储」 row and `GET /system/health`; the
+    /// verdict is `error` with sqlite's own words plus the ownership cause when
+    /// the sidecars (or the database) cannot be written — the incident in which
+    /// every write failed silently with `attempt to write a readonly database`.
+    pub storage_health: Arc<crate::server::api::storage_health::StorageHealthStore>,
     /// WebUI expert overrides (RENG-69), keyed by expert name. The source of
     /// truth for what `PUT /api/v1/system/experts/{id}` changed, kept beside
     /// the persisted `app_settings` row so every review dispatch can re-apply
@@ -323,6 +331,7 @@ impl AppState {
             catalog: CatalogStore::new(),
             llm_health: Arc::new(crate::server::api::llm_health::LlmHealthStore::new()),
             git_health: crate::server::api::git_health::GitHealthStore::new(),
+            storage_health: Arc::new(crate::server::api::storage_health::StorageHealthStore::new()),
             expert_overrides: RwLock::new(Arc::new(crate::config::ExpertOverrides::default())),
             expert_base: RwLock::new(None),
             report_aggregated: RwLock::new(None),

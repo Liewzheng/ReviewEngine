@@ -36,7 +36,7 @@ import CardPanel from '../components/common/CardPanel.vue'
 import EllipsisText from '../components/common/EllipsisText.vue'
 import PageHeader from '../components/common/PageHeader.vue'
 import LastUpdated from '../components/common/LastUpdated.vue'
-import type { HealthStatus, KpiData, TrendPoint, SystemHealth, RecentReview } from '../types/dashboard'
+import type { HealthStatus, HealthState, KpiData, TrendPoint, SystemHealth, StorageHealth, RecentReview } from '../types/dashboard'
 
 const router = useRouter()
 const { t } = useI18n()
@@ -136,6 +136,23 @@ function integrationMessage(item: HealthStatus): string | undefined {
  *  relative words — the "stale result" signal RENG-97 requires. */
 function integrationCheckedAt(item: HealthStatus): string | null {
   return item.checkedAt ? timeAgo(item.checkedAt) : null
+}
+
+/**
+ * The 存储 row's detail (RENG-106). A healthy verdict is a static state, so it
+ * is i18n'd here and the raw backend words stay out of the UI — the same rule
+ * the integration rows follow. A failure keeps the probe's own words: sqlite's
+ * error plus the ownership cause (`review.db-wal 属主 uid 1026…`), which is the
+ * whole diagnosis and never locale-aware.
+ */
+function storageMessage(item: StorageHealth): string {
+  return item.status === 'healthy' ? t('dashboard.health.storageWritable') : item.message
+}
+
+/** The badge's vocabulary for the storage verdict: the backend says
+ *  `healthy`/`error`, `StatusBadge` speaks `success`/`error`. */
+function storageState(item: StorageHealth): HealthState {
+  return item.status === 'healthy' ? 'success' : 'error'
 }
 
 function formatTime(iso: string): string {
@@ -632,6 +649,31 @@ onUnmounted(() => {
               </div>
             </div>
 
+            <!-- Storage (RENG-106): the database's own write test, so a
+                 deployment losing every write cannot look healthy. -->
+            <div v-if="health.storage" class="health-section">
+              <div class="health-section-title">{{ $t('dashboard.health.storage') }}</div>
+              <div class="health-row last-row">
+                <div class="health-row-left">
+                  <span class="health-service">{{ $t('dashboard.health.database') }}</span>
+                </div>
+                <div class="health-row-right">
+                  <StatusBadge :status="storageState(health.storage)" show-text size="small" />
+                  <span class="health-latency">
+                    <EllipsisText :text="storageMessage(health.storage)" />
+                  </span>
+                  <span v-if="health.storage.checkedAt" class="health-latency health-latency-ts">
+                    <EllipsisText :text="$t('common.lastTest', { date: timeAgo(health.storage.checkedAt) })" />
+                  </span>
+                </div>
+              </div>
+              <!-- The remedy only appears when there is something to remedy:
+                   the write test failing is what the doctor repairs. -->
+              <div v-if="health.storage.status === 'error'" class="health-hint">
+                {{ $t('dashboard.health.storageHint') }}
+              </div>
+            </div>
+
             <!-- Overall -->
             <div class="health-overall">
               <StatusBadge :status="health.overall" size="large" />
@@ -945,6 +987,15 @@ onUnmounted(() => {
 
 .health-latency-ts {
   flex: 0 0 auto;
+}
+
+/* The 存储 row's remedy (RENG-106) — a hint, not a status: it only appears
+   when the write test failed, so a healthy card carries no extra line. */
+.health-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  padding-top: var(--space-1);
 }
 
 .health-overall {

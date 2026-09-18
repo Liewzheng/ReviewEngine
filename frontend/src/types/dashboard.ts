@@ -40,6 +40,24 @@ export interface HealthStatus {
  */
 export type StorageBackendKind = 'postgresql' | 'sqlite' | 'disabled';
 
+/**
+ * The storage verdict (RENG-106): the result of a REAL, harmless write test
+ * against the database (`PRAGMA user_version`, unchanged), taken by the server
+ * at most once a minute. `healthy`/`error` is the backend's own vocabulary —
+ * `StatusBadge` speaks `success`/`error`, so the render site maps it.
+ *
+ * It exists because a host-side process could change the owner of
+ * `review.db-wal` / `review.db-shm` and every write then failed with
+ * `attempt to write a readonly database` while the UI showed nothing at all.
+ */
+export interface StorageHealth {
+  status: 'healthy' | 'error';
+  /** `Write test passed`, or sqlite's own error plus the ownership cause. */
+  message: string;
+  /** When that write test ran (iso8601). */
+  checkedAt: string;
+}
+
 export interface SystemHealth {
   integrations: HealthStatus[];
   llmProviders: HealthStatus[];
@@ -49,6 +67,9 @@ export interface SystemHealth {
   llmConfigured: boolean;
   /** Persistence backend kind; normalized from the raw `storage_backend` key. */
   storageBackend?: StorageBackendKind;
+  /** Storage writability (RENG-106). Absent on servers predating the field, in
+   *  which case the 存储 section is hidden rather than guessed at. */
+  storage?: StorageHealth;
 }
 
 // Display-facing status for recent reviews. The backend reports the real task

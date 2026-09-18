@@ -47,6 +47,7 @@ check() {
 #   NONE   → 不创建(模拟卷空)
 #   BAD    → --version 输出非预期(但仍退出 0)
 #   EXIT1  → --version 输出看似正常但退出码非 0
+#   DOCTORFAIL → --version 正常;`doctor ...` 记一次调用到 $REVIEW_DOCTOR_LOG 并退出 1
 #   其他   → --version 输出 "Review Engine <$2>" 并退出 0
 make_bin() {
     local path="$1" behavior="$2"
@@ -60,6 +61,15 @@ make_bin() {
         case "$behavior" in
             BAD)   echo 'echo "garbage-output"; exit 0' ;;
             EXIT1) echo 'echo "Review Engine v9.9.9"; exit 1' ;;
+            DOCTORFAIL) {
+                # 只对 doctor 子命令失败(模拟非空 -wal 被拒),--version 仍正常
+                echo 'if [ "${1:-}" = "doctor" ]; then'
+                echo '    echo "$*" >> "${REVIEW_DOCTOR_LOG:-/dev/null}"'
+                echo '    echo "reng doctor: simulated storage refusal" >&2'
+                echo '    exit 1'
+                echo 'fi'
+                echo 'echo "Review Engine v0.9.14"; exit 0'
+            } ;;
             *)     echo "echo 'Review Engine $behavior'; exit 0" ;;
         esac
     } > "$path"
@@ -67,7 +77,7 @@ make_bin() {
 }
 
 # 准备一次同步场景:$1=img_bin 行为,$2=vol_bin 行为,$3=img_dist 是否有 index.html(1/0)
-# 设置全局:WORK / IMG_BIN_DIR / VOL_BIN_DIR / IMG_DIST / VOL_DIST / SYNC_SH / OUTPUT
+# 设置全局:WORK / IMG_BIN_DIR / VOL_BIN_DIR / IMG_DIST / VOL_DIST / SYNC_SH / OUTPUT / RC
 prepare() {
     WORK="$(mktemp -d)"
     WORKS+=("$WORK")
@@ -95,8 +105,11 @@ prepare() {
         REVIEW_VOL_BIN="$VOL_BIN_DIR/review-engine" \
         REVIEW_IMAGE_DIST="$IMG_DIST" \
         REVIEW_VOL_DIST="$VOL_DIST" \
+        REVIEW_DOCTOR_LOG="$WORK/doctor.log" \
         bash "$SYNC_SH" 2>&1
     )"
+    # 同步段落自身的退出码(set -e 下,任何一个未包裹的失败都会让它非 0)
+    RC=$?
 }
 
 cleanup() {
@@ -156,6 +169,14 @@ prepare v0.9.10 v0.9.14 1
 check "输出含「保留」" "printf '%s' \"\$OUTPUT\" | grep -q '保留'"
 check "卷二进制仍为 v0.9.14(未降级)" "grep -q 'v0.9.14' \"\$VOL_BIN_DIR/review-engine\""
 check "dist 保留(未同步)" "! test -f \"\$VOL_DIST/index.html\""
+echo
+
+# ── 用例 6: 卷内 doctor 失败 → 自愈被调用但不中断启动(RENG-105)────────────
+echo "== 用例 6: doctor --fix 失败(如拒绝删除非空 -wal)→ 调用被发出,启动不受影响 =="
+prepare v0.9.14 DOCTORFAIL 0
+check "自愈调用确实发出(--fix --quiet 打到卷内二进制)" "grep -q '^doctor --fix --quiet$' \"\$WORK/doctor.log\""
+check "doctor 失败信息可见(不被静默吞掉)" "printf '%s' \"\$OUTPUT\" | grep -q 'simulated storage refusal'"
+check "doctor 失败未中断脚本(set -e 下 RC=0)" "test \"\$RC\" -eq 0"
 echo
 
 echo "== 结果: $PASS passed, $FAIL failed =="

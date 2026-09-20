@@ -11,8 +11,20 @@ The config file uses TOML format. Below is the complete schema with all availabl
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `output_dir` | string | `<state dir>/reports/` (`~/.config/review-engine/reports/` unless `serve --data-dir` moved the root) | Directory for auto-saved reports |
-| `max_team_size` | integer (optional) | `6` | Maximum number of experts per review |
-| `max_concurrent_llm_calls` | integer (optional) | `6` | Maximum concurrent LLM API calls |
+| `max_team_size` | integer (optional) | `6` | Maximum number of experts per review. Parsed and carried in the resolved config, but **no review path enforces it today**: the pipelines build the enabled expert team directly (`AppConfig::build_expert_defs`), and the team-selection code that does read this key is not called by the CLI, `serve` or the webhook handler. A `0` is therefore never honoured either — see [Concurrency keys](#concurrency-keys-max_team_size--max_concurrent_llm_calls) |
+| `max_concurrent_llm_calls` | integer (optional) | `6` | Maximum concurrent LLM API calls, enforced by the review pipelines. Read only when the file is passed as the whole configuration (`--config <file>`); a value of `0` is treated as "not decided" (the default applies) rather than as a limit |
+
+### Concurrency keys (`max_team_size` / `max_concurrent_llm_calls`)
+
+Whether these two top-level scalars are honoured depends on how the file is read:
+
+| How the file is read | Are the keys honoured? |
+|---|---|
+| `--config <file>` (and the library's `ConfigSource::Path` / `Inline`) | Yes — the whole `AppConfig` is deserialized, so `max_concurrent_llm_calls` bounds the review's LLM concurrency. `max_team_size` reaches the config but is not enforced by any review path (see above) |
+| The auto-detected `.code-audit-config.toml` (user-level `~/.config/review-engine/` or project-level, i.e. what `reng review` reads without `--config`) | **No** — the resolver lifts only `llm`, `report`, `commands` and `review_experts` out of the file, so both scalars are ignored there |
+| The Web UI / database (`serve`) | The Configuration page's `advanced.maxConcurrentReviews` is stored in `review.db` and written to both `AppConfig` fields; `max_concurrent_llm_calls` is the one that actually limits concurrency |
+
+A value of **`0` is treated as "not decided", never as a limit**: a concurrency semaphore with zero permits would leave every expert task waiting forever — a silent hang with no error, no timeout and no last log line — so the built-in default `6` applies instead. `reng` prints one warning naming the key it ignored, and the review and repo-review pipelines carry their own backstop for callers that never go through the CLI (they warn if a `0` reaches a semaphore at all).
 
 ## `[project]`
 

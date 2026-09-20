@@ -29,7 +29,7 @@
 //!
 //! | DB surface | lands on |
 //! | --- | --- |
-//! | `app_settings` `ui` → `advanced.maxConcurrentReviews` | `AppConfig::max_concurrent_llm_calls` **and** `AppConfig::max_team_size` |
+//! | `app_settings` `ui` → `advanced.maxConcurrentReviews` | `AppConfig::max_concurrent_llm_calls` **and** `AppConfig::max_team_size` — only when the row really carries a cap; a row without `advanced` (or with 0) leaves the config file's values in force (RENG-107, the same tri-state reasoning as `aggregated`: 0 is a 0-permit semaphore, not a setting) |
 //! | `app_settings` `ui` → `aggregated` (RENG-95 tri-state) | `AppConfig::report.aggregated` |
 //! | `app_settings` `ui` → `rules` / the remaining `advanced` fields | returned in [`AppliedDbOverrides::ui`] — the UI projection has no `AppConfig` counterpart |
 //! | `llm_providers` rows | `AppConfig::llm` — replaced wholesale, in the server's chain order (primary first, disabled entries out) |
@@ -278,9 +278,26 @@ pub async fn apply_db_overrides(
         // `advanced.maxConcurrentReviews` is the UI's name for the two caps the
         // backend enforces; they are set together, exactly as the `PUT /config`
         // pipeline sets them (`apply_ui_config`).
+        //
+        // A value of 0 — what a row whose `advanced` section is ABSENT yields,
+        // because serde then fills the DERIVED `UiAdvancedConfig::default()` —
+        // is not a decision: 0 concurrent LLM calls is not a configuration any
+        // path can honour (it is a 0-permit semaphore, so every expert task
+        // waits forever instead of running), and before RENG-107 this silently
+        // zeroed the caps of a config file that had them. So the rule is
+        // RENG-95's `aggregated` rule: only a row that actually decided the
+        // caps overrides the config file, and a row that did not leaves the
+        // file's values in force.
         let concurrency = ui.advanced.max_concurrent_reviews as usize;
-        config.max_concurrent_llm_calls = Some(concurrency);
-        config.max_team_size = Some(concurrency);
+        if concurrency > 0 {
+            config.max_concurrent_llm_calls = Some(concurrency);
+            config.max_team_size = Some(concurrency);
+        } else {
+            tracing::debug!(
+                "the persisted ui row carries no concurrency cap (0); the config file's \
+                 max_concurrent_llm_calls / max_team_size stay in force"
+            );
+        }
         // RENG-95: tri-state — only a row that actually decided the flag
         // overrides the config file. `None` (a row written before the toggle
         // existed) leaves the file's value in force.
@@ -940,6 +957,101 @@ mod tests {
         assert!(config.report.aggregated, "the file value stays; the row is silent");
         assert_eq!(config.max_concurrent_llm_calls, Some(9), "the row still applies");
         assert!(applied.ui.is_some());
+    }
+
+    /// RENG-107 regression: a `ui` row that does NOT carry the concurrency cap
+    /// must leave the config file's caps in force — and `Some(0)` must never
+    /// reach the review pipeline, where a 0-permit semaphore makes every expert
+    /// task wait forever instead of running.
+    ///
+    /// The row below is the shape that used to do it: `{ "llm": { … } }` has no
+    /// `advanced` key, so serde fills the DERIVED `UiAdvancedConfig::default()`
+    /// (`max_concurrent_reviews: 0` — the field-level serde default only fires
+    /// when the field is present). Rows like this arrive from a hand-edited
+    /// row, from the one-shot `ui-state.toml` import, or from any writing
+    /// front end that predates the field.
+    #[tokio::test]
+    async fn ui_row_without_the_concurrency_cap_keeps_the_file_caps() {
+        let store = fresh_db().await;
+        // The `llm` section is present and useful: the row DOES apply, it just
+        // does not decide the caps.
+        let ui: UiConfig = serde_json::from_value(serde_json::json!({
+            "llm": { "primaryProvider": "anthropic" }
+        }))
+        .unwrap();
+        assert_eq!(
+            ui.advanced.max_concurrent_reviews, 0,
+            "precondition: an absent `advanced` section deserializes to the derived default, 0"
+        );
+        store
+            .save_setting(UI_SETTING_KEY, &serde_json::to_value(&ui).unwrap())
+            .await
+            .unwrap();
+
+        // `file_config` carries max_concurrent_llm_calls = max_team_size = 2.
+        let mut config = file_config();
+        let applied = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+        assert_eq!(
+            config.max_concurrent_llm_calls,
+            Some(2),
+            "the file's cap stays; a silent row never zeroes it"
+        );
+        assert_eq!(config.max_team_size, Some(2));
+        assert!(applied.ui.is_some(), "the row still applies its other surfaces");
+        assert_eq!(
+            config.llm[0].provider, "openai",
+            "the row carries no providers here, so the file's chain stands"
+        );
+        // Sibling audit (the same hazard class, swept): `advanced`'s OTHER
+        // fields — `logLevel`, `logRetentionDays`, `sseHeartbeatInterval`,
+        // `requestTimeout`, `enableMetrics`, `debugMode` — are never applied to
+        // `AppConfig` by this overlay; they are projection-only, because no
+        // caller outside `server::api::config` reads any of them (a tree-wide
+        // search finds `maxConcurrentReviews` as the ONE `advanced` field with a
+        // consumer). A row that lacks the whole `advanced` section therefore
+        // cannot inject its derived zeros into a running review. The strongest
+        // form of that statement: with nothing but such a row, the overlay
+        // leaves the config it was handed EXACTLY as it found it.
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::to_value(&file_config()).unwrap(),
+            "a ui row without `advanced` must leave AppConfig untouched"
+        );
+
+        // An explicit 0 is the same statement, not a request for "no concurrent
+        // LLM calls": nothing can run then, and the pipeline would hang rather
+        // than report it.
+        store
+            .save_setting(
+                UI_SETTING_KEY,
+                &serde_json::json!({ "advanced": { "maxConcurrentReviews": 0 } }),
+            )
+            .await
+            .unwrap();
+        let mut config = file_config();
+        apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+        assert_eq!(config.max_concurrent_llm_calls, Some(2));
+        assert_eq!(config.max_team_size, Some(2));
+
+        // …and a cap the row DID decide still wins over the file (positive
+        // control — the guard must not disable the feature).
+        store
+            .save_setting(
+                UI_SETTING_KEY,
+                &serde_json::json!({ "advanced": { "maxConcurrentReviews": 9 } }),
+            )
+            .await
+            .unwrap();
+        let mut config = file_config();
+        apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+        assert_eq!(config.max_concurrent_llm_calls, Some(9));
+        assert_eq!(config.max_team_size, Some(9));
     }
 
     /// `Debug` must never print a live credential — the result is a natural

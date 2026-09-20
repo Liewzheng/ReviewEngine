@@ -464,3 +464,40 @@ fn test_build_consolidated_report_uses_configured_weights() {
     let no_weights = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None, &[]);
     assert_eq!(no_weights.assessment.score, 79, "equal weights: (67*0.5 + 91*0.5)");
 }
+
+// ── RENG-107 r2: the zero-concurrency backstop ──────────────────────
+
+/// `Some(0)` is not a limit: [`tokio::sync::Semaphore::new`] with zero permits
+/// blocks every acquirer forever, so a resolved config carrying one turns a
+/// review into a silent hang (no error, no timeout, no last log line). The two
+/// sink sites — the team-review pipeline and the repo-review LLM pass — both
+/// build their semaphore through this helper, so the refusal is tested once
+/// here and once per site.
+#[test]
+fn zero_concurrency_is_refused_and_the_default_applies() {
+    let config = |cap: Option<usize>| -> AppConfig {
+        serde_json::from_value(serde_json::json!({ "max_concurrent_llm_calls": cap }))
+            .expect("minimal AppConfig must deserialize")
+    };
+
+    assert_eq!(
+        concurrent_llm_calls(Some(&config(Some(0))), "unit test"),
+        DEFAULT_LLM_CONCURRENCY,
+        "a 0-permit semaphore would hang every LLM task"
+    );
+    assert_eq!(
+        concurrent_llm_calls(Some(&config(None)), "unit test"),
+        DEFAULT_LLM_CONCURRENCY,
+        "an absent cap uses the documented default"
+    );
+    assert_eq!(concurrent_llm_calls(None, "unit test"), DEFAULT_LLM_CONCURRENCY);
+    assert_eq!(
+        concurrent_llm_calls(Some(&config(Some(3))), "unit test"),
+        3,
+        "a real limit is honoured — the guard must not disable the setting"
+    );
+    assert_eq!(
+        DEFAULT_LLM_CONCURRENCY, 6,
+        "the documented default (docs/config-schema.md) is 6"
+    );
+}

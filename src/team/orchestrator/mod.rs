@@ -24,6 +24,44 @@ use crate::team::verifier::DroppedFinding;
 
 use super::{TeamOrchestrator, TeamReport};
 
+/// Concurrency the LLM work gets when nothing usable is configured — the
+/// `max_concurrent_llm_calls` default of [`DefaultOrchestrator`], used by every
+/// pipeline that builds a concurrency semaphore (the team review in
+/// [`pipeline`] and the repo-review LLM pass in [`crate::actions`]).
+pub(crate) const DEFAULT_LLM_CONCURRENCY: usize = 6;
+
+/// The number of concurrent LLM calls a pipeline may use, with the default for
+/// an absent value and a BACKSTOP for an unusable one.
+///
+/// `Some(0)` is not a limit: [`tokio::sync::Semaphore::new`] with zero permits
+/// blocks every acquirer forever, so a config carrying one turns a review into
+/// a silent hang — no error, no timeout, nothing after the last log line. The
+/// config layer is supposed to prevent that (the CLI clears a 0 cap in
+/// `cli::db_config`, and both database writers treat 0 as "the row did not
+/// decide"), which is exactly why this guard logs LOUDLY and names its `site`
+/// when it fires: a 0 that arrives here means something upstream let one
+/// through — a config file read as a whole `AppConfig` by an embedder, a writer
+/// added later, or a path nobody thought about.
+///
+/// `site` is free-form text naming the caller (it reaches the log as a field),
+/// so a warning tells which pipeline was protected.
+pub(crate) fn concurrent_llm_calls(config: Option<&AppConfig>, site: &'static str) -> usize {
+    match config.and_then(|config| config.max_concurrent_llm_calls) {
+        None => DEFAULT_LLM_CONCURRENCY,
+        Some(0) => {
+            tracing::warn!(
+                site,
+                default = DEFAULT_LLM_CONCURRENCY,
+                "concurrency backstop: a limit of 0 would leave every LLM task waiting \
+                 forever, so the default is used instead — the resolved configuration \
+                 should never carry a 0 (something upstream let one through)"
+            );
+            DEFAULT_LLM_CONCURRENCY
+        }
+        Some(configured) => configured,
+    }
+}
+
 /// Default implementation of [`TeamOrchestrator`].
 ///
 /// Runs all selected experts in parallel with concurrency limited by
@@ -44,7 +82,7 @@ impl DefaultOrchestrator {
     pub fn new() -> Self {
         Self {
             max_team_size: 6,
-            max_concurrent_llm_calls: 6,
+            max_concurrent_llm_calls: DEFAULT_LLM_CONCURRENCY,
             progress_map: None,
             review_id: String::new(),
             llm_sink: None,

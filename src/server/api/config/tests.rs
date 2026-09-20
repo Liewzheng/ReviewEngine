@@ -43,6 +43,165 @@ fn stored_openai_key(state: &Arc<AppState>) -> String {
         .unwrap_or_default()
 }
 
+/// The concurrency caps the running config carries — what the review pipeline
+/// turns into its `Semaphore`.
+fn running_caps(state: &Arc<AppState>) -> (Option<usize>, Option<usize>) {
+    let cfg = state.app_config.read().unwrap();
+    let cfg = cfg.as_ref().expect("app_config seeded");
+    (cfg.max_concurrent_llm_calls, cfg.max_team_size)
+}
+
+/// Set the caps the running config carries (the pipeline's semaphore size).
+fn set_running_caps(state: &Arc<AppState>, cap: Option<usize>) {
+    let mut slot = state.app_config.write().unwrap();
+    let mut cfg = (**slot.as_ref().expect("app_config seeded")).clone();
+    cfg.max_concurrent_llm_calls = cap;
+    cfg.max_team_size = cap;
+    *slot = Some(Arc::new(cfg));
+}
+
+/// RENG-107 regression: a config update that does not carry a concurrency cap
+/// must not zero the caps.
+///
+/// 0 is not "no concurrent LLM calls", it is a 0-permit `Semaphore`: every
+/// expert task would wait forever instead of running, so a review hangs
+/// silently. The shape that produced it is ordinary — a `ui` row written
+/// before `advanced` existed deserializes to the DERIVED
+/// `UiAdvancedConfig::default()`, whose cap is 0 — and the startup replay
+/// re-applies exactly that row on every boot, which is why the guard belongs in
+/// this path and not only in the DB overlay.
+///
+/// 0 therefore means "this update did not decide the caps": the running values
+/// stay, and the published projection carries the value actually in force
+/// rather than a cap that cannot apply (which also heals the stored row on the
+/// next save).
+#[tokio::test]
+async fn put_config_without_a_concurrency_cap_keeps_the_caps_in_force() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai("sk-primary");
+    // A legacy deployment: the config file's cap is what runs, and the stored
+    // ui row predates the field.
+    set_running_caps(&state, Some(2));
+    state.ui_config.write().unwrap().advanced.max_concurrent_reviews = 0;
+    assert_eq!(running_caps(&state), (Some(2), Some(2)));
+
+    // 1) A sparse update (or the startup replay of that row) must leave the
+    //    effective cap alone rather than freezing the pipeline.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        running_caps(&state),
+        (Some(2), Some(2)),
+        "a row that did not decide the caps must not zero them"
+    );
+    assert_eq!(
+        state.ui_config.read().unwrap().advanced.max_concurrent_reviews,
+        2,
+        "the projection carries the cap in force, never 0"
+    );
+
+    // 2) An explicit 0 is the same statement, not a request for "nothing runs".
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "advanced": { "maxConcurrentReviews": 0 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(running_caps(&state), (Some(2), Some(2)));
+    assert_eq!(state.ui_config.read().unwrap().advanced.max_concurrent_reviews, 2);
+
+    // 3) Positive control: a cap the update really carries still applies — the
+    //    guard must not disable the setting. And a state with no cap of its own
+    //    publishes the documented default rather than 0.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "advanced": { "maxConcurrentReviews": 9 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(running_caps(&state), (Some(9), Some(9)));
+    assert_eq!(state.ui_config.read().unwrap().advanced.max_concurrent_reviews, 9);
+
+    let _ = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "advanced": { "maxConcurrentReviews": 0 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(running_caps(&state), (Some(9), Some(9)));
+}
+
+/// RENG-107 sibling audit: `ui.advanced`'s OTHER fields — `logLevel`,
+/// `logRetentionDays`, `sseHeartbeatInterval`, `requestTimeout`,
+/// `enableMetrics`, `debugMode` — share the shape of the cap bug (a row
+/// without the `advanced` section gives them the derived defaults: `0`, `""`,
+/// `false`), so they were swept for the same hazard: is any of them applied to
+/// something that RUNS?
+///
+/// Verdict, pinned here: no. Nothing outside `server::api::config` reads any of
+/// them (a tree-wide search leaves `maxConcurrentReviews` as the only
+/// `advanced` field with a consumer — the guard in this file); they are
+/// display-only, fed back by the Configuration page's own form defaults
+/// (`frontend/src/composables/useConfigForm.ts`: info / 30 / 15 / 120 / true /
+/// false). The proof that no sibling reaches the running configuration is this
+/// test: a `PUT /config` that zeroes all of them changes the `AppConfig` in
+/// exactly one place — the caps it also submits.
+///
+/// `enableMetrics`/`debugMode` are deliberately NOT guarded even so: `false` is
+/// a legitimate choice a user can make, indistinguishable from the derived
+/// default, and with no consumer there is nothing to protect.
+#[tokio::test]
+async fn advanced_siblings_are_projection_only() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai("sk-primary");
+    let before =
+        serde_json::to_value(&**state.app_config.read().unwrap().as_ref().expect("app_config seeded")).unwrap();
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "advanced": {
+                "logLevel": "",
+                "logRetentionDays": 0,
+                "sseHeartbeatInterval": 0,
+                "requestTimeout": 0,
+                "enableMetrics": false,
+                "debugMode": false,
+                "maxConcurrentReviews": 4
+            }
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let after = serde_json::to_value(&**state.app_config.read().unwrap().as_ref().expect("app_config seeded")).unwrap();
+    let mut expected = before.clone();
+    expected["max_concurrent_llm_calls"] = serde_json::json!(4);
+    expected["max_team_size"] = serde_json::json!(4);
+    assert_eq!(
+        after, expected,
+        "no `advanced` sibling may reach the running configuration — only the caps are applied"
+    );
+
+    // The projection, on the other hand, echoes what was submitted: the only
+    // consumer of these fields is the Configuration page.
+    let ui = state.ui_config.read().unwrap();
+    assert_eq!(ui.advanced.log_level, "");
+    assert_eq!(ui.advanced.log_retention_days, 0);
+    assert_eq!(ui.advanced.sse_heartbeat_interval, 0);
+    assert_eq!(ui.advanced.request_timeout, 0);
+    assert!(!ui.advanced.enable_metrics);
+    assert!(!ui.advanced.debug_mode);
+}
+
 /// Security regression: `GET /config` must never return a live LLM key.
 #[tokio::test]
 async fn get_config_never_leaks_llm_api_key() {

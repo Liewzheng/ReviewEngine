@@ -1,3 +1,4 @@
+use crate::cli::db_config::resolve_cli_config;
 use anyhow::Result;
 use review_engine::models::*;
 use review_engine::progress::ProgressMap;
@@ -150,7 +151,7 @@ pub async fn run_mr(
         gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default())
     };
     let config_source = config_path.map(ConfigSource::Path);
-    let config = review_engine::config::resolve_config(config_source.clone()).await?;
+    let config = resolve_cli_config(config_source.clone()).await?.into_config();
     let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
     let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
@@ -193,7 +194,7 @@ pub async fn run_local(
 ) -> Result<()> {
     let diff = tokio::fs::read_to_string(diff_path).await?;
     let config_source = config_path.map(ConfigSource::Path);
-    let config = review_engine::config::resolve_config(config_source).await?;
+    let config = resolve_cli_config(config_source).await?.into_config();
     let llm_configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
     let dump_dir = verbose_dump_dir(verbose, output, &config.output_dir);
 
@@ -294,7 +295,7 @@ pub async fn run_local_repo(
     }
 
     let config_source = config_path.map(ConfigSource::Path);
-    let config = review_engine::config::resolve_config(config_source).await?;
+    let config = resolve_cli_config(config_source).await?.into_config();
 
     let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
@@ -369,7 +370,7 @@ pub async fn run_local_path(
     verbose: bool,
 ) -> Result<()> {
     let config_source = config_path.map(ConfigSource::Path);
-    let config = review_engine::config::resolve_config(config_source).await?;
+    let config = resolve_cli_config(config_source).await?.into_config();
     let llm_configs: Vec<LLMConfig> = resolve_llm_configs(&llm_configs, &config)?;
 
     // Validate the review input FIRST: a bad --path (missing directory, empty

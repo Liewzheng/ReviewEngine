@@ -169,8 +169,16 @@ fn annotate(configs: Vec<LLMConfig>, source: Source) -> Vec<ListedProvider> {
         .collect()
 }
 
-/// The resolved effective provider list — the same resolution the review
-/// path uses: project `[[llm]]` → user-level fallback → `LLM_CONFIG` env.
+/// The effective provider list of the CONFIG FILES: project `[[llm]]` →
+/// user-level fallback → `LLM_CONFIG` env.
+///
+/// Deliberately the file resolution only. `reng review` and the other review
+/// commands apply the state root's database over the files
+/// (`crate::cli::db_config`), so on a machine configured through the Web UI
+/// this command can legitimately print "no providers configured" while
+/// `reng review` runs on the database's providers. Listing those would mean
+/// opening the database from a command that otherwise only reads and edits
+/// files — the DB-over-file rule is documented in `docs/configuration.md`.
 pub fn resolved_providers() -> Result<Vec<ListedProvider>> {
     let project = read_llm_entries(&project_config_path()?)?;
     if !project.is_empty() {

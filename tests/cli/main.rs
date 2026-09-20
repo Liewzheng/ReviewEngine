@@ -42,5 +42,6 @@ fn run_git(path: &Path, args: &[&str]) {
 
 mod basic;
 mod data_dir;
+mod db_config;
 mod review_path;
 mod upgrade;

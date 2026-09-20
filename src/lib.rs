@@ -291,7 +291,10 @@ pub async fn publish_review_with_diff(
         // — "N 条行内评论未能发布" with the provider's verdict for each, instead
         // of the single WARN this used to be.
         if let Some(board_id) = board_id {
-            let md = format!("{md}{}", crate::publisher::render_inline_failure_section(&summary));
+            // The appended section starts with its own `##` heading; the blank
+            // line keeps it out of a bullet list the board may end with (the
+            // dropped-findings appendix can).
+            let md = format!("{md}\n{}", crate::publisher::render_inline_failure_section(&summary));
             if let Err(e) = provider.update_discussion(&board_id, &md).await {
                 // Not a second error: the count this addendum carries is already
                 // reported below, and the addendum is another rendering of it.

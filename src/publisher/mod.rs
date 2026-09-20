@@ -445,7 +445,10 @@ pub async fn publish_planned_inline_notes(
 /// The ticket's requirement (RENG-99) is the first line — "有 N 条行内评论未能
 /// 发布" — because the pre-fix behaviour left the loss to one `WARN` that the
 /// user never reads. The per-anchor lines are the RENG-71 diagnosis carried
-/// where it is useful: the provider's verdict for the notes that were refused.
+/// where it is useful, and they cover **both** ways a note can be lost: one the
+/// provider refused (a verdict, with its status) and one that spent its retries
+/// without ever getting an answer (a transport failure, "no HTTP verdict").
+/// The lead sentence therefore claims neither of the two on its own.
 ///
 /// Rendered as a board section, so a caller that re-posts the board or a
 /// follow-up note can append this verbatim. It is deliberately **not** part of
@@ -458,9 +461,10 @@ pub fn render_inline_failure_section(summary: &PublishSummary) -> String {
 
     let mut out = format!(
         "## Inline notes — {} could not be published\n\n\
-         > ⛔ **{} inline note(s) failed to publish**: the provider refused them and they are \
-         not retried. The round's findings are all in the sections above; only their inline \
-         anchors are missing.\n\n",
+         > ⛔ **{} inline note(s) failed to publish**: each was either refused by the provider or \
+         stopped after its retries without an answer, and neither kind is retried again. The \
+         status on each line below says which. The round's findings are all in the sections \
+         above; only their inline anchors are missing.\n\n",
         summary.failures.len(),
         summary.failures.len(),
     );
@@ -1488,6 +1492,13 @@ mod tests {
             "the count is what the user must see: {section}"
         );
         assert!(section.contains("**2 inline note(s) failed to publish**"), "{section}");
+        // The lead sentence has to hold for both kinds of entry this section
+        // renders — a provider verdict and a spent transport retry — because the
+        // per-line detail distinguishes them (RENG-99 review r1 P2-1).
+        assert!(
+            section.contains("either refused by the provider or stopped after its retries"),
+            "the blanket sentence must not claim a refusal for a transport failure: {section}"
+        );
         assert!(
             section.contains("- `one.rs:1` — HTTP 400 — "),
             "the refused anchor and its status are named: {section}"

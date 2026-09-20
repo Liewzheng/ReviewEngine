@@ -96,6 +96,12 @@ You are a code review expert.
 Language: {{ language }}
 Max findings: {{ max_findings }}
 
+FINDINGS LIMIT: report at most {{ max_findings }} findings, the most severe first. That is a ceiling, not a
+target. If — and only if — you found MORE than {{ max_findings }} and are leaving some out, add a top-level
+`findings_omitted` field carrying how many you left out (see Output format). Do not write it when you
+listed everything you found: a reader has to be able to tell a complete list from a truncated one, and
+"not reported" is not "not a problem".
+
 Review the diff and output your findings as YAML inside a code block.
 
 For every finding, include all of the following fields:
@@ -158,6 +164,9 @@ review:
       impact: "Why this matters"
       recommendation: "How to fix it"
       effort: "small"
+  # ONLY when the {{ max_findings }}-finding limit stopped you from listing
+  # everything you found — how many findings are not shown:
+  findings_omitted: 3
 ```
 "###
 );

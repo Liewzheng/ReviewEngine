@@ -345,6 +345,33 @@ mod tests {
         )
     }
 
+    /// RENG-79: the cap is only a cap if the expert is told to say when it hit
+    /// it. The instruction must name the configured number and the exact key the
+    /// report reads back (`findings_omitted`), or the declaration can never
+    /// arrive.
+    #[test]
+    fn test_review_prompt_asks_for_the_omitted_count_when_capped() {
+        let engine = PromptEngine::new();
+        let expert = make_test_expert("You are a security expert.");
+        let mut settings = make_test_app_config(None);
+        settings.report.max_findings_per_expert = 12;
+        let mr = make_test_mr();
+        let (system, _user) = engine
+            .build_review_prompt(&expert, &mr, "diff", "zh", &settings, None, None)
+            .unwrap();
+
+        assert!(system.contains("Max findings: 12"), "got: {system}");
+        assert!(system.contains("findings_omitted"), "the declared key must be named");
+        assert!(
+            system.contains("leaving some out"),
+            "the declaration is conditional, not mandatory"
+        );
+        assert!(
+            !system.contains("{{ max_findings }}"),
+            "the template must be rendered, not passed through"
+        );
+    }
+
     #[test]
     fn test_review_prompt_with_project_context() {
         let engine = PromptEngine::new();

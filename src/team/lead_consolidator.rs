@@ -424,14 +424,21 @@ fn append_coverage_banners(
     }
     if let Some(s) = coverage {
         if !s.is_sufficient() {
+            // `debt` is one entry per uncovered *span*, not per hunk: a single
+            // partially reviewed hunk contributes several. Name the unit
+            // accordingly and give the line count first — "486 of 1351 lines
+            // were reached, 865 were not" is the fact a reader is looking for,
+            // and calling the spans "hunks" overstated how coarse the list was.
             tl_dr.push_str(&format!(
-                "\n\n⚠️ 审查覆盖不足：{}/{} 行改动可追溯被审查（{} 处 hunk 未覆盖）——结果标记为不可信。\n\
-                 ⚠️ Insufficient review coverage: {}/{} changed lines demonstrably reviewed ({} uncovered range(s)) — result marked unverified.",
+                "\n\n⚠️ 审查覆盖不足：{}/{} 行改动可追溯被审查（{} 行未覆盖，分布在 {} 处区间）——结果标记为不可信。\n\
+                 ⚠️ Insufficient review coverage: {}/{} changed lines demonstrably reviewed ({} lines uncovered across {} range(s)) — result marked unverified.",
                 s.covered_changed_lines,
                 s.total_changed_lines,
+                s.uncovered_changed_lines(),
                 s.debt.len(),
                 s.covered_changed_lines,
                 s.total_changed_lines,
+                s.uncovered_changed_lines(),
                 s.debt.len(),
             ));
         }

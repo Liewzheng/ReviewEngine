@@ -511,6 +511,15 @@ fn under_cap_review_carries_no_truncation() {
 /// prompt template, the HTTP client, the parser, validation, consolidation and
 /// the report renderer — so this is what proves the cap reaches the reader
 /// rather than only the unit under test.
+///
+/// Two of each expert's five findings cite a file that is not in the diff, so
+/// validation drops them and the report ships three while the cap accounting
+/// still counts five. That gap is deliberate: it is the only way a test can
+/// catch a refactor that moves the measurement *after* `validate_findings` —
+/// the accounting would then read 3 < cap, the expert would vanish from the
+/// warning, and nothing else in the suite would notice. (A line outside the
+/// hunk would not work: `validate_findings` keeps those with a note and only
+/// drops a finding whose *file* is absent from the diff.)
 #[tokio::test]
 async fn capped_experts_are_visible_end_to_end() {
     use crate::models::{ExpertDef, ExpertTomlDef, LLMConfig, MRInfo};
@@ -518,13 +527,15 @@ async fn capped_experts_are_visible_end_to_end() {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     let server = MockServer::start().await;
-    // Five findings, all inside the diff's changed lines, plus the declaration
-    // the prompt now asks for.
-    let findings: Vec<String> = (1..=5)
-        .map(|i| {
+    // Five findings — three in the diff's file, two in a file the diff never
+    // touches — plus the declaration the prompt now asks for.
+    let findings: Vec<String> = [("src/a.rs", 1), ("src/a.rs", 2), ("src/a.rs", 3), ("src/elsewhere.rs", 1), ("src/elsewhere.rs", 2)]
+        .iter()
+        .enumerate()
+        .map(|(n, (file, line))| {
             format!(
-                "    - file: \"src/a.rs\"\n      line: {i}\n      severity: \"medium\"\n      confidence: 8\n      \
-                 category: \"correctness\"\n      title: \"issue {i}\"\n      summary: \"s\"\n      evidence: \"e\"\n      \
+                "    - file: \"{file}\"\n      line: {line}\n      severity: \"medium\"\n      confidence: 8\n      \
+                 category: \"correctness\"\n      title: \"issue {n}\"\n      summary: \"s\"\n      evidence: \"e\"\n      \
                  impact: \"i\"\n      recommendation: \"r\"\n      effort: \"small\""
             )
         })
@@ -613,6 +624,24 @@ async fn capped_experts_are_visible_end_to_end() {
     assert_eq!(
         summary.declared_omitted_total, 14,
         "the model's own declaration is read back from its raw response"
+    );
+    assert_eq!(summary.declaring_reports, 2, "both declared a number");
+
+    // The measurement order, pinned: validation dropped the two out-of-diff
+    // findings from each report (3 ship), while the cap accounting still sees
+    // the five the expert returned. Move the measurement next to the ledger
+    // build — which runs after validation — and `listed` becomes 3, the experts
+    // fall below the cap, and this warning silently disappears.
+    let shipped: Vec<usize> = reports.iter().map(|r| r.findings.len()).collect();
+    assert_eq!(shipped, vec![3, 3], "validation dropped the two out-of-diff findings");
+    assert!(
+        summary.experts.iter().all(|e| e.listed == 5),
+        "the cap is measured on the reports AS THE EXPERTS RETURNED THEM, not after validation: {:?}",
+        summary
+            .experts
+            .iter()
+            .map(|e| (e.expert.as_str(), e.listed))
+            .collect::<Vec<_>>()
     );
 
     // The sentence a human reads.

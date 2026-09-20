@@ -283,7 +283,7 @@ fn range_label(range: (u32, u32)) -> String {
 /// How many uncovered spans the report prints before summarising the rest.
 const UNCOVERED_RANGES_SHOWN: usize = 24;
 
-/// Render the RENG-79 truncation warning: which experts stopped at
+/// Render the RENG-79 truncation warning: which expert reports stopped at
 /// `report.max_findings_per_expert`, and how many findings they said they left
 /// out.
 ///
@@ -293,6 +293,14 @@ const UNCOVERED_RANGES_SHOWN: usize = 24;
 /// those prefixes as the complete result (39 findings over 10 experts, 35 of
 /// them five experts parked on five). A number the expert declared is quoted as
 /// a number; a silent expert is reported as unknown rather than as zero.
+///
+/// The totals line is gated on [`TruncationSummary::declaring_reports`], not on
+/// the sum: a sum of 0 means either "everyone who answered declared zero" or
+/// "nobody answered", and only the first of those may be shown as a number —
+/// printing "0 omitted" on the strength of silence is the exact false
+/// reassurance this warning exists to remove. The field-by-field list already
+/// says which experts are which, so the total only adds anything when someone
+/// actually gave a count.
 fn render_truncation_warning(truncation: &crate::coverage::TruncationSummary) -> String {
     if truncation.is_empty() {
         return String::new();
@@ -310,8 +318,12 @@ fn render_truncation_warning(truncation: &crate::coverage::TruncationSummary) ->
         .collect();
     let declared = if truncation.declared_omitted_total > 0 {
         format!(
-            "专家自报共 {} 条未列出 / {} declared omitted by the experts. ",
-            truncation.declared_omitted_total, truncation.declared_omitted_total
+            "{} 位专家自报共 {} 条未列出 / {} of {} declared {} omitted in total. ",
+            truncation.declaring_reports,
+            truncation.declared_omitted_total,
+            truncation.declaring_reports,
+            truncation.at_cap_count(),
+            truncation.declared_omitted_total,
         )
     } else {
         String::new()

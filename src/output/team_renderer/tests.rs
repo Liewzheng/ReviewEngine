@@ -352,6 +352,7 @@ fn test_render_lead_summary_flags_a_capped_expert() {
                 cap: 5,
                 declared_omitted: Some(7),
             }],
+            declaring_reports: 1,
             declared_omitted_total: 7,
         },
         ..Default::default()
@@ -361,6 +362,10 @@ fn test_render_lead_summary_flags_a_capped_expert() {
     assert!(md.contains("report.max_findings_per_expert = 5"));
     assert!(md.contains("另有 7 条未列出"), "the dropped count must be stated: {md}");
     assert!(md.contains("`security`"));
+    assert!(
+        md.contains("1 位专家自报共 7 条未列出"),
+        "the total is attributed to the experts who actually answered: {md}"
+    );
 }
 
 #[test]
@@ -375,6 +380,7 @@ fn test_render_lead_summary_says_unknown_when_the_expert_did_not_declare() {
                 cap: 5,
                 declared_omitted: None,
             }],
+            declaring_reports: 0,
             declared_omitted_total: 0,
         },
         ..Default::default()
@@ -382,6 +388,14 @@ fn test_render_lead_summary_says_unknown_when_the_expert_did_not_declare() {
     let md = render_lead_summary(&consolidated);
     assert!(md.contains("未列出的条数未知"), "silence is unknown, not zero: {md}");
     assert!(!md.contains("另有 0 条未列出"), "never invent a zero count: {md}");
+    // A sum of 0 with no declaration behind it must not become a total line:
+    // `declared_omitted_total` alone cannot tell "nobody answered" from "they
+    // answered zero", and printing the former as a number is the exact false
+    // reassurance this warning exists to remove.
+    assert!(
+        !md.contains("自报共 0 条未列出"),
+        "silence must not be summarised as a zero: {md}"
+    );
 }
 
 #[test]
@@ -413,6 +427,7 @@ fn test_render_lead_summary_reports_an_expert_that_declared_no_omissions() {
                 cap: 5,
                 declared_omitted: Some(0),
             }],
+            declaring_reports: 1,
             declared_omitted_total: 0,
         },
         ..Default::default()
@@ -420,6 +435,10 @@ fn test_render_lead_summary_reports_an_expert_that_declared_no_omissions() {
     let md = render_lead_summary(&consolidated);
     assert!(md.contains("专家自报无遗漏"), "got: {md}");
     assert!(!md.contains("另有 0 条未列出"));
+    assert!(
+        !md.contains("自报共 0 条未列出"),
+        "a declared zero is not a total worth printing: {md}"
+    );
 }
 
 #[test]

@@ -164,9 +164,10 @@ review:
       impact: "Why this matters"
       recommendation: "How to fix it"
       effort: "small"
-  # ONLY when the {{ max_findings }}-finding limit stopped you from listing
-  # everything you found — how many findings are not shown:
-  findings_omitted: 3
+# ONLY when the {{ max_findings }}-finding limit stopped you from listing
+# everything you found. Omit the line entirely when you listed everything, and
+# replace 3 with your own count — never leave the example number in place:
+findings_omitted: 3
 ```
 "###
 );

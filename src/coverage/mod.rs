@@ -207,11 +207,12 @@ impl CoverageLedger {
 
 /// The key an expert is asked to declare when `report.max_findings_per_expert`
 /// stopped it from listing everything it found (see
-/// [`crate::prompt`]'s review system template). Top level of the response's
-/// YAML block, an integer.
+/// [`crate::prompt`]'s review system template). An integer, at the top level of
+/// the response's YAML block; the reader accepts any indentation, since models
+/// nest it under `review:` about as often as they leave it flush.
 pub const DECLARED_OMITTED_KEY: &str = "findings_omitted";
 
-/// Per-expert truncation accounting.
+/// Truncation accounting for one expert report.
 ///
 /// `report.max_findings_per_expert` is applied **in the prompt** — the model is
 /// told `Max findings: N` and is expected to stop there — so an expert that
@@ -220,11 +221,19 @@ pub const DECLARED_OMITTED_KEY: &str = "findings_omitted";
 /// read as a complete list when 35 of those findings were five experts sitting
 /// on the same cap (RENG-79). This restores the missing sentence: *listed N of
 /// at least N, ask again or raise the cap for the rest*.
+///
+/// Note the unit: one entry describes one **report**, not one expert. A large
+/// PR is chunked, so the same expert answers more than once and appears here
+/// more than once — count entries, not distinct `expert` names, and never sum
+/// `listed` across entries of the same name and call it "the expert's findings".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExpertTruncation {
-    /// Expert whose report is (possibly) a prefix of what it found.
+    /// Expert whose report is (possibly) a prefix of what it found. May repeat
+    /// across entries of one summary (chunked review).
     pub expert: String,
-    /// Findings the expert's report carries.
+    /// Findings this report carries — as the expert returned them, before any
+    /// later pass trims out-of-diff lines (see
+    /// [`TruncationSummary::from_reports`]).
     pub listed: usize,
     /// `report.max_findings_per_expert` for this run.
     pub cap: usize,
@@ -248,16 +257,38 @@ impl ExpertTruncation {
     }
 }
 
-/// Truncation accounting for one review run: which experts may have had
+/// Truncation accounting for one review run: which expert reports may have had
 /// findings withheld by the configured cap, and how many were declared.
+///
+/// This struct is part of the payload a UI reads
+/// (`consolidated.coverage.findings_truncation`), so its fields are worded for a
+/// consumer that did not read this file. Two readings a caller can get wrong:
+///
+/// - **`experts` is one entry per report.** A chunked review asks the same
+///   expert several times; the name repeats. Use [`Self::at_cap_count`] for
+///   "how many lists are affected" and never treat `experts` as a set of
+///   distinct experts.
+/// - **`declared_omitted_total` alone cannot tell "nobody declared" from "the
+///   experts declared zero".** It is a *sum*, so `0` is ambiguous; printing it
+///   beside a truncation warning would assert "0 omitted" on the strength of
+///   silence. [`Self::declaring_reports`] is the count that resolves it: render
+///   the total only when it is greater than zero, and keep it out of the report
+///   otherwise.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TruncationSummary {
     /// `report.max_findings_per_expert` the run used.
     pub cap: usize,
-    /// Every expert that returned at least `cap` findings, in report order.
+    /// Every expert **report** that returned at least `cap` findings, in report
+    /// order. One expert may appear more than once (one entry per chunk).
     pub experts: Vec<ExpertTruncation>,
-    /// Sum of the experts' own declarations (0 when none declared anything —
-    /// including when every at-cap expert stayed silent).
+    /// How many entries of [`Self::experts`] stated a number at all. Distinguishes
+    /// a total of 0 that means "every declaring expert said zero" from one that
+    /// means "not one expert answered the question".
+    #[serde(default)]
+    pub declaring_reports: usize,
+    /// Sum of the experts' own declarations. `0` when every expert declared zero
+    /// **or** when every at-cap expert stayed silent — check
+    /// [`Self::declaring_reports`] before presenting this as "N omitted".
     pub declared_omitted_total: usize,
 }
 
@@ -292,6 +323,7 @@ impl TruncationSummary {
         Self {
             cap,
             experts,
+            declaring_reports: 0,
             declared_omitted_total: 0,
         }
     }
@@ -316,10 +348,12 @@ impl TruncationSummary {
             })
             .filter(ExpertTruncation::at_cap)
             .collect();
+        let declaring_reports = experts.iter().filter(|e| e.declared_omitted.is_some()).count();
         let declared_omitted_total = experts.iter().filter_map(|e| e.declared_omitted).sum();
         Self {
             cap,
             experts,
+            declaring_reports,
             declared_omitted_total,
         }
     }
@@ -852,7 +886,43 @@ mod tests {
         let reports = vec![report("security", 5, ""), report("quality", 1, "")];
         let summary = TruncationSummary::from_reports(&reports, 5);
         assert_eq!(summary.declared_omitted_total, 0);
+        assert_eq!(summary.declaring_reports, 0, "nobody answered the question");
         assert_eq!(summary.experts.iter().map(|e| e.listed).collect::<Vec<_>>(), vec![5]);
+    }
+
+    #[test]
+    fn truncation_counts_one_entry_per_report_not_per_expert() {
+        // A chunked PR asks the same expert several times; a UI must see three
+        // lists, not "one expert with 15 findings".
+        let reports = vec![
+            report("security", 5, "findings_omitted: 2\n"),
+            report("security", 5, "findings_omitted: 2\n"),
+            report("security", 5, ""),
+        ];
+        let summary = TruncationSummary::from_reports(&reports, 5);
+        assert_eq!(summary.at_cap_count(), 3, "three reports hit the cap");
+        assert_eq!(summary.declaring_reports, 2);
+        assert_eq!(summary.declared_omitted_total, 4);
+        assert_eq!(
+            summary.experts.iter().filter(|e| e.expert == "security").count(),
+            3,
+            "the name repeats on purpose"
+        );
+    }
+
+    #[test]
+    fn a_zero_total_is_distinguishable_from_nobody_declaring() {
+        // The trap this field exists for: both summaries below have
+        // declared_omitted_total == 0, and only `declaring_reports` says which
+        // one may be printed as "N omitted".
+        let silent = TruncationSummary::from_reports(&[report("a", 5, "")], 5);
+        assert_eq!(silent.declared_omitted_total, 0);
+        assert_eq!(silent.declaring_reports, 0);
+
+        let declared_zero = TruncationSummary::from_reports(&[report("a", 5, "findings_omitted: 0\n")], 5);
+        assert_eq!(declared_zero.declared_omitted_total, 0);
+        assert_eq!(declared_zero.declaring_reports, 1, "an answered zero is not silence");
+        assert_eq!(declared_zero.experts[0].omitted(), Some(0));
     }
 
     #[test]
@@ -902,5 +972,9 @@ mod tests {
             "an unknown count is omitted, not reported as 0"
         );
         assert_eq!(json["declared_omitted_total"], 0);
+        assert_eq!(
+            json["declaring_reports"], 0,
+            "the consumer must be able to tell silence from a declared zero"
+        );
     }
 }

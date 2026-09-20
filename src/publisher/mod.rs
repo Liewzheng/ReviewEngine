@@ -24,6 +24,8 @@ pub use policy::{
     ENV_INLINE_ON_DOCS_ONLY, ENV_MAX_INLINE_NOTES, ENV_MIN_CONFIDENCE, ENV_MIN_SEVERITY,
 };
 
+use crate::git_provider::InlineAnchor;
+
 /// Fixed header of the review report this service posts to the MR
 /// (`publish_review`, lib.rs). The Note-hook ingestion path skips notes
 /// starting with this prefix — self-echo guard (a) of
@@ -55,8 +57,9 @@ const INLINE_POST_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from
 /// the per-finding loop. The counters are the accounting the publish path logs
 /// and the RENG-59/60 work was measured with; RENG-63 adds `policy_excluded`
 /// and `rolled_up` so "why was this finding not posted" has an answer distinct
-/// from "the provider refused it".
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+/// from "the provider refused it", and RENG-99 adds `failures` so the refused
+/// notes survive this struct instead of ending as one WARN per note.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PublishSummary {
     /// Findings inspected.
     pub considered: usize,
@@ -76,10 +79,31 @@ pub struct PublishSummary {
     /// the reviewed diff.
     pub skipped: usize,
     /// Notes the provider rejected (permanent 4xx verdict, or retries spent).
+    /// Equal to `failures.len()`.
     pub failed: usize,
+    /// One entry per rejected note, in the order the batch attempted them —
+    /// what [`render_inline_failure_section`] puts in front of the user.
+    pub failures: Vec<InlineNoteFailure>,
     /// True when the round was published summary-only (documentation/CI-only
     /// change): the board was updated and no inline note was posted at all.
     pub summary_only: bool,
+}
+
+/// One inline note the provider refused.
+///
+/// The `PublishSummary` counters said *how many* notes were lost; this says
+/// *which*, and why. Without it a round that posted 3 of 4 candidate notes left
+/// one WARN in the log and nothing in anything the user reads — the "有结果但
+/// 评论没回写到 GitLab" complaint (RENG-99, and RENG-77 §4 for the same failure
+/// one layer further out).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineNoteFailure {
+    /// `file:line` (or `file:start-end`) of the finding that could not be posted.
+    pub anchor: String,
+    /// HTTP status of the provider's verdict, when there was one.
+    pub status: Option<u16>,
+    /// The provider's cause, truncated to one line.
+    pub detail: String,
 }
 
 /// The changed lines of the reviewed diff, keyed by file path.
@@ -88,10 +112,34 @@ pub struct PublishSummary {
 /// any changed hunk has no anchor the provider will accept, so posting it
 /// earns a `400 ... line_code can't be blank` instead of a comment (corpus
 /// §4.6 — five such rejections in four hours).
+///
+/// Since RENG-99 the index also remembers *how* the diff presents each new-side
+/// line, because that decides which numbers the anchor must carry: an added line
+/// is addressed by `new_line` alone, a line the diff leaves unchanged by
+/// `(old_line, new_line)` together. The old-side number is not a detail GitLab
+/// can supply on its own — it matches the position's pair against its own diff,
+/// so an anchor that omits it is rejected exactly like an anchor outside the
+/// diff.
 #[derive(Debug, Clone, Default)]
 pub struct DiffIndex {
-    files: std::collections::HashMap<String, Vec<(u32, u32)>>,
+    /// New-side line runs per file that has one, ascending.
+    files: std::collections::HashMap<String, Vec<LineRun>>,
     changed_files: Vec<String>,
+}
+
+/// One contiguous run of new-side lines that share an anchor shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LineRun {
+    /// First new-side line of the run.
+    new_start: u32,
+    /// Last new-side line of the run, inclusive.
+    new_end: u32,
+    /// `old_line - new_line` for every line of the run; `None` for a run of
+    /// added lines, whose old side has no number.
+    ///
+    /// Constant within a context run, so the old-side number of the run's line
+    /// `n` is `n as i64 + old_minus_new`.
+    old_minus_new: Option<i64>,
 }
 
 impl DiffIndex {
@@ -104,14 +152,9 @@ impl DiffIndex {
         let mut changed_files = std::collections::BTreeSet::new();
         for file in crate::diff::parser::parse_unified_diff(diff_text) {
             changed_files.insert(file.path.clone());
-            let ranges: Vec<(u32, u32)> = file
-                .hunks
-                .iter()
-                .filter(|h| h.new_lines > 0)
-                .map(|h| (h.new_start, h.new_start.saturating_add(h.new_lines.saturating_sub(1))))
-                .collect();
-            if !ranges.is_empty() {
-                files.insert(file.path, ranges);
+            let runs = line_runs(&file);
+            if !runs.is_empty() {
+                files.insert(file.path, runs);
             }
         }
         Self {
@@ -135,12 +178,92 @@ impl DiffIndex {
         &self.changed_files
     }
 
+    /// The run of new-side lines containing `line`, if any.
+    fn run_for(&self, file: &str, line: u32) -> Option<&LineRun> {
+        self.files
+            .get(file)?
+            .iter()
+            .find(|run| line >= run.new_start && line <= run.new_end)
+    }
+
     /// Whether `line` (1-based, new side) lies inside a changed hunk of `file`.
     pub fn contains(&self, file: &str, line: u32) -> bool {
-        self.files
-            .get(file)
-            .is_some_and(|ranges| ranges.iter().any(|(start, end)| line >= *start && line <= *end))
+        self.run_for(file, line).is_some()
     }
+
+    /// The anchor to submit for `file:line`.
+    ///
+    /// A line the diff adds becomes `new_line` alone — GitLab's added-line
+    /// contract, and the anchor the publisher submitted before RENG-99. A line
+    /// the diff leaves unchanged becomes `(old_line, new_line)`, which is the
+    /// pair GitLab matches on.
+    ///
+    /// `None` when the line is outside every hunk of `file`, which is the same
+    /// condition [`Self::contains`] gates on.
+    pub fn anchor_for(&self, file: &str, line: u32) -> Option<InlineAnchor> {
+        let run = self.run_for(file, line)?;
+        let anchor = InlineAnchor::new(file, line);
+        Some(match run.old_minus_new {
+            None => anchor,
+            Some(old_minus_new) => match line as i64 + old_minus_new {
+                // Defensive: an old-side number below 1 (a malformed hunk
+                // header) is not a line number, so the added-line shape — the
+                // one shape that needs no old side — is the honest fallback.
+                old_line if old_line < 1 => anchor,
+                old_line => anchor.with_old_line(old_line as u32),
+            },
+        })
+    }
+}
+
+/// The new-side line runs of one file's hunks.
+///
+/// Walks each hunk body the way a unified diff is read: `+` advances the new
+/// side only, `-` the old side only, a context line advances both, and the
+/// `\ No newline at end of file` marker advances neither (it is glued to the
+/// line above it and carries no position of its own).
+fn line_runs(file: &crate::models::DiffFile) -> Vec<LineRun> {
+    let mut runs: Vec<LineRun> = Vec::new();
+    for hunk in &file.hunks {
+        let mut old_line = hunk.old_start as i64;
+        let mut new_line = hunk.new_start as i64;
+        for line in &hunk.lines {
+            match line.content.as_bytes().first() {
+                Some(b'+') => {
+                    push_run(&mut runs, new_line, None);
+                    new_line += 1;
+                }
+                Some(b'-') => old_line += 1,
+                Some(b'\\') => {}
+                _ => {
+                    push_run(&mut runs, new_line, Some(old_line - new_line));
+                    old_line += 1;
+                    new_line += 1;
+                }
+            }
+        }
+    }
+    runs
+}
+
+/// Append new-side line `new_line` (with its `old_line - new_line` offset) to
+/// `runs`, extending the previous run when it is the same shape and contiguous.
+fn push_run(runs: &mut Vec<LineRun>, new_line: i64, old_minus_new: Option<i64>) {
+    if new_line < 1 {
+        return;
+    }
+    let new_line = new_line as u32;
+    if let Some(last) = runs.last_mut() {
+        if last.new_end.saturating_add(1) == new_line && last.old_minus_new == old_minus_new {
+            last.new_end = new_line;
+            return;
+        }
+    }
+    runs.push(LineRun {
+        new_start: new_line,
+        new_end: new_line,
+        old_minus_new,
+    });
 }
 
 /// `file:line` (or `file:start-end`) anchor of a finding.
@@ -212,7 +335,7 @@ pub fn has_inline_candidates(output: &crate::models::ReviewOutput, policy: &Publ
 /// output/diff/policy always yields the same plan.
 pub fn plan_inline_notes_for_output<'a>(
     output: &'a crate::models::ReviewOutput,
-    diff: Option<&DiffIndex>,
+    diff: Option<&'a DiffIndex>,
     docs_only: bool,
     policy: &PublishPolicy,
 ) -> InlinePlan<'a> {
@@ -245,15 +368,16 @@ pub async fn publish_planned_inline_notes(
     };
 
     for finding in &plan.selected {
-        // The plan only selects findings with a line; this guard is defensive
-        // (and keeps the accounting honest if that invariant ever breaks).
-        let Some(line) = finding.line else {
-            tracing::warn!(file = %finding.file, "Inline note selected without a line — skipping");
+        // The plan only selects findings the anchor gate admitted; this guard is
+        // defensive (and keeps the accounting honest if that invariant ever
+        // breaks).
+        let Some(anchor) = plan.anchor_for(finding) else {
+            tracing::warn!(file = %finding.file, "Inline note selected without a usable anchor — skipping");
             summary.not_eligible += 1;
             continue;
         };
         let body = format_inline_body(finding);
-        match post_inline_with_retry(provider, &finding.file, line, &body).await {
+        match post_inline_with_retry(provider, &anchor, &body).await {
             Ok(()) => summary.posted += 1,
             Err(err) => {
                 summary.failed += 1;
@@ -262,18 +386,36 @@ pub async fn publish_planned_inline_notes(
                 // only into the fields: the Logs page keeps `fields.message`
                 // and drops everything else (log_collector::parse_line), so a
                 // fields-only report is invisible where the operator looks.
+                //
+                // The message keeps its pre-RENG-99 shape for an added-line
+                // anchor and only gains the old-side number when there is one,
+                // so a rejected context-line anchor is distinguishable from a
+                // rejected added-line one in the log.
+                let old_line = anchor
+                    .old_line
+                    .map_or_else(String::new, |old| format!(" old_line={old}"));
                 tracing::warn!(
                     file = %finding.file,
-                    line,
+                    line = anchor.line,
+                    old_line = anchor.old_line,
                     status = status,
                     "Inline note failed — continuing with the remaining findings: \
-                     finding={} new_path={} new_line={} status={} error={}",
+                     finding={} new_path={} new_line={} status={} error={}{}",
                     inline_anchor(finding),
                     finding.file,
-                    line,
+                    anchor.line,
                     status.map_or_else(|| "none".to_string(), |code| code.to_string()),
                     detail,
+                    old_line,
                 );
+                // The same facts, kept where a reader of the review — not a
+                // reader of the log — can see them: a log line is not a report
+                // (RENG-99, RENG-77 §4).
+                summary.failures.push(InlineNoteFailure {
+                    anchor: inline_anchor(finding),
+                    status,
+                    detail,
+                });
             }
         }
     }
@@ -297,9 +439,55 @@ pub async fn publish_planned_inline_notes(
     summary
 }
 
-/// What a failed inline post carries for the operator: the HTTP status of the
-/// provider's verdict (`None` when the failure had no HTTP answer) and the
-/// cause, truncated to one log line.
+/// The user-facing statement that inline notes could not be published, for the
+/// review report; empty when every admitted note was posted.
+///
+/// The ticket's requirement (RENG-99) is the first line — "有 N 条行内评论未能
+/// 发布" — because the pre-fix behaviour left the loss to one `WARN` that the
+/// user never reads. The per-anchor lines are the RENG-71 diagnosis carried
+/// where it is useful, and they cover **both** ways a note can be lost: one the
+/// provider refused (a verdict, with its status) and one that spent its retries
+/// without ever getting an answer (a transport failure, "no HTTP verdict").
+/// The lead sentence therefore claims neither of the two on its own.
+///
+/// Rendered as a board section, so a caller that re-posts the board or a
+/// follow-up note can append this verbatim. It is deliberately **not** part of
+/// [`crate::publisher::render_board`]: the counting happens while the notes are
+/// posted, after the board body has been built.
+pub fn render_inline_failure_section(summary: &PublishSummary) -> String {
+    if summary.failures.is_empty() {
+        return String::new();
+    }
+
+    let mut out = format!(
+        "## Inline notes — {} could not be published\n\n\
+         > ⛔ **{} inline note(s) failed to publish**: each was either refused by the provider or \
+         stopped after its retries without an answer, and neither kind is retried again. The \
+         status on each line below says which. The round's findings are all in the sections \
+         above; only their inline anchors are missing.\n\n",
+        summary.failures.len(),
+        summary.failures.len(),
+    );
+    for failure in &summary.failures {
+        out.push_str(&format!(
+            "- `{}` — {} — {}\n",
+            failure.anchor,
+            failure
+                .status
+                .map_or_else(|| "no HTTP verdict".to_string(), |code| format!("HTTP {code}")),
+            one_line(&failure.detail),
+        ));
+    }
+    out.push('\n');
+    out
+}
+
+/// Collapse a provider cause onto one line, so it cannot break out of the
+/// bullet it is rendered in.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 ///
 /// Prefers the provider's own [`InlineNoteError`](crate::git_provider::InlineNoteError)
 /// — the status and the response body are then structural rather than parsed
@@ -331,13 +519,12 @@ fn inline_note_failure_detail(err: &anyhow::Error) -> (Option<u16>, String) {
 /// rejected path) are returned immediately: retrying cannot change the answer.
 async fn post_inline_with_retry(
     provider: &dyn crate::git_provider::GitProvider,
-    file: &str,
-    line: u32,
+    anchor: &InlineAnchor,
     body: &str,
 ) -> Result<()> {
     let mut attempt = 1;
     loop {
-        match provider.post_inline_comment(file, line, body).await {
+        match provider.post_inline_comment_at(anchor, body).await {
             Ok(()) => return Ok(()),
             Err(err) => {
                 if attempt >= INLINE_POST_MAX_ATTEMPTS || !is_transient_error(&err) {
@@ -345,8 +532,9 @@ async fn post_inline_with_retry(
                 }
                 let backoff = INLINE_POST_RETRY_BACKOFF * 2u32.pow(attempt - 1);
                 tracing::warn!(
-                    file = %file,
-                    line,
+                    file = %anchor.file,
+                    line = anchor.line,
+                    old_line = anchor.old_line,
                     attempt,
                     error = %err,
                     "Transient inline-note failure; retrying"
@@ -358,39 +546,68 @@ async fn post_inline_with_retry(
     }
 }
 
+/// Transport-layer phrases that mean "the request never got an answer".
+///
+/// Consulted only when the failure carries no HTTP status at all — see
+/// [`is_transient_error`].
+const TRANSPORT_FAILURE_MARKERS: [&str; 11] = [
+    "error sending request",
+    "failed to send",
+    "connection refused",
+    "connection reset",
+    "connection closed",
+    "timed out",
+    "timeout",
+    "dns error",
+    "broken pipe",
+    "unexpected eof",
+    "temporarily unavailable",
+];
+
 /// Whether a failed inline post is worth retrying.
 ///
-/// Transient means no HTTP verdict was produced (transport failure) or the
-/// provider answered with a retryable status (408 / 429 / 5xx). Anything with a
-/// 4xx verdict is permanent — the corpus' five `400 line_code can't be blank`
-/// rejections are logged and skipped, never retried.
+/// The provider's HTTP verdict decides whenever there is one: 408 / 429 / 5xx
+/// are transient, every other status is permanent — including the 400 a
+/// rejected anchor earns and the 401/403/404 a wrong token or a moved MR earns.
+/// Only a failure with **no** HTTP answer at all (a transport failure) falls
+/// back to the message, because the message is then the only evidence there is.
+///
+/// The order is the whole point (RENG-65). Classifying by substring first made
+/// the classification depend on the *response body*: a `404` whose body
+/// mentioned `connection closed` — GitLab echoes proxy errors, and a captured
+/// body is attacker-adjacent text — was read as a transport failure and retried
+/// three times. This is the publisher-side twin of RENG-35, which fixed the
+/// same false positive for the LLM path by classifying on the status code.
 fn is_transient_error(err: &anyhow::Error) -> bool {
-    for cause in err.chain() {
-        let message = cause.to_string();
-        let lowered = message.to_lowercase();
-        if [
-            "error sending request",
-            "failed to send",
-            "connection refused",
-            "connection reset",
-            "connection closed",
-            "timed out",
-            "timeout",
-            "dns error",
-            "broken pipe",
-            "unexpected eof",
-            "temporarily unavailable",
-        ]
-        .iter()
-        .any(|needle| lowered.contains(needle))
-        {
-            return true;
-        }
-        if let Some(status) = http_status_code(&message) {
-            return status == 408 || status == 429 || (500..600).contains(&status);
-        }
+    match http_status_verdict(err) {
+        Some(status) => status == 408 || status == 429 || (500..600).contains(&status),
+        None => err
+            .chain()
+            .any(|cause| has_transport_failure_marker(&cause.to_string())),
     }
-    false
+}
+
+/// The HTTP status a provider error carries, when it carries one.
+///
+/// Prefers the structural status of a
+/// [`InlineNoteError`](crate::git_provider::InlineNoteError) — the shape the
+/// real clients produce — over parsing the status back out of a rendered
+/// message, which is only there for providers (and mocks) that report a plain
+/// `anyhow` error.
+fn http_status_verdict(err: &anyhow::Error) -> Option<u16> {
+    err.chain()
+        .find_map(|cause| {
+            cause
+                .downcast_ref::<crate::git_provider::InlineNoteError>()
+                .and_then(|verdict| verdict.status)
+        })
+        .or_else(|| err.chain().find_map(|cause| http_status_code(&cause.to_string())))
+}
+
+/// Whether a message reads like a transport failure with no HTTP answer.
+fn has_transport_failure_marker(message: &str) -> bool {
+    let lowered = message.to_lowercase();
+    TRANSPORT_FAILURE_MARKERS.iter().any(|needle| lowered.contains(needle))
 }
 
 /// Extract the status code from a provider error such as
@@ -660,8 +877,14 @@ mod tests {
 
     /// Recording provider: keeps every `(file, line, body)` POST and can be
     /// told to fail a given file for its first N attempts with a chosen error.
+    ///
+    /// It also keeps the [`InlineAnchor`] each POST arrived with (RENG-99): the
+    /// anchor is what decides whether the provider can address the line at all,
+    /// and the default [`crate::git_provider::GitProvider::post_inline_comment_at`]
+    /// would hide it.
     struct RecordingProvider {
         posts: std::sync::Mutex<Vec<(String, u32, String)>>,
+        anchors: std::sync::Mutex<Vec<InlineAnchor>>,
         attempts: std::sync::Mutex<std::collections::HashMap<String, usize>>,
         failures: std::collections::HashMap<String, (usize, String)>,
     }
@@ -671,6 +894,7 @@ mod tests {
         fn new(failures: &[(&str, usize, &str)]) -> Self {
             Self {
                 posts: std::sync::Mutex::new(Vec::new()),
+                anchors: std::sync::Mutex::new(Vec::new()),
                 attempts: std::sync::Mutex::new(std::collections::HashMap::new()),
                 failures: failures
                     .iter()
@@ -681,6 +905,10 @@ mod tests {
 
         fn posted(&self) -> Vec<(String, u32, String)> {
             self.posts.lock().unwrap().clone()
+        }
+
+        fn anchors(&self) -> Vec<InlineAnchor> {
+            self.anchors.lock().unwrap().clone()
         }
 
         fn attempts_for(&self, file: &str) -> usize {
@@ -716,6 +944,10 @@ mod tests {
                 .unwrap()
                 .push((file.to_string(), line, body.to_string()));
             Ok(())
+        }
+        async fn post_inline_comment_at(&self, anchor: &InlineAnchor, body: &str) -> anyhow::Result<()> {
+            self.anchors.lock().unwrap().push(anchor.clone());
+            self.post_inline_comment(&anchor.file, anchor.line, body).await
         }
         async fn fetch_code_audit_toml(&self) -> anyhow::Result<Option<String>> {
             unimplemented!()
@@ -1033,6 +1265,52 @@ mod tests {
         assert_eq!(provider.posted()[0].0, "up.rs");
     }
 
+    /// RENG-65 (retry accounting): a permanent verdict costs exactly one
+    /// attempt, even when its response body reads like a transport failure;
+    /// 429 and 5xx keep retrying to the same bound as before.
+    #[tokio::test(start_paused = true)]
+    async fn test_publish_inline_notes_attempts_a_permanent_verdict_once() {
+        for (file, message) in [
+            (
+                "unauthorized.rs",
+                "GitLab API returned 401 Unauthorized for POST merge_requests/1/discussions: \
+                 {\"message\":\"connection closed by remote host\"}",
+            ),
+            (
+                "vanished.rs",
+                "GitLab API returned 404 Not Found for POST merge_requests/1/discussions: \
+                 {\"message\":\"connection reset while reading the diff\"}",
+            ),
+        ] {
+            let findings = vec![make_finding("ux", file, 5, Severity::High)];
+            let provider = RecordingProvider::new(&[(file, 99, message)]);
+            let summary = publish(&provider, &findings, &unlimited_policy()).await;
+
+            assert_eq!(
+                provider.attempts_for(file),
+                1,
+                "{file} carries a permanent status — one attempt, no retry"
+            );
+            assert_eq!(summary.posted, 0);
+            assert_eq!(summary.failed, 1);
+        }
+
+        // The retryable set is unchanged: 429 still spends every attempt.
+        let rate_limited = RecordingProvider::new(&[(
+            "limited.rs",
+            99,
+            "GitLab API returned 429 Too Many Requests for POST merge_requests/1/discussions: {}",
+        )]);
+        let findings = vec![make_finding("ux", "limited.rs", 5, Severity::High)];
+        let summary = publish(&rate_limited, &findings, &unlimited_policy()).await;
+        assert_eq!(
+            rate_limited.attempts_for("limited.rs"),
+            INLINE_POST_MAX_ATTEMPTS as usize,
+            "429 remains transient"
+        );
+        assert_eq!(summary.failed, 1);
+    }
+
     /// Findings whose anchor is outside the reviewed diff are skipped instead of
     /// being sent (the corpus' five `400 line_code can't be blank` rejections).
     #[tokio::test]
@@ -1084,6 +1362,185 @@ mod tests {
         assert!(DiffIndex::from_diff("").changed_files().is_empty());
     }
 
+    // ── RENG-99: the anchor GitLab can match ────────────────────────────────
+
+    /// A hunk carrying every line shape GitLab distinguishes: an unchanged line
+    /// (needs both numbers), an added line (needs `new_line` alone) and a
+    /// removed line (has no new-side number at all).
+    const MIXED_HUNK_DIFF: &str = "diff --git a/src/rt.rs b/src/rt.rs\n\
+                                   index 1111111..2222222 100644\n\
+                                   --- a/src/rt.rs\n\
+                                   +++ b/src/rt.rs\n\
+                                   @@ -10,5 +10,5 @@ fn main() {\n\
+                                   \x20let a = 1;\n\
+                                   -let b = 2;\n\
+                                   +let b = 3;\n\
+                                   \x20let c = 4;\n\
+                                   \x20let d = 5;\n";
+
+    /// The old-side number is what GitLab's pair match needs, and the index is
+    /// the only place that knows it.
+    #[test]
+    fn test_diff_index_carries_the_old_line_of_an_unchanged_line() {
+        let index = DiffIndex::from_diff(MIXED_HUNK_DIFF);
+
+        assert_eq!(
+            index.anchor_for("src/rt.rs", 10),
+            Some(InlineAnchor::new("src/rt.rs", 10).with_old_line(10)),
+            "line 10 is unchanged: it needs both numbers"
+        );
+        assert_eq!(
+            index.anchor_for("src/rt.rs", 11),
+            Some(InlineAnchor::new("src/rt.rs", 11)),
+            "line 11 is added: its old side has no number, so none is sent"
+        );
+        assert_eq!(
+            index.anchor_for("src/rt.rs", 13),
+            Some(InlineAnchor::new("src/rt.rs", 13).with_old_line(13)),
+            "the context run stays anchored across its lines"
+        );
+
+        // Outside every hunk, and in a file the diff does not touch: no anchor —
+        // the same set the gate admits.
+        assert_eq!(index.anchor_for("src/rt.rs", 9), None);
+        assert_eq!(index.anchor_for("src/rt.rs", 14), None);
+        assert_eq!(index.anchor_for("other.rs", 10), None);
+        assert!(!index.contains("src/rt.rs", 14));
+        assert!(index.contains("src/rt.rs", 10), "an unchanged line is still anchorable");
+    }
+
+    /// The `\ No newline at end of file` marker is not a line: it must not
+    /// consume a new-side number, which would shift every later anchor.
+    #[test]
+    fn test_diff_index_ignores_the_no_newline_marker() {
+        let diff = "diff --git a/x.rs b/x.rs\n\
+                    --- a/x.rs\n\
+                    +++ b/x.rs\n\
+                    @@ -1,1 +1,2 @@\n\
+                    \x20kept\n\
+                    +added\n\
+                    \\ No newline at end of file\n";
+        let index = DiffIndex::from_diff(diff);
+
+        assert_eq!(
+            index.anchor_for("x.rs", 1),
+            Some(InlineAnchor::new("x.rs", 1).with_old_line(1))
+        );
+        assert_eq!(index.anchor_for("x.rs", 2), Some(InlineAnchor::new("x.rs", 2)));
+        assert!(
+            !index.contains("x.rs", 3),
+            "the marker must not be given a new-side line number"
+        );
+    }
+
+    /// The publisher submits the anchor the diff implies: an unchanged line
+    /// travels with its old-side number, an added line without one (RENG-99).
+    #[tokio::test]
+    async fn test_publish_submits_the_old_line_of_an_unchanged_line() {
+        let index = DiffIndex::from_diff(MIXED_HUNK_DIFF);
+        let findings = vec![
+            make_finding("ux", "src/rt.rs", 10, Severity::High),
+            make_finding("ux", "src/rt.rs", 11, Severity::High),
+        ];
+        let provider = RecordingProvider::new(&[]);
+        let plan = plan_inline_notes(&findings, Some(&index), false, &unlimited_policy());
+        let summary = publish_planned_inline_notes(&provider, &plan).await;
+
+        assert_eq!(summary.posted, 2);
+        assert_eq!(
+            provider.anchors(),
+            vec![
+                InlineAnchor::new("src/rt.rs", 10).with_old_line(10),
+                InlineAnchor::new("src/rt.rs", 11),
+            ]
+        );
+
+        // Without a diff index the gate never ran, so the line alone is all the
+        // publisher knows — exactly the pre-RENG-99 anchor.
+        let provider = RecordingProvider::new(&[]);
+        let plan = plan_inline_notes(&findings, None, false, &unlimited_policy());
+        publish_planned_inline_notes(&provider, &plan).await;
+        assert_eq!(provider.anchors()[0], InlineAnchor::new("src/rt.rs", 10));
+    }
+
+    /// RENG-99's other half: a note that never reached the MR is stated in the
+    /// report, with its anchor and the provider's verdict — not only as a WARN.
+    #[tokio::test(start_paused = true)]
+    async fn test_inline_failure_section_names_what_was_lost() {
+        let findings = vec![
+            make_finding("ux", "one.rs", 1, Severity::High),
+            make_finding("ux", "two.rs", 2, Severity::High),
+        ];
+        let provider = RecordingProvider::new(&[
+            (
+                "one.rs",
+                1,
+                "GitLab API returned 400 Bad Request for POST merge_requests/54/discussions: \
+                 {\"message\":\"400 Bad request - Note {:line_code=>[\\\"can't be blank\\\"]}\"}",
+            ),
+            (
+                "two.rs",
+                99,
+                "error sending request for url (http://gitlab): connection refused",
+            ),
+        ]);
+        let summary = publish(&provider, &findings, &unlimited_policy()).await;
+
+        let section = render_inline_failure_section(&summary);
+        assert!(
+            section.starts_with("## Inline notes — 2 could not be published"),
+            "the count is what the user must see: {section}"
+        );
+        assert!(section.contains("**2 inline note(s) failed to publish**"), "{section}");
+        // The lead sentence has to hold for both kinds of entry this section
+        // renders — a provider verdict and a spent transport retry — because the
+        // per-line detail distinguishes them (RENG-99 review r1 P2-1).
+        assert!(
+            section.contains("either refused by the provider or stopped after its retries"),
+            "the blanket sentence must not claim a refusal for a transport failure: {section}"
+        );
+        assert!(
+            section.contains("- `one.rs:1` — HTTP 400 — "),
+            "the refused anchor and its status are named: {section}"
+        );
+        assert!(
+            section.contains("line_code"),
+            "GitLab's verdict is carried into the report: {section}"
+        );
+        assert!(
+            section.contains("- `two.rs:2` — no HTTP verdict — "),
+            "a transport failure is reported as one, not as an HTTP status: {section}"
+        );
+        assert_eq!(
+            summary.failed,
+            summary.failures.len(),
+            "the counter and the list must not drift apart"
+        );
+
+        // A round that lost nothing adds nothing to the report.
+        let clean = publish(&RecordingProvider::new(&[]), &findings, &unlimited_policy()).await;
+        assert!(render_inline_failure_section(&clean).is_empty());
+    }
+
+    /// A provider cause is rendered on one line: a multi-line body must not
+    /// break out of the bullet it belongs to.
+    #[test]
+    fn test_inline_failure_section_keeps_one_line_per_failure() {
+        let summary = PublishSummary {
+            failed: 1,
+            failures: vec![InlineNoteFailure {
+                anchor: "src/rt.rs:12".to_string(),
+                status: Some(400),
+                detail: "GitLab said\n  line two of the body".to_string(),
+            }],
+            ..Default::default()
+        };
+        let section = render_inline_failure_section(&summary);
+
+        assert!(section.contains("GitLab said line two of the body"), "{section}");
+        assert!(!section.contains("said\n"), "the body is flattened: {section}");
+    }
+
     #[test]
     fn test_transient_error_classification() {
         /// Build an error without format-string interpretation (`{}` / `{` appear
@@ -1095,6 +1552,12 @@ mod tests {
         assert!(is_transient_error(&err(
             "GitLab API returned 503 Service Unavailable for POST merge_requests/1/discussions: {}"
         )));
+        assert!(
+            is_transient_error(&err(
+                "GitLab API returned 429 Too Many Requests for POST merge_requests/1/discussions: {}"
+            )),
+            "429 stays retryable (RENG-65 must not tighten the retryable set)"
+        );
         assert!(is_transient_error(&err(
             "error sending request for url (http://gitlab.islet.space/api/v4): connection refused"
         )));
@@ -1108,6 +1571,53 @@ mod tests {
         assert!(!is_transient_error(&err(
             "Invalid file path for inline comment: ../etc/passwd"
         )));
+    }
+
+    /// RENG-65: a permanent status is permanent no matter what the response body
+    /// says. Before this, a body mentioning `connection closed` won the
+    /// classification and a 401/404 was retried three times.
+    #[test]
+    fn test_transient_error_classification_ignores_transport_words_in_a_verdict_body() {
+        fn err(message: &str) -> anyhow::Error {
+            anyhow::Error::msg(message.to_string())
+        }
+
+        for (status, phrase) in [
+            (401, "connection closed by remote host"),
+            (403, "connection reset by peer"),
+            (404, "connection refused while fetching the diff"),
+            (400, "the connection timed out before the diff was read"),
+        ] {
+            let message = format!(
+                "GitLab API returned {status} for POST merge_requests/1/discussions: {{\"message\":\"{phrase}\"}}"
+            );
+            assert!(
+                !is_transient_error(&err(&message)),
+                "status {status} is permanent even though the body says {phrase:?}: {message}"
+            );
+        }
+
+        // The same holds when the verdict is structural (the shape the real
+        // clients produce) rather than parsed out of a rendered message.
+        let verdict = anyhow::Error::new(crate::git_provider::InlineNoteError {
+            status: Some(404),
+            body: "{\"message\":\"connection closed\"}".to_string(),
+            message: "GitLab API returned 404 Not Found for POST merge_requests/1/discussions: \
+                      {\"message\":\"connection closed\"}"
+                .to_string(),
+        });
+        assert!(!is_transient_error(&verdict));
+
+        // A transport failure that carries no status at all is still retried —
+        // the message is then the only evidence there is.
+        let transport = anyhow::Error::new(crate::git_provider::InlineNoteError {
+            status: None,
+            body: String::new(),
+            message: "Failed to send POST merge_requests/1/discussions: connection closed before \
+                      message completed"
+                .to_string(),
+        });
+        assert!(is_transient_error(&transport));
     }
 
     // ── RENG-63: policy floors, per-round cap, change-type adaptation ───────

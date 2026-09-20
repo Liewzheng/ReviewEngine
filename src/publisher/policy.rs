@@ -350,9 +350,31 @@ pub struct InlinePlan<'a> {
     /// Findings whose anchor the provider would reject: an unsafe path, or a
     /// line that is not part of the reviewed diff.
     pub skipped: usize,
+    /// The reviewed diff the anchor gate ran on, when one was available.
+    ///
+    /// Kept (RENG-99) because it is what says whether a selected line is an
+    /// added or an unchanged one, and therefore which numbers the provider's
+    /// position needs. The gate already read it; re-deriving it at post time
+    /// would need the diff a second time.
+    pub diff: Option<&'a crate::publisher::DiffIndex>,
 }
 
 impl InlinePlan<'_> {
+    /// The anchor to submit for `finding`, or `None` when it has no line.
+    ///
+    /// With a diff index, a line the diff leaves unchanged carries its old-side
+    /// number as well — GitLab matches the position's `(old_line, new_line)`
+    /// pair and rejects a context line that sends only `new_line` (RENG-99).
+    /// Without one no gate ran (the fail-open case), so the line alone is all we
+    /// know: exactly the anchor the publisher submitted before RENG-99.
+    pub fn anchor_for(&self, finding: &Finding) -> Option<crate::git_provider::InlineAnchor> {
+        let line = finding.line?;
+        match self.diff {
+            None => Some(crate::git_provider::InlineAnchor::new(finding.file.clone(), line)),
+            Some(diff) => diff.anchor_for(&finding.file, line),
+        }
+    }
+
     /// The board section describing this round's inline-note decision.
     ///
     /// Empty when there is nothing to say — a round that posted every finding
@@ -423,7 +445,7 @@ impl InlinePlan<'_> {
 /// flagged next" list and the next-best finding belongs at its top.
 pub fn plan_inline_notes<'a, I>(
     findings: I,
-    diff: Option<&crate::publisher::DiffIndex>,
+    diff: Option<&'a crate::publisher::DiffIndex>,
     docs_only: bool,
     policy: &PublishPolicy,
 ) -> InlinePlan<'a>
@@ -432,6 +454,7 @@ where
 {
     let mut plan = InlinePlan {
         docs_only,
+        diff,
         ..Default::default()
     };
     // The source index travels with the candidate so the selected notes can be

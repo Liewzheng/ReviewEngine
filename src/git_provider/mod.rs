@@ -111,6 +111,51 @@ where
     .map_err(|_| anyhow::anyhow!("remote repo browser task panicked"))?
 }
 
+/// Where an inline note anchors a diff line (RENG-99).
+///
+/// `line` is always the **new**-side (head) line number. `old_line` is the
+/// base-side number of the *same* line and is `Some` exactly when the diff
+/// leaves that line unchanged.
+///
+/// The pair is what GitLab's API actually matches on. It derives a note's
+/// `line_code` itself — a client-sent `line_code` is not honoured — by looking
+/// the position up in the diff with strict equality on **both** numbers
+/// (`Gitlab::Diff::File#line_for_position`: `line.old_line == pos.old_line &&
+/// line.new_line == pos.new_line`, the line's own unchanged side being masked to
+/// `nil` for added/removed lines). The documented contract follows from that: an
+/// added-line note sends `new_line` alone, a context-line note must send both,
+/// and a note whose pair matches no diff line is rejected with
+/// `400 … Note {:line_code=>["can't be blank", "must be a valid line code"]}` —
+/// the production symptom this type exists to fix.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InlineAnchor {
+    /// Path of the file, relative to the repository root.
+    pub file: String,
+    /// 1-based line number on the new (head) side.
+    pub line: u32,
+    /// 1-based line number on the old (base) side, for a line the diff leaves
+    /// unchanged. `None` for an added line, whose old side has no number.
+    pub old_line: Option<u32>,
+}
+
+impl InlineAnchor {
+    /// An anchor on new-side line `line`, with no old-side counterpart — the
+    /// added-line shape, and the anchor the publisher submitted before RENG-99.
+    pub fn new(file: impl Into<String>, line: u32) -> Self {
+        Self {
+            file: file.into(),
+            line,
+            old_line: None,
+        }
+    }
+
+    /// The same anchor plus the old-side number of an unchanged line.
+    pub fn with_old_line(mut self, old_line: u32) -> Self {
+        self.old_line = Some(old_line);
+        self
+    }
+}
+
 /// Unified interface for Git provider operations (GitLab, GitHub, etc.).
 #[async_trait]
 pub trait GitProvider: Send + Sync {
@@ -126,6 +171,17 @@ pub trait GitProvider: Send + Sync {
     async fn fetch_code_audit_toml(&self) -> Result<Option<String>>;
     /// Add a reaction (emoji) to a comment.
     async fn add_reaction(&self, comment_id: i64, reaction: &str) -> Result<()>;
+
+    /// Post an inline note at [`InlineAnchor`], old-side line number included.
+    ///
+    /// The default implementation drops the old-side number and delegates to
+    /// [`Self::post_inline_comment`]: GitHub addresses a review comment by one
+    /// side (`side=RIGHT`), so that number is not part of its request. GitLab
+    /// overrides this, because its `position` needs the pair for a line the diff
+    /// leaves unchanged (RENG-99).
+    async fn post_inline_comment_at(&self, anchor: &InlineAnchor, body: &str) -> Result<()> {
+        self.post_inline_comment(&anchor.file, anchor.line, body).await
+    }
 
     /// Find an existing bot discussion and update it, or create a new one.
     ///

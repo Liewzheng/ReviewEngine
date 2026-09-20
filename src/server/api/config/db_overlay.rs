@@ -1004,6 +1004,21 @@ mod tests {
             config.llm[0].provider, "openai",
             "the row carries no providers here, so the file's chain stands"
         );
+        // Sibling audit (the same hazard class, swept): `advanced`'s OTHER
+        // fields — `logLevel`, `logRetentionDays`, `sseHeartbeatInterval`,
+        // `requestTimeout`, `enableMetrics`, `debugMode` — are never applied to
+        // `AppConfig` by this overlay; they are projection-only, because no
+        // caller outside `server::api::config` reads any of them (a tree-wide
+        // search finds `maxConcurrentReviews` as the ONE `advanced` field with a
+        // consumer). A row that lacks the whole `advanced` section therefore
+        // cannot inject its derived zeros into a running review. The strongest
+        // form of that statement: with nothing but such a row, the overlay
+        // leaves the config it was handed EXACTLY as it found it.
+        assert_eq!(
+            serde_json::to_value(&config).unwrap(),
+            serde_json::to_value(&file_config()).unwrap(),
+            "a ui row without `advanced` must leave AppConfig untouched"
+        );
 
         // An explicit 0 is the same statement, not a request for "no concurrent
         // LLM calls": nothing can run then, and the pipeline would hang rather

@@ -138,6 +138,70 @@ async fn put_config_without_a_concurrency_cap_keeps_the_caps_in_force() {
     assert_eq!(running_caps(&state), (Some(9), Some(9)));
 }
 
+/// RENG-107 sibling audit: `ui.advanced`'s OTHER fields — `logLevel`,
+/// `logRetentionDays`, `sseHeartbeatInterval`, `requestTimeout`,
+/// `enableMetrics`, `debugMode` — share the shape of the cap bug (a row
+/// without the `advanced` section gives them the derived defaults: `0`, `""`,
+/// `false`), so they were swept for the same hazard: is any of them applied to
+/// something that RUNS?
+///
+/// Verdict, pinned here: no. Nothing outside `server::api::config` reads any of
+/// them (a tree-wide search leaves `maxConcurrentReviews` as the only
+/// `advanced` field with a consumer — the guard in this file); they are
+/// display-only, fed back by the Configuration page's own form defaults
+/// (`frontend/src/composables/useConfigForm.ts`: info / 30 / 15 / 120 / true /
+/// false). The proof that no sibling reaches the running configuration is this
+/// test: a `PUT /config` that zeroes all of them changes the `AppConfig` in
+/// exactly one place — the caps it also submits.
+///
+/// `enableMetrics`/`debugMode` are deliberately NOT guarded even so: `false` is
+/// a legitimate choice a user can make, indistinguishable from the derived
+/// default, and with no consumer there is nothing to protect.
+#[tokio::test]
+async fn advanced_siblings_are_projection_only() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai("sk-primary");
+    let before =
+        serde_json::to_value(&**state.app_config.read().unwrap().as_ref().expect("app_config seeded")).unwrap();
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "advanced": {
+                "logLevel": "",
+                "logRetentionDays": 0,
+                "sseHeartbeatInterval": 0,
+                "requestTimeout": 0,
+                "enableMetrics": false,
+                "debugMode": false,
+                "maxConcurrentReviews": 4
+            }
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let after = serde_json::to_value(&**state.app_config.read().unwrap().as_ref().expect("app_config seeded")).unwrap();
+    let mut expected = before.clone();
+    expected["max_concurrent_llm_calls"] = serde_json::json!(4);
+    expected["max_team_size"] = serde_json::json!(4);
+    assert_eq!(
+        after, expected,
+        "no `advanced` sibling may reach the running configuration — only the caps are applied"
+    );
+
+    // The projection, on the other hand, echoes what was submitted: the only
+    // consumer of these fields is the Configuration page.
+    let ui = state.ui_config.read().unwrap();
+    assert_eq!(ui.advanced.log_level, "");
+    assert_eq!(ui.advanced.log_retention_days, 0);
+    assert_eq!(ui.advanced.sse_heartbeat_interval, 0);
+    assert_eq!(ui.advanced.request_timeout, 0);
+    assert!(!ui.advanced.enable_metrics);
+    assert!(!ui.advanced.debug_mode);
+}
+
 /// Security regression: `GET /config` must never return a live LLM key.
 #[tokio::test]
 async fn get_config_never_leaks_llm_api_key() {

@@ -81,6 +81,69 @@ pub trait LLMProvider: Send + Sync {
     async fn complete(&self, params: &CompletionParams) -> Result<CompletionResult>;
 }
 
+// ─── Provider kind resolution ──────────────────
+
+/// Which implementation a configured provider name resolves to (RENG-66 r2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderKind {
+    /// Anthropic's native API: `/v1/messages`, authenticated with `x-api-key`.
+    Anthropic,
+    /// OpenAI's own API.
+    OpenAi,
+    /// Every other name: an OpenAI-compatible endpoint, authenticated with a
+    /// bearer token.
+    OpenAiCompatible,
+}
+
+/// Resolve a configured provider name to its implementation kind, ignoring case
+/// (RENG-66 r2).
+///
+/// ONE function decides this, and both sides that must agree call it: the
+/// registry below picks the implementation, and [`crate::llm::probe`] picks the
+/// auth header and the model-list URL. The probe's contract is "probe a card the
+/// way its completions will be attempted", and a case fold on one side only
+/// broke it: `provider = "Anthropic"` — a name that arrives from a TOML file,
+/// `LLM_CONFIG`, `reng config provider add --provider` or the CLI, never from
+/// the WebUI's lowercase catalog ids — was probed with `x-api-key` and could
+/// read healthy while [`ProviderRegistry::from_configs`] sent its completions
+/// out as an OpenAI-compatible request.
+///
+/// Two cards whose names differ only in case now resolve to the same
+/// implementation and share one registry entry — which is what two cards with
+/// the *same* name have always done, the registry being keyed by name.
+pub fn provider_kind(provider: &str) -> ProviderKind {
+    if provider.eq_ignore_ascii_case("anthropic") {
+        ProviderKind::Anthropic
+    } else if provider.eq_ignore_ascii_case("openai") {
+        ProviderKind::OpenAi
+    } else {
+        ProviderKind::OpenAiCompatible
+    }
+}
+
+/// An Anthropic API base carrying exactly one `/v1` version segment
+/// (RENG-66 r2).
+///
+/// Anthropic's endpoints live under `/v1`, and the base URL of that one API is
+/// written several ways in the wild: the builtin catalog prefills
+/// `https://api.anthropic.com/v1` (`catalog::normalize_api_base` passes
+/// Anthropic through untouched), Anthropic's own docs quote the same versioned
+/// form, [`crate::llm::probe::resolve_api_base`] defaults an empty base to the
+/// bare host, and a proxy path (`https://gw.example/anthropic/v1`) is a fourth.
+/// Appending `/v1/messages` to the versioned form built `/v1/v1/messages` — a
+/// 404 on every completion — while the probe normalized the same base and
+/// reported the card `healthy`: the health column lying in the direction
+/// opposite to RENG-66's. Both endpoints go through here, so "reads healthy"
+/// and "can complete" cannot drift apart again.
+pub fn anthropic_api_base(api_base: &str) -> String {
+    let base = api_base.trim_end_matches('/');
+    if base.ends_with("/v1") || base.ends_with("/v1beta") {
+        base.to_string()
+    } else {
+        format!("{base}/v1")
+    }
+}
+
 // ─── OpenAI Provider ───────────────────────────
 
 /// Provider implementation for the OpenAI chat completion API.
@@ -254,7 +317,11 @@ impl LLMProvider for AnthropicProvider {
     }
 
     async fn complete(&self, params: &CompletionParams) -> Result<CompletionResult> {
-        let url = format!("{}/v1/messages", self.api_base.trim_end_matches('/'));
+        // RENG-66 r2 (F-1): the base may already name the version — the builtin
+        // catalog prefills `https://api.anthropic.com/v1` — so `/v1` is ensured
+        // here instead of being appended blindly (`/v1/v1/messages` was a 404
+        // on every completion of such a card).
+        let url = format!("{}/messages", anthropic_api_base(&self.api_base));
 
         // Convert unified messages to Anthropic format
         let mut system_content = String::new();
@@ -360,8 +427,22 @@ impl ProviderRegistry {
     }
 
     /// Look up a provider by name.
+    ///
+    /// Case-insensitively (RENG-66 r2), for the same reason
+    /// [`provider_kind`] folds case: the registry is keyed by the canonical
+    /// implementation name (`"anthropic"`, `"openai"`, or the configured name
+    /// for an OpenAI-compatible entry), while the lookup key is the card's
+    /// configured `provider` — and a card named `"Anthropic"` must reach the
+    /// Anthropic implementation rather than fall through to the direct
+    /// OpenAI-compatible HTTP path, which is a 404 on the real API.
     pub fn get(&self, name: &str) -> Option<&dyn LLMProvider> {
-        self.providers.get(name).map(|p| p.as_ref())
+        if let Some(provider) = self.providers.get(name) {
+            return Some(provider.as_ref());
+        }
+        self.providers
+            .iter()
+            .find(|(registered, _)| registered.eq_ignore_ascii_case(name))
+            .map(|(_, provider)| provider.as_ref())
     }
 
     /// Return the list of registered provider names.
@@ -376,8 +457,14 @@ impl ProviderRegistry {
         let mut order = Vec::new();
 
         for config in configs {
-            let provider: Box<dyn LLMProvider> = match config.provider.as_str() {
-                "anthropic" => Box::new(AnthropicProvider::new(
+            // RENG-66 r2: the kind comes from `provider_kind`, which folds case,
+            // so a card named "Anthropic" reaches `AnthropicProvider` — the same
+            // resolution the probe uses to choose its headers and URL. Before
+            // this its completions were silently attempted as OpenAI-compatible
+            // (bearer, `{api_base}/chat/completions`) while the probe read the
+            // card healthy.
+            let provider: Box<dyn LLMProvider> = match provider_kind(&config.provider) {
+                ProviderKind::Anthropic => Box::new(AnthropicProvider::new(
                     config.api_key.clone(),
                     if config.api_base.is_empty() {
                         "https://api.anthropic.com".to_string()
@@ -385,7 +472,7 @@ impl ProviderRegistry {
                         config.api_base.clone()
                     },
                 )),
-                "openai" => Box::new(OpenAIProvider::new(
+                ProviderKind::OpenAi => Box::new(OpenAIProvider::new(
                     config.api_key.clone(),
                     if config.api_base.is_empty() {
                         "https://api.openai.com/v1".to_string()
@@ -393,7 +480,7 @@ impl ProviderRegistry {
                         config.api_base.clone()
                     },
                 )),
-                _ => {
+                ProviderKind::OpenAiCompatible => {
                     // Treat as OpenAI-compatible
                     let name = if config.provider.is_empty() {
                         "openai-compatible"
@@ -460,6 +547,98 @@ mod tests {
         let (registry, order) = ProviderRegistry::from_configs(&configs);
         assert!(registry.get("anthropic").is_some());
         assert_eq!(order, vec!["anthropic"]);
+    }
+
+    // ─── Provider kind + base normalization (RENG-66 r2) ───────────
+
+    #[test]
+    fn provider_kind_folds_case() {
+        use ProviderKind::*;
+        for name in ["anthropic", "Anthropic", "ANTHROPIC"] {
+            assert_eq!(provider_kind(name), Anthropic, "{name}");
+        }
+        for name in ["openai", "OpenAI", "OpenAi"] {
+            assert_eq!(provider_kind(name), OpenAi, "{name}");
+        }
+        // A proxy in front of Claude is an OpenAI-compatible endpoint, not
+        // Anthropic's API, and an empty name stays the generic fallback.
+        for name in ["deepseek", "ollama", "claude", "openai-compatible", ""] {
+            assert_eq!(provider_kind(name), OpenAiCompatible, "{name}");
+        }
+    }
+
+    /// F-1: the base may or may not name the version — `/v1/messages` must be
+    /// built on exactly one `/v1` either way.
+    #[test]
+    fn anthropic_api_base_keeps_exactly_one_version_segment() {
+        // The builtin catalog's prefill and Anthropic's own docs: already
+        // versioned, so nothing is added.
+        assert_eq!(
+            anthropic_api_base("https://api.anthropic.com/v1"),
+            "https://api.anthropic.com/v1"
+        );
+        assert_eq!(
+            anthropic_api_base("https://api.anthropic.com/v1/"),
+            "https://api.anthropic.com/v1"
+        );
+        // The bare host (the probe's own default) and a proxy path get it.
+        assert_eq!(
+            anthropic_api_base("https://api.anthropic.com"),
+            "https://api.anthropic.com/v1"
+        );
+        assert_eq!(
+            anthropic_api_base("https://gw.example/anthropic"),
+            "https://gw.example/anthropic/v1"
+        );
+        assert_eq!(
+            format!("{}/messages", anthropic_api_base("https://api.anthropic.com/v1")),
+            "https://api.anthropic.com/v1/messages",
+            "the versioned base must not produce /v1/v1/messages"
+        );
+    }
+
+    /// P2-2 (RENG-66 r2): a mixed-case card is routed to the Anthropic
+    /// implementation rather than silently downgraded to an OpenAI-compatible
+    /// request, and both spellings reach it — the client looks the card up by
+    /// the name it was configured with.
+    #[test]
+    fn from_configs_routes_a_mixed_case_anthropic_card_to_anthropic() {
+        let configs = vec![LLMConfig {
+            provider: "Anthropic".to_string(),
+            model: "claude-3".to_string(),
+            api_key: "test-key".to_string(),
+            api_base: "https://api.anthropic.com/v1".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+            disabled: false,
+        }];
+        let (registry, order) = ProviderRegistry::from_configs(&configs);
+        assert_eq!(
+            order,
+            vec!["anthropic"],
+            "the registry key is the canonical implementation name"
+        );
+        assert_eq!(registry.get("Anthropic").unwrap().name(), "anthropic");
+        assert_eq!(registry.get("anthropic").unwrap().name(), "anthropic");
+    }
+
+    #[test]
+    fn registry_lookup_is_case_insensitive_for_any_provider() {
+        let (registry, _) = ProviderRegistry::from_configs(&[LLMConfig {
+            provider: "DeepSeek".to_string(),
+            model: "deepseek-chat".to_string(),
+            api_key: "k".to_string(),
+            api_base: "https://api.deepseek.com".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+            disabled: false,
+        }]);
+        // Registered under the configured spelling, reachable from either.
+        assert_eq!(registry.get("deepseek").unwrap().name(), "DeepSeek");
+        assert_eq!(registry.get("DeepSeek").unwrap().name(), "DeepSeek");
+        assert!(registry.get("nonexistent").is_none());
     }
 
     #[test]

@@ -6,13 +6,18 @@
 //! provider in exactly the same way.
 //!
 //! What the probe reports is what the provider cards show in their error
-//! column, so the request it sends has to be the request the provider
-//! actually accepts (RENG-66): the provider NAME decides both the auth header
-//! ([`auth_headers`] — Anthropic wants `x-api-key` + `anthropic-version`,
-//! everything else is OpenAI-compatible and wants `Authorization: Bearer`,
-//! the same split [`crate::llm::provider::ProviderRegistry::from_configs`]
-//! makes for real completions) and the URL ([`models_url`] — Anthropic and
-//! Ollama are configured by host and serve their model list under `/v1`).
+//! column, so the request it sends has to be the request the provider actually
+//! accepts (RENG-66). Both the auth header ([`auth_headers`]) and the
+//! model-list URL ([`models_url`]) therefore come from the SAME resolution the
+//! completion path uses — [`crate::llm::provider::provider_kind`] (which folds
+//! case, so `"Anthropic"` is probed and completed as Anthropic alike) and
+//! [`crate::llm::provider::anthropic_api_base`] — because a card that reads
+//! `healthy` must be a card whose completions are attempted the same way.
+//!
+//! One known exception, tracked separately (F-2) and deliberately not folded in
+//! here: an Ollama card configured by bare host is probed at `/v1/models` while
+//! its OpenAI-compatible completion path still posts to `{base}/chat/completions`.
+//!
 //! A failure is classified ([`ProbeFailureKind`]) so a rejected key and an
 //! unreachable provider no longer read the same way.
 
@@ -41,8 +46,8 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 ///
 /// The classes exist because they ask the user to do different things: a
 /// credential problem is fixed by changing the key, an unreachable provider by
-/// changing `api_base` or the network, and a 5xx by retrying later. Before
-/// this, all of them reached the health page as prose — `HTTP 401` or
+/// changing `api_base` or the network, and a provider-side error by waiting.
+/// Before this, all of them reached the health page as prose — `HTTP 401` or
 /// `error sending request for url (…)` — which is why a normal Anthropic key
 /// and a dead provider looked alike.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -53,12 +58,13 @@ pub enum ProbeFailureKind {
     /// Nothing answered: DNS, connect, TLS, or timeout. The key was never
     /// checked.
     Unreachable,
-    /// The provider answered 4xx other than 401/403 — most often a 404 because
-    /// `api_base` does not point at an OpenAI-compatible API (or at the wrong
-    /// version of it).
+    /// The provider answered 4xx without blaming this request's credentials or
+    /// its rate: most often a 404, meaning `api_base` does not point at an
+    /// OpenAI-compatible API (or at the wrong version of it).
     BadEndpoint,
-    /// The provider answered 5xx: reachable, but unhealthy. Not a credential
-    /// problem, and not something a config change can fix.
+    /// The provider answered but the answer blames ITS OWN state, not this
+    /// request and not the address: a 5xx (unhealthy), or a 429 (rate-limited,
+    /// P2-1). Neither is a credential problem and neither is `api_base`.
     ProviderError,
 }
 
@@ -106,12 +112,23 @@ impl std::fmt::Display for ProbeFailure {
                  Check api_base — it should be the API root of an OpenAI-compatible endpoint.",
                 self.status_text()
             ),
-            ProbeFailureKind::ProviderError => write!(
-                f,
-                "provider \"{provider}\" is reachable but answered an error (HTTP {}) at {url}. \
-                 Not a credential problem — the provider itself is unhealthy; retry later.",
-                self.status_text()
-            ),
+            ProbeFailureKind::ProviderError => {
+                // P2-1: a 429 asks for patience, not for a fix. Without this
+                // branch a rate-limited provider would be described as an
+                // unhealthy one, and its `api_base` (the one thing that is
+                // right) would read as the suspect.
+                let advice = if self.status == Some(429) {
+                    "Not a credential problem — the provider is reachable and rate-limiting \
+                     this client; retry later."
+                } else {
+                    "Not a credential problem — the provider itself is unhealthy; retry later."
+                };
+                write!(
+                    f,
+                    "provider \"{provider}\" is reachable but answered an error (HTTP {}) at {url}. {advice}",
+                    self.status_text()
+                )
+            }
         }
     }
 }
@@ -151,6 +168,11 @@ impl ProbeFailure {
     fn from_status(cfg: &LLMConfig, url: String, status: reqwest::StatusCode) -> Self {
         let kind = if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             ProbeFailureKind::Auth
+        } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            // P2-1: a 429 is the PROVIDER throttling this client, not a wrong
+            // address. Reading it as `BadEndpoint` told the user to check
+            // `api_base` — the one thing that was right.
+            ProbeFailureKind::ProviderError
         } else if status.is_client_error() {
             ProbeFailureKind::BadEndpoint
         } else {
@@ -190,16 +212,21 @@ fn transport_detail(err: &reqwest::Error) -> String {
 
 /// Whether a provider name is Anthropic's API (RENG-66).
 ///
-/// Deliberately an exact, case-insensitive match on `anthropic`: that is the
-/// name [`crate::llm::provider::ProviderRegistry::from_configs`] routes to
-/// [`crate::llm::provider::AnthropicProvider`], so a card is probed with the
-/// headers its completions will use. Any other name is an OpenAI-compatible
-/// endpoint (including a proxy in front of Claude).
+/// [`crate::llm::provider::provider_kind`] answers this — the SAME function
+/// [`crate::llm::provider::ProviderRegistry::from_configs`] routes completions
+/// with — so the probe and the completion path cannot drift apart on case
+/// (RENG-66 r2). Any other name is an OpenAI-compatible endpoint, a proxy in
+/// front of Claude included.
 fn is_anthropic(provider: &str) -> bool {
-    provider.eq_ignore_ascii_case("anthropic")
+    crate::llm::provider::provider_kind(provider) == crate::llm::provider::ProviderKind::Anthropic
 }
 
 /// The auth header(s) a provider expects, as `(name, value)` pairs (RENG-66).
+///
+/// `anthropic` gets Anthropic's pair and everything else a bearer token — the
+/// same split the completion path makes, resolved by the same function, so a
+/// card that reads `healthy` is a card whose completions carry the same
+/// credentials.
 pub fn auth_headers(provider: &str, api_key: &str) -> Vec<(&'static str, String)> {
     if is_anthropic(provider) {
         vec![
@@ -215,20 +242,25 @@ pub fn auth_headers(provider: &str, api_key: &str) -> Vec<(&'static str, String)
 /// (RENG-66).
 ///
 /// An OpenAI-compatible base normally names its version — `…/v1`, or `…/v1beta`
-/// for the Gemini-style endpoints — and then only `/models` is appended. A base
-/// that does NOT name a version is only prefixed for the two providers that are
-/// configured by host while serving that listing under `/v1`: Anthropic
-/// (`https://api.anthropic.com` → `…/v1/models`) and Ollama
-/// (`http://localhost:11434` → `…/v1/models`). Every other host is left alone,
-/// because `https://api.deepseek.com/models` and friends are valid as written —
-/// adding `/v1` there would break the probe instead of fixing it.
+/// for the Gemini-style endpoints — and then only `/models` is appended. The
+/// Anthropic base goes through [`crate::llm::provider::anthropic_api_base`], the
+/// same normalization `AnthropicProvider::complete` applies, so the probe and the
+/// completion path agree on the versioned base too (the builtin catalog prefills
+/// `https://api.anthropic.com/v1`; RENG-66 r2 / F-1). Ollama's host-style base is
+/// prefixed `/v1` here as well, but its completion path does not normalize yet —
+/// that mismatch is F-2, tracked separately and deliberately left alone. Every
+/// other host is used as written, because `https://api.deepseek.com/models` and
+/// friends are valid that way — adding `/v1` there would break the probe.
 pub fn models_url(provider: &str, api_base: &str) -> String {
+    if is_anthropic(provider) {
+        return format!("{}/models", crate::llm::provider::anthropic_api_base(api_base));
+    }
     let base = api_base.trim_end_matches('/');
     let versioned = base.ends_with("/v1") || base.ends_with("/v1beta");
     if versioned {
         return format!("{base}/models");
     }
-    if is_anthropic(provider) || provider.eq_ignore_ascii_case("ollama") {
+    if provider.eq_ignore_ascii_case("ollama") {
         return format!("{base}/v1/models");
     }
     format!("{base}/models")
@@ -241,15 +273,22 @@ pub fn models_url(provider: &str, api_base: &str) -> String {
 /// else: for any other provider the stored bearer key would otherwise be
 /// silently sent to `api.openai.com` with zero indication, so the probe
 /// fails fast instead of making any request.
+///
+/// The kind comes from the same [`crate::llm::provider::provider_kind`] the
+/// completion path uses, so `"Anthropic"` gets the Anthropic default (and the
+/// required-api_base error keeps naming the configured spelling).
 pub fn resolve_api_base(cfg: &LLMConfig) -> Result<String> {
     if !cfg.api_base.is_empty() {
         return Ok(cfg.api_base.clone());
     }
-    match cfg.provider.to_lowercase().as_str() {
-        "openai" => Ok("https://api.openai.com/v1".to_string()),
-        "anthropic" => Ok("https://api.anthropic.com".to_string()),
-        "ollama" => Ok("http://localhost:11434".to_string()),
-        _ => anyhow::bail!(
+    use crate::llm::provider::{provider_kind, ProviderKind};
+    match provider_kind(&cfg.provider) {
+        ProviderKind::OpenAi => Ok("https://api.openai.com/v1".to_string()),
+        ProviderKind::Anthropic => Ok("https://api.anthropic.com".to_string()),
+        ProviderKind::OpenAiCompatible if cfg.provider.eq_ignore_ascii_case("ollama") => {
+            Ok("http://localhost:11434".to_string())
+        }
+        ProviderKind::OpenAiCompatible => anyhow::bail!(
             "api_base is required for provider \"{}\" (no well-known default)",
             cfg.provider
         ),
@@ -554,8 +593,9 @@ mod tests {
         assert!(!message.contains("authentication failed"), "got {message}");
     }
 
-    /// 404 and 5xx are distinct from both of the above: the provider answered,
-    /// so the URL (404) or the provider's health (5xx) is the problem.
+    /// 404, 5xx and 429 are distinct from both of the above: the provider
+    /// answered, so the URL (404) or the provider's own condition (5xx, 429) is
+    /// the problem.
     #[tokio::test]
     async fn answered_errors_are_classified_by_status() {
         let mock = MockServer::start().await;
@@ -588,6 +628,32 @@ mod tests {
         assert!(message.contains("Not a credential problem"), "got {message}");
     }
 
+    /// P2-1: a 429 is the provider throttling this client — it answered, and
+    /// `api_base` is exactly right. Reading it as `BadEndpoint` (the pre-r2
+    /// behaviour) told the user to check the one thing that was not wrong.
+    #[tokio::test]
+    async fn a_rate_limited_provider_is_not_told_to_check_its_api_base() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(429).set_body_string(r#"{"error":{"type":"rate_limit_error"}}"#))
+            .mount(&mock)
+            .await;
+
+        let err = probe_llm_connectivity(&cfg("anthropic", &mock.uri(), "sk-ant-good"))
+            .await
+            .expect_err("429 is not healthy");
+        let failure = err.downcast_ref::<ProbeFailure>().expect("classified");
+        assert_eq!(failure.kind, ProbeFailureKind::ProviderError);
+        assert_eq!(failure.status, Some(429));
+        let message = err.to_string();
+        assert!(message.contains("rate-limiting"), "got {message}");
+        assert!(
+            !message.contains("Check api_base") && !message.contains("serves no model list"),
+            "a throttle is not an address problem: {message}"
+        );
+    }
+
     /// The fail-fast path is unchanged: an unknown provider with no api_base
     /// makes no request at all (and never leaks the key anywhere).
     #[tokio::test]
@@ -598,6 +664,42 @@ mod tests {
         assert!(
             err.to_string().contains("api_base is required for provider \"mimo\""),
             "got {err}"
+        );
+    }
+
+    /// P2-2: the probe and the completion registry resolve the provider name
+    /// with the SAME function, so a mixed-case card is probed the way its
+    /// completions are routed (`ProviderRegistry::from_configs` sends
+    /// "Anthropic" to the Anthropic implementation since RENG-66 r2) and can no
+    /// longer read healthy while completing as someone else.
+    #[tokio::test]
+    async fn a_mixed_case_anthropic_card_is_probed_as_anthropic() {
+        let mock = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(header("x-api-key", "sk-ant-good"))
+            .and(header("anthropic-version", ANTHROPIC_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .mount(&mock)
+            .await;
+
+        probe_llm_connectivity(&cfg("Anthropic", &mock.uri(), "sk-ant-good"))
+            .await
+            .expect("a mixed-case Anthropic card must probe as Anthropic");
+
+        let requests = mock.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].url.path(), "/v1/models");
+        assert_eq!(
+            requests[0].headers.get("x-api-key").unwrap().to_str().unwrap(),
+            "sk-ant-good"
+        );
+        assert!(requests[0].headers.get("authorization").is_none());
+
+        // …and the kind the probe used is the kind the registry will use.
+        assert_eq!(
+            crate::llm::provider::provider_kind("Anthropic"),
+            crate::llm::provider::ProviderKind::Anthropic
         );
     }
 }

@@ -113,8 +113,51 @@ pub async fn resolve_cli_config_at(
     state_root: Option<&Path>,
 ) -> anyhow::Result<CliConfig> {
     let mut config = review_engine::config::resolve_config(config_source).await?;
+    clear_unusable_caps(&mut config);
     let db = overlay_database(&mut config, state_root).await;
     Ok(CliConfig { config, db })
+}
+
+/// Clear a concurrency cap of 0 that the resolved config carries, warning once.
+///
+/// `resolve_config(None)` — the auto-detected `.code-audit-config.toml` — only
+/// lifts `llm` / `report` / `commands` / `review_experts` out of the file
+/// (`config::resolver`), so a top-level `max_concurrent_llm_calls` written there
+/// never arrives. `--config <file>` (and the library's `ConfigSource::Path` /
+/// `Inline`) deserializes the whole `AppConfig` instead, so the same line DOES
+/// arrive — and 0 is not a limit: the review pipeline builds
+/// `Semaphore::new(cap)` from it, so every expert task waits forever and the
+/// command hangs with no error, no timeout and no last log line. `--config` is
+/// on every config-consuming command, so the guard belongs here, on the one
+/// resolution those commands share; `team::orchestrator::concurrent_llm_calls`
+/// is the sink-side backstop for callers that never come through the CLI.
+///
+/// Clearing, rather than clamping to 1, gives the file's 0 the meaning the two
+/// database writers' rule gives it: "not decided", so the pipeline's own
+/// default applies. This runs BEFORE the database overlay, so a stored
+/// `advanced.maxConcurrentReviews` still gets to decide the caps afterward.
+fn clear_unusable_caps(config: &mut AppConfig) {
+    let ignored: Vec<&str> = [
+        ("max_concurrent_llm_calls", config.max_concurrent_llm_calls),
+        ("max_team_size", config.max_team_size),
+    ]
+    .into_iter()
+    .filter(|(_, value)| *value == Some(0))
+    .map(|(name, _)| name)
+    .collect();
+    if ignored.is_empty() {
+        return;
+    }
+    config.max_concurrent_llm_calls = config.max_concurrent_llm_calls.filter(|cap| *cap > 0);
+    config.max_team_size = config.max_team_size.filter(|cap| *cap > 0);
+    // Same channel as the database warning below, for the same reason: main
+    // routes tracing into `logs.ndjson`, so a tracing warning never reaches the
+    // terminal this command is running in.
+    eprintln!(
+        "warning: ignoring {} = 0 in the configuration file — no expert task can run with a \
+         limit of 0, so the built-in default applies",
+        ignored.join(" / ")
+    );
 }
 
 /// Apply the state root's database over `config`, degrading to plain TOML on
@@ -446,6 +489,63 @@ api_key = "sk-from-toml"
 
         assert!(resolved.db.is_empty());
         assert_eq!(resolved.config.llm[0].api_key, "sk-from-toml");
+    }
+
+    /// RENG-107 r2 — the hang the reviewer found. `--config <file>` (and the
+    /// library's `ConfigSource::Path` / `Inline`) deserializes the whole
+    /// `AppConfig`, so a top-level concurrency cap of 0 in THAT file does
+    /// arrive in the resolved config — unlike the auto-detected
+    /// `.code-audit-config.toml`, whose top-level scalars the resolver drops
+    /// (`resolve_config(None)` lifts only `llm` / `report` / `commands` /
+    /// `review_experts`). 0 is not a limit: the review pipeline builds
+    /// `Semaphore::new(cap)` from it, so every expert task waits forever, which
+    /// is how `reng review --config cfg.toml` used to hang with rc=124 and a
+    /// single LLM request. The CLI clears both keys, so the pipeline default
+    /// applies — and it clears them BEFORE the database overlay, so a stored
+    /// cap still gets to decide.
+    #[tokio::test]
+    async fn a_zero_cap_from_an_explicit_config_file_is_not_a_limit() {
+        let _env_lock = clean_env();
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("cfg.toml");
+        let source = || Some(ConfigSource::Path(file.display().to_string()));
+
+        std::fs::write(
+            &file,
+            format!("max_concurrent_llm_calls = 0\nmax_team_size = 0\n{}", file_toml()),
+        )
+        .unwrap();
+        let resolved = resolve_cli_config_at(source(), None).await.unwrap();
+        assert_eq!(
+            resolved.config.max_concurrent_llm_calls, None,
+            "0 must be cleared, not carried into the pipeline's semaphore"
+        );
+        assert_eq!(resolved.config.max_team_size, None);
+        // Clearing must not disturb the rest of the file.
+        assert_eq!(resolved.config.llm[0].provider, "openai");
+        assert_eq!(resolved.config.review_experts["security"].weight, 30);
+
+        // A real cap in the same file is honoured — the guard is not a blanket
+        // reset of the key.
+        std::fs::write(
+            &file,
+            format!("max_concurrent_llm_calls = 3\nmax_team_size = 3\n{}", file_toml()),
+        )
+        .unwrap();
+        let resolved = resolve_cli_config_at(source(), None).await.unwrap();
+        assert_eq!(resolved.config.max_concurrent_llm_calls, Some(3));
+        assert_eq!(resolved.config.max_team_size, Some(3));
+
+        // …and the clearing happens before the DB overlay: a stored cap still
+        // decides for a run whose file said 0.
+        let root = seeded_root().await;
+        std::fs::write(&file, format!("max_concurrent_llm_calls = 0\n{}", file_toml())).unwrap();
+        let resolved = resolve_cli_config_at(source(), Some(root.path())).await.unwrap();
+        assert_eq!(
+            resolved.config.max_concurrent_llm_calls,
+            Some(9),
+            "the database's cap applies over the cleared file value"
+        );
     }
 
     /// The database is looked for exactly where `serve` keeps it: next to the

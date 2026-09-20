@@ -250,6 +250,54 @@ async fn authorization_headers(server: &wiremock::MockServer) -> Vec<String> {
         .collect()
 }
 
+/// The result of [`run_with_deadline`].
+struct FinishedRun {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+/// Run the binary with a HARD deadline, capturing its output through files.
+///
+/// The hang tests exist because `reng` used to wait forever on a 0-permit
+/// semaphore; if that ever comes back, a test that simply waits would hang the
+/// whole suite instead of failing. Files rather than pipes, because a killed
+/// child must not be able to block on a full pipe.
+fn run_with_deadline(args: &[&str], cwd: &Path, home: &Path, seconds: u64) -> FinishedRun {
+    let out_path = home.join("deadline-stdout.txt");
+    let err_path = home.join("deadline-stderr.txt");
+    let mut child = isolated_command(args, cwd, home, &[])
+        .stdout(std::fs::File::create(&out_path).expect("create stdout file"))
+        .stderr(std::fs::File::create(&err_path).expect("create stderr file"))
+        .spawn()
+        .expect("failed to spawn review-engine");
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    let mut finished = false;
+    while !finished {
+        match child.try_wait().expect("try_wait failed") {
+            Some(_) => finished = true,
+            None if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "review-engine did not finish within {seconds}s — the zero-cap hang is back. \
+                     stdout: {} stderr: {}",
+                    std::fs::read_to_string(&out_path).unwrap_or_default(),
+                    std::fs::read_to_string(&err_path).unwrap_or_default()
+                );
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(25)),
+        }
+    }
+    let status = child.wait().expect("wait failed");
+    FinishedRun {
+        success: status.success(),
+        stdout: std::fs::read_to_string(&out_path).unwrap_or_default(),
+        stderr: std::fs::read_to_string(&err_path).unwrap_or_default(),
+    }
+}
+
 // ─── `--config-dir` ────────────────────────────────────────────────
 
 /// The flag is global (accepted by a command that has no `--data-dir` of its
@@ -643,5 +691,87 @@ async fn an_unreadable_database_warns_once_and_falls_back_to_the_config_files() 
         db_fingerprint(&root),
         before,
         "the degraded path must not touch the database either"
+    );
+}
+
+/// RENG-107 r2 — the reviewer's P2-1 repro: `review --config <file>` with a
+/// concurrency cap of 0.
+///
+/// `--config` is read as a WHOLE `AppConfig` (`ConfigSource::Path` →
+/// `load_config_without_llm` → `load_and_apply`), unlike the auto-detected
+/// `.code-audit-config.toml`, whose top-level scalars the resolver drops. So the
+/// 0 reached `Semaphore::new(0)` and the command hung: rc=124 under `timeout`,
+/// one LLM request (the pre-semaphore global-context call), no output at all —
+/// the silent-hang class, reachable through a documented flag.
+///
+/// The CLI now clears a 0 cap and warns once, so the review runs on the file's
+/// provider and the pipeline default.
+#[tokio::test]
+async fn a_zero_concurrency_cap_in_an_explicit_config_file_does_not_hang() {
+    let home = TempDir::new().unwrap();
+    let repo = repo_with_a_change();
+    let root = home.path().join("nas-config");
+    // No config file and no database in the state root: the only provider is
+    // the one in the `--config` file under test.
+    make_state_root(&root, None);
+
+    let mock = wiremock::MockServer::start().await;
+    mount_mock_llm(&mock, findings_body("the review still ran", "sk-from-cfg")).await;
+
+    let cfg = home.path().join("cfg.toml");
+    std::fs::write(
+        &cfg,
+        format!(
+            "max_concurrent_llm_calls = 0\nmax_team_size = 0\n{}",
+            config_toml(Some(("mock-cfg", &format!("{}/v1", mock.uri()), "sk-from-cfg")))
+        ),
+    )
+    .unwrap();
+
+    let run = run_with_deadline(
+        &[
+            "--config-dir",
+            root.to_str().unwrap(),
+            "review",
+            "--local-path",
+            ".",
+            "--base",
+            "main",
+            "--format",
+            "json",
+            "--config",
+            cfg.to_str().unwrap(),
+        ],
+        repo.path(),
+        home.path(),
+        60,
+    );
+
+    assert!(
+        run.success,
+        "a 0 cap must not hang the command — stdout: {}\nstderr: {}",
+        run.stdout, run.stderr
+    );
+    assert!(
+        run.stdout.contains("the review still ran"),
+        "the review must have run to completion: {}",
+        run.stdout
+    );
+    assert_eq!(
+        authorization_headers(&mock).await.first().map(String::as_str),
+        Some("Bearer sk-from-cfg"),
+        "and it must have used the --config file's provider"
+    );
+
+    assert_eq!(
+        run.stderr.lines().filter(|line| line.contains("limit of 0")).count(),
+        1,
+        "exactly one warning about the ignored cap — stderr: {}",
+        run.stderr
+    );
+    assert!(
+        run.stderr.contains("max_concurrent_llm_calls") && run.stderr.contains("max_team_size"),
+        "the warning must name both keys it ignored: {}",
+        run.stderr
     );
 }

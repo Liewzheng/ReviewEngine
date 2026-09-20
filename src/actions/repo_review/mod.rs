@@ -21,6 +21,16 @@ use crate::repo::{FileEntry, RepoScanner};
 use anyhow::Result;
 use std::sync::Arc;
 
+/// Concurrency the LLM enhancement pass (pass 2) may use.
+///
+/// Goes through [`crate::team::orchestrator::concurrent_llm_calls`], the sink
+/// guard that refuses a limit of 0 — a 0-permit semaphore leaves every chunk
+/// task waiting forever, which is the silent-hang class the CLI clears a 0 cap
+/// for. If the guard fires, the warning names this site.
+fn llm_enhance_concurrency(config: Option<&AppConfig>) -> usize {
+    crate::team::orchestrator::concurrent_llm_calls(config, "repo-review LLM enhancement")
+}
+
 /// Run the 6 static experts and produce a weighted score.
 async fn run_static_experts(ctx: &RepoContext) -> Vec<ExpertScore> {
     let experts: Vec<Box<dyn RepoExpert>> = vec![
@@ -325,11 +335,7 @@ pub async fn run_repo_review(
             }
         }
 
-        let max_concurrent = ctx
-            .config
-            .as_deref()
-            .and_then(|c| c.max_concurrent_llm_calls)
-            .unwrap_or(6);
+        let max_concurrent = llm_enhance_concurrency(ctx.config.as_deref());
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent));
         let completed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let total_chunks = chunks.len();

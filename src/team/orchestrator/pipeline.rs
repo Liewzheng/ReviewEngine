@@ -234,8 +234,14 @@ fn sanitize_overview_yaml(text: &str) -> String {
 
 /// Set up concurrency-control infrastructure: semaphore, rate limiter, and
 /// completion counter.
+///
+/// The semaphore size goes through [`super::concurrent_llm_calls`], the sink
+/// guard that refuses a limit of 0 (a 0-permit semaphore would make every
+/// expert task wait forever, i.e. a silent hang). The CLI clears a 0 cap before
+/// it gets here, so if the guard fires something upstream let one through — the
+/// warning names this site.
 fn setup_concurrency_control(config: &AppConfig) -> (Arc<Semaphore>, Arc<RateLimiter>, Arc<AtomicUsize>) {
-    let max_concurrent = config.max_concurrent_llm_calls.unwrap_or(6);
+    let max_concurrent = super::concurrent_llm_calls(Some(config), "team review pipeline");
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let rate_limiter = Arc::new(RateLimiter::new(
         config.rate_limit.max_rpm,
@@ -948,5 +954,28 @@ mod global_context_parse_tests {
     #[test]
     fn parse_global_context_garbage_returns_none() {
         assert!(parse_global_review_context("not yaml at all: [unclosed").is_none());
+    }
+
+    /// RENG-107 r2 — the team-review sink site: a 0 cap must never become
+    /// `Semaphore::new(0)` (the hang the CLI clears a 0 cap for). The guard is
+    /// the shared [`super::concurrent_llm_calls`]; this pins the site.
+    #[test]
+    fn setup_concurrency_control_never_builds_a_zero_permit_semaphore() {
+        let config = |cap: Option<usize>| -> AppConfig {
+            serde_json::from_value(serde_json::json!({ "max_concurrent_llm_calls": cap }))
+                .expect("minimal AppConfig must deserialize")
+        };
+
+        assert_eq!(
+            setup_concurrency_control(&config(Some(0))).0.available_permits(),
+            super::super::DEFAULT_LLM_CONCURRENCY,
+            "0 must degrade to the default, never to a 0-permit semaphore"
+        );
+        assert_eq!(setup_concurrency_control(&config(None)).0.available_permits(), 6);
+        assert_eq!(
+            setup_concurrency_control(&config(Some(3))).0.available_permits(),
+            3,
+            "a real limit still reaches the semaphore"
+        );
     }
 }

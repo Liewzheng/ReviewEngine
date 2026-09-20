@@ -1180,3 +1180,28 @@ fn test_render_markdown_marks_fallback_experts() {
     let row = format!("| architecture ⚠ | {}/100 |", experts::LLM_FALLBACK_SCORE);
     assert!(md.contains(&row), "{md}");
 }
+
+// ── RENG-107 r2: the repo-review site's zero-concurrency backstop ───
+
+/// The repo-review LLM-enhancement pass builds its OWN semaphore, so it needs
+/// the same refusal as the team-review pipeline: a config carrying
+/// `max_concurrent_llm_calls = 0` (e.g. `repo-review --config <file>`) must not
+/// reach `Semaphore::new(0)`, which would leave every chunk task waiting
+/// forever. Both sites share the guard; this pins the site's own wiring.
+#[test]
+fn llm_enhance_concurrency_never_yields_a_zero() {
+    let config = |cap: Option<usize>| -> AppConfig {
+        serde_json::from_value(serde_json::json!({ "max_concurrent_llm_calls": cap }))
+            .expect("minimal AppConfig must deserialize")
+    };
+    let default = crate::team::orchestrator::DEFAULT_LLM_CONCURRENCY;
+
+    assert_eq!(super::llm_enhance_concurrency(Some(&config(Some(0)))), default);
+    assert_eq!(super::llm_enhance_concurrency(Some(&config(None))), default);
+    assert_eq!(super::llm_enhance_concurrency(None), default, "no config at all");
+    assert_eq!(
+        super::llm_enhance_concurrency(Some(&config(Some(2)))),
+        2,
+        "a real limit still reaches the semaphore"
+    );
+}

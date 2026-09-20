@@ -334,6 +334,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             // 0.10.0 persistence (design/persistence.md §6.1, strict order):
             // 1) resolve DB URL → pool → migrate (failure aborts startup;
             //    REVIEW_DISABLE_DB=1 bypasses to 0.9 behaviour);
+            // 1b) overlay the DB configuration onto the file-resolved config
+            //    (db_overlay::apply_db_overrides — the same call the CLI paths
+            //    make: DB over file, key by key);
             // 2) §5.3 interrupted sweep + TaskStore write-through injection
             //    (below, right after migrate);
             // 3) one-shot ui-state.toml import (single transaction; failure
@@ -343,6 +346,44 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .await?
                 .map(Arc::new);
             if let Some(store) = app_state.db.clone() {
+                // DB over file: the config dir's `review.db`, when it exists, is
+                // the HIGHEST-priority configuration layer. Read it here — before
+                // the WebUI replay below — and let it override the file-resolved
+                // config key by key, through the same `AppState`-free function the
+                // CLI paths use. The replay that follows still owns the UI
+                // projection, the GitLab runtime and the masked shapes, and
+                // re-applies the same DB values, so the running configuration is
+                // unchanged. A database that carries nothing (fresh deploy, or
+                // `REVIEW_DISABLE_DB=1`) leaves the file resolution in force.
+                let file_experts = config.review_experts.clone();
+                let env_overrides = app_state.ui_state_env.clone().unwrap_or_default();
+                match review_engine::server::api::config::db_overlay::apply_db_overrides(
+                    &mut config,
+                    &store,
+                    &env_overrides,
+                )
+                .await
+                {
+                    Ok(applied) if !applied.is_empty() => {
+                        if applied.experts_patched > 0 {
+                            // RENG-93: the WebUI expert edits are re-applied over
+                            // the FILE-resolved team, never over the DB-overlaid
+                            // one published here — clearing an override must fall
+                            // back to the config file's value.
+                            *app_state.expert_base.write().unwrap_or_else(|e| e.into_inner()) = Some(file_experts);
+                        }
+                        // Poisoning is not a concern here: the state is still local
+                        // to startup, so a poisoned lock only means an earlier
+                        // panicking thread — publishing the config still beats
+                        // silently leaving the file resolution in force.
+                        let mut running = app_state.app_config.write().unwrap_or_else(|e| e.into_inner());
+                        *running = Some(Arc::new(config.clone()));
+                        drop(running);
+                        tracing::info!("applied the database configuration over the config file");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("failed to apply the database configuration over the config file: {e:#}"),
+                }
                 // §5.3: tasks still pending/running when the previous process
                 // died are marked failed with an 'interrupted' error. They are
                 // NOT re-queued automatically (LLM quota / duplicate MR

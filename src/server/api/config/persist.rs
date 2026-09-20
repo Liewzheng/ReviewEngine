@@ -81,6 +81,16 @@ pub struct PersistedGitlabConfig {
     pub webhook_signing_secret: String,
 }
 
+impl PersistedGitlabConfig {
+    /// True when no field carries a credential — "unset is unset" for this
+    /// section (the store deletes an all-empty row rather than keeping a JSON
+    /// shell). Used by the save path and by the DB-over-file overlay's
+    /// "did the database carry anything" answer.
+    pub fn is_empty(&self) -> bool {
+        self.token.is_empty() && self.webhook_secret.is_empty() && self.webhook_signing_secret.is_empty()
+    }
+}
+
 impl UiStateFile {
     /// Build the persistable file from a resolved PUT ([`AppliedConfig`]),
     /// keeping env-derived values OUT: `env` tracks what came from CLI/env
@@ -495,6 +505,11 @@ pub async fn import_ui_state_into_db(store: &SqlxStore, path: &Path) -> anyhow::
     Ok(true)
 }
 
+/// `app_settings` key holding the persisted UI projection ([`UiConfig`]) — the
+/// `ui` row the DB replay and the `AppState`-free overlay
+/// ([`super::db_overlay::apply_db_overrides`]) both read.
+pub const UI_SETTING_KEY: &str = "ui";
+
 /// Startup step 4 (§6.1): replay the UI state from the DB through the SAME
 /// `apply_ui_config` path as `PUT /config`. The DB rows are reassembled into
 /// a [`UiStateFile`] so the replay payload builder (env precedence, masked
@@ -506,7 +521,7 @@ pub async fn load_and_apply_ui_state_from_db(
     overrides: &UiStateEnvOverrides,
 ) -> anyhow::Result<bool> {
     let ui: Option<UiConfig> = store
-        .load_setting("ui")
+        .load_setting(UI_SETTING_KEY)
         .await?
         .map(|v| serde_json::from_value(v).context("app_settings row 'ui' is not a valid UiConfig"))
         .transpose()?;
@@ -521,12 +536,7 @@ pub async fn load_and_apply_ui_state_from_db(
     // [`AppState::set_aggregation_override`]).
     state.set_aggregation_override(file.ui.as_ref().and_then(|u| u.aggregated));
     let gitlab = &file.gitlab;
-    let empty = file.ui.is_none()
-        && file.llm.is_empty()
-        && file.git_platforms.is_empty()
-        && gitlab.token.is_empty()
-        && gitlab.webhook_secret.is_empty()
-        && gitlab.webhook_signing_secret.is_empty();
+    let empty = file.ui.is_none() && file.llm.is_empty() && file.git_platforms.is_empty() && gitlab.is_empty();
     if empty {
         return Ok(false);
     }

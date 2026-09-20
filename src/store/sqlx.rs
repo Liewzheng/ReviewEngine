@@ -289,7 +289,7 @@ impl ConfigStore for SqlxStore {
         replace_git_platforms_in(&mut tx, self.kind, &state.git_platforms, &self.key).await?;
         replace_llm_providers_in(&mut tx, self.kind, &state.llm, &self.key).await?;
         let gitlab = &state.gitlab;
-        if gitlab.token.is_empty() && gitlab.webhook_secret.is_empty() && gitlab.webhook_signing_secret.is_empty() {
+        if gitlab.is_empty() {
             // Unset is unset: an all-empty legacy gitlab value removes the row
             // instead of storing an empty JSON shell.
             delete_setting_in(&mut tx, self.kind, LEGACY_GITLAB_KEY).await?;

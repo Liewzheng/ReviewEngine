@@ -36,7 +36,7 @@ pub(crate) struct GitPlatformRow {
 }
 
 /// At-rest form of one `llm_providers` row.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct LlmProviderRow {
     pub id: String,
     pub provider: String,

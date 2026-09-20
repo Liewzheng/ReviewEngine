@@ -674,6 +674,27 @@ fn replay_payload(file: &UiStateFile, overrides: &UiStateEnvOverrides) -> serde_
         obj.remove("llm");
     } else if !file.llm.is_empty() {
         let mut section = file.ui.as_ref().map(|u| u.llm.clone()).unwrap_or_default();
+        // The legacy scalar mirror describes the PRIMARY entry (`sync_llm_projection`
+        // fills the persisted projection's mirror the same way), so the replay
+        // must fill it too. Leaving it at whatever the stored `ui` row held —
+        // empty on a row written before the mirror existed — made the replayed
+        // payload describe a provider with no api_base and no model, which the
+        // legacy scalar path then applied INSTEAD of `providers[0]`: the
+        // provider list was replaced by that empty entry (the 0.10.46 release
+        // gate's data loss, reproduced on a row without the `llm` key).
+        let recorded_primary = section.primary_provider.trim().to_string();
+        let primary = file
+            .llm
+            .iter()
+            .find(|c| !c.disabled && c.provider == recorded_primary)
+            .or_else(|| file.llm.iter().find(|c| !c.disabled));
+        if let Some(primary) = primary {
+            section.primary_provider = primary.provider.clone();
+            section.default_model = primary.model.clone();
+            section.api_base_url = primary.api_base.clone();
+            section.max_tokens = primary.max_tokens;
+            section.temperature = primary.temperature;
+        }
         section.openai_api_key = file
             .llm
             .iter()
@@ -2390,5 +2411,199 @@ webhook_secret = "legacy-wh-plain"
             "the state is untouched, so a caller that logs and continues has a usable config"
         );
         assert!(state.expert_overrides_snapshot().is_empty());
+    }
+
+    // ── An unrelated save must not touch the provider rows (0.10.46 gate) ──
+
+    /// Every column of `llm_providers`, verbatim: the byte-level answer to
+    /// "did this save touch the provider list" that a database copy gives.
+    async fn raw_provider_rows(
+        store: &SqlxStore,
+    ) -> Vec<(String, String, String, String, String, i64, f64, String, String)> {
+        sqlx::query_as(
+            "SELECT id, provider, model, api_base, api_key, max_tokens, temperature, raw, updated_at \
+             FROM llm_providers ORDER BY id",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap()
+    }
+
+    /// The release gate's data loss (0.10.46), end to end against a real
+    /// database, on the shape the gate's evidence showed: a `ui` row written
+    /// before the legacy scalar mirror existed (no `llm` key) next to a correct
+    /// `llm_providers` row.
+    ///
+    /// Two things must hold: the startup replay keeps the stored provider
+    /// usable (the mirror is filled from the primary, so the legacy scalar
+    /// path can no longer rebuild the entry from empty fields), and an
+    /// unrelated save — the Configuration page's auto-save, which omits `llm`
+    /// entirely — leaves the rows byte-identical with the runtime still usable
+    /// by `GET /llm/providers` and the review enqueue gate (422
+    /// `llmNotConfigured` is exactly the `api_base.is_empty()` test below).
+    #[tokio::test]
+    async fn unrelated_save_leaves_the_provider_rows_untouched_on_a_legacy_ui_row() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let store = fresh_db().await;
+        store
+            .replace_llm_providers(&[LLMConfig {
+                provider: "openai".to_string(),
+                model: "gpt-4o".to_string(),
+                api_key: "sk-live".to_string(),
+                api_base: "https://api.example.com/v1".to_string(),
+                max_tokens: 4096,
+                temperature: 0.7,
+                disable_thinking: None,
+                disabled: false,
+            }])
+            .await
+            .unwrap();
+        // The legacy row: a projection without the `llm` section at all.
+        store
+            .save_setting(
+                UI_SETTING_KEY,
+                &serde_json::json!({
+                    "gitlab": {"apiToken": "", "webhookSecret": "", "webhookSigningSecret": ""},
+                    "rules": {"minScore": 75},
+                    "advanced": {"maxConcurrentReviews": 5, "enableMetrics": true},
+                    "gitPlatforms": []
+                }),
+            )
+            .await
+            .unwrap();
+
+        let mut state = fresh_state(vec![]);
+        state.db = Some(Arc::new(store.clone()));
+        let state = Arc::new(state);
+        assert!(
+            load_and_apply_ui_state_from_db(&state, &store, &UiStateEnvOverrides::default())
+                .await
+                .unwrap(),
+            "the legacy ui row + provider row must replay"
+        );
+        // Usable after the replay: the very condition `require_usable_llm`
+        // turns into a 422 `llmNotConfigured` when it fails.
+        {
+            let live = state.llm_configs.read().unwrap().clone();
+            assert_eq!(live.len(), 1, "the stored provider survives the replay: {live:?}");
+            assert_eq!(live[0].api_base, "https://api.example.com/v1");
+            assert_eq!(live[0].model, "gpt-4o");
+            assert_eq!(live[0].api_key, "sk-live");
+        }
+
+        let before = raw_provider_rows(&store).await;
+        // The Configuration page's auto-save: the served projection minus the
+        // `llm` section (LLM settings are managed on the /llm page).
+        let mut page_payload = serde_json::to_value(&*state.ui_config.read().unwrap()).unwrap();
+        page_payload
+            .as_object_mut()
+            .expect("the projection serializes to an object")
+            .remove("llm");
+        let resp =
+            crate::server::api::config::put_config(axum::extract::State(state.clone()), axum::Json(page_payload))
+                .await
+                .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        assert_eq!(
+            raw_provider_rows(&store).await,
+            before,
+            "an unrelated save must leave llm_providers byte-identical (ids included)"
+        );
+        let live = state.llm_configs.read().unwrap().clone();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].api_base, "https://api.example.com/v1");
+        assert_eq!(live[0].api_key, "sk-live");
+    }
+
+    /// A sparse `llm` patch — an `llm` member stating neither `providers` nor a
+    /// legacy scalar (`{"llm":{}}`, or a lone `primaryProvider`) — must leave
+    /// the provider set alone.
+    ///
+    /// The projection is not authoritative for the set: `sync_llm_projection`
+    /// keeps the scalar mirror in sync and never `providers[]`, so a scan that
+    /// configures a provider through the legacy scalar fields (a shape this
+    /// backend supports) leaves the projection's array EMPTY while the table
+    /// holds the row. Re-deriving the set from that empty array deleted the
+    /// provider on a 200-OK save, and — because the live process keeps serving
+    /// its in-memory copy — the loss only surfaced after the next boot: empty
+    /// `GET /llm/providers` and 422 `llmNotConfigured` on every review. Hence
+    /// the boot assertion below.
+    #[tokio::test]
+    async fn sparse_llm_patch_keeps_the_provider_rows_across_a_restart() {
+        let _lock = RUNTIME_TEST_LOCK.lock().await;
+        let _guard = RuntimeGuard::new();
+        let store = fresh_db().await;
+        let mut state = fresh_state(vec![]);
+        state.db = Some(Arc::new(store.clone()));
+        let state = Arc::new(state);
+
+        // 1) Configure through the legacy scalar fields only.
+        let resp = crate::server::api::config::put_config(
+            axum::extract::State(state.clone()),
+            axum::Json(serde_json::json!({
+                "llm": {
+                    "openaiApiKey": "sk-legacy-only",
+                    "apiBaseUrl": "https://api.example.com/v1",
+                    "defaultModel": "gpt-4o",
+                    "maxTokens": 4096,
+                    "temperature": 0.7
+                }
+            })),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        assert_eq!(
+            store.load_llm_providers().await.unwrap().len(),
+            1,
+            "the legacy scalar save stores the provider"
+        );
+        assert!(
+            state.ui_config.read().unwrap().llm.providers.is_empty(),
+            "precondition for the trap: the projection's providers[] is empty while the table holds the row"
+        );
+        let before = raw_provider_rows(&store).await;
+
+        // 2) The trap payloads: both used to return 200 and delete the row.
+        for payload in [
+            serde_json::json!({ "llm": {} }),
+            serde_json::json!({ "llm": { "primaryProvider": "openai" } }),
+        ] {
+            let resp = crate::server::api::config::put_config(
+                axum::extract::State(state.clone()),
+                axum::Json(payload.clone()),
+            )
+            .await
+            .into_response();
+            assert_eq!(resp.status(), axum::http::StatusCode::OK, "payload {payload}");
+            assert_eq!(
+                raw_provider_rows(&store).await,
+                before,
+                "payload {payload} must leave llm_providers byte-identical"
+            );
+        }
+        assert_eq!(
+            state.ui_config.read().unwrap().llm.primary_provider,
+            "openai",
+            "the stated primary is still merged into the projection"
+        );
+
+        // 3) What the next boot sees — the point at which the deletion used to
+        //    become visible (the live process kept serving its in-memory copy).
+        let restarted = Arc::new(fresh_state(vec![]));
+        assert!(
+            load_and_apply_ui_state_from_db(&restarted, &store, &UiStateEnvOverrides::default())
+                .await
+                .unwrap()
+        );
+        let live = restarted.llm_configs.read().unwrap().clone();
+        assert_eq!(live.len(), 1, "the provider survives the boot: {live:?}");
+        assert_eq!(
+            live[0].api_base, "https://api.example.com/v1",
+            "usable after the restart (no 422 llmNotConfigured)"
+        );
+        assert_eq!(live[0].api_key, "sk-legacy-only");
     }
 }

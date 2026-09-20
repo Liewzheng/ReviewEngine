@@ -536,12 +536,7 @@ pub async fn load_and_apply_ui_state_from_db(
     // [`AppState::set_aggregation_override`]).
     state.set_aggregation_override(file.ui.as_ref().and_then(|u| u.aggregated));
     let gitlab = &file.gitlab;
-    let empty = file.ui.is_none()
-        && file.llm.is_empty()
-        && file.git_platforms.is_empty()
-        && gitlab.token.is_empty()
-        && gitlab.webhook_secret.is_empty()
-        && gitlab.webhook_signing_secret.is_empty();
+    let empty = file.ui.is_none() && file.llm.is_empty() && file.git_platforms.is_empty() && gitlab.is_empty();
     if empty {
         return Ok(false);
     }

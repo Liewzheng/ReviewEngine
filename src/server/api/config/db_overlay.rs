@@ -63,17 +63,19 @@
 //!   FILE-resolved `[review_experts]` so RENG-93's "clearing an override
 //!   restores the file value" still holds).
 //!
-//! Two narrow divergences are known and accepted, both reachable only with a
-//! database whose stored key is a MASK (`***`) — the UI/import save paths only
-//! ever persist live keys:
+//! Two narrow divergences are known and accepted. Both need a database whose
+//! stored key is not a live one — empty or the `***` mask. The UI save path
+//! only ever persists keys it resolved to a real value, but nothing else
+//! guarantees that: the one-shot `ui-state.toml` import carries whatever the
+//! file held (`load_ui_state` does not validate keys) and a hand-edited row
+//! can hold anything.
 //!
-//! 1. A stored provider row with an empty or masked key is dropped here, while
-//!    the replay's masked-keep resolution resolves it against the config it
-//!    keeps in memory — which after this function ran is this chain, not the
-//!    TOML/env one it used to be. The result is the same "keep nothing" when
-//!    the DB has no usable row (the file chain is left in place) and can only
-//!    differ for a hand-edited row whose `(provider, api_base, model)` triple
-//!    also exists in the TOML file.
+//! 1. Such a row is dropped here, while the replay's masked-keep resolution
+//!    ([`super::is_blank_or_masked`]) instead tries to resolve the key against
+//!    the config it keeps in memory — which after this function ran is this
+//!    chain, not the TOML/env one it used to be. A row whose
+//!    `(provider, api_base, model)` triple also exists in the TOML file could
+//!    therefore inherit that file's key, and is dropped now.
 //! 2. That keep-resolution's SOURCE is consequently the DB chain rather than
 //!    the TOML chain.
 //!
@@ -139,7 +141,8 @@ pub struct AppliedDbOverrides {
     /// UI shows as primary without re-ordering anything itself. The rule is the
     /// one the server's own [`crate::server::AppState::ordered_llm_configs`]
     /// applies to the same rows. Empty when the DB carries no provider with a
-    /// usable key, or when env supplied the chain.
+    /// usable key (a stored key that is blank or the `***` mask is not one —
+    /// see the module divergences), or when env supplied the chain.
     pub llm: Vec<LLMConfig>,
     /// The git platform set the DB carries (live secrets, already decrypted).
     /// Never empty when rows exist; `AppConfig` has no field to land it on, so
@@ -294,10 +297,15 @@ pub async fn apply_db_overrides(
              the database chain is not applied"
         );
     } else {
-        // A stored card whose key is empty never reaches the chain — the same
-        // rule `apply_ui_config` applies to a card the user emptied, so both
-        // DB-apply paths agree on what "a configured provider" is.
-        let usable: Vec<LLMConfig> = stored_llm.into_iter().filter(|c| !c.api_key.is_empty()).collect();
+        // A stored card whose key is blank or masked never reaches the chain —
+        // the SAME rule `apply_ui_config` applies to a card the user emptied
+        // ([`super::is_blank_or_masked`]), so both DB-apply paths agree on what
+        // "a configured provider" is. A masked row would otherwise enter the
+        // chain as the literal `***` and hand that to the provider.
+        let usable: Vec<LLMConfig> = stored_llm
+            .into_iter()
+            .filter(|c| !super::is_blank_or_masked(&c.api_key))
+            .collect();
         if !usable.is_empty() {
             // RENG-55 / RENG-75: the chain order is the server's, not the
             // stored one — the persisted primary first (when the `ui` row
@@ -636,6 +644,47 @@ mod tests {
             .await
             .unwrap();
 
+        assert!(applied.llm.is_empty());
+        assert_eq!(config.llm.len(), 1);
+        assert_eq!(config.llm[0].api_key, "sk-from-toml");
+    }
+
+    /// A stored key that is the `***` MASK is not a key either: the table is
+    /// not usable, so the TOML chain stands and the sentinel never reaches a
+    /// provider as a literal credential. Same rule as the empty-key case above
+    /// — `apply_ui_config`'s `is_blank_or_masked`.
+    #[tokio::test]
+    async fn stored_masked_key_is_not_a_provider() {
+        let store = fresh_db().await;
+        store
+            .replace_llm_providers(&[
+                db_llm("openai", "gpt-4o", crate::models::API_KEY_MASK),
+                db_llm("anthropic", "claude-3-opus", "sk-db"),
+            ])
+            .await
+            .unwrap();
+
+        let mut config = file_config();
+        let applied = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+
+        // The masked row is gone from the chain, the live one is the chain.
+        let chain: Vec<&str> = applied.llm.iter().map(|c| c.provider.as_str()).collect();
+        assert_eq!(chain, ["anthropic"]);
+        assert!(applied.llm.iter().all(|c| c.api_key != crate::models::API_KEY_MASK));
+        assert!(config.llm.iter().all(|c| c.api_key != crate::models::API_KEY_MASK));
+        // And with ONLY the masked row, the file chain is left in place
+        // rather than being replaced by an unusable one.
+        let mask_only = fresh_db().await;
+        mask_only
+            .replace_llm_providers(&[db_llm("openai", "gpt-4o", crate::models::API_KEY_MASK)])
+            .await
+            .unwrap();
+        let mut config = file_config();
+        let applied = apply_db_overrides(&mut config, &mask_only, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
         assert!(applied.llm.is_empty());
         assert_eq!(config.llm.len(), 1);
         assert_eq!(config.llm[0].api_key, "sk-from-toml");

@@ -76,6 +76,32 @@ fn warn_escaping_overrides() {
     }
 }
 
+/// Resolve the file `reng validate` reads.
+///
+/// `reng validate <file>` and `reng validate --config <file>` reach this
+/// function identically — the caller merges both forms into one `explicit`
+/// path (RENG-81). With no explicit path the current directory's
+/// `.code-audit-config.toml` wins, then the user-level one.
+pub(super) fn resolve_validate_target(
+    explicit: Option<String>,
+    cwd: Option<&std::path::Path>,
+    user_config: Option<std::path::PathBuf>,
+) -> Result<String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let found = [cwd.map(|dir| dir.join(".code-audit-config.toml")), user_config]
+        .into_iter()
+        .flatten()
+        .find(|path| path.exists());
+    match found {
+        Some(path) => Ok(path.to_string_lossy().into_owned()),
+        None => anyhow::bail!(
+            "No config file found. Pass one (`reng validate <file>` or `--config <file>`) or run review-engine init."
+        ),
+    }
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     if cli.version {
         println!("Review Engine v{}", env!("CARGO_PKG_VERSION"));
@@ -216,25 +242,15 @@ pub async fn run(cli: Cli) -> Result<()> {
                 std::process::exit(code);
             }
         }
-        Commands::Validate { config } => {
-            let config = match config {
-                Some(path) => path,
-                None => {
-                    let candidates = [
-                        std::env::current_dir().ok().map(|p| p.join(".code-audit-config.toml")),
-                        review_engine::paths::user_config_path(),
-                    ];
-                    candidates
-                        .into_iter()
-                        .flatten()
-                        .find(|p| p.exists())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("No config file found. Use --config or run review-engine init.")
-                        })?
-                        .to_string_lossy()
-                        .to_string()
-                }
-            };
+        Commands::Validate { config, file } => {
+            // `reng validate <file>` and `reng validate --config <file>` are
+            // the same request (RENG-81); clap rejects passing both.
+            let cwd = std::env::current_dir().ok();
+            let config = resolve_validate_target(
+                config.or(file),
+                cwd.as_deref(),
+                review_engine::paths::user_config_path(),
+            )?;
             let content = tokio::fs::read_to_string(&config).await?;
             let parsed = review_engine::config::load_and_apply(&content)?;
             println!("✓ Valid config: {} experts defined", parsed.review_experts.len());

@@ -158,10 +158,19 @@ pub enum Commands {
     },
 
     /// Validate a .code-audit-config.toml file
+    ///
+    /// The file can be named positionally (`reng validate <file>`) or with
+    /// `--config <file>`; the two forms are equivalent. With neither, the
+    /// `.code-audit-config.toml` of the current directory is validated,
+    /// falling back to the user-level one.
     Validate {
         /// Path to config file
-        #[arg(long)]
+        #[arg(long, value_name = "FILE", conflicts_with = "file")]
         config: Option<String>,
+
+        /// Path to config file (same as --config)
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
     },
 
     /// Print the default config
@@ -250,7 +259,9 @@ pub enum Commands {
     /// framework, then prompts the user to choose commands, experts, and
     /// LLM settings before writing a `.code-audit-config.toml`.
     Init {
-        /// Skip interactive prompts and print the built-in default config.
+        /// Skip interactive prompts: write the built-in default config to
+        /// ./.code-audit-config.toml (it is not printed — `reng default`
+        /// prints it instead).
         #[arg(long)]
         default: bool,
     },
@@ -428,7 +439,11 @@ pub enum Commands {
         output: Option<String>,
     },
 
-    /// Update CHANGELOG from commit history
+    /// Generate CHANGELOG entries from the diff
+    ///
+    /// Prints the generated entries in the report; it does NOT rewrite
+    /// CHANGELOG.md, and the commit messages are not fed to the model (the
+    /// diff is).
     UpdateChangelog {
         /// Path to local git repository
         #[arg(long)]

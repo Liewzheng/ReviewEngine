@@ -269,10 +269,14 @@ allowed_projects = ["group/project-a", "group/project-b"]   # empty = all projec
 
 ## Configuration Loading Order
 
-1. Built-in defaults (`docs/code-audit-default.toml`) with environment overrides
-2. User-level config (`.code-audit-config.toml` in the state directory, `~/.config/review-engine/` by default)
-3. Project-level config (`.code-audit-config.toml` in the project root)
-4. Environment variables (`LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.)
-5. CLI arguments (`--llm-config`, `--config`)
+Later sources override earlier ones:
+
+1. Built-in defaults (`docs/code-audit-default.toml`)
+2. Environment variables (`CODE_AUDIT_COMMANDS`, `CODE_AUDIT_SCORING_ENABLED`, etc.), applied to the built-in defaults
+3. User-level config (`.code-audit-config.toml` in the state directory, `~/.config/review-engine/` by default)
+4. Project-level config (`.code-audit-config.toml` in the project root, or the file named by `--config`)
+5. **The configuration database** (`review.db` in the config directory) — highest priority, applied **per key**: a key the database carries wins, a key it does not carry keeps the TOML value
+
+`--config` selects the project-level file in step 4 and `--llm-config` replaces the resolved `[[llm]]` list for one run; neither is a further layer. `LLM_CONFIG` is the one surface that does not follow the order above on the CLI — there it outranks both the file and the database (see the priority note in [`[[llm]]`](#llm)). See [Configuration resolution order](configuration.md#config-resolution-order) for the full rules and how to point the CLI at a server's config directory with `--config-dir`.
 
 When no `--config` is given, the user-level file contributes `[[llm]]` (as a fallback) and `[report]` (as global defaults); the project-level file then overrides `commands`/`review_experts` (extended) and `[report]` (replaced wholesale — fields omitted in the project file fall back to serde defaults, not user-level values).

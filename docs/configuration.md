@@ -9,12 +9,14 @@ review-engine is driven by a TOML config file named `.code-audit-config.toml`. Y
 Configuration is merged from multiple sources. Later sources override earlier ones:
 
 1. **Built-in defaults** — `docs/code-audit-default.toml` embedded in the binary.
-2. **Environment variables** — `CODE_AUDIT_COMMANDS`, `CODE_AUDIT_SCORING_ENABLED`, `LLM_CONFIG`, etc. They are applied **to the built-in defaults**, so a config file entry overrides them. `LLM_CONFIG` is stricter still: it is a **fallback only** — it is read when no config file supplies a non-empty `[[llm]]`, and a file that does always wins.
+2. **Environment variables** — `CODE_AUDIT_COMMANDS`, `CODE_AUDIT_SCORING_ENABLED`, `LLM_CONFIG`, etc. Applied **to the built-in defaults**, so a config file entry overrides them. `LLM_CONFIG` behaves differently from the rest and differently on each front end — see the exception note below.
 3. **User-level config** — `~/.config/review-engine/.code-audit-config.toml` (or `<state dir>/.code-audit-config.toml` — see [Data directory](#data-directory-serve---data-dir)). Provides a global `[[llm]]` fallback and global `[report]` defaults.
 4. **Project-level config** — `.code-audit-config.toml` in the current working directory, or the file you name with `--config`. Overrides the above for the keys it carries.
-5. **Database overrides (what the Web UI configured)** — the configuration database wins over everything above. **This is the highest-priority source, and it applies to every command, not only `serve`.**
+5. **Database overrides (what the Web UI configured)** — the configuration database wins over everything above. **This is the highest-priority source, and it applies to every command, not only `serve`** — with one documented exception for the provider list, in step 2.
 
 `--config` and `--llm-config` are not a sixth layer: `--config` picks which file plays the project-level role in step 4, and `--llm-config` replaces the resolved `[[llm]]` list for that one run.
+
+**`LLM_CONFIG` is the exception, and it differs by front end.** On `serve` it is a **fallback only** — it is read when no config file supplies a non-empty `[[llm]]`, so a file that does always wins (`apply_llm_env_fallback`, `src/config/resolver/env.rs:59`, called from the serve path only). On the CLI it is the opposite: `resolve_llm_configs` (`src/cli/handlers/review.rs:32-48`) takes `--llm-config` first, then `LLM_CONFIG`, and only then the resolved providers — so on a CLI run the environment **outranks** both the file and the database for the provider list. Every other surface follows the order above unchanged.
 
 Use this to keep secrets (API keys) in your user config and share project-specific expert settings in the repo.
 
@@ -30,7 +32,9 @@ config file / env / CLI  <  database
 
 **It holds for the CLI as much as for the server.** DB-override resolution lives in the config layer, so `review-engine review` / `describe` / `improve` / `repo-review` apply it the same way `serve` does. The point is that one machine has one answer to "which providers, experts and rules are configured": the same `review.db` the container runs on. Configure through the Web UI and the CLI follows.
 
-The two sides are not symmetric in *role*, even though they read the same file. For `serve` the database is the runtime source of truth — everything changed in the Web UI lands there, and the TOML file is bootstrap/fallback. For the CLI the TOML file is the complete source and the database is a "prefer it where present" overlay, which is what makes a CLI run work on a machine that has never run `serve`. Both sides read the same `secrets.key` from the same directory, so credentials the Web UI stored encrypted (the `enc:` values in `ui-state.toml`) are decrypted by the CLI with no extra setup.
+The two sides are not symmetric in *role*, even though they read the same file. For `serve` the database is the runtime source of truth — everything changed in the Web UI lands there, and the TOML file is bootstrap/fallback. For the CLI the TOML file is the complete source and the database is a "prefer it where present" overlay, which is what makes a CLI run work on a machine that has never run `serve`. Both sides read the same `secrets.key` from the same directory, so the **LLM provider API keys** the Web UI stored encrypted (the `enc:` values in the `llm_providers` rows, and in `ui-state.toml` before the migration) are decrypted by the CLI with no extra setup.
+
+That covers provider credentials **only**. A CLI review still needs its own git credential: the CLI's review path resolves the Git token from `--gitlab-token` / `GITLAB_TOKEN` (or the GitHub equivalents) and does not reuse the **Git platform** entries stored in the database. Pointing `--config-dir` at the server's directory gives the CLI the same *providers, experts and rules* — not the same GitLab token. Set `GITLAB_TOKEN` for CLI runs, or fetch the token from the Web UI and export it.
 
 With no database reachable — `REVIEW_DISABLE_DB=1`, or no state directory to resolve — nothing changes and nothing fails: the CLI runs on exactly the file-based configuration it always did, and a missing database is a normal state (dev machines, CI), so it is not even a warning. A warning is logged in the one case worth knowing about: a `review.db` that **exists but cannot be read or applied** (typically a permission problem) — the command still proceeds on the TOML values.
 

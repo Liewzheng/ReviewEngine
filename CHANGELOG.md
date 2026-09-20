@@ -1,3 +1,13 @@
+## [0.10.46] - 2026-09-20
+
+### Added
+- **The Web UI's database now outranks the TOML file for the CLI too, and a global `--config-dir` points any command at the server's configuration (RENG-107)**: the deployment's configuration lived in two places and the two front ends read them differently. The Docker deployment is configured through the Web UI, which persists to the configuration database (`review.db`); the CLI is configured through `.code-audit-config.toml`. So the same machine could hold two different answers to "which LLM providers / experts / review rules are configured" — the server ran on the Web UI's values while `review-engine review` on the same host ran on the file's, and the file's values were usually older. Two changes close the gap:
+  - **DB-override resolution moved into the config layer**, so every config-resolving entry point applies it — the CLI's `review` / `describe` / `improve` / `repo-review` as much as `serve`. The rule is **per key**: a key the database carries wins over the TOML value, and a key the database does not carry keeps the TOML value. A stored row therefore patches the file's base, never replaces it wholesale; everything the Web UI never touched still comes from the file. This generalises the RENG-69 expert-override rule (which already read `config file [review_experts] < DB overrides`) to the remaining config surfaces, so there is exactly one precedence to remember: **built-in defaults → environment variables → user `.code-audit-config.toml` → project `.code-audit-config.toml` → database overrides**. With no database attached (`REVIEW_DISABLE_DB=1`, or none resolvable) nothing changes: the CLI resolves exactly the file-based config it always did.
+  - **A global `--config-dir <path>` flag** answers the deployment question the two front ends created — "how do I make the CLI on this NAS use the configuration the container is using?". It names the same directory the server's state lives in (the one mounted at `/app/config` in the shipped compose files, holding `review.db`, `ui-state.toml` and the user-level `.code-audit-config.toml`), and it is accepted by every command rather than only `serve`. `REVIEW_ENGINE_CONFIG_DIR` is the environment equivalent, so a shell profile setting is enough for interactive use.
+
+### Notes
+- **Why the two front ends had to agree before this could be documented**: the resolution order previously stopped at the file. `docs/configuration.md` §Config resolution order now carries the full chain including the database layer, the per-key rule, and the NAS recipe (`--config-dir /volume1/docker/reng/config`, or `REVIEW_ENGINE_CONFIG_DIR` in `.bashrc`) — the single place a reader needs.
+
 ## [0.10.45] - 2026-09-17
 
 ### Added

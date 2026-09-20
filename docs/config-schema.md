@@ -237,7 +237,7 @@ window_seconds = 60
 
 ## `[[git_platforms]]` (Web UI, persisted to `ui-state.toml`)
 
-Git platform instances are **not** read from `.code-audit-config.toml`: they are managed in the Web UI (**Git 平台** card) and persisted to `ui-state.toml` in the config directory (default `ui-state.toml` in the state directory — `~/.config/review-engine/ui-state.toml` unless `serve --data-dir` moved the root — overridable via `REVIEW_UI_STATE_FILE`, `REVIEW_ENGINE_CONFIG_DIR` or `--data-dir`) as `[[git_platforms]]` entries. They are hot-effective and drive webhook verification, review-time GitLab API pulls, admin-level System Hook dispatch, and per-platform project filtering. Only `type = "gitlab"` is implemented today.
+Git platform instances are **not** read from `.code-audit-config.toml`: they are managed in the Web UI (**Git 平台** card) and persisted to `ui-state.toml` in the config directory (default `ui-state.toml` in the state directory — `~/.config/review-engine/ui-state.toml` unless `serve --data-dir` or the global `--config-dir` moved the root — overridable via `REVIEW_UI_STATE_FILE`, `REVIEW_ENGINE_CONFIG_DIR` or `--data-dir`) as `[[git_platforms]]` entries. They are hot-effective and drive webhook verification, review-time GitLab API pulls, admin-level System Hook dispatch, and per-platform project filtering. Only `type = "gitlab"` is implemented today.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

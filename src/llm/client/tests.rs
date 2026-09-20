@@ -913,3 +913,83 @@ async fn test_permanent_401_advances_the_chain_without_retrying() {
         "the credential error must be attempted exactly once before the chain advances"
     );
 }
+
+/// RENG-66 r2 (F-1) — the acceptance criterion of this round: a card the probe
+/// calls `healthy` must be a card whose completions actually run.
+///
+/// The builtin catalog prefills Anthropic's base WITH the version
+/// (`https://api.anthropic.com/v1`, `catalog::normalize_api_base` passes it
+/// through), and that is exactly where the two ends drifted: the probe
+/// normalized it to `/v1/models` and read healthy, while `AnthropicProvider`
+/// built `/v1/v1/messages` and 404'd on every completion. The mock answers 200
+/// on `/v1/messages` and on nothing else, so a doubled version cannot pass (a
+/// 404 is a permanent verdict, so no retry can rescue it). The card is exercised
+/// the way a user would: probe it, then complete through the registry its config
+/// resolves to.
+#[tokio::test]
+async fn a_probe_healthy_anthropic_card_with_a_versioned_base_completes() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/v1/models"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/v1/messages"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "content": [{"type": "text", "text": "reviewed"}],
+            "usage": {"input_tokens": 7, "output_tokens": 3},
+            "model": "claude-3-5-sonnet"
+        })))
+        .mount(&server)
+        .await;
+
+    let config = LLMConfig {
+        provider: "anthropic".to_string(),
+        model: "claude-3-5-sonnet".to_string(),
+        api_key: "sk-ant-good".to_string(),
+        // The catalog prefill, and what a user copying Anthropic's docs types.
+        api_base: format!("{}/v1", server.uri()),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: None,
+        disabled: false,
+    };
+
+    crate::llm::probe::probe_llm_connectivity(&config)
+        .await
+        .expect("the probe must read this card healthy");
+
+    let configs = vec![config];
+    let (registry, _order) = ProviderRegistry::from_configs(&configs);
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+    let result = client
+        .complete_with_fallback(&configs, "system", "user")
+        .await
+        .expect("a card the probe calls healthy must complete");
+    assert_eq!(result.content, "reviewed");
+    assert_eq!(result.provider, "anthropic");
+
+    let requests = server.received_requests().await.expect("request recording enabled");
+    assert_eq!(requests.len(), 2, "one probe GET, one completion POST");
+    assert!(
+        requests
+            .iter()
+            .all(|r| r.url.path() == "/v1/models" || r.url.path() == "/v1/messages"),
+        "no request may carry a doubled version: {:?}",
+        requests.iter().map(|r| r.url.path()).collect::<Vec<_>>()
+    );
+    let completion = requests
+        .iter()
+        .find(|r| r.url.path() == "/v1/messages")
+        .expect("the completion must go to /v1/messages");
+    assert_eq!(
+        completion.headers.get("x-api-key").map(|v| v.to_str().unwrap()),
+        Some("sk-ant-good"),
+        "the completion authenticates the way the probe does"
+    );
+    assert!(
+        completion.headers.get("authorization").is_none(),
+        "Anthropic must not receive a bearer header"
+    );
+}

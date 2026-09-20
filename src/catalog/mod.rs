@@ -430,9 +430,16 @@ pub fn sorted_models(provider: &CatalogProvider) -> Vec<&CatalogModel> {
 /// chat-completions calls need. When the provider's `npm` package marks it as
 /// OpenAI-compatible (`@ai-sdk/openai-compatible` / `@ai-sdk/openai`), append
 /// `/v1` unless already present. Anything else (Anthropic's native API,
-/// unknown packages) is passed through with only trailing slashes trimmed —
-/// `provider = "anthropic"` is special-cased downstream in
-/// `ProviderRegistry::from_configs` and takes no `/v1`.
+/// unknown packages) is passed through with only trailing slashes trimmed.
+///
+/// Anthropic's untouched value is left exactly as the catalog writes it —
+/// `https://api.anthropic.com/v1`, the form Anthropic's own docs quote —
+/// because the two ends that consume it ensure the single `/v1` version segment
+/// themselves ([`crate::llm::provider::anthropic_api_base`], RENG-66 r2):
+/// `https://api.anthropic.com/v1` and the bare host both build
+/// `/v1/messages` (completions) and `/v1/models` (connectivity probe). Appending
+/// `/v1` here as well would be harmless, and stripping it would only change what
+/// the provider dialog shows.
 pub fn normalize_api_base(npm: Option<&str>, api: &str) -> String {
     let trimmed = api.trim_end_matches('/');
     if let Some(npm) = npm {

@@ -88,6 +88,44 @@ fn test_sufficient_coverage_with_findings_not_unverified() {
     );
 }
 
+/// The banner the user quoted must count the right unit: `debt` is one entry
+/// per uncovered span, so a partially reviewed hunk contributes several and
+/// "N 处 hunk" both mislabelled them and hid how much code went unread (RENG-79
+/// — this is the sentence the user read as "覆盖率不足" with no detail).
+#[test]
+fn coverage_banner_names_uncovered_lines_and_spans_not_hunks() {
+    let config = ConsolidatorConfig::default();
+    // 100 changed lines (10..=109), one touched line in the middle: 99
+    // uncovered lines split into two spans, and the old wording would have
+    // printed "2 处 hunk 未覆盖" — two, from a single hunk.
+    let diff_files = vec![("a.rs".to_string(), vec![make_hunk(10, 100)])];
+    let mut ledger = crate::coverage::CoverageLedger::from_diff_files(&diff_files);
+    ledger.mark_touched("a.rs", (50, 50), "security");
+    let reports = vec![make_report(
+        "security",
+        vec![make_finding(Severity::High, 8, "a.rs", Some(50), "Real issue")],
+    )];
+    let result = config.consolidate_with_coverage(&reports, None, &FileCoverage::full(1), Some(&ledger));
+
+    let coverage = result.coverage.as_ref().expect("ledger supplied");
+    assert_eq!(coverage.debt.len(), 2, "two spans of one hunk");
+    assert_eq!(coverage.uncovered_changed_lines(), 99);
+
+    let tl_dr = &result.assessment.tl_dr;
+    assert!(
+        tl_dr.contains("1/100 行改动可追溯被审查（99 行未覆盖，分布在 2 处区间）"),
+        "the banner must state the uncovered lines and call the spans spans: {tl_dr}"
+    );
+    assert!(
+        !tl_dr.contains("hunk 未覆盖"),
+        "spans are not hunks — the count is per gap now: {tl_dr}"
+    );
+    assert!(
+        tl_dr.contains("99 lines uncovered across 2 range(s)"),
+        "the English half must use the same unit: {tl_dr}"
+    );
+}
+
 #[test]
 fn test_ledger_without_findings_yields_zero_coverage_and_unverified() {
     let config = ConsolidatorConfig::default();

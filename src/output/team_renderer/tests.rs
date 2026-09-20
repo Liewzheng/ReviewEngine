@@ -299,12 +299,146 @@ fn test_render_lead_summary_hunk_coverage_debt() {
             file: "c.c".to_string(),
             range: (50, 55),
         }],
+        findings_truncation: Default::default(),
     });
     let md = render_lead_summary(&consolidated);
     assert!(md.contains("Hunk Coverage"), "ledger section must render");
     assert!(md.contains("19/25 changed lines demonstrably reviewed (76%)"));
     assert!(md.contains("未覆盖区域 / uncovered"));
     assert!(md.contains("c.c:50-55"), "coverage debt must list the uncovered range");
+    assert!(md.contains("(6 lines)"), "the uncovered line count is stated");
+    assert!(!md.contains("more spans not listed"), "short lists need no remainder");
+}
+
+#[test]
+fn test_render_lead_summary_caps_a_long_uncovered_list_and_says_how_many() {
+    // A sparse run over a large diff: hundreds of spans. The report must name a
+    // bounded preview and state the remainder — the RENG-79 shape, where the
+    // old per-hunk rule printed nothing at all.
+    let mut consolidated = make_consolidated(40, RiskLevel::High, "sparse");
+    let debt: Vec<crate::coverage::UncoveredRange> = (0..40)
+        .map(|i| crate::coverage::UncoveredRange {
+            file: "a.c".to_string(),
+            range: (i * 10 + 1, i * 10 + 5),
+        })
+        .collect();
+    consolidated.coverage = Some(crate::coverage::CoverageSummary {
+        total_changed_lines: 400,
+        covered_changed_lines: 8,
+        ratio: 0.02,
+        debt,
+        findings_truncation: Default::default(),
+    });
+    let md = render_lead_summary(&consolidated);
+    assert!(md.contains("a.c:1-5"));
+    assert!(
+        md.contains("另有 16 段未列出 / 16 more spans not listed"),
+        "the withheld spans must be counted, not dropped: {md}"
+    );
+    assert!(!md.contains("a.c:381-385"), "the preview stops at the cap");
+}
+
+// ── RENG-79: truncation transparency ───────────────────────────
+
+#[test]
+fn test_render_lead_summary_flags_a_capped_expert() {
+    let mut consolidated = make_consolidated(60, RiskLevel::Medium, "under the cap");
+    consolidated.coverage = Some(crate::coverage::CoverageSummary {
+        findings_truncation: crate::coverage::TruncationSummary {
+            cap: 5,
+            experts: vec![crate::coverage::ExpertTruncation {
+                expert: "security".to_string(),
+                listed: 5,
+                cap: 5,
+                declared_omitted: Some(7),
+            }],
+            declaring_reports: 1,
+            declared_omitted_total: 7,
+        },
+        ..Default::default()
+    });
+    let md = render_lead_summary(&consolidated);
+    assert!(md.contains("清单可能不完整 / findings may be truncated"), "got: {md}");
+    assert!(md.contains("report.max_findings_per_expert = 5"));
+    assert!(md.contains("另有 7 条未列出"), "the dropped count must be stated: {md}");
+    assert!(md.contains("`security`"));
+    assert!(
+        md.contains("1 位专家自报共 7 条未列出"),
+        "the total is attributed to the experts who actually answered: {md}"
+    );
+}
+
+#[test]
+fn test_render_lead_summary_says_unknown_when_the_expert_did_not_declare() {
+    let mut consolidated = make_consolidated(60, RiskLevel::Medium, "capped");
+    consolidated.coverage = Some(crate::coverage::CoverageSummary {
+        findings_truncation: crate::coverage::TruncationSummary {
+            cap: 5,
+            experts: vec![crate::coverage::ExpertTruncation {
+                expert: "quality".to_string(),
+                listed: 5,
+                cap: 5,
+                declared_omitted: None,
+            }],
+            declaring_reports: 0,
+            declared_omitted_total: 0,
+        },
+        ..Default::default()
+    });
+    let md = render_lead_summary(&consolidated);
+    assert!(md.contains("未列出的条数未知"), "silence is unknown, not zero: {md}");
+    assert!(!md.contains("另有 0 条未列出"), "never invent a zero count: {md}");
+    // A sum of 0 with no declaration behind it must not become a total line:
+    // `declared_omitted_total` alone cannot tell "nobody answered" from "they
+    // answered zero", and printing the former as a number is the exact false
+    // reassurance this warning exists to remove.
+    assert!(
+        !md.contains("自报共 0 条未列出"),
+        "silence must not be summarised as a zero: {md}"
+    );
+}
+
+#[test]
+fn test_render_lead_summary_is_silent_when_nothing_hit_the_cap() {
+    let mut consolidated = make_consolidated(90, RiskLevel::Low, "clean");
+    consolidated.coverage = Some(crate::coverage::CoverageSummary {
+        total_changed_lines: 10,
+        covered_changed_lines: 10,
+        ratio: 1.0,
+        debt: vec![],
+        findings_truncation: Default::default(),
+    });
+    let md = render_lead_summary(&consolidated);
+    assert!(
+        !md.contains("findings may be truncated"),
+        "no cap hit → no warning: {md}"
+    );
+}
+
+#[test]
+fn test_render_lead_summary_reports_an_expert_that_declared_no_omissions() {
+    let mut consolidated = make_consolidated(80, RiskLevel::Low, "exactly at the cap");
+    consolidated.coverage = Some(crate::coverage::CoverageSummary {
+        findings_truncation: crate::coverage::TruncationSummary {
+            cap: 5,
+            experts: vec![crate::coverage::ExpertTruncation {
+                expert: "docs".to_string(),
+                listed: 5,
+                cap: 5,
+                declared_omitted: Some(0),
+            }],
+            declaring_reports: 1,
+            declared_omitted_total: 0,
+        },
+        ..Default::default()
+    });
+    let md = render_lead_summary(&consolidated);
+    assert!(md.contains("专家自报无遗漏"), "got: {md}");
+    assert!(!md.contains("另有 0 条未列出"));
+    assert!(
+        !md.contains("自报共 0 条未列出"),
+        "a declared zero is not a total worth printing: {md}"
+    );
 }
 
 #[test]

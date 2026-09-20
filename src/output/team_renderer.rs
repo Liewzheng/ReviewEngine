@@ -280,6 +280,66 @@ fn range_label(range: (u32, u32)) -> String {
     }
 }
 
+/// How many uncovered spans the report prints before summarising the rest.
+const UNCOVERED_RANGES_SHOWN: usize = 24;
+
+/// Render the RENG-79 truncation warning: which expert reports stopped at
+/// `report.max_findings_per_expert`, and how many findings they said they left
+/// out.
+///
+/// Empty when nobody hit the cap — and **never** silent when somebody did,
+/// which is the whole point. The cap lives in the prompt, so a capped expert's
+/// list is a prefix of what it found; before this line the report presented
+/// those prefixes as the complete result (39 findings over 10 experts, 35 of
+/// them five experts parked on five). A number the expert declared is quoted as
+/// a number; a silent expert is reported as unknown rather than as zero.
+///
+/// The totals line is gated on [`TruncationSummary::declaring_reports`], not on
+/// the sum: a sum of 0 means either "everyone who answered declared zero" or
+/// "nobody answered", and only the first of those may be shown as a number —
+/// printing "0 omitted" on the strength of silence is the exact false
+/// reassurance this warning exists to remove. The field-by-field list already
+/// says which experts are which, so the total only adds anything when someone
+/// actually gave a count.
+fn render_truncation_warning(truncation: &crate::coverage::TruncationSummary) -> String {
+    if truncation.is_empty() {
+        return String::new();
+    }
+    let experts: Vec<String> = truncation
+        .experts
+        .iter()
+        .map(|e| match e.omitted() {
+            Some(n) if n > 0 => format!("`{}`（列出 {} 条，另有 {} 条未列出）", e.expert, e.listed, n),
+            // A capped expert that declared no omissions found exactly that
+            // many; say so rather than rendering "0 more not listed".
+            Some(_) => format!("`{}`（列出 {} 条，专家自报无遗漏）", e.expert, e.listed),
+            None => format!("`{}`（列出 {} 条，未列出的条数未知）", e.expert, e.listed),
+        })
+        .collect();
+    let declared = if truncation.declared_omitted_total > 0 {
+        format!(
+            "{} 位专家自报共 {} 条未列出 / {} of {} declared {} omitted in total. ",
+            truncation.declaring_reports,
+            truncation.declared_omitted_total,
+            truncation.declaring_reports,
+            truncation.at_cap_count(),
+            truncation.declared_omitted_total,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "> ⚠️ **清单可能不完整 / findings may be truncated**: {} 个专家报告达到 \
+         `report.max_findings_per_expert = {}` 上限，其清单是「前 {} 条」而非全部 —— \
+         「没报」不等于「没问题」。{}想要完整清单请调高上限后重跑。\n>\n> {}\n\n",
+        truncation.at_cap_count(),
+        truncation.cap,
+        truncation.cap,
+        declared,
+        experts.join("、"),
+    )
+}
+
 /// Render the lead consolidation summary as a Markdown section.
 ///
 /// Uses the same Overall Assessment / TL;DR formats as the team report.
@@ -357,8 +417,9 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
         }
     }
     // Hunk-level coverage ledger: changed ranges vs. demonstrably-touched
-    // ranges, plus the uncovered ranges (coverage debt). Rendered whenever the
-    // consolidator was given a ledger (the full `run_experts` path).
+    // ranges, plus the uncovered ranges (coverage debt) and the per-expert
+    // truncation accounting. Rendered whenever the consolidator was given a
+    // ledger (the full `run_experts` path).
     if let Some(coverage) = &consolidated.coverage {
         out.push_str(&format!(
             "**Hunk Coverage**: {}/{} changed lines demonstrably reviewed ({:.0}%)\n\n",
@@ -367,13 +428,28 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
             coverage.ratio * 100.0,
         ));
         if !coverage.debt.is_empty() {
-            let debt: Vec<String> = coverage
-                .debt
+            // `debt` holds every uncovered span, which on a large sparse diff
+            // is hundreds of entries; the report names a bounded preview and
+            // states the remainder instead of either flooding the line or
+            // dropping the fact that more was missed.
+            let (shown, withheld) = coverage.debt_preview(UNCOVERED_RANGES_SHOWN);
+            let debt: Vec<String> = shown
                 .iter()
                 .map(|u| format!("`{}:{}`", u.file, range_label(u.range)))
                 .collect();
-            out.push_str(&format!("**未覆盖区域 / uncovered**: {}\n\n", debt.join(", "),));
+            let tail = if withheld > 0 {
+                format!(" … 另有 {withheld} 段未列出 / {withheld} more spans not listed")
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "**未覆盖区域 / uncovered** ({} lines): {}{}\n\n",
+                coverage.uncovered_changed_lines(),
+                debt.join(", "),
+                tail,
+            ));
         }
+        out.push_str(&render_truncation_warning(&coverage.findings_truncation));
     }
     out.push_str(&format!(
         "### TL;DR\n{}\n\n",

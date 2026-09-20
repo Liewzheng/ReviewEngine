@@ -72,6 +72,36 @@ pub(super) fn build_coverage_ledger(
     ledger
 }
 
+/// Attach the per-expert truncation accounting (RENG-79) to the coverage block
+/// that ships inside the report, and return it for logging.
+///
+/// `report.max_findings_per_expert` is applied in the *prompt*, so an expert
+/// that returned exactly the cap may be a prefix of what it actually found, and
+/// nothing in the report used to say so — a run of 39 findings over 10 experts
+/// read as a complete list while 35 of them were five experts parked on the
+/// same cap.
+///
+/// The count travels in [`crate::coverage::CoverageSummary`] (serialized inside
+/// `reviews.result`, so the UI can read it) rather than on a struct of its own:
+/// "how much of the diff did we reach" and "how complete is this list" are the
+/// two halves of one question, and a second field would give the halves a way
+/// to disagree.
+///
+/// Take `truncation` from the reports **as the experts returned them** — the
+/// caller measures before validation trims out-of-diff lines — so a capped
+/// expert whose lines were partly dropped is still counted as capped. A report
+/// with no coverage block (the backward-compatible consolidation path) is left
+/// untouched; the returned summary is accurate either way.
+pub(super) fn attach_findings_truncation(
+    consolidated: &mut ConsolidatedReport,
+    truncation: crate::coverage::TruncationSummary,
+) -> crate::coverage::TruncationSummary {
+    if let Some(coverage) = consolidated.coverage.as_mut() {
+        coverage.findings_truncation = truncation.clone();
+    }
+    truncation
+}
+
 /// Reason recorded in [`DroppedFinding`] for findings filtered out because
 /// the user previously marked them as false positives via the feedback API.
 const FEEDBACK_FALSE_POSITIVE_REASON: &str = "marked false positive by user feedback";

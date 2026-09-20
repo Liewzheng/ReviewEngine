@@ -25,6 +25,85 @@ fn verbose_dump_dir(verbose: bool, output: &Option<String>, output_dir: &str) ->
     Some(dir)
 }
 
+/// The tuple `review_engine::team::orchestrator::run_experts` returns: the
+/// per-expert reports, the team's global context, the findings dropped by the
+/// verification pass, the lead consolidation, and the experts that produced
+/// no report at all (RENG-77 §4).
+type ExpertRun = (
+    Vec<ExpertReport>,
+    Option<GlobalReviewContext>,
+    Vec<review_engine::team::verifier::DroppedFinding>,
+    review_engine::team::lead_consolidator::ConsolidatedReport,
+    Vec<String>,
+);
+
+/// The aggregator gate: run the aggregator only when `report.aggregated` is on
+/// AND the active team carries an `aggregator` expert.
+///
+/// This mirrors the library's `server::select_aggregator_expert`, which is
+/// `pub(crate)` and therefore unreachable from this binary crate — the two
+/// must stay in step (the same gate decides the MR, webhook and REST paths).
+fn aggregator_expert(aggregated: bool, experts: &[ExpertDef]) -> Option<&ExpertDef> {
+    if !aggregated {
+        return None;
+    }
+    experts.iter().find(|expert| expert.name == "aggregator")
+}
+
+/// Build the CLI's `ReviewOutput` from a finished expert run.
+///
+/// Shared by the three local entries (`run_local`, `run_local_repo`,
+/// `run_local_path`) so they finish a review exactly like every other path:
+/// the aggregator expert runs under [`aggregator_expert`]'s gate, with the
+/// same fail-soft degradation as the webhook and REST paths — an aggregation
+/// failure warns and falls back to the non-aggregated output, so a local
+/// review never loses the expert reports it already paid for (RENG-94).
+/// Before this, the local entries built `ReviewOutput::new(reports)` directly,
+/// so `--local-path` / `--diff` reviews silently ignored the aggregation flag
+/// the MR, webhook and REST paths honour.
+async fn finish_output(
+    run: ExpertRun,
+    config: &AppConfig,
+    experts: &[ExpertDef],
+    llm_configs: &[LLMConfig],
+    mr_info: &MRInfo,
+    progress_map: Option<ProgressMap>,
+    review_id: &str,
+) -> ReviewOutput {
+    let (reports, global_context, dropped_findings, consolidated, expert_failures) = run;
+    let aggregated = match aggregator_expert(config.report.aggregated, experts) {
+        None => None,
+        Some(aggregator) => match review_engine::team::orchestrator::run_aggregator(
+            aggregator,
+            &reports,
+            llm_configs,
+            mr_info,
+            global_context.as_ref(),
+            progress_map,
+            review_id,
+            // RENG-57: the CLI owns no `llm_call_samples` store, so the
+            // aggregator call records no latency here.
+            None,
+        )
+        .await
+        {
+            Ok(report) => Some(report),
+            Err(e) => {
+                tracing::warn!("Failed to run aggregator: {e:?}, falling back to non-aggregated output");
+                None
+            }
+        },
+    };
+    let out = match aggregated {
+        Some(report) => ReviewOutput::with_aggregated(reports, report),
+        None => ReviewOutput::new(reports),
+    };
+    out.with_dropped_findings(dropped_findings)
+        .with_consolidated(consolidated)
+        // RENG-77 §4: experts that produced no report, with the reason each saw.
+        .with_errors(expert_failures)
+}
+
 /// Resolve LLM configuration from multiple sources:
 /// 1. CLI --llm-config arguments (highest priority)
 /// 2. LLM_CONFIG environment variable
@@ -207,7 +286,7 @@ pub async fn run_local(
     let project_path = local_path.unwrap_or(".");
     let (experts, mr_info) = prepare_review(&config, project_path, "local", "main");
 
-    let (reports, _, dropped_findings, consolidated, expert_failures) = review_engine::team::orchestrator::run_experts(
+    let run = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -223,11 +302,16 @@ pub async fn run_local(
     )
     .await?;
 
-    let out = ReviewOutput::new(reports)
-        .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated)
-        // RENG-77 §4: experts that produced no report, with the reason each saw.
-        .with_errors(expert_failures);
+    let out = finish_output(
+        run,
+        &config,
+        &experts,
+        &llm_configs,
+        &mr_info,
+        progress_map.clone(),
+        review_id,
+    )
+    .await;
     write_output(
         &out,
         format,
@@ -304,7 +388,7 @@ pub async fn run_local_repo(
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", base_ref);
 
-    let (reports, _, dropped_findings, consolidated, expert_failures) = review_engine::team::orchestrator::run_experts(
+    let run = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &diff,
@@ -320,11 +404,16 @@ pub async fn run_local_repo(
     )
     .await?;
 
-    let out = ReviewOutput::new(reports)
-        .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated)
-        // RENG-77 §4: experts that produced no report, with the reason each saw.
-        .with_errors(expert_failures);
+    let out = finish_output(
+        run,
+        &config,
+        &experts,
+        &llm_configs,
+        &mr_info,
+        progress_map.clone(),
+        review_id,
+    )
+    .await;
 
     let repo_root = match std::fs::canonicalize(local_path) {
         Ok(p) => Some(p),
@@ -386,7 +475,7 @@ pub async fn run_local_path(
 
     let (experts, mr_info) = prepare_review(&config, local_path, "local", "main");
 
-    let (reports, _, dropped_findings, consolidated, expert_failures) = review_engine::team::orchestrator::run_experts(
+    let run = review_engine::team::orchestrator::run_experts(
         &experts,
         &mr_info,
         &full.diff,
@@ -402,11 +491,16 @@ pub async fn run_local_path(
     )
     .await?;
 
-    let mut out = ReviewOutput::new(reports)
-        .with_dropped_findings(dropped_findings)
-        .with_consolidated(consolidated)
-        // RENG-77 §4: experts that produced no report, with the reason each saw.
-        .with_errors(expert_failures);
+    let mut out = finish_output(
+        run,
+        &config,
+        &experts,
+        &llm_configs,
+        &mr_info,
+        progress_map.clone(),
+        review_id,
+    )
+    .await;
 
     // P1: a full-content review that finds nothing must not read as "the
     // code is clean". Surface the coverage claim explicitly.
@@ -566,5 +660,233 @@ mod tests {
         config_off.report.inject_agents_md = false;
         let (_experts, mr_info) = prepare_review(&config_off, dir.path().to_str().unwrap(), "local", "main");
         assert!(mr_info.agents_md.is_none(), "agents_md must be absent when disabled");
+    }
+
+    // ─── RENG-94: the local review paths run the aggregator ───────────────
+
+    /// A config whose only interesting switch is `report.aggregated`.
+    fn config_with_aggregated(aggregated: bool) -> AppConfig {
+        let mut config = empty_app_config();
+        config.report.aggregated = aggregated;
+        config
+    }
+
+    fn expert_def(name: &str) -> ExpertDef {
+        ExpertDef::from((&name.to_string(), &ExpertTomlDef::default()))
+    }
+
+    fn report(name: &str) -> ExpertReport {
+        ExpertReport {
+            expert_name: name.to_string(),
+            findings: vec![],
+            markdown: "## Test\n\nNo findings.\n".to_string(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_model: None,
+            llm_fp: None,
+            llm_provider: None,
+        }
+    }
+
+    fn consolidated() -> review_engine::team::lead_consolidator::ConsolidatedReport {
+        use review_engine::team::lead_consolidator::ConsolidatedReport;
+        ConsolidatedReport {
+            findings: vec![],
+            low_confidence_removed: 0,
+            duplicates_merged: 0,
+            conflicts: vec![],
+            assessment: OverallAssessment {
+                score: 100,
+                risk_level: RiskLevel::Low,
+                lead_override: None,
+                tl_dr: "Test review".to_string(),
+                unverified: false,
+                coverage_insufficient: false,
+            },
+            consensus_reached: true,
+            total_files: 0,
+            reviewed_files: 0,
+            unreviewed_files: vec![],
+            coverage: None,
+            adjudicated_removed: vec![],
+        }
+    }
+
+    /// The local entries' own expert run, ready for `finish_output`.
+    fn expert_run() -> ExpertRun {
+        (vec![report("security")], None, vec![], consolidated(), vec![])
+    }
+
+    fn mock_llm_config(api_base: &str) -> LLMConfig {
+        LLMConfig {
+            provider: "openai".to_string(),
+            model: "mock-model".to_string(),
+            api_key: "test-key".to_string(),
+            api_base: api_base.to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+            disabled: false,
+        }
+    }
+
+    /// RENG-94: with `report.aggregated = true` and an `aggregator` expert in
+    /// the team, a local review's output carries an aggregated report — the
+    /// hole this mission closes (`finish_output` used to build
+    /// `ReviewOutput::new(reports)`, dropping the flag on the floor). The mock
+    /// server proves the aggregator LLM actually ran rather than the report
+    /// being fabricated.
+    #[tokio::test]
+    async fn local_review_runs_the_aggregator_when_the_config_enables_it() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                r#"{"model":"mock-model","choices":[{"message":{"content":"findings: []"}}],"usage":{"total_tokens":9}}"#,
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = config_with_aggregated(true);
+        let experts = vec![expert_def("security"), expert_def("aggregator")];
+        let llm_configs = vec![mock_llm_config(&server.uri())];
+        let mr_info = MRInfo::new(
+            "local".to_string(),
+            "Local review".to_string(),
+            "local".to_string(),
+            "main".to_string(),
+        );
+
+        let out = finish_output(
+            expert_run(),
+            &config,
+            &experts,
+            &llm_configs,
+            &mr_info,
+            None,
+            "test-local-aggregated",
+        )
+        .await;
+
+        let aggregated = out
+            .aggregated
+            .expect("the local path must aggregate when report.aggregated is on");
+        assert_eq!(
+            aggregated.llm_model.as_deref(),
+            Some("mock-model"),
+            "the aggregated report must carry the model that produced it"
+        );
+        assert_eq!(
+            out.reports.len(),
+            1,
+            "aggregation must not replace the per-expert reports"
+        );
+        assert_eq!(
+            server
+                .received_requests()
+                .await
+                .expect("request recording enabled")
+                .len(),
+            1,
+            "the aggregator LLM must have been called exactly once"
+        );
+    }
+
+    /// The other half of the same gate: with `report.aggregated` off, the local
+    /// path must not call the aggregator at all (identical to the webhook and
+    /// REST paths).
+    #[tokio::test]
+    async fn local_review_skips_the_aggregator_when_the_flag_is_off() {
+        let server = wiremock::MockServer::start().await;
+        let config = config_with_aggregated(false);
+        let experts = vec![expert_def("security"), expert_def("aggregator")];
+        let llm_configs = vec![mock_llm_config(&server.uri())];
+        let mr_info = MRInfo::new("local".into(), "Local review".into(), "local".into(), "main".into());
+
+        let out = finish_output(
+            expert_run(),
+            &config,
+            &experts,
+            &llm_configs,
+            &mr_info,
+            None,
+            "test-local-not-aggregated",
+        )
+        .await;
+
+        assert!(out.aggregated.is_none(), "aggregated must stay off with the flag off");
+        assert_eq!(out.reports.len(), 1);
+        assert!(
+            server.received_requests().await.unwrap_or_default().is_empty(),
+            "no aggregator call may be made when the flag is off"
+        );
+    }
+
+    /// The degradation rule the local path adopts with the other paths: a
+    /// failed aggregation warns and falls back to the non-aggregated output —
+    /// it never throws away the expert reports the review already paid for.
+    /// A 400 is a permanent failure, so the mock sees exactly one attempt.
+    #[tokio::test]
+    async fn aggregator_failure_is_fail_soft_on_the_local_path() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(400).set_body_string(r#"{"error":{"message":"aggregator prompt rejected"}}"#),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = config_with_aggregated(true);
+        let experts = vec![expert_def("security"), expert_def("aggregator")];
+        let llm_configs = vec![mock_llm_config(&server.uri())];
+        let mr_info = MRInfo::new("local".into(), "Local review".into(), "local".into(), "main".into());
+
+        let out = finish_output(
+            expert_run(),
+            &config,
+            &experts,
+            &llm_configs,
+            &mr_info,
+            None,
+            "test-local-aggregator-failure",
+        )
+        .await;
+
+        assert!(
+            out.aggregated.is_none(),
+            "a failed aggregation must fall back to a non-aggregated output"
+        );
+        assert_eq!(
+            out.reports.len(),
+            1,
+            "the expert reports must survive an aggregation failure"
+        );
+    }
+
+    /// The CLI's copy of the aggregator gate, in all four config × presence
+    /// states — the library's `select_aggregator_expert` is `pub(crate)` and
+    /// unreachable from the binary crate, so this mirror needs its own guard.
+    #[test]
+    fn aggregator_gate_needs_both_the_flag_and_the_expert() {
+        let team = [expert_def("security"), expert_def("aggregator")];
+        let flag_on = aggregator_expert(true, &team).map(|expert| expert.name.clone());
+        let flag_off = aggregator_expert(false, &team).map(|expert| expert.name.clone());
+        assert_eq!(flag_on.as_deref(), Some("aggregator"));
+        assert_eq!(flag_off, None, "the flag alone enables nothing");
+        assert!(
+            aggregator_expert(true, &[expert_def("security")]).is_none(),
+            "the flag needs an enabled aggregator expert to run"
+        );
+        assert!(aggregator_expert(true, &[]).is_none());
     }
 }

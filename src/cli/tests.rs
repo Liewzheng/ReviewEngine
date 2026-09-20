@@ -1,4 +1,5 @@
 use super::app::cli_command;
+use super::app::resolve_validate_target;
 use super::app::spawn_progress_if_needed;
 use super::commands::{Cli, Commands};
 use anyhow::Result;
@@ -167,11 +168,73 @@ fn doctor_parses_fix_and_quiet_independently() {
 fn validate_accepts_config_path() {
     let cli = parse_ok(&["validate", "--config", "/tmp/.code-audit-config.toml"]);
     match cli.command {
-        Some(Commands::Validate { config }) => {
-            assert_eq!(config.as_deref(), Some("/tmp/.code-audit-config.toml"))
+        Some(Commands::Validate { config, file }) => {
+            assert_eq!(config.as_deref(), Some("/tmp/.code-audit-config.toml"));
+            assert_eq!(file, None, "--config alone leaves the positional empty");
         }
         other => panic!("expected Validate, got {other:?}"),
     }
+}
+
+/// RENG-81: `reng validate <file>` was rejected with "unexpected argument" even
+/// though the help text said the command takes a config file. Both spellings
+/// must now name the same file, and asking for both at once is a contradiction
+/// rather than a silent winner.
+#[test]
+fn validate_positional_path_equals_the_config_flag() {
+    let target = |cli: Cli| match cli.command {
+        Some(Commands::Validate { config, file }) => config.or(file),
+        other => panic!("expected Validate, got {other:?}"),
+    };
+    let positional = target(parse_ok(&["validate", "/tmp/.code-audit-config.toml"]));
+    let flagged = target(parse_ok(&["validate", "--config", "/tmp/.code-audit-config.toml"]));
+    assert_eq!(positional.as_deref(), Some("/tmp/.code-audit-config.toml"));
+    assert_eq!(positional, flagged, "both forms must resolve to the same file");
+
+    assert!(
+        parse(&["validate", "/tmp/a.toml", "--config", "/tmp/a.toml"]).is_err(),
+        "one file named twice is rejected, not silently preferred"
+    );
+}
+
+/// The `validate` file resolution: an explicit path (from either spelling)
+/// wins, then the current directory's `.code-audit-config.toml`, then the
+/// user-level file — and with none of them the error names both spellings.
+#[test]
+fn resolve_validate_target_prefers_explicit_then_cwd_then_user_config() {
+    let dir = tempfile::tempdir().ok().expect("tempdir");
+    let local = dir.path().join(".code-audit-config.toml");
+    std::fs::write(&local, "llm = []\n").expect("write local config");
+    let user = dir.path().join("user-code-audit-config.toml");
+    std::fs::write(&user, "llm = []\n").expect("write user config");
+
+    assert_eq!(
+        resolve_validate_target(
+            Some("/tmp/explicit.toml".to_string()),
+            Some(dir.path()),
+            Some(user.clone())
+        )
+        .expect("an explicit path always resolves"),
+        "/tmp/explicit.toml",
+        "an explicit path is used even when it does not exist (the read reports it)"
+    );
+    assert_eq!(
+        resolve_validate_target(None, Some(dir.path()), Some(user.clone())).expect("local config exists"),
+        local.to_string_lossy(),
+        "the current directory's config wins over the user-level one"
+    );
+
+    let empty = tempfile::tempdir().ok().expect("tempdir");
+    assert_eq!(
+        resolve_validate_target(None, Some(empty.path()), Some(user.clone())).expect("user config exists"),
+        user.to_string_lossy(),
+        "without a local file the user-level config is validated"
+    );
+
+    let err = resolve_validate_target(None, Some(empty.path()), None).expect_err("no config anywhere");
+    let message = err.to_string();
+    assert!(message.contains("reng validate <file>"), "got: {message}");
+    assert!(message.contains("--config"), "got: {message}");
 }
 
 #[test]
@@ -267,10 +330,24 @@ fn unknown_subcommand_is_rejected() {
     assert!(parse(&["bogus-command"]).is_err());
 }
 
+/// The full-content directory review is spelled `--path` (the stale
+/// `--review-dir` name this test used made it pass on an unknown-argument
+/// error, asserting nothing): it requires `--local-path` and is mutually
+/// exclusive with `--diff`.
 #[test]
-fn review_rejects_conflicting_directory_and_diff_flags() {
-    // `--review-dir` conflicts with `--diff` (clap conflicts_with_all).
-    assert!(parse(&["review", "--diff", "/tmp/x.diff", "--review-dir", "src"]).is_err());
+fn review_path_requires_local_path_and_conflicts_with_diff() {
+    assert!(
+        parse(&["review", "--path", "src"]).is_err(),
+        "--path without --local-path has no repository to read"
+    );
+    assert!(
+        parse(&["review", "--diff", "/tmp/x.diff", "--path", "src", "--local-path", "."]).is_err(),
+        "--path and --diff are mutually exclusive"
+    );
+    assert!(
+        parse(&["review", "--path", "src", "--local-path", "."]).is_ok(),
+        "the documented combination must parse"
+    );
 }
 
 #[tokio::test]

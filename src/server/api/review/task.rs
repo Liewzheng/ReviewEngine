@@ -60,6 +60,25 @@ pub(crate) fn build_review_participants(meta: &SourceMeta) -> Vec<ReviewParticip
         .collect()
 }
 
+/// Append one message to the `errors` array of a review result, creating it when
+/// absent.
+///
+/// `ReviewOutput.errors` is `#[serde(default, skip_serializing_if = "Vec::is_empty")]`,
+/// so a clean round's persisted result carries no `errors` key at all and the
+/// field has to be created rather than appended to. RENG-99 uses this to carry a
+/// publish failure into the record the review detail is built from
+/// ([`build_review_detail`]) — the same channel RENG-77 §4 uses for a partially
+/// failed run.
+fn push_review_error(result: &mut serde_json::Value, message: &str) {
+    let message = serde_json::Value::String(message.to_string());
+    match result.get_mut("errors").and_then(|errors| errors.as_array_mut()) {
+        Some(errors) => errors.push(message),
+        None => {
+            result["errors"] = serde_json::Value::Array(vec![message]);
+        }
+    }
+}
+
 pub(crate) fn build_review_detail(entry: &TaskEntry, platforms: &[crate::models::GitPlatformConfig]) -> ReviewDetail {
     let meta = &entry.source_meta;
     let status = task_status_str(&entry.state);
@@ -492,16 +511,21 @@ pub(crate) async fn enqueue_review(
         };
 
         match outcome {
-            Ok(outcome) => {
+            Ok(mut outcome) => {
                 // RENG-98: publish before the task is recorded as completed —
                 // the webhook path's order (publish, then persist). A publish
                 // failure must NOT fail the review: it only logs a warning,
                 // exactly like `src/server/mod.rs` on the webhook path.
+                let mut publish_error: Option<String> = None;
                 if let Some((url, token, diff)) = publish_input {
                     match serde_json::from_value::<crate::models::ReviewOutput>(outcome.value.clone()) {
                         Ok(output) => {
                             if let Err(e) = crate::publish_review_with_diff(&token, &url, &output, Some(&diff)).await {
                                 tracing::warn!("Publish failed: {:?}", e);
+                                // RENG-99: carried into the persisted result, so
+                                // the review detail shows that the round's inline
+                                // notes did not reach the MR.
+                                publish_error = Some(format!("Publish failed: {e}"));
                             }
                         }
                         Err(e) => {
@@ -510,6 +534,9 @@ pub(crate) async fn enqueue_review(
                             );
                         }
                     }
+                }
+                if let Some(message) = publish_error {
+                    push_review_error(&mut outcome.value, &message);
                 }
                 crate::server::log_collector::push_global_entry(
                     "INFO",

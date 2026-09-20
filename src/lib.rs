@@ -273,12 +273,31 @@ pub async fn publish_review_with_diff(
     let plan = crate::publisher::plan_inline_notes_for_output(output, diff_index.as_ref(), docs_only, &policy);
 
     let md = crate::publisher::render_board(output, &plan, &policy);
-    if let Err(e) = provider.find_or_update_discussion(&md).await {
-        errors.push(e.context("discussion"));
-    }
+    // The board's id, when it went up: the inline-note failures can only be
+    // reported in the board if there is a board to update.
+    let board_id = match provider.find_or_update_discussion(&md).await {
+        Ok(id) => Some(id),
+        Err(e) => {
+            errors.push(e.context("discussion"));
+            None
+        }
+    };
 
     let summary = crate::publisher::publish_planned_inline_notes(&*provider, &plan).await;
     if summary.failed > 0 {
+        // RENG-99: the board is the report the user reads, and it had to be
+        // posted before the notes were (the plan is what decides which notes
+        // exist). So the notes that were refused are written into it afterwards
+        // — "N 条行内评论未能发布" with the provider's verdict for each, instead
+        // of the single WARN this used to be.
+        if let Some(board_id) = board_id {
+            let md = format!("{md}{}", crate::publisher::render_inline_failure_section(&summary));
+            if let Err(e) = provider.update_discussion(&board_id, &md).await {
+                // Not a second error: the count this addendum carries is already
+                // reported below, and the addendum is another rendering of it.
+                tracing::warn!("Could not append the inline-note failures to the review board: {e}");
+            }
+        }
         // The batch is already finished; surface the partial failure instead of
         // hiding it in the log (the pre-0.10.13 code did the opposite: the
         // first failure ended the batch and the rest were lost silently).
@@ -309,7 +328,7 @@ mod publish_policy_e2e_tests {
     //! code — only the provider's HTTP endpoint is faked.
 
     use crate::models::{Effort, ExpertReport, Finding, ReviewOutput, Severity};
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn finding(file: &str, line: u32, title: &str) -> Finding {
@@ -566,6 +585,147 @@ mod publish_policy_e2e_tests {
         assert!(
             !board.contains("## Inline notes — delivery policy"),
             "nothing was withheld, so the board gains no policy section"
+        );
+    }
+
+    // ── RENG-99: the position GitLab accepts, and the note it refused ───────
+
+    /// A one-hunk diff in which line 2 of each named file is **unchanged**
+    /// context and line 3 is an **added** line — the two anchor shapes GitLab's
+    /// position lookup distinguishes.
+    fn diff_with_context_line(files: &[&str]) -> String {
+        files
+            .iter()
+            .map(|file| {
+                format!(
+                    "diff --git a/{file} b/{file}\n\
+                     index 1111111..2222222 100644\n\
+                     --- a/{file}\n\
+                     +++ b/{file}\n\
+                     @@ -1,2 +1,3 @@\n\
+                     \x20first\n\
+                     \x20second\n\
+                     +third\n"
+                )
+            })
+            .collect()
+    }
+
+    /// The user-visible half of RENG-99, end to end: a refused inline note is
+    /// written into the board — the report the user reads — with its count, its
+    /// anchor and GitLab's verdict, instead of surviving only as a WARN. The
+    /// note that *is* accepted on an unchanged line carries the old-side number
+    /// its position needs.
+    #[tokio::test]
+    async fn publish_review_reports_a_refused_inline_note_in_the_board() {
+        let server = MockServer::start().await;
+        // Wiremock answers with the first *mounted* mock that matches (it sorts
+        // by explicit priority only, and these are all equal), so the rejected
+        // anchor has to be mounted before `mount_gitlab`'s catch-all discussions
+        // handler — the same reason `tests/publish/main.rs` gives both of its
+        // discussion mocks a body matcher.
+        Mock::given(method("POST"))
+            .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/discussions"))
+            .and(body_string_contains("bad.rs"))
+            .respond_with(ResponseTemplate::new(400).set_body_string(
+                r#"{"message":"400 Bad request - Note {:line_code=>[\"can't be blank\", \"must be a valid line code\"]}"}"#,
+            ))
+            .mount(&server)
+            .await;
+        mount_gitlab(&server).await;
+        // The board update — the note created by `mount_gitlab` is id 7.
+        Mock::given(method("PUT"))
+            .and(path("/api/v4/projects/group%2Fproject/merge_requests/1/notes/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 7})))
+            .mount(&server)
+            .await;
+
+        let files = ["good.rs", "bad.rs"];
+        let output = output_with(vec![
+            finding("good.rs", 2, "An issue on a line the change leaves unchanged"),
+            finding("bad.rs", 3, "An issue on an added line"),
+        ]);
+        let diff = diff_with_context_line(&files);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect_err("a refused inline note is reported to the caller");
+
+        let requests = received(&server).await;
+
+        // (a) The accepted note's position carries the old-side number of the
+        // unchanged line, which is what GitLab matches on.
+        let posted = inline_posts(&requests);
+        let accepted = posted
+            .iter()
+            .find(|body| body.contains("good.rs"))
+            .expect("the accepted note is posted");
+        let accepted: serde_json::Value = serde_json::from_str(accepted).expect("the discussion body is JSON");
+        assert_eq!(accepted["position"]["old_line"], 2);
+        assert_eq!(accepted["position"]["new_line"], 2);
+        assert!(
+            accepted["position"].get("line_code").is_none(),
+            "line_code is GitLab's to derive: {}",
+            accepted["position"]
+        );
+
+        // (b) The refused note is reported in the board, not only in the log.
+        let board_update = requests
+            .iter()
+            .find(|(method, path, _)| method == "PUT" && path.ends_with("/notes/7"))
+            .map(|(_, _, body)| body.clone())
+            .expect("the board must be updated with the publish outcome");
+        assert!(
+            board_update.contains("1 could not be published"),
+            "the board states how many notes were lost: {board_update}"
+        );
+        assert!(
+            board_update.contains("**1 inline note(s) failed to publish**"),
+            "{board_update}"
+        );
+        assert!(
+            board_update.contains("`bad.rs:3` — HTTP 400"),
+            "the board names the refused anchor and GitLab's status: {board_update}"
+        );
+        assert!(
+            board_update.contains("line_code"),
+            "the board carries GitLab's verdict: {board_update}"
+        );
+        assert!(
+            !board_update.contains("`good.rs:2` — HTTP"),
+            "only the refused note is listed: {board_update}"
+        );
+
+        // The board itself (the POSTed body) is unchanged by the addendum: the
+        // failure is a second, post-pass rendering of the same round.
+        let initial_board = board_body(&server).await;
+        assert!(
+            !initial_board.contains("could not be published"),
+            "the first board body cannot know the outcome yet: {initial_board}"
+        );
+    }
+
+    /// A round that posts everything it admitted performs no board update at
+    /// all — the RENG-99 addendum costs one request, and only when it has
+    /// something to say.
+    #[tokio::test]
+    async fn publish_review_leaves_the_board_alone_when_nothing_was_refused() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let files = ["good.rs"];
+        let output = output_with(vec![finding("good.rs", 3, "An issue on an added line")]);
+        let diff = diff_with_context_line(&files);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("publishing must succeed");
+
+        let requests = received(&server).await;
+        assert_eq!(inline_posts(&requests).len(), 1);
+        assert!(
+            !requests.iter().any(|(method, _, _)| method == "PUT"),
+            "no failure, no addendum: {requests:?}"
         );
     }
 }

@@ -732,7 +732,34 @@ impl Client {
     }
 
     /// Post an inline comment (discussion) on a specific file and line.
+    ///
+    /// Convenience for the added-line shape; [`Self::post_inline_note_at`] is
+    /// the one that can carry an old-side line number.
     pub async fn post_inline_note(&self, file: &str, line: u32, body: &str) -> Result<()> {
+        self.post_inline_note_at(&crate::git_provider::InlineAnchor::new(file, line), body)
+            .await
+    }
+
+    /// Post an inline comment (discussion) at `anchor`.
+    ///
+    /// The `position` GitLab receives is exactly what its own diff lookup
+    /// matches on (RENG-99):
+    ///
+    /// - the line is **unchanged** by the diff → `old_line` and `new_line` are
+    ///   both sent, because GitLab matches the pair with strict equality;
+    /// - the line is **added** → `new_line` alone, and `old_line` is *absent*
+    ///   rather than null (an added line's old side is nil server-side, so
+    ///   sending a number there would stop it matching).
+    ///
+    /// `line_code` is deliberately not sent: GitLab derives it server-side from
+    /// the position (`Gitlab::Diff::Position#line_code` → `DiffFile#line_code_for_position`),
+    /// and its position schema (`additionalProperties: false`) does not accept
+    /// one. A position whose pair matches no diff line is what earns the
+    /// production `400 … line_code can't be blank` — the missing pair, never a
+    /// missing `line_code`.
+    pub async fn post_inline_note_at(&self, anchor: &crate::git_provider::InlineAnchor, body: &str) -> Result<()> {
+        let file = anchor.file.as_str();
+        let line = anchor.line;
         // Defensive: validate file path to prevent API abuse from hallucinated paths
         if file.contains("..") || file.starts_with('/') || file.starts_with('~') {
             anyhow::bail!("Invalid file path for inline comment: {}", file);
@@ -752,6 +779,7 @@ impl Client {
         info!(
             file = %file,
             line = line,
+            old_line = anchor.old_line,
             "Posting inline note to MR !{}", self.mr_iid
         );
 
@@ -760,6 +788,9 @@ impl Client {
             position_type: &'a str,
             new_path: &'a str,
             new_line: u32,
+            /// Omitted, not nulled, for an added line — see the method docs.
+            #[serde(skip_serializing_if = "Option::is_none")]
+            old_line: Option<u32>,
             base_sha: &'a str,
             start_sha: &'a str,
             head_sha: &'a str,
@@ -777,6 +808,7 @@ impl Client {
                 position_type: "text",
                 new_path: file,
                 new_line: line,
+                old_line: anchor.old_line,
                 base_sha,
                 start_sha,
                 head_sha,
@@ -1750,6 +1782,126 @@ mod tests {
         let posts = discussion_posts(&server).await;
         assert_eq!(posts.len(), 2, "one POST per finding — a 4xx verdict is never retried");
         assert_eq!(posts.iter().filter(|b| b.contains("good.rs")).count(), 1);
+    }
+
+    /// RENG-65: a permanent GitLab verdict is permanent even when the response
+    /// body reads like a transport failure. The classification runs on the
+    /// status the real client reports, so this is one POST, never three.
+    #[tokio::test]
+    async fn test_inline_publish_does_not_retry_a_404_whose_body_reads_like_a_transport_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 1, "name": "Alice"},
+                "diff_refs": {"base_sha": "b1", "start_sha": "s1", "head_sha": "h1"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/discussions"))
+            .respond_with(
+                ResponseTemplate::new(404).set_body_string(
+                    "{\"message\":\"connection closed by remote host\",\"detail\":\"gitlab-workhorse\"}",
+                ),
+            )
+            .mount(&server)
+            .await;
+
+        let provider = crate::git_provider::gitlab::GitLabProvider {
+            client: make_test_client(&server),
+        };
+        let findings = vec![inline_finding("ux", "gone.rs", 1, Severity::High)];
+        let summary = crate::publisher::publish_planned_inline_notes(
+            &provider,
+            &crate::publisher::plan_inline_notes(&findings, None, false, &crate::publisher::PublishPolicy::default()),
+        )
+        .await;
+
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.posted, 0);
+        assert_eq!(
+            discussion_posts(&server).await.len(),
+            1,
+            "a 404 costs exactly one attempt, whatever its body says"
+        );
+    }
+
+    /// RENG-99: the `position` shape GitLab can actually match.
+    ///
+    /// GitLab derives a diff note's `line_code` itself, by looking the position
+    /// up in its own diff with strict equality on `(old_line, new_line)` (the
+    /// unchanged side of a line being nil server-side). So an **added** line is
+    /// addressed by `new_line` alone — sending an old-side number there would
+    /// stop it matching — and a line the diff leaves **unchanged** must carry
+    /// both numbers. Omitting the pair is what produced the production
+    /// `400 … Note {:line_code=>["can't be blank", "must be a valid line code"]}`.
+    #[tokio::test]
+    async fn test_inline_note_position_matches_the_line_the_diff_presents() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/projects/group%2Fproject/merge_requests/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "title": "t",
+                "source_branch": "a",
+                "target_branch": "b",
+                "author": {"id": 1, "name": "Alice"},
+                "diff_refs": {"base_sha": "b1", "start_sha": "s1", "head_sha": "h1"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/projects/group%2Fproject/merge_requests/1/discussions"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id": 7})))
+            .mount(&server)
+            .await;
+
+        let client = make_test_client(&server);
+        client
+            .post_inline_note("src/rt.rs", 11, "added line")
+            .await
+            .expect("the added-line shape is accepted");
+        client
+            .post_inline_note_at(
+                &crate::git_provider::InlineAnchor::new("src/rt.rs", 12).with_old_line(10),
+                "unchanged line",
+            )
+            .await
+            .expect("the unchanged-line shape is accepted");
+
+        let positions: Vec<serde_json::Value> = discussion_posts(&server)
+            .await
+            .into_iter()
+            .map(|body| {
+                serde_json::from_str::<serde_json::Value>(&body)
+                    .expect("the discussion body is JSON")
+                    .get("position")
+                    .cloned()
+                    .expect("every discussion carries a position")
+            })
+            .collect();
+        assert_eq!(positions.len(), 2);
+
+        let added = &positions[0];
+        assert_eq!(added["new_line"], 11);
+        assert_eq!(added["new_path"], "src/rt.rs");
+        assert_eq!(added["position_type"], "text");
+        assert!(
+            added.get("old_line").is_none(),
+            "an added line's old side is nil server-side — the key must be absent, not null: {added}"
+        );
+
+        let unchanged = &positions[1];
+        assert_eq!(unchanged["old_line"], 10);
+        assert_eq!(unchanged["new_line"], 12);
+        assert_eq!(unchanged["position_type"], "text");
+        assert!(
+            unchanged.get("line_code").is_none(),
+            "line_code is derived by GitLab, never sent: {unchanged}"
+        );
     }
 
     /// A transient verdict (503) is retried against the real client too, and the

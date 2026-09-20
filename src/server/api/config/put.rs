@@ -671,29 +671,40 @@ pub(crate) fn apply_ui_config(
         let cfg_opt = state.app_config.read().unwrap();
         cfg_opt.as_ref().map(|arc| arc.llm.clone()).unwrap_or_default()
     };
-    // ── The llm section is resolved only when this request speaks for it ──
+    // ── The llm provider SET is re-derived only when this request states it ──
     //
-    // `PUT /config` is a partial update: a payload with no `llm` member says
-    // nothing about the provider list, and the Configuration page's auto-save
-    // deliberately omits the section (LLM settings are managed on the /llm
-    // page — see `useConfigForm`). Recomputing the list from the merged
-    // projection anyway is the data loss the 0.10.46 release gate measured:
-    // the projection's legacy scalar mirror is EMPTY on any `ui` row written
-    // before that mirror existed, and the resolution applied the empty mirror
-    // as the primary instead of `providers[0]`, replacing the whole provider
-    // list with a single entry carrying no api_base — after which
-    // `GET /llm/providers` was unusable and every `POST /reviews` answered 422
-    // `llmNotConfigured`. An unspoken-for save now leaves the stored set, the
-    // stored projection and the persisted rows exactly as they are.
+    // `PUT /config` is a partial update, and the provider set has exactly two
+    // representations: a stated `providers` array and the legacy scalar mirror.
+    // An `llm` member that states neither (`{"llm":{}}`, or a lone
+    // `primaryProvider`) patches the projection but says nothing about the set,
+    // so the stored set is kept verbatim.
+    //
+    // Re-deriving from anything else is data loss, and both directions have
+    // been measured. The Configuration page's auto-save omits `llm` entirely
+    // (LLM settings are managed on the /llm page — see `useConfigForm`), and
+    // resolving the set anyway applied the merged projection's legacy mirror —
+    // EMPTY on any `ui` row written before the mirror existed — as the primary
+    // instead of `providers[0]`, replacing the list with one entry carrying no
+    // api_base (the 0.10.46 release gate: `GET /llm/providers` unusable, every
+    // `POST /reviews` 422 `llmNotConfigured`). The projection's `providers[]`
+    // is not authoritative either — `sync_llm_projection` keeps the scalar
+    // mirror in sync and never the array, so a scan that configures a provider
+    // through the legacy scalars only leaves the array empty while the table
+    // holds the row, and re-deriving from the empty array deleted the provider
+    // on a 200-OK save (visible only after the next boot).
     let submitted_llm = payload.get("llm").and_then(serde_json::Value::as_object);
-    let speaks_for_llm = submitted_llm.is_some();
     // Does the REQUEST state the legacy scalar mirror? The merged body always
     // carries it (it is part of the stored projection), so only a key on the
     // submitted `llm` object marks it as an edit a client actually made — see
     // [`resolve_llm_section`].
     let states_legacy_scalars =
         submitted_llm.is_some_and(|llm| LEGACY_SCALAR_KEYS.iter().any(|key| llm.contains_key(*key)));
-    let new_llm_configs = if speaks_for_llm {
+    // A stated `providers` array REPLACES the set (an empty array is the
+    // explicit "every provider was deleted" the /llm page sends); a stated
+    // legacy scalar describes the set through the legacy path.
+    let states_the_provider_set =
+        submitted_llm.is_some_and(|llm| llm.contains_key("providers")) || states_legacy_scalars;
+    let new_llm_configs = if states_the_provider_set {
         resolve_llm_section(&mut body, &existing_llm, states_legacy_scalars)
     } else {
         // Persistence keeps the stored set; the runtime set and the projection

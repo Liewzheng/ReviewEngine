@@ -1,3 +1,4 @@
+use crate::cli::db_config::resolve_cli_config;
 use anyhow::Result;
 use review_engine::models::*;
 
@@ -20,7 +21,7 @@ pub async fn run_describe(
         gitlab_token.unwrap_or_else(|| std::env::var("GITLAB_TOKEN").unwrap_or_default())
     };
     let config_source = config_path.map(ConfigSource::Path);
-    let config = review_engine::config::resolve_config(config_source).await?;
+    let config = resolve_cli_config(config_source).await?.into_config();
     let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
 
     let (diff, mr_info) = if is_github_url(mr_url) {
@@ -89,7 +90,7 @@ pub async fn run_describe_local_diff(
 ) -> Result<()> {
     let diff = tokio::fs::read_to_string(diff_path).await?;
     let config_source = config_path.map(ConfigSource::Path);
-    let config = review_engine::config::resolve_config(config_source).await?;
+    let config = resolve_cli_config(config_source).await?.into_config();
     let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
 
     let mr_info = MRInfo::new(
@@ -156,7 +157,7 @@ pub async fn run_describe_local_repo(
     }
 
     let config_source = config_path.map(ConfigSource::Path);
-    let config = review_engine::config::resolve_config(config_source).await?;
+    let config = resolve_cli_config(config_source).await?.into_config();
     let configs: Vec<LLMConfig> = require_llm_configs(&llm_configs, &config)?;
 
     let mr_info = MRInfo::new(

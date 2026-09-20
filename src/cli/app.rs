@@ -31,14 +31,29 @@ pub fn parse_cli() -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
 }
 
-/// Apply the explicit data dir (`serve --data-dir`, or `REVIEW_DATA_DIR`) —
-/// RENG-37. Called by `main` before anything can resolve or write a state
-/// path, including the log collector's `logs.ndjson`.
+/// Apply the explicit state root — `serve --data-dir`, the global
+/// `--config-dir`, or `REVIEW_DATA_DIR` (RENG-37, RENG-107). Called by `main`
+/// before anything can resolve or write a state path, including the log
+/// collector's `logs.ndjson`.
+///
+/// Precedence, highest first: `serve --data-dir` > `--config-dir` >
+/// `REVIEW_DATA_DIR` > `REVIEW_ENGINE_CONFIG_DIR` > `~/.config/review-engine`.
+/// The first two are CLI requests for *this* run and are applied as the
+/// process data dir, which is exactly what puts them above the environment
+/// variables (see `review_engine::paths`); `REVIEW_ENGINE_CONFIG_DIR` needs no
+/// handling here — the resolvers read it themselves.
 pub fn apply_data_dir(cli: &Cli) -> Result<()> {
     let flag = match &cli.command {
         Some(Commands::Serve { data_dir, .. }) => data_dir.clone(),
         _ => None,
     };
+    // `--config-dir` is the global form of REVIEW_ENGINE_CONFIG_DIR: it pins
+    // the same root for every command, and only when `serve` did not name one
+    // itself. Passing it as the data-dir flag (rather than leaving it to the
+    // env var) is what places it ABOVE REVIEW_DATA_DIR — the CLI request for
+    // this run outranks a deployment-wide default. Creating the directory
+    // matches `--data-dir`.
+    let flag = flag.or_else(|| cli.config_dir.clone());
     review_engine::paths::apply_data_dir(flag.as_deref())?;
     Ok(())
 }
@@ -785,7 +800,9 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             // Resolve LLM config
             let config_source = config_path.clone().map(ConfigSource::Path);
-            let config = review_engine::config::resolve_config(config_source).await?;
+            let config = crate::cli::db_config::resolve_cli_config(config_source)
+                .await?
+                .into_config();
             let llm_configs = handlers::resolve_llm_configs(&llm_config, &config)?;
 
             let has_llm = !llm_configs.is_empty() || std::env::var("LLM_CONFIG").is_ok() || !config.llm.is_empty();

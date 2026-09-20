@@ -15,6 +15,29 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub progress: bool,
 
+    /// State root: the directory holding review.db, secrets.key, ui-state.toml
+    /// and the deployment's .code-audit-config.toml
+    ///
+    /// The global form of REVIEW_ENGINE_CONFIG_DIR, with the same meaning as
+    /// `serve --data-dir`: it is accepted by every command and resolved before
+    /// anything reads a path. Aliases the shipped deployments use:
+    /// `reng --config-dir /volume1/docker/reng/config review --local-path . --base main`,
+    /// or export REVIEW_ENGINE_CONFIG_DIR=/volume1/docker/reng/config.
+    ///
+    /// When that directory holds a `review.db`, the database is the
+    /// HIGHEST-priority configuration layer for the command at hand — the
+    /// command reads it (read-only: it never writes the database, creates no
+    /// `-wal`/`-shm` sidecars and takes no write lock) and its stored LLM
+    /// providers, expert overrides and ui settings override the config files
+    /// key by key. No database means plain TOML, exactly as before.
+    ///
+    /// Precedence: `serve --data-dir` > this flag > REVIEW_DATA_DIR >
+    /// REVIEW_ENGINE_CONFIG_DIR > ~/.config/review-engine. A per-artifact
+    /// variable (REVIEW_UI_STATE_FILE, DATABASE_URL, …) still wins for its own
+    /// artifact.
+    #[arg(long = "config-dir", global = true, value_name = "PATH")]
+    pub config_dir: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -206,14 +229,14 @@ pub enum Commands {
         /// and the user-level .code-audit-config.toml all resolve under this
         /// path, which is created if missing. Two instances with different
         /// values share no state; without the flag the defaults stay
-        /// ~/.config/review-engine (or REVIEW_ENGINE_CONFIG_DIR).
+        /// ~/.config/review-engine (or --config-dir / REVIEW_ENGINE_CONFIG_DIR).
         ///
-        /// Precedence: this flag > REVIEW_DATA_DIR > REVIEW_ENGINE_CONFIG_DIR >
-        /// ~/.config/review-engine. A per-artifact variable
-        /// (REVIEW_UI_STATE_FILE, REVIEW_AUTH_FILE, REVIEW_DISPATCH_STATE,
-        /// REVIEW_FEEDBACK_PATH, REVIEW_MODELS_DEV_CACHE, DATABASE_URL) still
-        /// wins for its own artifact — even against this flag — and is
-        /// reported as a warning at startup.
+        /// Precedence: this flag > --config-dir > REVIEW_DATA_DIR >
+        /// REVIEW_ENGINE_CONFIG_DIR > ~/.config/review-engine. A per-artifact
+        /// variable (REVIEW_UI_STATE_FILE, REVIEW_AUTH_FILE,
+        /// REVIEW_DISPATCH_STATE, REVIEW_FEEDBACK_PATH, REVIEW_MODELS_DEV_CACHE,
+        /// DATABASE_URL) still wins for its own artifact — even against this
+        /// flag — and is reported as a warning at startup.
         #[arg(long, value_name = "PATH")]
         data_dir: Option<std::path::PathBuf>,
     },

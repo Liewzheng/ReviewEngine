@@ -495,6 +495,11 @@ pub async fn import_ui_state_into_db(store: &SqlxStore, path: &Path) -> anyhow::
     Ok(true)
 }
 
+/// `app_settings` key holding the persisted UI projection ([`UiConfig`]) — the
+/// `ui` row the DB replay and the `AppState`-free overlay
+/// ([`super::db_overlay::apply_db_overrides`]) both read.
+pub const UI_SETTING_KEY: &str = "ui";
+
 /// Startup step 4 (§6.1): replay the UI state from the DB through the SAME
 /// `apply_ui_config` path as `PUT /config`. The DB rows are reassembled into
 /// a [`UiStateFile`] so the replay payload builder (env precedence, masked
@@ -506,7 +511,7 @@ pub async fn load_and_apply_ui_state_from_db(
     overrides: &UiStateEnvOverrides,
 ) -> anyhow::Result<bool> {
     let ui: Option<UiConfig> = store
-        .load_setting("ui")
+        .load_setting(UI_SETTING_KEY)
         .await?
         .map(|v| serde_json::from_value(v).context("app_settings row 'ui' is not a valid UiConfig"))
         .transpose()?;

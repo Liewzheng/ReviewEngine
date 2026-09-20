@@ -2,6 +2,7 @@
 //!
 //! @module review-engine: part of the CodeReview Board virtual engineering team
 
+pub mod db_overlay;
 mod helpers;
 pub mod persist;
 mod put;

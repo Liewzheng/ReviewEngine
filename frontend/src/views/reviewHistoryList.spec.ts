@@ -68,8 +68,10 @@ describe('the detail drawer keeps its per-expert LLM tag', () => {
 describe('the removed label leaves no key behind in any locale', () => {
   it('drops `columns.llm` from all six catalogs', () => {
     // Six spaces of indent = the `history.columns` block; `nav.llm` sits at
-    // four and is the LLM Status page's name, not a table column.
-    const left = locales.filter(([, text]) => /^ {6}llm: 'LLM',$/m.test(text));
+    // four and is the LLM Status page's name, not a table column. Any value is
+    // caught, not just the `'LLM'` the column used to carry — a re-added key
+    // with a translated label would otherwise slip through.
+    const left = locales.filter(([, text]) => /^ {6}llm:/m.test(text));
     expect(left.map(([name]) => name)).toEqual([]);
   });
 

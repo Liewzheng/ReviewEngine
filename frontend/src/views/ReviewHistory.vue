@@ -20,6 +20,7 @@ import type { ApiError } from '../services/api'
 import type { ReviewListItem, ExpertResult, HistoryFilters, RiskLevel, ReviewParticipant } from '../types/history'
 import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
+import { useHistoryTableColumns } from '../composables/useHistoryTableColumns'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 import MarkdownView from '../components/common/MarkdownView.vue'
 import PageHeader from '../components/common/PageHeader.vue'
@@ -32,6 +33,10 @@ const route = useRoute()
 const router = useRouter()
 const { t, locale } = useI18n()
 const reviews = useReviews()
+
+/* The narrow layouts drop columns from the table itself — see the composable
+ * for why hiding their cells with CSS never worked. */
+const columns = useHistoryTableColumns()
 
 const loading = reviews.loading
 const drawerOpen = ref(false)
@@ -610,7 +615,12 @@ watch(() => route.query, () => {
           :border="false"
           :highlight-current-row="false"
         >
-          <el-table-column :label="$t('history.columns.mrTitle')" min-width="200" sortable :sort-by="['mrTitle']">
+          <el-table-column
+            :label="$t('history.columns.mrTitle')"
+            :min-width="columns.details ? 200 : 88"
+            sortable
+            :sort-by="['mrTitle']"
+          >
             <template #default="{ row }">
               <div class="title-cell">
                 <div class="title-text">
@@ -621,7 +631,14 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column prop="project" :label="$t('history.columns.project')" width="160" sortable class-name="col-project">
+          <el-table-column
+            v-if="columns.project"
+            prop="project"
+            :label="$t('history.columns.project')"
+            width="160"
+            sortable
+            class-name="col-project"
+          >
             <template #default="{ row }">
               <!-- Long "group/sub/project" slugs used to be hard-clipped by the
                    cell's overflow:hidden — no ellipsis, no way to read the full
@@ -636,7 +653,13 @@ watch(() => route.query, () => {
           <!-- RENG-45: the cell shows an overlapping avatar stack (the backend
                already orders author → creator → participant). Records that
                predate `participants` keep the legacy single-author cell. -->
-          <el-table-column :label="$t('history.columns.author')" width="160" sortable :sort-by="['author.name']">
+          <el-table-column
+            v-if="columns.details"
+            :label="$t('history.columns.author')"
+            width="160"
+            sortable
+            :sort-by="['author.name']"
+          >
             <template #default="{ row }">
               <el-tooltip v-if="participantsOf(row).length > 0" placement="top" effect="light">
                 <!-- Hover lists EVERY participant, in the same order as the
@@ -708,6 +731,7 @@ watch(() => route.query, () => {
                both paddings in place only 28px of the 76px column was left for
                a 30–38px badge, and a two- or three-digit score was trimmed. -->
           <el-table-column
+            v-if="columns.details"
             :label="$t('history.columns.score')"
             width="76"
             align="center"
@@ -730,13 +754,25 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.duration')" width="100" sortable :sort-by="['durationMs']">
+          <el-table-column
+            v-if="columns.details"
+            :label="$t('history.columns.duration')"
+            width="100"
+            sortable
+            :sort-by="['durationMs']"
+          >
             <template #default="{ row }">
               <span class="duration-text">{{ formatDuration(row.durationMs) }}</span>
             </template>
           </el-table-column>
 
-          <el-table-column :label="$t('history.columns.created')" width="150" sortable :sort-by="['createdAt']">
+          <el-table-column
+            v-if="columns.details"
+            :label="$t('history.columns.created')"
+            width="150"
+            sortable
+            :sort-by="['createdAt']"
+          >
             <template #default="{ row }">
               <span class="created-text">
                 <span class="created-date">{{ formatCreatedDate(row.createdAt) }}</span>
@@ -745,7 +781,7 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
-          <el-table-column width="72" fixed="right">
+          <el-table-column width="72" :fixed="columns.details ? 'right' : false">
             <template #default="{ row }">
               <el-dropdown trigger="click" @command="(cmd: string) => {
                 if (cmd === 'rerun') handleRerun(row)
@@ -1603,7 +1639,11 @@ watch(() => route.query, () => {
   flex-wrap: wrap;
 }
 
-/* Responsive */
+/* Responsive. The narrow column sets are NOT decided here: a hidden cell keeps
+ * its column in Element Plus's fixed table layout (the phone table stayed
+ * 1026px wide inside a 302px viewport and the sticky action column covered the
+ * status cell). `useHistoryTableColumns` drops the columns from the table
+ * instead, which is what lets the table fit. */
 @media (max-width: 1024px) {
   .filter-bar {
     flex-direction: column;
@@ -1617,11 +1657,6 @@ watch(() => route.query, () => {
     min-width: unset;
   }
 
-  .history-table :deep(.col-project),
-  .history-table :deep(.col-repository) {
-    display: none;
-  }
-
   .meta-grid {
     grid-template-columns: 1fr;
   }
@@ -1632,16 +1667,6 @@ watch(() => route.query, () => {
     flex-direction: column;
     align-items: flex-start;
     gap: var(--space-3);
-  }
-
-  .history-table :deep(.el-table__cell:not(.el-table-column--selection):not(.is-fixed-right)) {
-    display: none;
-  }
-
-  .history-table :deep(.el-table__cell:first-child),
-  .history-table :deep(.el-table__cell:nth-child(4)),
-  .history-table :deep(.is-fixed-right) {
-    display: table-cell;
   }
 
   .pagination-bar {

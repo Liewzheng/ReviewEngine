@@ -32,7 +32,7 @@
 //! | `app_settings` `ui` → `advanced.maxConcurrentReviews` | `AppConfig::max_concurrent_llm_calls` **and** `AppConfig::max_team_size` |
 //! | `app_settings` `ui` → `aggregated` (RENG-95 tri-state) | `AppConfig::report.aggregated` |
 //! | `app_settings` `ui` → `rules` / the remaining `advanced` fields | returned in [`AppliedDbOverrides::ui`] — the UI projection has no `AppConfig` counterpart |
-//! | `llm_providers` rows | `AppConfig::llm` (the whole chain) |
+//! | `llm_providers` rows | `AppConfig::llm` — replaced wholesale, in the server's chain order (primary first, disabled entries out) |
 //! | `git_platforms` rows | returned in [`AppliedDbOverrides::git_platforms`] — `AppConfig` carries no such field |
 //! | `app_settings` `gitlab` | returned in [`AppliedDbOverrides::gitlab`] |
 //! | `app_settings` `experts` | `AppConfig::review_experts` (patched entries) |
@@ -45,6 +45,37 @@
 //! SAME key resolution `serve` uses — the store is built over the same config
 //! dir (`SqlxStore::connect_default(config_dir)`, `secrets.key` next to
 //! `review.db`) — and never handles ciphertext itself.
+//!
+//! ## Relationship to the WebUI replay in `serve`
+//!
+//! `serve` calls this function in its bootstrap and then keeps its existing
+//! WebUI replay ([`super::persist::load_and_apply_ui_state_from_db`] plus the
+//! expert-override replay) — the replay owns surfaces this function cannot
+//! express (the `ui_config` projection, the GitLab runtime, the masked
+//! shapes), so it is not replaced. The two paths agree, by construction, on:
+//!
+//! - the fields both write (`AppConfig::llm`, `report.aggregated`, the two
+//!   concurrency caps) — the replay runs LAST and recomputes them from the
+//!   same rows, so its value wins and this function only decides what the
+//!   config holds before the replay runs;
+//! - the expert overrides — the replay re-applies the same map (see the
+//!   `serve` call site, which pins `AppState::expert_base` to the
+//!   FILE-resolved `[review_experts]` so RENG-93's "clearing an override
+//!   restores the file value" still holds).
+//!
+//! Two narrow divergences are known and accepted, both reachable only with a
+//! database whose stored key is a MASK (`***`) — the UI/import save paths only
+//! ever persist live keys:
+//!
+//! 1. A stored provider row with an empty or masked key is dropped here, while
+//!    the replay's masked-keep resolution resolves it against the config it
+//!    keeps in memory — which after this function ran is this chain, not the
+//!    TOML/env one it used to be. The result is the same "keep nothing" when
+//!    the DB has no usable row (the file chain is left in place) and can only
+//!    differ for a hand-edited row whose `(provider, api_base, model)` triple
+//!    also exists in the TOML file.
+//! 2. That keep-resolution's SOURCE is consequently the DB chain rather than
+//!    the TOML chain.
 //!
 //! ## Env/CLI values
 //!
@@ -60,10 +91,13 @@
 //! ## Errors
 //!
 //! A store-level failure is returned to the caller, which decides whether to
-//! fall back (the DB carries no configuration) or to report it. The one
-//! exception is the `experts` row: its read failure degrades to "no overrides"
-//! with a WARN, because a hand-edited row must not be able to stop the other
-//! surfaces from applying (the same contract
+//! fall back (the DB carries no configuration) or to report it. The error path
+//! is atomic with respect to `config`: every fallible read happens before the
+//! first mutation, so an `Err` never leaves a partially overlaid config.
+//!
+//! The `experts` row is the exception: its read failure degrades to "no
+//! overrides" with a WARN, because a hand-edited row must not be able to stop
+//! the other surfaces from applying (the same contract
 //! [`super::persist::load_and_apply_expert_overrides`] documents).
 
 use anyhow::Context;
@@ -82,7 +116,12 @@ use super::types::UiConfig;
 /// the TOML resolution produced. The fields that have an `AppConfig`
 /// counterpart are ALSO already applied to the config handed in; the rest are
 /// returned because they have no place on `AppConfig` (see the module table).
-#[derive(Debug, Clone, Default)]
+///
+/// **Empty from a failed call**: an `Err` from [`apply_db_overrides`] returns
+/// nothing at all and leaves the caller's config untouched (every fallible
+/// store read happens before the first mutation), so the documented fallback —
+/// "treat the database as carrying no configuration" — is always safe.
+#[derive(Clone, Default)]
 pub struct AppliedDbOverrides {
     /// `app_settings` row `ui` — the persisted UI projection (rules,
     /// advanced, aggregated, and the masked llm/gitPlatform sub-sections).
@@ -90,9 +129,17 @@ pub struct AppliedDbOverrides {
     /// values are applied to the config; `rules` have no `AppConfig`
     /// counterpart and are only reported.
     pub ui: Option<UiConfig>,
-    /// The provider chain the DB contributed, exactly as it landed on
-    /// `AppConfig::llm`. Empty when the DB carries no usable provider or when
-    /// env supplied the chain.
+    /// The provider chain the DB contributed, EXACTLY as it landed on
+    /// `AppConfig::llm`: the server's authoritative chain order — the persisted
+    /// `ui.llm.primaryProvider` first, then the remaining entries in their
+    /// stored order, with DISABLED entries left out
+    /// ([`crate::llm::ordered_llm_configs`], RENG-55 / RENG-75).
+    ///
+    /// A caller that runs reviews on this chain gets the head provider the Web
+    /// UI shows as primary without re-ordering anything itself. The rule is the
+    /// one the server's own [`crate::server::AppState::ordered_llm_configs`]
+    /// applies to the same rows. Empty when the DB carries no provider with a
+    /// usable key, or when env supplied the chain.
     pub llm: Vec<LLMConfig>,
     /// The git platform set the DB carries (live secrets, already decrypted).
     /// Never empty when rows exist; `AppConfig` has no field to land it on, so
@@ -103,21 +150,64 @@ pub struct AppliedDbOverrides {
     pub gitlab: PersistedGitlabConfig,
     /// How many `[review_experts]` entries the persisted override map patched.
     pub experts_patched: usize,
+    /// Whether the DATABASE itself carried a legacy GitLab credential, BEFORE
+    /// the env/CLI fallback above filled [`Self::gitlab`]. Private on purpose:
+    /// it feeds [`Self::is_empty`] only, and a caller asking "did the DB carry
+    /// configuration" must not be answered by a fallback the DB never stored.
+    gitlab_stored: bool,
 }
 
 impl AppliedDbOverrides {
     /// True when the database carried no configuration at all — the caller's
     /// config is the plain TOML resolution and nothing needs republishing.
-    /// Overrides that named an expert the file does not define count as
-    /// nothing: they patched no entry.
+    ///
+    /// Deliberately based on what the DB itself holds: the env/CLI fallback
+    /// fills [`Self::gitlab`] into a database that stored no credential, and
+    /// an override that named an expert the file does not define patched no
+    /// entry — neither counts as "the DB carried configuration".
     pub fn is_empty(&self) -> bool {
         self.ui.is_none()
             && self.llm.is_empty()
             && self.git_platforms.is_empty()
-            && self.gitlab.token.is_empty()
-            && self.gitlab.webhook_secret.is_empty()
-            && self.gitlab.webhook_signing_secret.is_empty()
+            && !self.gitlab_stored
             && self.experts_patched == 0
+    }
+}
+
+/// Redacted: the result carries LIVE secrets (git platform tokens, LLM API
+/// keys, GitLab credentials), so a derived `Debug` would print them wherever a
+/// caller `{:?}`-logs the outcome. What a diagnostic needs — which surfaces the
+/// DB carried, which providers/cards they name, and whether a credential is
+/// set — is printed instead of the values.
+impl std::fmt::Debug for AppliedDbOverrides {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let llm: Vec<String> = self.llm.iter().map(|c| format!("{}:{}", c.provider, c.model)).collect();
+        let platforms: Vec<&str> = self.git_platforms.iter().map(|p| p.name.as_str()).collect();
+        f.debug_struct("AppliedDbOverrides")
+            .field("ui", &self.ui.as_ref().map(|ui| ui.rules.min_score))
+            .field("llm", &llm)
+            .field("git_platforms", &platforms)
+            .field(
+                "gitlab",
+                &format_args!(
+                    "token={} webhook_secret={} signing_secret={}",
+                    secret_state(&self.gitlab.token),
+                    secret_state(&self.gitlab.webhook_secret),
+                    secret_state(&self.gitlab.webhook_signing_secret),
+                ),
+            )
+            .field("experts_patched", &self.experts_patched)
+            .field("gitlab_stored", &self.gitlab_stored)
+            .finish()
+    }
+}
+
+/// `set` / `unset` for a live credential — never the value itself.
+fn secret_state(secret: &str) -> &'static str {
+    if secret.is_empty() {
+        "unset"
+    } else {
+        "set"
     }
 }
 
@@ -131,21 +221,56 @@ impl AppliedDbOverrides {
 /// `env` is the CLI/env tracking of the caller ([`UiStateEnvOverrides`]); pass
 /// [`UiStateEnvOverrides::default`] when the caller has none.
 ///
-/// Returns an error only for a store-level failure. The `experts` row is the
-/// exception (see the module docs): it degrades to "no overrides" with a WARN.
+/// Returns an error only for a store-level failure, and an error leaves
+/// `config` UNTOUCHED: every fallible read happens before the first mutation,
+/// so a caller may treat `Err` exactly like "the database carries no
+/// configuration" and keep the config it resolved. The `experts` row is the
+/// one non-fatal read (see the module docs): it degrades to "no overrides"
+/// with a WARN and never fails the call.
 pub async fn apply_db_overrides(
     config: &mut AppConfig,
     store: &SqlxStore,
     env: &UiStateEnvOverrides,
 ) -> anyhow::Result<AppliedDbOverrides> {
-    let mut applied = AppliedDbOverrides::default();
-
-    // ── app_settings `ui` (rules / advanced / aggregated) ───────────────
-    applied.ui = store
+    // ── Read phase: every fallible store read, before the first mutation, so
+    //    an `Err` cannot leave a partially overlaid config behind. ───────
+    let ui: Option<UiConfig> = store
         .load_setting(UI_SETTING_KEY)
         .await?
         .map(|value| serde_json::from_value(value).context("app_settings row 'ui' is not a valid UiConfig"))
         .transpose()?;
+    // `config.toml < ui-state.toml / review.db < env`: an env-seeded chain
+    // wins wholesale, so the table is not read at all then.
+    let stored_llm = if env.llm_from_env {
+        Vec::new()
+    } else {
+        store.load_llm_providers().await?
+    };
+    let stored_platforms = store.load_git_platforms().await?;
+    let stored_gitlab = store.load_legacy_gitlab().await?;
+    let expert_overrides = match load_expert_overrides(store).await {
+        Ok(overrides) => overrides,
+        Err(e) => {
+            // Field named `reason`, not `error`: the log collector infers a
+            // plain-text line's level by substring (`infer_level_from_line`),
+            // and an `error=…` field would file this WARN as an ERROR.
+            tracing::warn!(
+                reason = %format!("{e:#}"),
+                "ignoring the persisted expert overrides: the settings row could not be read; \
+                 the config file's [review_experts] values stand"
+            );
+            crate::config::ExpertOverrides::default()
+        }
+    };
+
+    // ── Apply phase: infallible from here on. ───────────────────────────
+    let mut applied = AppliedDbOverrides {
+        ui,
+        git_platforms: stored_platforms,
+        gitlab_stored: !stored_gitlab.is_empty(),
+        ..Default::default()
+    };
+
     if let Some(ui) = &applied.ui {
         // `advanced.maxConcurrentReviews` is the UI's name for the two caps the
         // backend enforces; they are set together, exactly as the `PUT /config`
@@ -163,8 +288,7 @@ pub async fn apply_db_overrides(
 
     // ── llm_providers ───────────────────────────────────────────────────
     if env.llm_from_env {
-        // `config.toml < ui-state.toml / review.db < env`: an env-seeded chain
-        // wins wholesale, so the table is not applied at all.
+        // The env-seeded chain (read phase) wins wholesale.
         tracing::debug!(
             "the LLM_CONFIG/env provider chain wins over the persisted llm_providers table; \
              the database chain is not applied"
@@ -173,23 +297,25 @@ pub async fn apply_db_overrides(
         // A stored card whose key is empty never reaches the chain — the same
         // rule `apply_ui_config` applies to a card the user emptied, so both
         // DB-apply paths agree on what "a configured provider" is.
-        let usable: Vec<LLMConfig> = store
-            .load_llm_providers()
-            .await?
-            .into_iter()
-            .filter(|provider| !provider.api_key.is_empty())
-            .collect();
+        let usable: Vec<LLMConfig> = stored_llm.into_iter().filter(|c| !c.api_key.is_empty()).collect();
         if !usable.is_empty() {
-            config.llm = usable.clone();
-            applied.llm = usable;
+            // RENG-55 / RENG-75: the chain order is the server's, not the
+            // stored one — the persisted primary first (when the `ui` row
+            // names one), the rest in stored order, disabled entries excluded.
+            // A caller that runs reviews straight off this chain therefore
+            // runs the head provider the Web UI shows as primary.
+            let primary = applied
+                .ui
+                .as_ref()
+                .map(|ui| ui.llm.primary_provider.as_str())
+                .unwrap_or_default();
+            let chain = crate::llm::ordered_llm_configs(primary, &usable);
+            config.llm = chain.clone();
+            applied.llm = chain;
         }
     }
 
-    // ── git_platforms (no `AppConfig` field: reported, not applied) ─────
-    applied.git_platforms = store.load_git_platforms().await?;
-
     // ── app_settings `gitlab` (legacy credentials) ──────────────────────
-    let stored_gitlab = store.load_legacy_gitlab().await?;
     let env_fallback = |stored: String, env: &Option<String>| -> String {
         match env {
             Some(value) if stored.is_empty() => value.clone(),
@@ -203,26 +329,13 @@ pub async fn apply_db_overrides(
     };
 
     // ── app_settings `experts` (WebUI expert overrides) ─────────────────
-    match load_expert_overrides(store).await {
-        Ok(overrides) if !overrides.is_empty() => {
-            applied.experts_patched = overrides.apply_to(config);
-            if applied.experts_patched < overrides.len() {
-                tracing::debug!(
-                    stored = overrides.len(),
-                    applied = applied.experts_patched,
-                    "expert override(s) name an expert the config file does not define; skipped"
-                );
-            }
-        }
-        Ok(_) => {}
-        Err(e) => {
-            // Field named `reason`, not `error`: the log collector infers a
-            // plain-text line's level by substring (`infer_level_from_line`),
-            // and an `error=…` field would file this WARN as an ERROR.
-            tracing::warn!(
-                reason = %format!("{e:#}"),
-                "ignoring the persisted expert overrides: the settings row could not be read; \
-                 the config file's [review_experts] values stand"
+    if !expert_overrides.is_empty() {
+        applied.experts_patched = expert_overrides.apply_to(config);
+        if applied.experts_patched < expert_overrides.len() {
+            tracing::debug!(
+                stored = expert_overrides.len(),
+                applied = applied.experts_patched,
+                "expert override(s) name an expert the config file does not define; skipped"
             );
         }
     }
@@ -289,6 +402,88 @@ mod tests {
         let store = SqlxStore::new_in_memory().await.unwrap();
         store.migrate().await.unwrap();
         store
+    }
+
+    /// A database that stored nothing contributes nothing even when the
+    /// environment supplies a GitLab credential: the env/CLI fallback fills the
+    /// RUNTIME value, it does not make the DB "carry configuration". A caller
+    /// (or `serve`'s startup log) that keyed off `is_empty()` must not be told
+    /// otherwise.
+    #[tokio::test]
+    async fn empty_database_with_an_env_gitlab_token_still_reports_nothing_applied() {
+        let store = fresh_db().await;
+        let env = UiStateEnvOverrides {
+            gitlab_token: Some("glpat-env".to_string()),
+            ..Default::default()
+        };
+        let mut config = file_config();
+
+        let applied = apply_db_overrides(&mut config, &store, &env).await.unwrap();
+
+        assert_eq!(
+            applied.gitlab.token, "glpat-env",
+            "the fallback still fills the runtime value"
+        );
+        assert!(
+            applied.is_empty(),
+            "but the DB stored no credential, so it carried no configuration"
+        );
+    }
+
+    /// A database whose only row is a credential the caller must not count as
+    /// "configuration the DB carries" through the fallback path: with a stored
+    /// credential `is_empty()` is false.
+    #[tokio::test]
+    async fn stored_gitlab_credential_is_reported_as_carried() {
+        let store = fresh_db().await;
+        store
+            .save_legacy_gitlab(&PersistedGitlabConfig {
+                webhook_secret: "wh-db".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        let mut config = file_config();
+
+        let applied = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+
+        assert!(!applied.is_empty());
+        assert_eq!(applied.gitlab.webhook_secret, "wh-db");
+    }
+
+    /// An `Err` leaves the caller's config exactly as it resolved it — every
+    /// fallible read happens before the first mutation, so "treat the failure
+    /// like an empty database" is always safe.
+    #[tokio::test]
+    async fn store_failure_leaves_the_config_untouched() {
+        let store = fresh_db().await;
+        // Rows the overlay would otherwise apply, plus a broken store: the
+        // `git_platforms` read fails AFTER the LLM read succeeded, which is
+        // exactly the shape that used to leave a half-overlaid config.
+        store
+            .replace_llm_providers(&[db_llm("anthropic", "claude-3-opus", "sk-db")])
+            .await
+            .unwrap();
+        sqlx::query("DROP TABLE git_platforms")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let mut config = file_config();
+        let err = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("git_platforms"),
+            "the store failure must be surfaced: {err:#}"
+        );
+        assert_eq!(config.llm.len(), 1, "no partial overlay");
+        assert_eq!(config.llm[0].provider, "openai");
+        assert_eq!(config.llm[0].api_key, "sk-from-toml");
+        assert_eq!(config.max_concurrent_llm_calls, Some(2));
     }
 
     /// No DB rows at all → the plain TOML result stands, key by key.
@@ -604,5 +799,133 @@ mod tests {
         // The file's own experts are untouched.
         let security: &ExpertTomlDef = &config.review_experts["Security"];
         assert!(security.enabled);
+    }
+
+    /// The returned chain is the server's authoritative order (RENG-55): the
+    /// persisted `ui.llm.primaryProvider` heads it, the rest keep their stored
+    /// order, and DISABLED entries are left out (RENG-75). A CLI caller that
+    /// runs reviews straight off `AppliedDbOverrides::llm` therefore runs the
+    /// same head provider the Web UI shows as primary.
+    #[tokio::test]
+    async fn stored_primary_provider_heads_the_returned_chain() {
+        let store = fresh_db().await;
+        let mut disabled = db_llm("gemini", "gemini-2.0", "sk-gemini");
+        disabled.disabled = true;
+        store
+            .replace_llm_providers(&[
+                db_llm("openai", "gpt-4o", "sk-openai"),
+                db_llm("anthropic", "claude-3-opus", "sk-anthropic"),
+                disabled,
+            ])
+            .await
+            .unwrap();
+        let ui: UiConfig =
+            serde_json::from_value(serde_json::json!({ "llm": { "primaryProvider": "anthropic" } })).unwrap();
+        store
+            .save_setting(UI_SETTING_KEY, &serde_json::to_value(&ui).unwrap())
+            .await
+            .unwrap();
+
+        let mut config = file_config();
+        let applied = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+
+        let chain: Vec<&str> = applied.llm.iter().map(|c| c.provider.as_str()).collect();
+        assert_eq!(chain, ["anthropic", "openai"], "primary first, disabled excluded");
+        let on_config: Vec<&str> = config.llm.iter().map(|c| c.provider.as_str()).collect();
+        assert_eq!(
+            on_config, chain,
+            "the field doc promises config.llm and applied.llm are the same chain"
+        );
+    }
+
+    /// Without a `ui` row there is no persisted primary, so the stored order of
+    /// the enabled entries is already authoritative (`ordered_llm_configs("")`).
+    #[tokio::test]
+    async fn no_stored_primary_keeps_the_stored_chain_order() {
+        let store = fresh_db().await;
+        store
+            .replace_llm_providers(&[
+                db_llm("openai", "gpt-4o", "sk-openai"),
+                db_llm("anthropic", "claude-3-opus", "sk-anthropic"),
+            ])
+            .await
+            .unwrap();
+
+        let mut config = file_config();
+        let applied = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+
+        let chain: Vec<&str> = applied.llm.iter().map(|c| c.provider.as_str()).collect();
+        assert_eq!(chain, ["openai", "anthropic"]);
+    }
+
+    /// RENG-95 tri-state: a `ui` row written BEFORE the aggregation toggle
+    /// existed carries no `aggregated` key, and the config file's value must
+    /// then stay in force rather than be reset to a serde default.
+    #[tokio::test]
+    async fn ui_row_without_the_aggregation_toggle_keeps_the_file_flag() {
+        let store = fresh_db().await;
+        let ui: UiConfig =
+            serde_json::from_value(serde_json::json!({ "advanced": { "maxConcurrentReviews": 9 } })).unwrap();
+        assert!(ui.aggregated.is_none(), "precondition: the row predates the toggle");
+        store
+            .save_setting(UI_SETTING_KEY, &serde_json::to_value(&ui).unwrap())
+            .await
+            .unwrap();
+
+        // The file says `aggregated = false` (see `file_config`)…
+        let mut config = file_config();
+        let applied = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+        assert!(!config.report.aggregated);
+        // …and `true` on the other side of the "did the row decide it" line:
+        // a silent row never resets the file value either way.
+        config.report.aggregated = true;
+        apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+        assert!(config.report.aggregated, "the file value stays; the row is silent");
+        assert_eq!(config.max_concurrent_llm_calls, Some(9), "the row still applies");
+        assert!(applied.ui.is_some());
+    }
+
+    /// `Debug` must never print a live credential — the result is a natural
+    /// thing to `{:?}`-log at startup.
+    #[tokio::test]
+    async fn debug_output_redacts_every_secret() {
+        let store = fresh_db().await;
+        store
+            .replace_llm_providers(&[db_llm("anthropic", "claude-3-opus", "sk-super-secret")])
+            .await
+            .unwrap();
+        store
+            .replace_git_platforms(&[db_platform("testbed", "glpat-super-secret")])
+            .await
+            .unwrap();
+        store
+            .save_legacy_gitlab(&PersistedGitlabConfig {
+                token: "glpat-legacy-secret".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        let mut config = file_config();
+        let applied = apply_db_overrides(&mut config, &store, &UiStateEnvOverrides::default())
+            .await
+            .unwrap();
+
+        let rendered = format!("{applied:?}");
+        for secret in ["sk-super-secret", "glpat-super-secret", "glpat-legacy-secret"] {
+            assert!(!rendered.contains(secret), "{secret} leaked into Debug: {rendered}");
+        }
+        // What a diagnostic needs is still there.
+        assert!(rendered.contains("anthropic:claude-3-opus"), "{rendered}");
+        assert!(rendered.contains("testbed"), "{rendered}");
+        assert!(rendered.contains("token=set"), "{rendered}");
     }
 }

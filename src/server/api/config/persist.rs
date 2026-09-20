@@ -81,6 +81,16 @@ pub struct PersistedGitlabConfig {
     pub webhook_signing_secret: String,
 }
 
+impl PersistedGitlabConfig {
+    /// True when no field carries a credential — "unset is unset" for this
+    /// section (the store deletes an all-empty row rather than keeping a JSON
+    /// shell). Used by the save path and by the DB-over-file overlay's
+    /// "did the database carry anything" answer.
+    pub fn is_empty(&self) -> bool {
+        self.token.is_empty() && self.webhook_secret.is_empty() && self.webhook_signing_secret.is_empty()
+    }
+}
+
 impl UiStateFile {
     /// Build the persistable file from a resolved PUT ([`AppliedConfig`]),
     /// keeping env-derived values OUT: `env` tracks what came from CLI/env

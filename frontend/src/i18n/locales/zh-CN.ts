@@ -181,7 +181,6 @@ export default {
       authorName: '作者',
       status: '状态',
       score: '得分',
-      llm: 'LLM',
       duration: '耗时',
       created: '创建时间',
       time: '时间',

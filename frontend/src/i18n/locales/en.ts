@@ -194,7 +194,6 @@ export default {
       authorName: 'Author',
       status: 'Status',
       score: 'Score',
-      llm: 'LLM',
       duration: 'Duration',
       created: 'Created',
       time: 'Time',

@@ -458,12 +458,6 @@ function expertLlmLabel(exp: ExpertResult): string | null {
   return `${exp.llmProvider ?? t('history.llm.unknown')}/${exp.llmModel ?? t('history.llm.unknown')}`
 }
 
-/** Compact list-cell form of the deduplicated `llmSummary` snapshot. */
-function formatLlmSummary(usages: ReviewListItem['llmSummary']): string {
-  if (!usages || usages.length === 0) return '-'
-  return usages.map((u) => `${u.provider}/${u.model}`).join(', ')
-}
-
 const hasRawComment = computed(
   () => !!selectedReview.value?.rawComment?.trim()
 )
@@ -733,14 +727,6 @@ watch(() => route.query, () => {
                 </el-tag>
               </el-tooltip>
               <span v-else class="score-empty">-</span>
-            </template>
-          </el-table-column>
-
-          <!-- RENG-38: LLM snapshot column — compact `provider/model` pairs,
-               '-' for records predating the 0.10.2 snapshot. -->
-          <el-table-column :label="$t('history.columns.llm')" min-width="150" class-name="col-llm">
-            <template #default="{ row }">
-              <span class="llm-cell">{{ formatLlmSummary(row.llmSummary) }}</span>
             </template>
           </el-table-column>
 
@@ -1491,18 +1477,6 @@ watch(() => route.query, () => {
   max-width: 220px;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-/* RENG-38: history list LLM column cell. */
-.llm-cell {
-  font-family: var(--font-mono, monospace);
-  font-size: 12px;
-  color: var(--text-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  display: inline-block;
-  max-width: 100%;
 }
 
 .expert-content {

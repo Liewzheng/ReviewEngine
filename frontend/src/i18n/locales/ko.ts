@@ -183,7 +183,6 @@ export default {
       authorName: '작성자',
       status: '상태',
       score: '점수',
-      llm: 'LLM',
       duration: '소요 시간',
       created: '생성 시간',
       time: '시간',

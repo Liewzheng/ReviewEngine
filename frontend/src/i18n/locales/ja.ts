@@ -184,7 +184,6 @@ export default {
       authorName: '作成者',
       status: 'ステータス',
       score: 'スコア',
-      llm: 'LLM',
       duration: '所要時間',
       created: '作成日時',
       time: '時間',

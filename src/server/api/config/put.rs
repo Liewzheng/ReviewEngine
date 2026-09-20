@@ -9,7 +9,9 @@ use crate::server::AppState;
 use crate::store::traits::ConfigStore;
 
 use super::is_blank_or_masked;
-use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK, CLEAR_SECRET_SENTINEL};
+use super::types::{
+    default_max_concurrent_reviews, UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK, CLEAR_SECRET_SENTINEL,
+};
 
 /// Deep-merge `patch` into `base` (both JSON values), returning the result.
 ///
@@ -610,8 +612,29 @@ pub(crate) fn apply_ui_config(
         if !new_llm_configs.is_empty() {
             new_cfg.llm = new_llm_configs.clone();
         }
-        new_cfg.max_concurrent_llm_calls = Some(body.advanced.max_concurrent_reviews as usize);
-        new_cfg.max_team_size = Some(body.advanced.max_concurrent_reviews as usize);
+        // RENG-107: the two caps the review pipeline enforces, set together
+        // exactly as the DB overlay sets them.
+        //
+        // A value of 0 — what a payload, or a STORED ui row, yields when its
+        // `advanced` section is absent (serde then fills the derived
+        // `UiAdvancedConfig::default()`) — is not a decision: the pipeline
+        // builds a 0-permit `Semaphore` from these caps, so every expert task
+        // would wait forever instead of running, and the startup replay would
+        // re-apply that zero on every boot. So 0 means "this update did not
+        // decide the caps": the running values stay, and the projection is
+        // published with the value actually in force, so the Configuration page
+        // neither shows a cap that cannot apply nor persists it again (this
+        // heals a legacy row on the next save).
+        let submitted_caps = body.advanced.max_concurrent_reviews as usize;
+        if submitted_caps > 0 {
+            new_cfg.max_concurrent_llm_calls = Some(submitted_caps);
+            new_cfg.max_team_size = Some(submitted_caps);
+        } else {
+            body.advanced.max_concurrent_reviews = new_cfg
+                .max_concurrent_llm_calls
+                .unwrap_or(default_max_concurrent_reviews() as usize)
+                as u32;
+        }
         // RENG-95: the aggregation flag is part of the UI projection, so a
         // `PUT /config` that mentions it applies it here (the config page never
         // sends it — it is controlled from the experts page — and a save that

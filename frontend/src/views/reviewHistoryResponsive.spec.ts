@@ -111,6 +111,44 @@ describe('the phone-width column set is title + status + actions', () => {
   });
 });
 
+describe('the fixed column widths stay where M10 measured them', () => {
+  /**
+   * The rendered widths at a 1400px viewport, from the headless-Chrome pass
+   * that produced the numbers in `reviewHistoryRowLayout.spec.ts`: the title
+   * column was 292px and the table 1118px inside a content area with room to
+   * spare, so no horizontal scroll. The fixed columns below sum to 826px, and
+   * the title column's 200px minimum makes the table's floor 1026px — which is
+   * exactly the width Element Plus lays out at 1025px and 1200px, where the
+   * visible area is already narrower than the table.
+   *
+   * The title column is the flexible one, so any width added to a fixed column
+   * comes straight out of it. Pinning the set means a width change has to come
+   * with a re-measurement instead of quietly eating the MR titles.
+   */
+  const MEASURED_FIXED_WIDTHS: [string, number][] = [
+    ['project', 160],
+    ['author', 160],
+    ['status', 108],
+    ['score', 76],
+    // The duration fix (see `reviewHistoryRowLayout.spec.ts`) is padding, not
+    // width: at 100px its cell holds `125m 59s` once the second padding layer
+    // is gone, so the column stays where it was.
+    ['duration', 100],
+    ['created', 150],
+  ];
+
+  it('keeps every fixed column at its measured width', () => {
+    for (const [name, width] of MEASURED_FIXED_WIDTHS) {
+      expect(columnTag(name), `${name} changed width`).toContain(`width="${width}"`);
+    }
+  });
+
+  it('leaves the actions column at its measured width', () => {
+    const actions = columnTags().at(-1) as string;
+    expect(actions).toContain('width="72"');
+  });
+});
+
 describe('no cell-level hiding is left behind', () => {
   it('hides no table cell at any breakpoint', () => {
     expect(flat(styles)).not.toMatch(/\.el-table__cell[^{}]*\{[^}]*display:\s*none/);

@@ -21,6 +21,7 @@ import type { ReviewListItem, ExpertResult, HistoryFilters, RiskLevel, ReviewPar
 import { getReviews } from '../services/reviews'
 import { useReviews } from '../composables/useReviews'
 import { useHistoryTableColumns } from '../composables/useHistoryTableColumns'
+import { reviewBranchLabel } from '../composables/reviewBranchLabel'
 import StatusBadge from '../components/ReviewHistory/StatusBadge.vue'
 import MarkdownView from '../components/common/MarkdownView.vue'
 import PageHeader from '../components/common/PageHeader.vue'
@@ -625,7 +626,18 @@ watch(() => route.query, () => {
               <div class="title-cell">
                 <div class="title-text">
                   <div class="mr-title">{{ row.mrTitle }}</div>
-                  <div class="branch-chip">{{ row.targetBranch }}</div>
+                  <!-- The chip carries the same source → target pair the detail
+                       drawer shows, via the shared label helper. Rows with no
+                       branch at all (local path / static diff) render no chip
+                       instead of an empty pill; a pair too long for its share
+                       of the column ellipsizes, and `title` reveals it whole. -->
+                  <div
+                    v-if="reviewBranchLabel(row.branch, row.targetBranch)"
+                    class="branch-chip"
+                    :title="reviewBranchLabel(row.branch, row.targetBranch)"
+                  >
+                    {{ reviewBranchLabel(row.branch, row.targetBranch) }}
+                  </div>
                 </div>
               </div>
             </template>
@@ -754,12 +766,18 @@ watch(() => route.query, () => {
             </template>
           </el-table-column>
 
+          <!-- The column holds `formatDuration` output, which is always one
+               token pair (`35m 29s`) — never a sentence. `col-duration` drops
+               the cell's second padding layer so the text fits on one line;
+               see the CSS block below. -->
           <el-table-column
             v-if="columns.details"
             :label="$t('history.columns.duration')"
             width="100"
             sortable
             :sort-by="['durationMs']"
+            class-name="col-duration"
+            label-class-name="col-duration"
           >
             <template #default="{ row }">
               <span class="duration-text">{{ formatDuration(row.durationMs) }}</span>
@@ -873,7 +891,7 @@ watch(() => route.query, () => {
             <div>
               <div class="meta-label">{{ $t('history.drawer.branch') }}</div>
               <div class="meta-value">
-                {{ selectedReview.branch }} &rarr; {{ selectedReview.targetBranch }}
+                {{ reviewBranchLabel(selectedReview.branch, selectedReview.targetBranch) }}
               </div>
             </div>
           </div>
@@ -1080,6 +1098,24 @@ watch(() => route.query, () => {
   max-width: 100%;
 }
 
+/* RENG-105 follow-up: a long duration wrapped to a second line while a short
+   one did not. Measured on the production bundle at a 1400px viewport: the
+   column is 100px and every cell is padded TWICE (12px on the
+   `.el-table__cell` from R0.5, plus Element Plus's own `padding: 0 12px` on
+   the inner `.cell`), leaving 52px of content. At the 13px mono face a
+   character advances 7.80px, so `2m 39s` (6 glyphs, 46.81px) fitted and stayed
+   on one line, while `35m 29s` (7 glyphs, 54.6px) broke at its space into
+   `35m` / `29s` — the row grew from 48px to 49px and the column looked ragged.
+
+   Same remedy as the score column above: the td padding already sets the
+   rhythm, so the inner one is dropped for this column only. That takes the
+   content box from 52px to 76px — enough for the nine glyphs of a two-hour
+   review (`125m 59s`, 70.2px) — and leaves `35m 29s` 21px of slack without
+   widening the column or taking space from its neighbours. */
+.history-table :deep(.col-duration .cell) {
+  padding: 0;
+}
+
 /* Project column: cap the tag at the cell width so an over-long slug
    ellipsizes instead of being hard-clipped by the cell's overflow:hidden
    (the full name is still available via the hover tooltip in the template).
@@ -1107,6 +1143,9 @@ watch(() => route.query, () => {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  /* Fill the title cell so the chip's percentage cap below resolves against a
+     definite width instead of the content-dependent shrink-to-fit one. */
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
 }
@@ -1122,11 +1161,25 @@ watch(() => route.query, () => {
   min-width: 0;
 }
 
-/* R0.5: the list view keeps a single muted branch chip — the full
-   source→target pair is the detail drawer's job, where it reads as context
-   next to the review it belongs to instead of as a micro-diagram inside a
-   scanning row. The chip therefore carries the target (where the change
-   lands). */
+/* The chip carries the source → target pair, matching the detail drawer (see
+   `reviewBranchLabel`). R0.5 kept the target alone, so the chip never grew past
+   one short slug; a pair is two to three times that ("refactor/
+   session-detail-split → develop" measures 262px at the 11px mono face, in a
+   title cell only 244px wide at a 1400px viewport). Left uncapped the chip took
+   the whole cell and crushed `.mr-title` to 0 — measured on the pre-change
+   build at 390px, a 183px chip left the title 0px wide.
+
+   So the chip never shrinks, never grows, and never takes more than 60% of the
+   row; the title keeps the rest minus the gap. Measured on the built bundle:
+
+   - 1400px: the title cell's content box is 244px, the cap 146.4px, the title
+     89.6px for a capped pair and 112.4px for the user's own
+     `feat/xxxx → main` (123.6px, so it renders whole);
+   - 390px: 80px content, cap 48px, title 24px. That is 3.6px less than the
+     target-only chip used to leave (27.6px) — the price of the source branch
+     on a 128px-wide column, and still far from the 0px a long pair produced.
+
+   A pair that does not fit ellipsizes; the element's `title` holds it whole. */
 .branch-chip {
   font-size: 11px;
   color: var(--text-secondary);
@@ -1137,7 +1190,11 @@ watch(() => route.query, () => {
   font-family: var(--font-mono);
   line-height: 1.5;
   white-space: nowrap;
-  flex-shrink: 0;
+  flex: 0 0 auto;
+  min-width: 0;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .author-cell {
@@ -1280,6 +1337,11 @@ watch(() => route.query, () => {
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--text-secondary);
+  /* `formatDuration` never emits a sentence — it is `35m 29s` or `9s`. Keeping
+     it on one line is the contract; the widened content box above is what lets
+     it fit. A value past the box ellipsizes (the `.cell` already carries
+     `overflow: hidden; text-overflow: ellipsis`) rather than growing the row. */
+  white-space: nowrap;
 }
 
 .created-text {

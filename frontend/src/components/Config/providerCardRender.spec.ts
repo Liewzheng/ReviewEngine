@@ -238,6 +238,42 @@ describe('provider card state visuals', () => {
     expect(html).toContain('HTTP 401 Unauthorized');
   });
 
+  /**
+   * RENG-112: a long probe error message must reach the footer untouched.
+   * The card truncates the visible line with `text-overflow: ellipsis`, but
+   * the full text has to ride the hover tooltip so a user hitting `probe
+   * failed — check api_base, DNS and the network path` can see why. The
+   * contract is the `.provider-card__footer-text` span: the inner text and
+   * the `title` attribute carry the same string. SSR strips whitespace
+   * runs in the textContent but the title is a literal attribute, so the
+   * assertion pins both halves separately. The source-level CSS contract
+   * (`min-width: 0` + the four truncation guards) is enforced in
+   * `designLanguage.spec.ts`; this spec guards the template against a
+   * future change that drops the class, splits the text across nodes, or
+   * removes the title attribute.
+   */
+  it('carries the full probe sentence into the footer, with the tooltip intact', async () => {
+    const long =
+      'service unreachable at https://api.example.com/v1/models: error sending request for url (https://api.example.com/v1/models): client error (Connect): tls handshake eof. The provider never answered, so the key was never checked — check api_base, DNS and the network path to "openai".';
+    const html = await renderCard({
+      card: card(),
+      health: { name: 'anthropic', status: 'error', disabled: false },
+      probeMessage: long,
+    });
+    // The full sentence is on the page — both as visible text and as the
+    // hover tooltip. SSR normalises whitespace runs in the textContent but
+    // keeps the title attribute verbatim.
+    expect(html).toContain('provider-card__footer-text');
+    expect(html).toContain('tls handshake eof');
+    // Title attribute carries the full error sentence (the assertion key
+    // phrase appears both inside `title="…"` and inside the text node, so
+    // we look for the surrounding span opening and the closing tag).
+    expect(html).toMatch(
+      /<span class="provider-card__footer-text"[^>]*>[^<]*tls handshake eof[^<]*<\/span>/,
+    );
+    expect(html).toMatch(/title="[^"]*tls handshake eof[^"]*"/);
+  });
+
   it('gives a degraded card the warning stripe, not the error one', async () => {
     const html = await renderCard({
       card: card(),

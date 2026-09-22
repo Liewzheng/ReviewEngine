@@ -18,7 +18,7 @@ fn run(args: &[&str], current_dir: Option<&Path>) -> std::process::Output {
 }
 
 fn git_init(path: &Path) {
-    run_git(path, &["init"])
+    run_git(path, &["init", "-b", "main"])
 }
 
 fn git_config_user(path: &Path) {

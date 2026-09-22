@@ -191,9 +191,35 @@ fn normalize_trims_trailing_slash_before_suffix() {
     );
 }
 
+/// RENG-66 r2 (F-1): the builtin catalog's Anthropic prefill must be a base both
+/// ends of the client can use. It carries `/v1`, so the completion path and the
+/// connectivity probe each ensure the version themselves instead of appending a
+/// second one — `/v1/v1/messages` was a 404 on every completion of a card built
+/// from this prefill, while the probe called that same card healthy.
+#[test]
+fn builtin_anthropic_api_base_works_for_completions_and_probing() {
+    let catalog = builtin_catalog();
+    let anthropic = catalog.get("anthropic").expect("the offline catalog carries Anthropic");
+    let api = normalize_api_base(
+        anthropic.npm.as_deref(),
+        anthropic.api.as_deref().expect("Anthropic has an api base"),
+    );
+    assert_eq!(api, "https://api.anthropic.com/v1");
+    assert_eq!(
+        format!("{}/messages", crate::llm::provider::anthropic_api_base(&api)),
+        "https://api.anthropic.com/v1/messages"
+    );
+    assert_eq!(
+        crate::llm::probe::models_url("anthropic", &api),
+        "https://api.anthropic.com/v1/models"
+    );
+}
+
 #[test]
 fn normalize_leaves_anthropic_and_unknown_npm_untouched() {
-    // Anthropic is special-cased in ProviderRegistry; its native API takes no /v1.
+    // Anthropic keeps the catalog's own value (`…/v1`, the form its docs
+    // quote); the completion path and the probe each ensure exactly one `/v1`
+    // version segment themselves (RENG-66 r2), so no rewrite is needed here.
     assert_eq!(
         normalize_api_base(Some("@ai-sdk/anthropic"), "https://api.anthropic.com"),
         "https://api.anthropic.com"

@@ -33,6 +33,7 @@ pub mod logs;
 pub mod queue;
 pub mod repo;
 pub mod review;
+pub mod storage_health;
 pub mod system;
 pub mod types;
 pub mod upgrade;

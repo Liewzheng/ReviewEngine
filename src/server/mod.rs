@@ -340,7 +340,7 @@ pub(crate) async fn run_review_common(
     //
     // RENG-77 §4: the experts that produced no report are carried on the output
     // so a partially failed run is not silently published as a clean one.
-    let output = output
+    let mut output = output
         .with_dropped_findings(dropped_findings)
         .with_consolidated(consolidated)
         .with_errors(expert_failures);
@@ -353,6 +353,10 @@ pub(crate) async fn run_review_common(
     }
     if let Err(e) = crate::publish_review_with_diff(token, url, &output, Some(&diff)).await {
         tracing::warn!("Publish failed: {:?}", e);
+        // RENG-99: a publish that lost inline notes must be visible in the
+        // review detail (`ReviewDetail::errors`), not only in the log — the same
+        // channel RENG-77 §4 uses for a partially failed run.
+        output.errors.push(format!("Publish failed: {e}"));
     }
 
     // Notify dispatcher that review is done, recording the fingerprint of the

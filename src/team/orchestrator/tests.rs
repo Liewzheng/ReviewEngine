@@ -428,8 +428,293 @@ fn coverage_ledger_merges_overlapping_touches_from_two_experts() {
     assert_eq!(by, vec!["q", "s"]);
 }
 
-// ─── RENG-92: [review_experts] weights flow into the consolidated score ───
+// ─── RENG-79: truncation + uncovered ranges reach the report ───
 
+/// A capped review's report must carry how many findings were withheld.
+///
+/// The reproduction is the user's own run: 10 experts, every one of them coming
+/// back with exactly `max_findings_per_expert = 5` findings. The report looked
+/// like a complete list of 39; the cap has to be visible in the payload a
+/// reader (and later the UI) consumes.
+#[test]
+fn capped_review_reports_the_dropped_count_in_the_payload() {
+    let mut config = test_config();
+    config.report.max_findings_per_expert = 5;
+
+    let reports = vec![
+        capped_report("security", 5, Some(7)),
+        capped_report("quality", 5, Some(2)),
+        capped_report("performance", 5, None),
+        // Under the cap — not a truncation entry.
+        make_report(
+            "docs",
+            vec![make_finding(Severity::Low, 8, "a.rs", Some(1), "one only")],
+        ),
+    ];
+    let diff_files = vec![("a.rs".to_string(), vec![diff_hunk(1, 30)])];
+    let ledger = build_coverage_ledger(&diff_files, &reports);
+    let mut consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), Some(&ledger), &[]);
+
+    // The pipeline measures on the reports as the experts returned them.
+    let truncation = crate::coverage::TruncationSummary::from_reports(&reports, config.report.max_findings_per_expert);
+    attach_findings_truncation(&mut consolidated, truncation);
+
+    let coverage = consolidated.coverage.as_ref().expect("ledger was supplied");
+    let summary = &coverage.findings_truncation;
+    assert_eq!(summary.cap, 5);
+    assert_eq!(summary.at_cap_count(), 3, "three experts stopped at the cap");
+    assert_eq!(summary.declared_omitted_total, 9, "7 + 2 + unknown");
+    assert!(
+        summary.experts.iter().all(|e| e.listed == 5),
+        "each at-cap expert shows what it did list"
+    );
+
+    // …and it survives serialization, which is what the UI reads.
+    let payload = serde_json::to_value(&consolidated).unwrap();
+    let json = &payload["coverage"]["findings_truncation"];
+    assert_eq!(json["cap"], 5);
+    assert_eq!(json["experts"].as_array().unwrap().len(), 3);
+    let security = json["experts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["expert"] == "security")
+        .expect("security is in the payload");
+    assert_eq!(security["listed"], 5);
+    assert_eq!(security["declared_omitted"], 7);
+}
+
+#[test]
+fn under_cap_review_carries_no_truncation() {
+    let mut config = test_config();
+    config.report.max_findings_per_expert = 5;
+
+    let reports = vec![capped_report("security", 2, None)];
+    let diff_files = vec![("a.rs".to_string(), vec![diff_hunk(1, 10)])];
+    let ledger = build_coverage_ledger(&diff_files, &reports);
+    let mut consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), Some(&ledger), &[]);
+    attach_findings_truncation(
+        &mut consolidated,
+        crate::coverage::TruncationSummary::from_reports(&reports, 5),
+    );
+
+    let summary = &consolidated.coverage.as_ref().unwrap().findings_truncation;
+    assert!(summary.is_empty(), "nobody hit the cap");
+    assert_eq!(summary.cap, 5, "the cap in force is still reported");
+}
+
+// ─── RENG-79: the whole path, against a real (mock) LLM ───
+
+/// The user's run, end to end: two experts each answer with exactly
+/// `max_findings_per_expert = 5` findings and one of them declares it left
+/// seven more out. Everything below the LLM is the production path — the
+/// prompt template, the HTTP client, the parser, validation, consolidation and
+/// the report renderer — so this is what proves the cap reaches the reader
+/// rather than only the unit under test.
+///
+/// Two of each expert's five findings cite a file that is not in the diff, so
+/// validation drops them and the report ships three while the cap accounting
+/// still counts five. That gap is deliberate: it is the only way a test can
+/// catch a refactor that moves the measurement *after* `validate_findings` —
+/// the accounting would then read 3 < cap, the expert would vanish from the
+/// warning, and nothing else in the suite would notice. (A line outside the
+/// hunk would not work: `validate_findings` keeps those with a note and only
+/// drops a finding whose *file* is absent from the diff.)
+#[tokio::test]
+async fn capped_experts_are_visible_end_to_end() {
+    use crate::models::{ExpertDef, ExpertTomlDef, LLMConfig, MRInfo};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    let server = MockServer::start().await;
+    // Five findings — three in the diff's file, two in a file the diff never
+    // touches — plus the declaration the prompt now asks for.
+    let findings: Vec<String> = [("src/a.rs", 1), ("src/a.rs", 2), ("src/a.rs", 3), ("src/elsewhere.rs", 1), ("src/elsewhere.rs", 2)]
+        .iter()
+        .enumerate()
+        .map(|(n, (file, line))| {
+            format!(
+                "    - file: \"{file}\"\n      line: {line}\n      severity: \"medium\"\n      confidence: 8\n      \
+                 category: \"correctness\"\n      title: \"issue {n}\"\n      summary: \"s\"\n      evidence: \"e\"\n      \
+                 impact: \"i\"\n      recommendation: \"r\"\n      effort: \"small\""
+            )
+        })
+        .collect();
+    let body = serde_json::json!({
+        "choices": [{
+            "message": {
+                "content": format!(
+                    "```yaml\nreview:\n  findings:\n{}\nfindings_omitted: 7\n```\n",
+                    findings.join("\n")
+                )
+            }
+        }],
+        "usage": { "total_tokens": 10 },
+        "model": "mock-model"
+    })
+    .to_string();
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body))
+        .mount(&server)
+        .await;
+
+    let mut config = test_config();
+    config.report.max_findings_per_expert = 5;
+    // Keep the run to the expert calls: the adjudicator is a lead-model pass and
+    // is not what this test is about.
+    config.report.adjudicate = false;
+    let llm_configs = vec![LLMConfig {
+        provider: "openai".to_string(),
+        model: "mock-model".to_string(),
+        api_key: "test".to_string(),
+        api_base: server.uri(),
+        max_tokens: 4096,
+        temperature: 0.0,
+        disable_thinking: None,
+        disabled: false,
+    }];
+    let experts: Vec<ExpertDef> = ["security", "quality"]
+        .iter()
+        .map(|name| ExpertDef {
+            name: (*name).to_string(),
+            trigger: crate::models::ExpertTrigger::Always,
+            prompt: "You review for this test.".to_string(),
+            config: ExpertTomlDef {
+                enabled: true,
+                role: "reviewer".to_string(),
+                ..Default::default()
+            },
+        })
+        .collect();
+
+    let diff = "diff --git a/src/a.rs b/src/a.rs\nindex 0000000..1111111 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n\
+                @@ -1,1 +1,8 @@\n fn main() {\n+    let a = 1;\n+    let b = 2;\n+    let c = 3;\n+    let d = 4;\n\
+                +    let e = 5;\n+    let f = 6;\n }\n";
+    let mr = MRInfo::new(
+        "test/project".to_string(),
+        "Capped review".to_string(),
+        "feat/test".to_string(),
+        "main".to_string(),
+    );
+
+    let (reports, _global, _dropped, consolidated, _failures) = run_experts(
+        &experts,
+        &mr,
+        diff,
+        &llm_configs,
+        &config,
+        None,
+        "test-review-capped",
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the mock LLM answers every call");
+
+    assert_eq!(reports.len(), 2, "both experts answered");
+    let summary = &consolidated
+        .coverage
+        .as_ref()
+        .expect("the review built a coverage ledger")
+        .findings_truncation;
+    assert_eq!(summary.cap, 5);
+    assert_eq!(summary.at_cap_count(), 2, "both experts stopped at the cap");
+    assert_eq!(
+        summary.declared_omitted_total, 14,
+        "the model's own declaration is read back from its raw response"
+    );
+    assert_eq!(summary.declaring_reports, 2, "both declared a number");
+
+    // The measurement order, pinned: validation dropped the two out-of-diff
+    // findings from each report (3 ship), while the cap accounting still sees
+    // the five the expert returned. Move the measurement next to the ledger
+    // build — which runs after validation — and `listed` becomes 3, the experts
+    // fall below the cap, and this warning silently disappears.
+    let shipped: Vec<usize> = reports.iter().map(|r| r.findings.len()).collect();
+    assert_eq!(shipped, vec![3, 3], "validation dropped the two out-of-diff findings");
+    assert!(
+        summary.experts.iter().all(|e| e.listed == 5),
+        "the cap is measured on the reports AS THE EXPERTS RETURNED THEM, not after validation: {:?}",
+        summary
+            .experts
+            .iter()
+            .map(|e| (e.expert.as_str(), e.listed))
+            .collect::<Vec<_>>()
+    );
+
+    // The sentence a human reads.
+    let md = crate::output::team_renderer::render_lead_summary(&consolidated);
+    assert!(
+        md.contains("清单可能不完整 / findings may be truncated"),
+        "the report must say the list may be short: {md}"
+    );
+    assert!(md.contains("另有 7 条未列出"), "the dropped count must appear: {md}");
+}
+
+/// A diff whose findings reference only a few lines must list the ranges that
+/// were never reached — including the *gaps inside a partially touched hunk*,
+/// which is the case the old per-hunk rule reported as nothing at all.
+#[test]
+fn partially_touched_hunk_lists_its_uncovered_ranges_in_the_report() {
+    let config = test_config();
+    let diff_files = vec![("src/a.rs".to_string(), vec![diff_hunk(10, 100)])]; // 10..=109
+    let reports = vec![make_report(
+        "security",
+        vec![make_categorized_finding("src/a.rs", Some(50), "one hit", "correctness")],
+    )];
+
+    let ledger = build_coverage_ledger(&diff_files, &reports);
+    let consolidated = build_consolidated_report(&reports, &config, &FileCoverage::full(1), Some(&ledger), &[]);
+
+    let coverage = consolidated.coverage.as_ref().unwrap();
+    assert_eq!(coverage.covered_changed_lines, 1, "only line 50 was reached");
+    assert_eq!(coverage.total_changed_lines, 100);
+    let ranges: Vec<((&str, u32), u32)> = coverage
+        .debt
+        .iter()
+        .map(|u| ((u.file.as_str(), u.range.0), u.range.1))
+        .collect();
+    assert_eq!(
+        ranges,
+        vec![(("src/a.rs", 10), 49), (("src/a.rs", 51), 109)],
+        "the gaps on both sides of the touched line, not an empty list"
+    );
+
+    let md = crate::output::team_renderer::render_lead_summary(&consolidated);
+    assert!(md.contains("src/a.rs:10-49"), "got: {md}");
+    assert!(md.contains("src/a.rs:51-109"), "got: {md}");
+
+    // The shape a UI reader gets: `coverage` lives on the serialized report
+    // (`reviews.result`), reachable today through the review detail response's
+    // `rawApiResponse`.
+    let payload = serde_json::to_value(&consolidated).unwrap();
+    let coverage = &payload["coverage"];
+    assert_eq!(coverage["covered_changed_lines"], 1);
+    assert_eq!(coverage["total_changed_lines"], 100);
+    assert_eq!(coverage["debt"][0]["file"], "src/a.rs");
+    assert_eq!(coverage["debt"][0]["range"], serde_json::json!([10, 49]));
+    assert_eq!(coverage["debt"][1]["range"], serde_json::json!([51, 109]));
+    assert_eq!(coverage["findings_truncation"]["experts"].as_array().unwrap().len(), 0);
+}
+
+/// An expert report that returned `listed` findings and (optionally) declared
+/// how many the cap made it leave out.
+fn capped_report(expert: &str, listed: usize, declared_omitted: Option<usize>) -> ExpertReport {
+    let mut report = make_report(
+        expert,
+        (0..listed)
+            .map(|i| make_finding(Severity::Medium, 8, "a.rs", Some(i as u32 + 1), "capped"))
+            .collect(),
+    );
+    if let Some(n) = declared_omitted {
+        report.raw_llm_response = format!("review:\n  findings: []\nfindings_omitted: {n}\n");
+    }
+    report
+}
+
+// ─── RENG-92: [review_experts] weights flow into the consolidated score ───
 /// End-to-end wiring through the orchestrator's validation path: the `weight`
 /// field of the `[review_experts]` defs must reach `build_consolidated_report`
 /// and move the overall score (alice: Critical → 67, bob: Medium → 91).
@@ -463,4 +748,41 @@ fn test_build_consolidated_report_uses_configured_weights() {
     // positive configured weight falls back to it.
     let no_weights = build_consolidated_report(&reports, &config, &FileCoverage::full(2), None, &[]);
     assert_eq!(no_weights.assessment.score, 79, "equal weights: (67*0.5 + 91*0.5)");
+}
+
+// ── RENG-107 r2: the zero-concurrency backstop ──────────────────────
+
+/// `Some(0)` is not a limit: [`tokio::sync::Semaphore::new`] with zero permits
+/// blocks every acquirer forever, so a resolved config carrying one turns a
+/// review into a silent hang (no error, no timeout, no last log line). The two
+/// sink sites — the team-review pipeline and the repo-review LLM pass — both
+/// build their semaphore through this helper, so the refusal is tested once
+/// here and once per site.
+#[test]
+fn zero_concurrency_is_refused_and_the_default_applies() {
+    let config = |cap: Option<usize>| -> AppConfig {
+        serde_json::from_value(serde_json::json!({ "max_concurrent_llm_calls": cap }))
+            .expect("minimal AppConfig must deserialize")
+    };
+
+    assert_eq!(
+        concurrent_llm_calls(Some(&config(Some(0))), "unit test"),
+        DEFAULT_LLM_CONCURRENCY,
+        "a 0-permit semaphore would hang every LLM task"
+    );
+    assert_eq!(
+        concurrent_llm_calls(Some(&config(None)), "unit test"),
+        DEFAULT_LLM_CONCURRENCY,
+        "an absent cap uses the documented default"
+    );
+    assert_eq!(concurrent_llm_calls(None, "unit test"), DEFAULT_LLM_CONCURRENCY);
+    assert_eq!(
+        concurrent_llm_calls(Some(&config(Some(3))), "unit test"),
+        3,
+        "a real limit is honoured — the guard must not disable the setting"
+    );
+    assert_eq!(
+        DEFAULT_LLM_CONCURRENCY, 6,
+        "the documented default (docs/config-schema.md) is 6"
+    );
 }

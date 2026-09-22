@@ -24,7 +24,9 @@ use crate::team::adjudicator;
 use crate::team::lead_consolidator::{ConsolidatedReport, FileCoverage};
 use crate::team::verifier::{self, DroppedFinding};
 
-use super::validation::{apply_feedback_filter, build_consolidated_report, build_coverage_ledger};
+use super::validation::{
+    apply_feedback_filter, attach_findings_truncation, build_consolidated_report, build_coverage_ledger,
+};
 use crate::team::ExpertMetrics;
 
 /// Gather project context for the lead overview.
@@ -234,8 +236,14 @@ fn sanitize_overview_yaml(text: &str) -> String {
 
 /// Set up concurrency-control infrastructure: semaphore, rate limiter, and
 /// completion counter.
+///
+/// The semaphore size goes through [`super::concurrent_llm_calls`], the sink
+/// guard that refuses a limit of 0 (a 0-permit semaphore would make every
+/// expert task wait forever, i.e. a silent hang). The CLI clears a 0 cap before
+/// it gets here, so if the guard fires something upstream let one through — the
+/// warning names this site.
 fn setup_concurrency_control(config: &AppConfig) -> (Arc<Semaphore>, Arc<RateLimiter>, Arc<AtomicUsize>) {
-    let max_concurrent = config.max_concurrent_llm_calls.unwrap_or(6);
+    let max_concurrent = super::concurrent_llm_calls(Some(config), "team review pipeline");
     let semaphore = Arc::new(Semaphore::new(max_concurrent));
     let rate_limiter = Arc::new(RateLimiter::new(
         config.rate_limit.max_rpm,
@@ -627,6 +635,17 @@ pub(crate) async fn run_experts_inner(
 
     let (mut reports, metrics, total_tokens, errors) = collect_expert_results(results);
 
+    // RENG-79: `report.max_findings_per_expert` is applied in the prompt — the
+    // expert is told `Max findings: N` and stops there — so an expert that
+    // returned exactly N may have withheld the rest, and the report used to say
+    // nothing about it (39 findings over 10 experts read as a complete list
+    // while 35 of them were five experts parked on the same cap). Measured
+    // HERE, on the reports as the experts returned them: validation below
+    // trims out-of-diff lines, and a capped expert whose lines were partly
+    // dropped is still a capped expert.
+    let findings_truncation =
+        crate::coverage::TruncationSummary::from_reports(&reports, config.report.max_findings_per_expert);
+
     // Validate each expert's findings against the parsed diff.
     let diff_files: Vec<(String, Vec<DiffHunk>)> = files.iter().map(|f| (f.path.clone(), f.hunks.clone())).collect();
     for report in &mut reports {
@@ -697,6 +716,20 @@ pub(crate) async fn run_experts_inner(
     // while `tl_dr` / `unverified` are re-derived after adjudication.
     let coverage_ledger = build_coverage_ledger(&diff_files, &reports);
     let mut consolidated = build_consolidated_report(&reports, config, &coverage, Some(&coverage_ledger), experts);
+    // RENG-79: park the truncation accounting in the coverage block that ships
+    // with the report (serialized inside `reviews.result`), so a reader — the
+    // markdown report today, the UI next — can see that a short list is short
+    // on purpose.
+    let findings_truncation = attach_findings_truncation(&mut consolidated, findings_truncation);
+    if !findings_truncation.is_empty() {
+        tracing::warn!(
+            "Findings cap: {} expert report(s) returned max_findings_per_expert = {} — their lists may be \
+             truncated ({} declared omitted by the experts themselves)",
+            findings_truncation.at_cap_count(),
+            findings_truncation.cap,
+            findings_truncation.declared_omitted_total,
+        );
+    }
 
     // Final adjudication pass (false-positive reduction, phase 3): the
     // lead-model LLM re-examines each consolidated finding at or above
@@ -948,5 +981,28 @@ mod global_context_parse_tests {
     #[test]
     fn parse_global_context_garbage_returns_none() {
         assert!(parse_global_review_context("not yaml at all: [unclosed").is_none());
+    }
+
+    /// RENG-107 r2 — the team-review sink site: a 0 cap must never become
+    /// `Semaphore::new(0)` (the hang the CLI clears a 0 cap for). The guard is
+    /// the shared [`super::concurrent_llm_calls`]; this pins the site.
+    #[test]
+    fn setup_concurrency_control_never_builds_a_zero_permit_semaphore() {
+        let config = |cap: Option<usize>| -> AppConfig {
+            serde_json::from_value(serde_json::json!({ "max_concurrent_llm_calls": cap }))
+                .expect("minimal AppConfig must deserialize")
+        };
+
+        assert_eq!(
+            setup_concurrency_control(&config(Some(0))).0.available_permits(),
+            super::super::DEFAULT_LLM_CONCURRENCY,
+            "0 must degrade to the default, never to a 0-permit semaphore"
+        );
+        assert_eq!(setup_concurrency_control(&config(None)).0.available_permits(), 6);
+        assert_eq!(
+            setup_concurrency_control(&config(Some(3))).0.available_permits(),
+            3,
+            "a real limit still reaches the semaphore"
+        );
     }
 }

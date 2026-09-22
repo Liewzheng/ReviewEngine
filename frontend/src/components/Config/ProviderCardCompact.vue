@@ -353,10 +353,23 @@ function onHeaderPointerDown(event: PointerEvent) {
 </template>
 
 <style scoped>
+/* RENG-112: a grid item's default `min-width: auto` resolves to its
+   min-content width, which for this card is the widest unbreakable string
+   — and the footer text uses `white-space: nowrap` on purpose. Without
+   `min-width: 0` here, that min-content width propagates into the grid
+   track sizing algorithm: the `minmax(320px, 1fr)` track grows to fit the
+   footer text (a 281-char probe sentence measures ~1560px), the card
+   itself stops being truncated, and the layout blows out across the row.
+   Per css-flexbox §4.5 the footer-span's `overflow: hidden` already zeroes
+   its own automatic minimum, so the `min-width: 0` belongs on the GRID
+   ITEM, not on the flex child. The footer-span rule is still the right
+   defence-in-depth — it stops the same propagation when this component is
+   laid out outside the grid (e.g. a future single-card detail view). */
 .provider-card {
   position: relative;
   display: flex;
   flex-direction: column;
+  min-width: 0;
   min-height: 183px;
   padding: var(--space-4);
   background: var(--bg-card);
@@ -546,8 +559,20 @@ function onHeaderPointerDown(event: PointerEvent) {
   color: var(--accent-error);
 }
 
+/* RENG-112: probe and test-failure messages can be long sentences
+   (e.g. "service unreachable at https://api.example.com/v1/models: …
+   tls handshake eof. The provider never answered, so the key was never
+   checked — check api_base, DNS and the network path to 'openai'."),
+   so the text must stay on one line and never grow the card. The existing
+   :title keeps the full text reachable on hover. The PRIMARY guard is on
+   `.provider-card` (the grid item) — see that rule's comment for the full
+   reasoning. This span-level rule is defence-in-depth: `min-width: 0` lets
+   the flex item shrink below its nowrap content's intrinsic width, and the
+   four truncation guards keep the rendered line on one row with an
+   ellipsis. Same shape as `.provider-card__name` above. */
 .provider-card__footer-text {
   display: block;
+  min-width: 0;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;

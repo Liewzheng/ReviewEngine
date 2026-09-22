@@ -71,6 +71,14 @@ impl GitProvider for GitLabProvider {
         self.client.post_inline_note(file, line, body).await
     }
 
+    /// GitLab matches the position's `(old_line, new_line)` pair against its own
+    /// diff lines, so a line the diff leaves unchanged must carry both numbers —
+    /// `new_line` alone is rejected there with `400 line_code can't be blank`
+    /// (RENG-99).
+    async fn post_inline_comment_at(&self, anchor: &crate::git_provider::InlineAnchor, body: &str) -> Result<()> {
+        self.client.post_inline_note_at(anchor, body).await
+    }
+
     async fn fetch_code_audit_toml(&self) -> Result<Option<String>> {
         self.client.fetch_config_toml().await
     }

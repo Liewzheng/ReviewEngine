@@ -96,5 +96,16 @@ if [ -n "${REVIEW_TLS_CERT}" ] && [ -n "${REVIEW_TLS_KEY}" ]; then
     set -- "$@" --tls-cert /app/tls/cert.pem --tls-key /app/tls/key.pem --tls-port 8443
 fi
 
+# ── 存储自愈(RENG-105)──────────────────────────────────────────────────────
+# 宿主侧进程可能把 review.db-wal / review.db-shm 的属主改成别的 uid,SQLite 在
+# WAL 模式下就再也写不动 sidecar:所有写库操作都以 "attempt to write a readonly
+# database" 失败——评审照跑、结果不落库,WebUI 毫无提示。启动时以应用用户身份跑
+# 一次 `doctor --fix`:空的/缺失的 sidecar 直接删除(删除只依赖配置目录的写权限,
+# 与文件属主无关),SQLite 会在下一次写入时以当前 uid 重建;非空 -wal 可能含未提交
+# 事务,会被拒绝且不动任何文件(review.db 本身永远不会被删改)。
+# 必须 `|| true`:set -e 生效,doctor 的失败(或旧版本二进制不认识 doctor 子命令)
+# 绝不能中断启动,自愈纯属尽力而为。
+"$VOL_BIN" doctor --fix --quiet || true
+
 # 从卷运行:升级替换的就是 $VOL_BIN,exec 后进程即新版本
 exec "$VOL_BIN" "$@"

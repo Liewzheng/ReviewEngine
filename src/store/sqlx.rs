@@ -208,43 +208,11 @@ impl ConfigStore for SqlxStore {
     }
 
     async fn load_llm_providers(&self) -> Result<Vec<LLMConfig>> {
-        // Order rule (RENG-55): the stored list position is authoritative, so
-        // the DB list matches the UI array order — `position` in `raw` is
-        // written by `replace_llm_providers_in` as the array index and read
-        // back here. The SQL pre-order (`updated_at`, then `provider`) is the
-        // deterministic fallback for rows that carry no `position` (hand-
-        // written/legacy rows); the sort below is stable, so those rows keep
-        // that order at the tail. `ORDER BY provider` alone — the pre-0.10.11
-        // rule — put the alphabetically-first provider first and disagreed
-        // with the UI order.
-        let sql = self.sql(
-            "SELECT id, provider, model, api_base, api_key, max_tokens, temperature, raw, \
-             updated_at FROM llm_providers ORDER BY updated_at, provider",
-        );
-        let rows = ::sqlx::query_as::<_, (String, String, String, String, String, i64, f64, String, String)>(&sql)
-            .fetch_all(self.pool())
-            .await
-            .context("failed to load llm_providers")?;
-        let mut rows: Vec<rows::LlmProviderRow> = rows
+        load_llm_provider_rows(self)
+            .await?
             .into_iter()
-            .map(
-                |(id, provider, model, api_base, api_key, max_tokens, temperature, raw, updated_at)| {
-                    rows::LlmProviderRow {
-                        id,
-                        provider,
-                        model,
-                        api_base,
-                        api_key,
-                        max_tokens,
-                        temperature,
-                        raw,
-                        updated_at,
-                    }
-                },
-            )
-            .collect();
-        rows.sort_by_key(|r| rows::llm_row_position(r).unwrap_or(i64::MAX));
-        rows.into_iter().map(|r| rows::llm_from_row(r, &self.key)).collect()
+            .map(|r| rows::llm_from_row(r, &self.key))
+            .collect()
     }
 
     async fn replace_llm_providers(&self, providers: &[LLMConfig]) -> Result<()> {
@@ -285,11 +253,21 @@ impl ConfigStore for SqlxStore {
     }
 
     async fn save_ui_state(&self, state: &UiStateFile) -> Result<()> {
+        // A save whose provider set is already stored must leave the
+        // `llm_providers` rows exactly as they are. Rewriting them anyway
+        // (DELETE + INSERT, the only shape this table knows) churns the row
+        // ids and every `updated_at` even when no value changes — and the
+        // release-gate forensics read a changed row id as evidence of the
+        // provider list having been replaced. See
+        // [`llm_providers_already_stored`] for the comparison's exact rules.
+        let llm_unchanged = llm_providers_already_stored(self, &state.llm).await?;
         let mut tx = self.pool().begin().await.context("begin save_ui_state")?;
         replace_git_platforms_in(&mut tx, self.kind, &state.git_platforms, &self.key).await?;
-        replace_llm_providers_in(&mut tx, self.kind, &state.llm, &self.key).await?;
+        if !llm_unchanged {
+            replace_llm_providers_in(&mut tx, self.kind, &state.llm, &self.key).await?;
+        }
         let gitlab = &state.gitlab;
-        if gitlab.token.is_empty() && gitlab.webhook_secret.is_empty() && gitlab.webhook_signing_secret.is_empty() {
+        if gitlab.is_empty() {
             // Unset is unset: an all-empty legacy gitlab value removes the row
             // instead of storing an empty JSON shell.
             delete_setting_in(&mut tx, self.kind, LEGACY_GITLAB_KEY).await?;
@@ -316,6 +294,88 @@ impl ConfigStore for SqlxStore {
             .await
             .context("failed to count config tables")?;
         Ok(gp == 0 && lp == 0 && st == 0)
+    }
+}
+
+/// The stored `llm_providers` ROWS, in the stored order — undecrypted, the
+/// shape [`llm_providers_already_stored`] needs to tell a no-op write from a
+/// real one (it must see the at-rest ciphertext, not just the plaintext).
+///
+/// Order rule (RENG-55): the stored list position is authoritative, so the DB
+/// list matches the UI array order — `position` in `raw` is written by
+/// [`replace_llm_providers_in`] as the array index and read back here. The SQL
+/// pre-order (`updated_at`, then `provider`) is the deterministic fallback for
+/// rows that carry no `position` (hand-written/legacy rows); the sort below is
+/// stable, so those rows keep that order at the tail. `ORDER BY provider`
+/// alone — the pre-0.10.11 rule — put the alphabetically-first provider first
+/// and disagreed with the UI order.
+async fn load_llm_provider_rows(store: &SqlxStore) -> Result<Vec<rows::LlmProviderRow>> {
+    let sql = store.sql(
+        "SELECT id, provider, model, api_base, api_key, max_tokens, temperature, raw, \
+         updated_at FROM llm_providers ORDER BY updated_at, provider",
+    );
+    let fetched = ::sqlx::query_as::<_, (String, String, String, String, String, i64, f64, String, String)>(&sql)
+        .fetch_all(store.pool())
+        .await
+        .context("failed to load llm_providers")?;
+    let mut rows: Vec<rows::LlmProviderRow> = fetched
+        .into_iter()
+        .map(
+            |(id, provider, model, api_base, api_key, max_tokens, temperature, raw, updated_at)| rows::LlmProviderRow {
+                id,
+                provider,
+                model,
+                api_base,
+                api_key,
+                max_tokens,
+                temperature,
+                raw,
+                updated_at,
+            },
+        )
+        .collect();
+    rows.sort_by_key(|r| rows::llm_row_position(r).unwrap_or(i64::MAX));
+    Ok(rows)
+}
+
+/// True when the stored rows already carry exactly `providers`, position for
+/// position — then the DELETE + INSERT would be a no-op and is skipped, so an
+/// unrelated `PUT /config` leaves the table byte-identical (ids, `updated_at`
+/// and ciphertext included).
+///
+/// Comparison is field-wise on the DECRYPTED values (`LLMConfig` has no
+/// `PartialEq`), and a secret still stored as legacy plaintext counts as a
+/// change: the next save must bring it inside the at-rest encryption boundary.
+/// A row that cannot be decrypted is a change too, so a `secrets.key` rotation
+/// rewrites it.
+async fn llm_providers_already_stored(store: &SqlxStore, providers: &[LLMConfig]) -> Result<bool> {
+    let rows = load_llm_provider_rows(store).await?;
+    Ok(rows.len() == providers.len()
+        && rows
+            .iter()
+            .zip(providers)
+            .all(|(row, cfg)| llm_row_matches(row, cfg, &store.key)))
+}
+
+/// Field-wise equality of one stored row (decrypted) with the config that is
+/// about to be written, plus the encryption-boundary requirement: an
+/// unencrypted non-empty secret is a change even when the plaintext is equal.
+fn llm_row_matches(row: &rows::LlmProviderRow, cfg: &LLMConfig, key: &[u8; 32]) -> bool {
+    if !row.api_key.is_empty() && !row.api_key.starts_with(crate::config::secrets::ENC_PREFIX) {
+        return false;
+    }
+    match rows::llm_from_row(row.clone(), key) {
+        Ok(stored) => {
+            stored.provider == cfg.provider
+                && stored.model == cfg.model
+                && stored.api_key == cfg.api_key
+                && stored.api_base == cfg.api_base
+                && stored.max_tokens == cfg.max_tokens
+                && stored.temperature == cfg.temperature
+                && stored.disabled == cfg.disabled
+                && stored.disable_thinking == cfg.disable_thinking
+        }
+        Err(_) => false,
     }
 }
 
@@ -2012,5 +2072,114 @@ mod tests {
         assert_eq!(notes[1].author_id, Some(99), "author id is updated in place");
         assert_eq!(notes[1].author_avatar_url, None);
         assert!(notes[1].author_bot);
+    }
+
+    // ── save_ui_state: an unchanged provider set must not rewrite the rows ──
+
+    fn llm_card() -> LLMConfig {
+        LLMConfig {
+            provider: "openai".into(),
+            model: "gpt-4o".into(),
+            api_key: "sk-live".into(),
+            api_base: "https://api.example.com/v1".into(),
+            max_tokens: 4096,
+            temperature: 0.7,
+            disable_thinking: None,
+            disabled: false,
+        }
+    }
+
+    fn llm_only_snapshot(llm: Vec<LLMConfig>) -> UiStateFile {
+        UiStateFile {
+            ui: None,
+            llm,
+            git_platforms: Vec::new(),
+            gitlab: PersistedGitlabConfig::default(),
+        }
+    }
+
+    /// Every column of `llm_providers`, verbatim — the byte-level answer to
+    /// "did this save touch the table" that a database copy gives.
+    async fn raw_llm_rows(
+        store: &SqlxStore,
+    ) -> Vec<(String, String, String, String, String, i64, f64, String, String)> {
+        ::sqlx::query_as(
+            "SELECT id, provider, model, api_base, api_key, max_tokens, temperature, raw, updated_at \
+             FROM llm_providers ORDER BY id",
+        )
+        .fetch_all(store.pool())
+        .await
+        .unwrap()
+    }
+
+    /// A `save_ui_state` that changes no provider value must leave the rows
+    /// byte-identical — ids, `updated_at` and ciphertext included. A config
+    /// save that does not speak for the LLM section resolves to exactly the
+    /// stored set, and the DELETE + INSERT this table knows would otherwise
+    /// re-mint every row id: the 0.10.46 release gate read a changed row id as
+    /// evidence that the provider list had been replaced.
+    #[tokio::test]
+    async fn save_ui_state_leaves_an_unchanged_provider_set_alone() {
+        let store = fresh_store().await;
+        let providers = vec![llm_card()];
+        store
+            .save_ui_state(&llm_only_snapshot(providers.clone()))
+            .await
+            .unwrap();
+        let before = raw_llm_rows(&store).await;
+
+        store
+            .save_ui_state(&llm_only_snapshot(providers.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            raw_llm_rows(&store).await,
+            before,
+            "an identical provider set must leave every row (and its id) untouched"
+        );
+
+        // A real change still lands, and the replace re-mints the ids.
+        let mut changed = providers.clone();
+        changed[0].model = "gpt-4o-mini".into();
+        store.save_ui_state(&llm_only_snapshot(changed)).await.unwrap();
+        let loaded = store.load_llm_providers().await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].model, "gpt-4o-mini");
+        assert!(loaded[0].api_key == "sk-live", "the key survives the rewrite");
+        assert_ne!(
+            raw_llm_rows(&store).await[0].0,
+            before[0].0,
+            "a changed set is rewritten (fresh row id)"
+        );
+    }
+
+    /// A legacy PLAINTEXT secret is a real change even when the plaintext is
+    /// equal: the comparison is on decrypted values, so the encryption
+    /// boundary is enforced explicitly — otherwise the skip would leave the
+    /// secret unencrypted at rest forever.
+    #[tokio::test]
+    async fn save_ui_state_rewrites_a_legacy_plaintext_secret() {
+        let store = fresh_store().await;
+        let mut providers = vec![llm_card()];
+        store
+            .save_ui_state(&llm_only_snapshot(providers.clone()))
+            .await
+            .unwrap();
+        ::sqlx::query("UPDATE llm_providers SET api_key = 'plain-legacy-key'")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        providers[0].api_key = "plain-legacy-key".into();
+
+        store.save_ui_state(&llm_only_snapshot(providers)).await.unwrap();
+        let at_rest: String = ::sqlx::query_scalar("SELECT api_key FROM llm_providers")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+        assert!(
+            at_rest.starts_with("enc:"),
+            "a plaintext secret must be rewritten inside the encryption boundary: {at_rest}"
+        );
+        assert_eq!(store.load_llm_providers().await.unwrap()[0].api_key, "plain-legacy-key");
     }
 }

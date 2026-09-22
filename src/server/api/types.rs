@@ -224,11 +224,14 @@ pub struct ReviewDetail {
     pub completed_at: Option<String>,
     pub commit_sha: Option<String>,
     pub experts: Vec<ExpertResultDetail>,
-    /// RENG-77 §4: the experts that produced NO report, each with its failure
-    /// (an empty completion, an exhausted provider chain). `experts` only ever
-    /// contains the ones that answered, so this is what tells a partial run
-    /// apart from a clean one. Empty for full runs and for every record
-    /// persisted before this field existed.
+    /// RENG-77 §4 + RENG-99: what went wrong *around* the reports — an expert
+    /// that produced NO report (an empty completion, an exhausted provider
+    /// chain), and a publish that could not write the round back to the MR
+    /// (`Publish failed: …`, including inline notes the provider refused or
+    /// whose retries were spent). `experts` only ever contains the ones that
+    /// answered, so this is what tells a partial run apart from a clean one.
+    /// Empty for a run with nothing to report and for every record persisted
+    /// before this field existed.
     #[serde(default)]
     pub errors: Vec<String>,
     pub raw_comment: Option<String>,

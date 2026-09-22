@@ -75,8 +75,55 @@ describe('R0.3 — every card is the same height', () => {
     expect(footer).toContain('margin-top: auto');
   });
 
+  /**
+   * RENG-112: a grid item's `min-width: auto` resolves to its min-content
+   * width — the widest unbreakable string it contains. The footer text is
+   * `white-space: nowrap` on purpose (so a long probe sentence stays on
+   * one line), and that one string becomes the card's min-content width.
+   * Without `min-width: 0` on the grid item, that min-content propagates
+   * into the grid track sizing algorithm: `minmax(320px, 1fr)` grows to
+   * fit the footer text (a 281-char probe sentence measures ~1560px), the
+   * card itself stops being truncated, and the layout blows out across
+   * the row. The footer-span rule is defence-in-depth; the GRID ITEM
+   * declaration is the actual fix.
+   */
+  it('lets the grid item shrink below its min-content width, so a long footer text does not blow the track out', () => {
+    const css = read('src/components/Config/ProviderCardCompact.vue');
+    const card = rule(css, '.provider-card');
+    expect(card).toContain('min-width: 0');
+  });
+
   it('stretches the provider grid rows', () => {
     expect(rule(read('src/views/LlmStatus.vue'), '.provider-grid')).toContain('align-items: stretch');
+  });
+
+  /**
+   * RENG-112: probe failures and manual test errors arrive as full sentences
+   * (e.g. `service unreachable at https://api.example.com/v1/models: …
+   * tls handshake eof. The provider never answered, …`), so every row the
+   * card shows must keep itself on one line. The footer carries its full
+   * text in `:title` (the existing tooltip), so truncation never costs
+   * information — only the visible width. The card has `min-height: 183px`
+   * and `align-items: stretch` on the grid, so the rows share one height
+   * already; the row-level guards are what stop a long string from
+   * growing either a single card or breaking the row above it.
+   */
+  it('keeps every card row on one line, even when the text is a long error sentence', () => {
+    const card = read('src/components/Config/ProviderCardCompact.vue');
+    const row = rule(card, '.provider-card__row');
+    expect(row).toContain('white-space: nowrap');
+    expect(row).toContain('overflow: hidden');
+    expect(row).toContain('text-overflow: ellipsis');
+    // The footer-text is a flex child of `.provider-card__footer` (horizontal
+    // flex), so it needs `min-width: 0` for the flex shrink to take effect —
+    // otherwise `white-space: nowrap` keeps the item at the intrinsic text
+    // width and the row overflows the card.
+    const footerText = rule(card, '.provider-card__footer-text');
+    expect(footerText).toContain('min-width: 0');
+    expect(footerText).toContain('max-width: 100%');
+    expect(footerText).toContain('white-space: nowrap');
+    expect(footerText).toContain('overflow: hidden');
+    expect(footerText).toContain('text-overflow: ellipsis');
   });
 
   it('equalises the expert card rows', () => {

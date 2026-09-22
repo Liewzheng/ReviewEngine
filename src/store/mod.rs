@@ -84,6 +84,9 @@ fn backend_kind_of(url: &str) -> BackendKind {
 pub struct SqlxStore {
     pool: ::sqlx::AnyPool,
     kind: BackendKind,
+    /// `sqlite::memory:` (tests, embedded use): there is no file behind the
+    /// pool, so nothing on disk can be checked (RENG-106's storage probe asks).
+    in_memory: bool,
     pub(crate) key: [u8; 32],
 }
 
@@ -108,18 +111,45 @@ impl SqlxStore {
     /// Connect with an explicit secrets key (used by [`Self::connect`] and
     /// available to tests that need a stable key without a config dir).
     pub async fn connect_with_key(url: &str, key: [u8; 32]) -> Result<Self> {
+        Self::connect_pool(url, key, SqliteOpen::ReadWrite).await
+    }
+
+    /// Connect with an explicit secrets key and a READ-ONLY handle: the same
+    /// store API, but SQLite refuses every write (`mode=ro` +
+    /// [`SqliteOpen::ReadOnly`]'s pragmas). Used by the CLI's configuration
+    /// read, which must never touch the database file (RENG-105/106).
+    pub async fn connect_readonly_with_key(url: &str, key: [u8; 32]) -> Result<Self> {
+        Self::connect_pool(url, key, SqliteOpen::ReadOnly).await
+    }
+
+    async fn connect_pool(url: &str, key: [u8; 32], open: SqliteOpen) -> Result<Self> {
         ::sqlx::any::install_default_drivers();
         let kind = backend_kind_of(url);
-        let pool = ::sqlx::any::AnyPoolOptions::new().connect(url).await.with_context(|| {
+        // The pragmas below are applied to the pool's connections ONCE, at
+        // connect time, and the connection-scoped ones (`query_only`,
+        // `foreign_keys`, `busy_timeout`) are then only guaranteed on the
+        // connections that exist right now. The read-only pool is therefore
+        // capped at one connection: its `query_only` covers the whole pool,
+        // and a configuration read (a handful of SELECTs) has no use for more.
+        let options = match open {
+            SqliteOpen::ReadOnly => ::sqlx::any::AnyPoolOptions::new().max_connections(1),
+            SqliteOpen::ReadWrite => ::sqlx::any::AnyPoolOptions::new(),
+        };
+        let pool = options.connect(url).await.with_context(|| {
             format!(
                 "failed to connect to database ({url_scheme})",
                 url_scheme = scheme_of(url)
             )
         })?;
         if kind == BackendKind::Sqlite {
-            apply_sqlite_pragmas(&pool).await?;
+            apply_sqlite_pragmas(&pool, open).await?;
         }
-        Ok(Self { pool, kind, key })
+        Ok(Self {
+            pool,
+            kind,
+            in_memory: url.contains(":memory:"),
+            key,
+        })
     }
 
     /// Connect to the default embedded SQLite database under `config_dir`
@@ -133,6 +163,83 @@ impl SqlxStore {
         )?;
         let url = format!("sqlite://{}/review.db?mode=rwc", config_dir.display());
         Self::connect_with_key(&url, key).await
+    }
+
+    /// Open the default embedded SQLite database under `config_dir` READ-ONLY.
+    ///
+    /// This is the CLI's configuration read (RENG-107): the database is the
+    /// highest-priority configuration layer for a manual `reng review` too, and
+    /// reading it must not be able to disturb the running server. What
+    /// "read-only" means here, in order of how much it matters:
+    ///
+    /// 1. **Nothing is created — no key, and no sidecar.** No
+    ///    `create_dir_all`, no `mode=rwc`, no `load_or_create_key` (a missing
+    ///    `secrets.key` is an ERROR: the rows were encrypted with the server's
+    ///    key, and generating a second one would both fail to decrypt them and
+    ///    leave a foreign, differently-owned key file behind). See
+    ///    [`Self::readonly_url`] for the `-wal` / `-shm` half of this, which is
+    ///    the RENG-105/106 incident class verbatim: a sidecar minted by
+    ///    whoever runs the CLI (root, on a NAS) is what makes every later
+    ///    server write fail with `attempt to write a readonly database`.
+    /// 2. **No journal-mode switch.** `journal_mode=WAL` is skipped
+    ///    ([`SqliteOpen::ReadOnly`]): it rewrites the database header and
+    ///    creates the sidecars.
+    /// 3. **`PRAGMA query_only=ON`** makes SQLite reject any statement that
+    ///    would write, even if a later code path forgets the handle is
+    ///    read-only.
+    ///
+    /// A database the process cannot open this way (unreadable file or
+    /// sidecar, a missing key, a corrupt file, an unmigrated schema) returns an
+    /// error; the caller decides to fall back to the config files.
+    pub async fn connect_default_readonly(config_dir: &Path) -> Result<Self> {
+        let db_path = config_dir.join(crate::paths::DB_FILE_NAME);
+        let key_path = config_dir.join(crate::config::secrets::SECRETS_KEY_FILE_NAME);
+        let Some(key) = crate::config::secrets::load_key(&key_path)? else {
+            anyhow::bail!(
+                "{} is missing next to {} — the stored secrets cannot be decrypted, \
+                 and a read-only open must not create a key",
+                key_path.display(),
+                db_path.display()
+            );
+        };
+        Self::connect_readonly_with_key(&Self::readonly_url(&db_path), key).await
+    }
+
+    /// The URL a read-only handle over `db_path` is opened with.
+    ///
+    /// Measured SQLite behaviour, which is the whole reason there are two
+    /// shapes (both verified in `store::tests`):
+    ///
+    /// - `mode=ro` on a database whose live WAL is present reads the committed
+    ///   WAL frames — the configuration the Web UI last saved — and modifies
+    ///   nothing, not even the sidecars' mtime. This is the healthy case: the
+    ///   server is running (or was stopped uncleanly), so `-wal` holds data and
+    ///   `-shm` is its index.
+    /// - `mode=ro` on a CHECKPOINTED database (no `-wal`, e.g. after a clean
+    ///   server shutdown) **creates** a 0-byte `review.db-wal` and a 32 KB
+    ///   `review.db-shm` merely to read. Owned by the CLI's uid, that pair is
+    ///   the incident: the next server start cannot write the shm and every
+    ///   write fails readonly. `immutable=1` refuses the WAL instead — SQLite
+    ///   then reads the main file alone, creates nothing, and loses nothing,
+    ///   because a database with no `-wal` has all of its committed data in
+    ///   the main file.
+    ///
+    /// The trade-off `immutable=1` carries (SQLite takes no locks and does no
+    /// change detection, so a writer that appears *during* the read can make it
+    /// fail — the caller then falls back to the files) only exists for the
+    /// window in which a checkpointed database starts being written again. A
+    /// `-wal` without its `-shm` is treated the same way: that is a repaired or
+    /// interrupted state, and reading it through the WAL would have to create
+    /// the missing sidecar.
+    fn readonly_url(db_path: &Path) -> String {
+        let wal = crate::doctor::sidecar_path(db_path, "-wal");
+        let shm = crate::doctor::sidecar_path(db_path, "-shm");
+        let live_wal = std::fs::metadata(&wal).map(|m| m.len() > 0).unwrap_or(false) && shm.is_file();
+        if live_wal {
+            format!("sqlite://{}?mode=ro", db_path.display())
+        } else {
+            format!("sqlite://{}?mode=ro&immutable=1", db_path.display())
+        }
     }
 
     /// In-memory SQLite store for unit tests.
@@ -150,10 +257,11 @@ impl SqlxStore {
             .connect("sqlite::memory:")
             .await
             .context("failed to open in-memory sqlite database")?;
-        apply_sqlite_pragmas(&pool).await?;
+        apply_sqlite_pragmas(&pool, SqliteOpen::ReadWrite).await?;
         Ok(Self {
             pool,
             kind: BackendKind::Sqlite,
+            in_memory: true,
             key,
         })
     }
@@ -169,6 +277,12 @@ impl SqlxStore {
     /// (PostgreSQL or SQLite).
     pub fn backend_kind(&self) -> BackendKind {
         self.kind
+    }
+
+    /// True for `sqlite::memory:` — no file behind the pool, so a
+    /// file-permission diagnosis has nothing to inspect (RENG-106).
+    pub fn is_in_memory(&self) -> bool {
+        self.in_memory
     }
 
     /// Access the underlying pool (used by trait implementations in
@@ -204,13 +318,34 @@ fn scheme_of(url: &str) -> &str {
     url.split("://").next().unwrap_or(url)
 }
 
-async fn apply_sqlite_pragmas(pool: &::sqlx::AnyPool) -> Result<()> {
+/// Whether a SQLite pool is opened for writing (the server) or only for
+/// reading (the CLI's configuration read). See [`SqlxStore::connect_default_readonly`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SqliteOpen {
+    ReadWrite,
+    ReadOnly,
+}
+
+async fn apply_sqlite_pragmas(pool: &::sqlx::AnyPool, open: SqliteOpen) -> Result<()> {
     // Executed as separate statements: Any queries are single-statement.
-    for pragma in [
-        "PRAGMA journal_mode=WAL;",
-        "PRAGMA foreign_keys=ON;",
-        "PRAGMA busy_timeout=5000;",
-    ] {
+    let pragmas: &[&str] = match open {
+        SqliteOpen::ReadWrite => &[
+            "PRAGMA journal_mode=WAL;",
+            "PRAGMA foreign_keys=ON;",
+            "PRAGMA busy_timeout=5000;",
+        ],
+        // `journal_mode=WAL` is deliberately absent: it rewrites the database
+        // header and creates the `-wal`/`-shm` sidecars, so on a read-only
+        // handle it is either a no-op (the file is already WAL) or an outright
+        // failure. `query_only` is the guarantee that this connection cannot
+        // write even if it tried.
+        SqliteOpen::ReadOnly => &[
+            "PRAGMA query_only=ON;",
+            "PRAGMA foreign_keys=ON;",
+            "PRAGMA busy_timeout=5000;",
+        ],
+    };
+    for pragma in pragmas {
         ::sqlx::query(pragma)
             .execute(pool)
             .await
@@ -737,5 +872,294 @@ mod tests {
             .execute(store.pool())
             .await
             .unwrap();
+    }
+
+    // ── RENG-107: the CLI's read-only configuration read ────────────────
+    //
+    // `connect_default_readonly` is what makes "the database is the highest-
+    // priority configuration layer for a manual `reng review`" safe: the read
+    // must be able to see the server's live rows while being structurally
+    // unable to disturb them.
+
+    /// Every entry in `dir`, sorted — the shape a read-only open must leave
+    /// exactly as it found it.
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn mtime(path: &Path) -> std::time::SystemTime {
+        std::fs::metadata(path).unwrap().modified().unwrap()
+    }
+
+    fn stored_card(provider: &str, key: &str) -> crate::models::LLMConfig {
+        crate::models::LLMConfig {
+            provider: provider.to_string(),
+            model: "claude-3-opus".to_string(),
+            api_key: key.to_string(),
+            api_base: "https://api.db.example/v1".to_string(),
+            max_tokens: 8192,
+            temperature: 0.4,
+            disable_thinking: None,
+            disabled: false,
+        }
+    }
+
+    /// Seed `dir` with the CHECKPOINTED shape of the configuration database: a
+    /// `review.db` + `secrets.key` and no sidecars, exactly as a clean shutdown
+    /// (or a directory copied onto the NAS) leaves it.
+    ///
+    /// The row is written through the normal write path in a scratch directory,
+    /// the WAL is checkpointed into the main file — so the two copied files are
+    /// the whole database — and only then is the pair copied into `dir`. Going
+    /// through a copy is what makes the shape exact: SQLite decides for itself
+    /// whether the *close* of a pool unlinks the sidecars (a repeated run of
+    /// this test showed it varying), and a test whose precondition is "the
+    /// writer happened to clean up" would be flaky rather than meaningful.
+    async fn seed_checkpointed_config_dir(dir: &Path, provider: &str, key: &str) {
+        let scratch = tempfile::tempdir().unwrap();
+        let writer = SqlxStore::connect_default(scratch.path()).await.unwrap();
+        writer.migrate().await.unwrap();
+        crate::store::traits::ConfigStore::replace_llm_providers(&writer, &[stored_card(provider, key)])
+            .await
+            .unwrap();
+        // TRUNCATE moves every committed frame into `review.db` and empties the
+        // WAL, so removing the (now empty) sidecars loses nothing.
+        ::sqlx::query("PRAGMA wal_checkpoint(TRUNCATE);")
+            .execute(writer.pool())
+            .await
+            .unwrap();
+        writer.pool().close().await;
+        std::fs::create_dir_all(dir).unwrap();
+        for name in [
+            crate::paths::DB_FILE_NAME,
+            crate::config::secrets::SECRETS_KEY_FILE_NAME,
+        ] {
+            std::fs::copy(scratch.path().join(name), dir.join(name)).unwrap();
+        }
+    }
+
+    /// A read of a WAL-mode database that has no sidecars must work, return the
+    /// DECRYPTED rows, and leave the config dir byte-for-byte untouched — no
+    /// `-wal`, no `-shm`, no key file, no mtime bump. This is the case the
+    /// sidecar-ownership incident (RENG-105/106) is about: a CLI running as
+    /// another uid must not be the thing that creates or replaces a sidecar.
+    #[tokio::test]
+    async fn readonly_open_reads_a_wal_database_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        seed_checkpointed_config_dir(dir, "anthropic", "sk-live-db").await;
+
+        let db_path = dir.join(crate::paths::DB_FILE_NAME);
+        assert!(db_path.is_file(), "precondition: the database exists");
+        // Precondition: the sidecars are gone and the value really is at rest
+        // encrypted — the decrypt below therefore goes through secrets.key.
+        let before_listing = listing(dir);
+        assert!(
+            !before_listing.iter().any(|n| n.starts_with("review.db-")),
+            "precondition: no sidecars in a checkpointed config dir: {before_listing:?}"
+        );
+        let before_mtime = mtime(&db_path);
+        let before_bytes = std::fs::read(&db_path).unwrap();
+
+        let reader = SqlxStore::connect_default_readonly(dir).await.unwrap();
+        let loaded = crate::store::traits::ConfigStore::load_llm_providers(&reader)
+            .await
+            .unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].api_key, "sk-live-db", "decrypted with the config dir's key");
+        drop(reader);
+
+        assert_eq!(
+            listing(dir),
+            before_listing,
+            "a read-only open must create nothing — no -wal/-shm, no secrets.key"
+        );
+        assert_eq!(mtime(&db_path), before_mtime, "the database file must not be touched");
+        assert_eq!(
+            std::fs::read(&db_path).unwrap(),
+            before_bytes,
+            "the database bytes must be unchanged"
+        );
+    }
+
+    /// The connection itself refuses writes, independently of the file mode:
+    /// `query_only` is what keeps a future code path from writing through the
+    /// handle even if it never checked how the store was opened.
+    #[tokio::test]
+    async fn readonly_open_rejects_writes_on_the_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_checkpointed_config_dir(dir.path(), "anthropic", "sk-live-db").await;
+
+        let reader = SqlxStore::connect_default_readonly(dir.path()).await.unwrap();
+        let err = ::sqlx::query("INSERT INTO app_settings (key, value, updated_at) VALUES (?, ?, ?)")
+            .bind("m2-probe")
+            .bind("{}")
+            .bind(encode_ts(&Utc::now()))
+            .execute(reader.pool())
+            .await
+            .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.to_ascii_lowercase().contains("readonly") || msg.to_ascii_lowercase().contains("read-only"),
+            "the write must be refused as read-only, got: {msg}"
+        );
+        // …and the refused write left no trace on disk either.
+        assert!(!dir.path().join("review.db-wal").exists());
+    }
+
+    /// The URL the two open shapes are built from — the decision the whole
+    /// incident class hinges on, asserted directly so a future change to the
+    /// sidecar test cannot silently pick the URL that creates them.
+    #[test]
+    fn readonly_url_uses_the_wal_only_when_the_live_wal_is_there() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join(crate::paths::DB_FILE_NAME);
+        let wal = crate::doctor::sidecar_path(&db, "-wal");
+        let shm = crate::doctor::sidecar_path(&db, "-shm");
+
+        // Checkpointed database (clean shutdown, fresh copy): the main file
+        // holds everything, and `mode=ro` alone would CREATE the sidecars.
+        assert!(
+            SqlxStore::readonly_url(&db).ends_with("?mode=ro&immutable=1"),
+            "a database without a live WAL must be opened immutable: {}",
+            SqlxStore::readonly_url(&db)
+        );
+
+        // The live shape a running (or uncleanly stopped) server leaves.
+        std::fs::write(&wal, b"frames").unwrap();
+        std::fs::write(&shm, b"index").unwrap();
+        assert!(
+            SqlxStore::readonly_url(&db).ends_with("?mode=ro"),
+            "a live WAL must be read through, not ignored: {}",
+            SqlxStore::readonly_url(&db)
+        );
+
+        // An empty `-wal` holds no frames: reading it would only create a
+        // sidecar for nothing.
+        std::fs::write(&wal, b"").unwrap();
+        assert!(SqlxStore::readonly_url(&db).ends_with("?mode=ro&immutable=1"));
+
+        // `-wal` without its `-shm`: a repaired/interrupted state. Reading the
+        // WAL would have to mint the missing index, so this shape is read
+        // immutable too — the price is the checkpointed view, not a foreign
+        // sidecar.
+        std::fs::write(&wal, b"frames").unwrap();
+        std::fs::remove_file(&shm).unwrap();
+        assert!(SqlxStore::readonly_url(&db).ends_with("?mode=ro&immutable=1"));
+    }
+
+    /// The server is usually STILL RUNNING when a user runs `reng review`: the
+    /// sidecars exist and are held open by the writer. A read-only handle must
+    /// still see the committed rows, and it must not touch a single one of the
+    /// writer's files.
+    #[tokio::test]
+    async fn readonly_open_sees_rows_while_a_writer_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        seed_checkpointed_config_dir(dir, "anthropic", "sk-live-db").await;
+        // Keep a writer open across the read: this is `serve` holding the
+        // database while the CLI reads the configuration.
+        let writer = SqlxStore::connect_default(dir).await.unwrap();
+        crate::store::traits::ConfigStore::replace_git_platforms(
+            &writer,
+            &[crate::models::GitPlatformConfig {
+                name: "testbed".to_string(),
+                platform_type: "gitlab".to_string(),
+                base_url: "http://gitlab.internal:8929".to_string(),
+                token: "glpat-live".to_string(),
+                ..Default::default()
+            }],
+        )
+        .await
+        .unwrap();
+
+        // The writer is idle from here on, so anything that changes belongs to
+        // the reader.
+        let db_path = dir.join(crate::paths::DB_FILE_NAME);
+        let wal = crate::doctor::sidecar_path(&db_path, "-wal");
+        let shm = crate::doctor::sidecar_path(&db_path, "-shm");
+        assert!(wal.is_file() && shm.is_file(), "precondition: the live WAL shape");
+        let before = listing(dir);
+        let before_sizes = (
+            std::fs::metadata(&db_path).unwrap().len(),
+            std::fs::metadata(&wal).unwrap().len(),
+        );
+        let before_sidecar_mtimes = (mtime(&wal), mtime(&shm));
+
+        let reader = SqlxStore::connect_default_readonly(dir).await.unwrap();
+        let providers = crate::store::traits::ConfigStore::load_llm_providers(&reader)
+            .await
+            .unwrap();
+        let platforms = crate::store::traits::ConfigStore::load_git_platforms(&reader)
+            .await
+            .unwrap();
+        drop(reader);
+
+        assert_eq!(providers[0].api_key, "sk-live-db");
+        assert_eq!(
+            platforms[0].token, "glpat-live",
+            "the read must see rows the writer committed to the WAL"
+        );
+        assert_eq!(listing(dir), before, "the reader must not create or remove files");
+        assert_eq!(
+            (
+                std::fs::metadata(&db_path).unwrap().len(),
+                std::fs::metadata(&wal).unwrap().len()
+            ),
+            before_sizes,
+            "the database and its live WAL must keep their sizes"
+        );
+        assert_eq!(
+            (mtime(&wal), mtime(&shm)),
+            before_sidecar_mtimes,
+            "the reader must not replace the writer's sidecars"
+        );
+        writer.pool().close().await;
+    }
+
+    /// A missing `secrets.key` is an error that creates nothing: the rows were
+    /// encrypted with the server's key, and generating a second key would both
+    /// fail to decrypt them and leave a foreign key file in the config dir.
+    #[tokio::test]
+    async fn readonly_open_without_the_secrets_key_errors_and_creates_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        seed_checkpointed_config_dir(dir, "anthropic", "sk-live-db").await;
+        std::fs::remove_file(dir.join(crate::config::secrets::SECRETS_KEY_FILE_NAME)).unwrap();
+        let before_listing = listing(dir);
+
+        let err = SqlxStore::connect_default_readonly(dir).await.unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains(crate::config::secrets::SECRETS_KEY_FILE_NAME),
+            "the error must name the key file: {msg}"
+        );
+        assert_eq!(listing(dir), before_listing, "no key may be generated by a read");
+    }
+
+    /// A file that is not a database (a truncated copy, a stray file where the
+    /// database should be) is reported, never a panic — the caller degrades to
+    /// the config files.
+    #[tokio::test]
+    async fn readonly_open_of_a_corrupt_database_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        // The key must exist for the open to get as far as the file itself:
+        // seed a real dir, then overwrite the database with garbage.
+        seed_checkpointed_config_dir(dir, "anthropic", "sk-live-db").await;
+        std::fs::write(dir.join(crate::paths::DB_FILE_NAME), b"this is not a sqlite database").unwrap();
+
+        let reader = SqlxStore::connect_default_readonly(dir).await.unwrap();
+        assert!(
+            crate::store::traits::ConfigStore::load_llm_providers(&reader)
+                .await
+                .is_err(),
+            "a corrupt file must surface as a read error"
+        );
     }
 }

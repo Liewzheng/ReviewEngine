@@ -3,7 +3,8 @@
 //! The LLM Status page needs two numbers that only a call-level history can
 //! give: a real average latency over a window, and a sparkline of how a
 //! provider has behaved. Everything that existed before was instantaneous —
-//! the connectivity probe (RENG-36) measures one `GET /models` round trip —
+//! the connectivity probe (RENG-36) measures one model-listing round trip
+//! (`GET …/models`, provider-aware since RENG-66) —
 //! or review-level (`reviews.llm_summary`, RENG-38/56, names the provider and
 //! model of a review but carries no timing).
 //!

@@ -1,5 +1,6 @@
 pub(crate) mod app;
 pub mod commands;
+pub mod db_config;
 #[cfg(test)]
 mod tests;
 

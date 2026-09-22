@@ -15,6 +15,29 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub progress: bool,
 
+    /// State root: the directory holding review.db, secrets.key, ui-state.toml
+    /// and the deployment's .code-audit-config.toml
+    ///
+    /// The global form of REVIEW_ENGINE_CONFIG_DIR, with the same meaning as
+    /// `serve --data-dir`: it is accepted by every command and resolved before
+    /// anything reads a path. Aliases the shipped deployments use:
+    /// `reng --config-dir /volume1/docker/reng/config review --local-path . --base main`,
+    /// or export REVIEW_ENGINE_CONFIG_DIR=/volume1/docker/reng/config.
+    ///
+    /// When that directory holds a `review.db`, the database is the
+    /// HIGHEST-priority configuration layer for the command at hand — the
+    /// command reads it (read-only: it never writes the database, creates no
+    /// `-wal`/`-shm` sidecars and takes no write lock) and its stored LLM
+    /// providers, expert overrides and ui settings override the config files
+    /// key by key. No database means plain TOML, exactly as before.
+    ///
+    /// Precedence: `serve --data-dir` > this flag > REVIEW_DATA_DIR >
+    /// REVIEW_ENGINE_CONFIG_DIR > ~/.config/review-engine. A per-artifact
+    /// variable (REVIEW_UI_STATE_FILE, DATABASE_URL, …) still wins for its own
+    /// artifact.
+    #[arg(long = "config-dir", global = true, value_name = "PATH")]
+    pub config_dir: Option<std::path::PathBuf>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -107,11 +130,47 @@ pub enum Commands {
         publish: bool,
     },
 
+    /// Diagnose the persistent store, and optionally repair it
+    ///
+    /// Checks the config directory, `review.db` and its WAL sidecars
+    /// (`review.db-wal` / `review.db-shm`), then runs a real, harmless write
+    /// test — the definitive "can the database be written" verdict. Exits
+    /// non-zero when any check fails.
+    ///
+    /// `--fix` repairs the one failure an unprivileged user can repair: a
+    /// sidecar owned by another uid (e.g. a host process touched it) makes
+    /// every write fail with `attempt to write a readonly database`. Deleting
+    /// a sidecar only needs write permission on the DIRECTORY, so it works
+    /// without root; SQLite recreates it with the current uid on the next
+    /// write, and a running server recovers without a restart. A non-empty
+    /// `-wal` may hold uncommitted transactions and is therefore never
+    /// deleted — stop reng gracefully and re-run. `review.db` itself is never
+    /// modified, moved or chmod-ed.
+    Doctor {
+        /// Repair what can be repaired without root (see above)
+        #[arg(long)]
+        fix: bool,
+
+        /// Print nothing while every check passes; report only the failures
+        /// (used by the container entrypoint's startup self-heal)
+        #[arg(long)]
+        quiet: bool,
+    },
+
     /// Validate a .code-audit-config.toml file
+    ///
+    /// The file can be named positionally (`reng validate <file>`) or with
+    /// `--config <file>`; the two forms are equivalent. With neither, the
+    /// `.code-audit-config.toml` of the current directory is validated,
+    /// falling back to the user-level one.
     Validate {
         /// Path to config file
-        #[arg(long)]
+        #[arg(long, value_name = "FILE", conflicts_with = "file")]
         config: Option<String>,
+
+        /// Path to config file (same as --config)
+        #[arg(value_name = "FILE")]
+        file: Option<String>,
     },
 
     /// Print the default config
@@ -179,14 +238,14 @@ pub enum Commands {
         /// and the user-level .code-audit-config.toml all resolve under this
         /// path, which is created if missing. Two instances with different
         /// values share no state; without the flag the defaults stay
-        /// ~/.config/review-engine (or REVIEW_ENGINE_CONFIG_DIR).
+        /// ~/.config/review-engine (or --config-dir / REVIEW_ENGINE_CONFIG_DIR).
         ///
-        /// Precedence: this flag > REVIEW_DATA_DIR > REVIEW_ENGINE_CONFIG_DIR >
-        /// ~/.config/review-engine. A per-artifact variable
-        /// (REVIEW_UI_STATE_FILE, REVIEW_AUTH_FILE, REVIEW_DISPATCH_STATE,
-        /// REVIEW_FEEDBACK_PATH, REVIEW_MODELS_DEV_CACHE, DATABASE_URL) still
-        /// wins for its own artifact — even against this flag — and is
-        /// reported as a warning at startup.
+        /// Precedence: this flag > --config-dir > REVIEW_DATA_DIR >
+        /// REVIEW_ENGINE_CONFIG_DIR > ~/.config/review-engine. A per-artifact
+        /// variable (REVIEW_UI_STATE_FILE, REVIEW_AUTH_FILE,
+        /// REVIEW_DISPATCH_STATE, REVIEW_FEEDBACK_PATH, REVIEW_MODELS_DEV_CACHE,
+        /// DATABASE_URL) still wins for its own artifact — even against this
+        /// flag — and is reported as a warning at startup.
         #[arg(long, value_name = "PATH")]
         data_dir: Option<std::path::PathBuf>,
     },
@@ -200,7 +259,9 @@ pub enum Commands {
     /// framework, then prompts the user to choose commands, experts, and
     /// LLM settings before writing a `.code-audit-config.toml`.
     Init {
-        /// Skip interactive prompts and print the built-in default config.
+        /// Skip interactive prompts: write the built-in default config to
+        /// ./.code-audit-config.toml (it is not printed — `reng default`
+        /// prints it instead).
         #[arg(long)]
         default: bool,
     },
@@ -378,7 +439,11 @@ pub enum Commands {
         output: Option<String>,
     },
 
-    /// Update CHANGELOG from commit history
+    /// Generate CHANGELOG entries from the diff
+    ///
+    /// Prints the generated entries in the report; it does NOT rewrite
+    /// CHANGELOG.md, and the commit messages are not fed to the model (the
+    /// diff is).
     UpdateChangelog {
         /// Path to local git repository
         #[arg(long)]

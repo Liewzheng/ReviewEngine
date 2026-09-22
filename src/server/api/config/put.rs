@@ -9,7 +9,9 @@ use crate::server::AppState;
 use crate::store::traits::ConfigStore;
 
 use super::is_blank_or_masked;
-use super::types::{UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK, CLEAR_SECRET_SENTINEL};
+use super::types::{
+    default_max_concurrent_reviews, UiConfig, UiGitLabConfig, UiGitPlatformConfig, API_KEY_MASK, CLEAR_SECRET_SENTINEL,
+};
 
 /// Deep-merge `patch` into `base` (both JSON values), returning the result.
 ///
@@ -33,6 +35,316 @@ pub fn merge_json(base: &serde_json::Value, patch: &serde_json::Value) -> serde_
         }
         (_, patch) => patch.clone(),
     }
+}
+
+/// The legacy scalar mirror of the `llm` section (the pre-multi-provider
+/// shape: `openaiApiKey` / `apiBaseUrl` / `defaultModel` / …). A `PUT` whose
+/// `llm` object carries any of them is a client speaking for the primary
+/// through the scalar fields — see [`resolve_llm_section`].
+const LEGACY_SCALAR_KEYS: [&str; 7] = [
+    "openaiApiKey",
+    "apiBaseUrl",
+    "defaultModel",
+    "maxTokens",
+    "temperature",
+    "timeoutSeconds",
+    "retryAttempts",
+];
+
+/// Resolve a `PUT /config` llm section into the provider set to apply.
+///
+/// `stored` is the effective runtime set: blank/masked secrets of the
+/// submission resolve against it ("leave blank = unchanged"). `states_legacy_scalars`
+/// tells whether the REQUEST itself stated the legacy scalar mirror (see
+/// [`apply_ui_config`]) — the merged body always carries that mirror, because
+/// it is part of the stored projection, so only the keys the request actually
+/// submitted mark it as an edit a client made.
+///
+/// Mutates `body.llm` in place: the masked write-back and the normalised
+/// primary are part of the projection `GET /config` serves afterwards.
+fn resolve_llm_section(
+    body: &mut UiConfig,
+    stored: &[crate::models::LLMConfig],
+    states_legacy_scalars: bool,
+) -> Vec<crate::models::LLMConfig> {
+    // RENG-75 (identity batch): provider names are display labels, not
+    // identities — several cards may share one name, so "keep unchanged"
+    // must follow the ENTRY, never the name. Resolution for payload entry
+    // `idx` (or a nameless lookup with `None`):
+    //   1. the stored entry AT INDEX `idx` matches on the
+    //      `(provider, api_base, model)` triple → same card: keep it;
+    //   2. otherwise, when EXACTLY ONE stored entry matches the triple → keep
+    //      that one (a plain reorder moved the card, its secret follows);
+    //   3. otherwise — no match, or several (two same-triple accounts are
+    //      indistinguishable in a masked payload) → keep NOTHING. Rule 3 is
+    //      what can never mis-assign one account's key to the other; it also
+    //      means editing a card's URL or model with a masked key clears the
+    //      key (re-enter it).
+    let stored_for =
+        |idx: Option<usize>, provider: &str, api_base: &str, model: &str| -> Option<crate::models::LLMConfig> {
+            let triple =
+                |c: &crate::models::LLMConfig| c.provider == provider && c.api_base == api_base && c.model == model;
+            if let Some(c) = idx.and_then(|i| stored.get(i)).filter(|c| triple(c)) {
+                return Some(c.clone());
+            }
+            let mut matches = stored.iter().filter(|c| triple(c));
+            match (matches.next(), matches.next()) {
+                (Some(c), None) => Some(c.clone()),
+                _ => None,
+            }
+        };
+    // RENG-75: `disabled` follows the same keep semantics as the masked API
+    // key — a providers[] entry that OMITS the key (`None`) keeps the stored
+    // flag of the SAME entry, so an unrelated save (or a client that does
+    // not know the field yet) cannot silently re-enable a provider the user
+    // switched off; an explicit `true`/`false` sets it.
+    let resolve_disabled = |submitted: Option<bool>, kept: Option<&crate::models::LLMConfig>| -> bool {
+        submitted.or_else(|| kept.map(|c| c.disabled)).unwrap_or(false)
+    };
+    // RENG-77: `disable_thinking` keeps the same way, but its stored value is
+    // itself an `Option` (unset = the flag is not sent to the provider), so
+    // the resolution stays tri-state: an omitted key keeps the card's stored
+    // `Option` — including "never set" — instead of collapsing it to `false`.
+    let resolve_disable_thinking = |submitted: Option<bool>, kept: Option<&crate::models::LLMConfig>| -> Option<bool> {
+        submitted.or_else(|| kept.and_then(|c| c.disable_thinking))
+    };
+
+    let mut new_llm_configs = Vec::new();
+
+    // The providers[] entry the legacy scalar section consumes when it
+    // activates (so the primary is not duplicated in the rebuilt list): the
+    // first entry whose triple matches the scalar fields — or, when no entry
+    // matches (the scalar fields themselves were edited), the first entry
+    // named like the scalar provider, preserving the pre-duplicate round
+    // trip. Every OTHER same-named entry is its own card and survives below.
+    let legacy_triple_present = body.llm.providers.iter().any(|p| {
+        p.provider == "openai" && p.api_base_url == body.llm.api_base_url && p.default_model == body.llm.default_model
+    });
+    let legacy_consumed: Option<usize> = body.llm.providers.iter().position(|p| {
+        p.provider == "openai"
+            && (!legacy_triple_present
+                || (p.api_base_url == body.llm.api_base_url && p.default_model == body.llm.default_model))
+    });
+
+    // Legacy primary (openai): an empty or masked key means "keep the stored
+    // key"; a real key replaces it. The stored entry the section is about —
+    // the triple the scalar fields describe, else a UNIQUE stored entry named
+    // "openai" (two same-named accounts are indistinguishable, so they resolve
+    // to nothing rather than to a guessed key) — also supplies every field the
+    // submission leaves empty.
+    let mut primary_provider: Option<&str> = None;
+    let legacy_ref = stored_for(None, "openai", &body.llm.api_base_url, &body.llm.default_model).or_else(|| {
+        let mut named = stored.iter().filter(|c| c.provider == "openai");
+        match (named.next(), named.next()) {
+            (Some(c), None) => Some(c.clone()),
+            _ => None,
+        }
+    });
+    let openai_key = if is_blank_or_masked(&body.llm.openai_api_key) {
+        legacy_ref.as_ref().map(|c| c.api_key.clone()).unwrap_or_default()
+    } else {
+        body.llm.openai_api_key.clone()
+    };
+    // The scalar mirror is a legacy-client affordance for the `openai`-labelled
+    // primary, and it may only speak when the REQUEST states it: the merged body
+    // always carries the mirror (it is part of the stored projection), so
+    // reading an unstated projection back as an edit is what rewrote the whole
+    // provider list from an empty mirror — the 0.10.46 release gate's data
+    // loss — and what relabelled a same-named account onto another provider's
+    // endpoint (measured: an ordinary card edit turned
+    // `openai|gpt-4o|api.openai.com` into `openai|deepseek-v4-flash|
+    // api.deepseek.com`).
+    let mirror_is_the_recorded_primarys_echo = {
+        // `sync_llm_projection` fills the mirror from the primary WHATEVER its
+        // name, so when the recorded primary is another provider whose own
+        // entry carries exactly these base/model values, the mirror describes
+        // THAT entry — the field names make no statement about which provider
+        // owns it.
+        let recorded = body.llm.primary_provider.trim();
+        !recorded.is_empty()
+            && recorded != "openai"
+            && body.llm.providers.iter().any(|p| {
+                p.provider == recorded
+                    && p.api_base_url.trim() == body.llm.api_base_url.trim()
+                    && p.default_model.trim() == body.llm.default_model.trim()
+            })
+    };
+    let legacy_scalars_apply = states_legacy_scalars && !mirror_is_the_recorded_primarys_echo;
+    if legacy_scalars_apply && !openai_key.is_empty() {
+        primary_provider = Some("openai");
+        // Keep-fill: a scalar field left empty states nothing, so the entry's
+        // own value comes from the stored entry this section is about. Without
+        // it, an empty mirror — a `ui` row written before the mirror existed,
+        // replayed back through this path — fabricated an entry with no
+        // api_base and no model, unusable, and `POST /reviews` then answered
+        // 422 `llmNotConfigured` while the real provider sat in the stored
+        // list.
+        let api_base = if body.llm.api_base_url.trim().is_empty() {
+            legacy_ref.as_ref().map(|c| c.api_base.clone()).unwrap_or_default()
+        } else {
+            body.llm.api_base_url.clone()
+        };
+        let model = if body.llm.default_model.trim().is_empty() {
+            legacy_ref.as_ref().map(|c| c.model.clone()).unwrap_or_default()
+        } else {
+            body.llm.default_model.clone()
+        };
+        // The legacy scalar section has no disabled flag of its own: the
+        // providers[] entry it consumes speaks for it, falling back to the
+        // stored flag of the entry the scalars describe.
+        let disabled = resolve_disabled(
+            legacy_consumed.and_then(|i| body.llm.providers[i].disabled),
+            legacy_ref.as_ref(),
+        );
+        // Same source for the RENG-77 opt-out.
+        let disable_thinking = resolve_disable_thinking(
+            legacy_consumed.and_then(|i| body.llm.providers[i].disable_thinking),
+            legacy_ref.as_ref(),
+        );
+        new_llm_configs.push(crate::models::LLMConfig {
+            provider: "openai".to_string(),
+            model,
+            api_key: openai_key,
+            api_base,
+            max_tokens: body.llm.max_tokens,
+            temperature: body.llm.temperature,
+            disable_thinking,
+            disabled,
+        });
+    }
+
+    // Build LLM configs from multi-provider providers Vec. GET /config maps
+    // every backend LLM config — including the primary — into `llm.providers`,
+    // so a UI round-trip echoes the primary back inside this array. The entry
+    // the legacy scalar section consumed is skipped (it is already in the
+    // list); every other entry — same-named ones included — is processed by
+    // INDEX, never merged by name (RENG-75).
+    //
+    // `resolved` is aligned with providers[] indices and feeds the masked
+    // write-back below: what each submitted entry resolved to (RENG-75's
+    // `disabled`, RENG-77's `disable_thinking`).
+    let mut resolved: Vec<ResolvedEntry> = Vec::with_capacity(body.llm.providers.len());
+    for (i, p) in body.llm.providers.iter().enumerate() {
+        if p.provider.is_empty() {
+            // A nameless entry names no card to keep from, so an omitted
+            // `disable_thinking` stays "never set".
+            resolved.push(ResolvedEntry {
+                key_present: false,
+                disabled: resolve_disabled(p.disabled, None),
+                disable_thinking: resolve_disable_thinking(p.disable_thinking, None),
+            });
+            continue;
+        }
+        if primary_provider == Some(p.provider.as_str()) && legacy_consumed == Some(i) {
+            resolved.push(ResolvedEntry {
+                key_present: true,
+                disabled: new_llm_configs[0].disabled,
+                disable_thinking: new_llm_configs[0].disable_thinking,
+            });
+            continue;
+        }
+        // Same "keep unchanged" semantics as the legacy field: a masked key
+        // must never overwrite the stored secret with the `***` sentinel —
+        // and it must keep THIS entry's secret, not a same-named sibling's.
+        let kept = stored_for(Some(i), &p.provider, &p.api_base_url, &p.default_model);
+        let key = if is_blank_or_masked(&p.api_key) {
+            kept.as_ref().map(|c| c.api_key.clone()).unwrap_or_default()
+        } else {
+            p.api_key.clone()
+        };
+        let disabled = resolve_disabled(p.disabled, kept.as_ref());
+        // RENG-77: the SAME `kept` card resolves the thinking opt-out, so a
+        // card edit that omits the key cannot silently re-enable thinking on
+        // the very card it edits.
+        let disable_thinking = resolve_disable_thinking(p.disable_thinking, kept.as_ref());
+        if key.is_empty() {
+            resolved.push(ResolvedEntry {
+                key_present: false,
+                disabled,
+                disable_thinking,
+            });
+            continue;
+        }
+        new_llm_configs.push(crate::models::LLMConfig {
+            provider: p.provider.clone(),
+            model: p.default_model.clone(),
+            api_key: key,
+            api_base: p.api_base_url.clone(),
+            max_tokens: p.max_tokens,
+            temperature: p.temperature,
+            disable_thinking,
+            disabled,
+        });
+        resolved.push(ResolvedEntry {
+            key_present: true,
+            disabled,
+            disable_thinking,
+        });
+    }
+
+    // Sync the persisted UI config's key fields with what was actually stored:
+    // a configured provider is recorded as the mask sentinel (never a live
+    // key, never a blank that would read as "unconfigured"), so GET /config
+    // stays self-consistent across "leave blank = unchanged" saves.
+    let has_stored_key = |provider: &str| -> bool {
+        new_llm_configs
+            .iter()
+            .any(|c| c.provider == provider && !c.api_key.is_empty())
+    };
+    // The legacy scalar field echoes the PRIMARY provider's key
+    // (`UiConfig::from_app_config` fills the scalars from the primary entry,
+    // whatever its name), so the mask marker must key off the effective
+    // primary — keying it off the literal "openai" would show a configured
+    // non-openai primary as "unset" in GET /config after any save.
+    let scalar_provider = {
+        let p = body.llm.primary_provider.trim();
+        if p.is_empty() {
+            "openai"
+        } else {
+            p
+        }
+    };
+    body.llm.openai_api_key = if has_stored_key(scalar_provider) {
+        API_KEY_MASK.to_string()
+    } else {
+        String::new()
+    };
+    for (i, p) in body.llm.providers.iter_mut().enumerate() {
+        let entry = resolved.get(i).copied().unwrap_or_default();
+        p.api_key = if entry.key_present {
+            API_KEY_MASK.to_string()
+        } else {
+            String::new()
+        };
+        // Store the RESOLVED flag (keep semantics applied) so `GET /config`
+        // always reports a concrete bool and the next merge starts from it.
+        p.disabled = Some(entry.disabled);
+        // RENG-77: same rule for the thinking opt-out — the resolved
+        // (post-keep) value is what the projection echoes, so the next merge
+        // starts from what was actually applied. `None` stays `None` (the
+        // flag is not sent to the provider), never a fabricated `false`.
+        p.disable_thinking = entry.disable_thinking;
+    }
+
+    // RENG-75: the effective head is always an ENABLED provider. A recorded
+    // primary that still names an enabled entry is kept verbatim — RENG-72: a
+    // save that does not speak for the primary must never change it. One that
+    // is empty, unmatched, or names a now-DISABLED entry is normalised to the
+    // first enabled provider (or emptied when none are enabled — the stored
+    // order then stays authoritative until an entry is re-enabled).
+    if !new_llm_configs.is_empty()
+        && !new_llm_configs
+            .iter()
+            .any(|c| !c.disabled && c.provider == body.llm.primary_provider)
+    {
+        body.llm.primary_provider = new_llm_configs
+            .iter()
+            .find(|c| !c.disabled)
+            .map(|c| c.provider.clone())
+            .unwrap_or_default();
+    }
+
+    new_llm_configs
 }
 
 /// Apply the submitted GitLab UI section to the runtime config, resolving the
@@ -359,244 +671,46 @@ pub(crate) fn apply_ui_config(
         let cfg_opt = state.app_config.read().unwrap();
         cfg_opt.as_ref().map(|arc| arc.llm.clone()).unwrap_or_default()
     };
-    // RENG-75 (identity batch): provider names are display labels, not
-    // identities — several cards may share one name, so "keep unchanged"
-    // must follow the ENTRY, never the name. Resolution for payload entry
-    // `idx` (or a nameless lookup with `None`):
-    //   1. the stored entry AT INDEX `idx` matches on the
-    //      `(provider, api_base, model)` triple → same card: keep it;
-    //   2. otherwise, when EXACTLY ONE stored entry matches the triple → keep
-    //      that one (a plain reorder moved the card, its secret follows);
-    //   3. otherwise — no match, or several (two same-triple accounts are
-    //      indistinguishable in a masked payload) → keep NOTHING. Rule 3 is
-    //      what can never mis-assign one account's key to the other; it also
-    //      means editing a card's URL or model with a masked key clears the
-    //      key (re-enter it).
-    let stored_for =
-        |idx: Option<usize>, provider: &str, api_base: &str, model: &str| -> Option<crate::models::LLMConfig> {
-            let triple =
-                |c: &crate::models::LLMConfig| c.provider == provider && c.api_base == api_base && c.model == model;
-            if let Some(c) = idx.and_then(|i| existing_llm.get(i)).filter(|c| triple(c)) {
-                return Some(c.clone());
-            }
-            let mut matches = existing_llm.iter().filter(|c| triple(c));
-            match (matches.next(), matches.next()) {
-                (Some(c), None) => Some(c.clone()),
-                _ => None,
-            }
-        };
-    // RENG-75: `disabled` follows the same keep semantics as the masked API
-    // key — a providers[] entry that OMITS the key (`None`) keeps the stored
-    // flag of the SAME entry, so an unrelated save (or a client that does
-    // not know the field yet) cannot silently re-enable a provider the user
-    // switched off; an explicit `true`/`false` sets it.
-    let resolve_disabled = |submitted: Option<bool>, kept: Option<&crate::models::LLMConfig>| -> bool {
-        submitted.or_else(|| kept.map(|c| c.disabled)).unwrap_or(false)
-    };
-    // RENG-77: `disable_thinking` keeps the same way, but its stored value is
-    // itself an `Option` (unset = the flag is not sent to the provider), so
-    // the resolution stays tri-state: an omitted key keeps the card's stored
-    // `Option` — including "never set" — instead of collapsing it to `false`.
-    let resolve_disable_thinking = |submitted: Option<bool>, kept: Option<&crate::models::LLMConfig>| -> Option<bool> {
-        submitted.or_else(|| kept.and_then(|c| c.disable_thinking))
-    };
-
-    let mut new_llm_configs = Vec::new();
-
-    // The providers[] entry the legacy scalar section consumes when it
-    // activates (so the primary is not duplicated in the rebuilt list): the
-    // first entry whose triple matches the scalar fields — or, when no entry
-    // matches (the scalar fields themselves were edited), the first entry
-    // named like the scalar provider, preserving the pre-duplicate round
-    // trip. Every OTHER same-named entry is its own card and survives below.
-    let legacy_triple_present = body.llm.providers.iter().any(|p| {
-        p.provider == "openai" && p.api_base_url == body.llm.api_base_url && p.default_model == body.llm.default_model
-    });
-    let legacy_consumed: Option<usize> = body.llm.providers.iter().position(|p| {
-        p.provider == "openai"
-            && (!legacy_triple_present
-                || (p.api_base_url == body.llm.api_base_url && p.default_model == body.llm.default_model))
-    });
-
-    // Legacy primary (openai): an empty or masked key means "keep the stored
-    // key"; a real key replaces it.
-    let mut primary_provider: Option<&str> = None;
-    let openai_key = if is_blank_or_masked(&body.llm.openai_api_key) {
-        // Keep follows the triple the scalar fields describe; the legacy
-        // section is name-anchored by design, so fall back to a UNIQUE
-        // stored entry named "openai" — two same-named accounts resolve to
-        // empty rather than to a guessed key.
-        stored_for(None, "openai", &body.llm.api_base_url, &body.llm.default_model)
-            .map(|c| c.api_key.clone())
-            .or_else(|| {
-                let mut named = existing_llm.iter().filter(|c| c.provider == "openai");
-                match (named.next(), named.next()) {
-                    (Some(c), None) => Some(c.api_key.clone()),
-                    _ => None,
-                }
-            })
-            .unwrap_or_default()
-    } else {
-        body.llm.openai_api_key.clone()
-    };
-    if !openai_key.is_empty() {
-        primary_provider = Some("openai");
-        // The legacy scalar section has no disabled flag of its own: the
-        // providers[] entry it consumes speaks for it, falling back to the
-        // stored flag of the triple the scalar describes.
-        let disabled = resolve_disabled(
-            legacy_consumed.and_then(|i| body.llm.providers[i].disabled),
-            stored_for(None, "openai", &body.llm.api_base_url, &body.llm.default_model).as_ref(),
-        );
-        // Same source for the RENG-77 opt-out: the providers[] entry this
-        // scalar section consumes speaks for it, falling back to the stored
-        // value of the triple the scalars describe.
-        let disable_thinking = resolve_disable_thinking(
-            legacy_consumed.and_then(|i| body.llm.providers[i].disable_thinking),
-            stored_for(None, "openai", &body.llm.api_base_url, &body.llm.default_model).as_ref(),
-        );
-        new_llm_configs.push(crate::models::LLMConfig {
-            provider: "openai".to_string(),
-            model: body.llm.default_model.clone(),
-            api_key: openai_key,
-            api_base: body.llm.api_base_url.clone(),
-            max_tokens: body.llm.max_tokens,
-            temperature: body.llm.temperature,
-            disable_thinking,
-            disabled,
-        });
-    }
-
-    // Build LLM configs from multi-provider providers Vec. GET /config maps
-    // every backend LLM config — including the primary — into `llm.providers`,
-    // so a UI round-trip echoes the primary back inside this array. The entry
-    // the legacy scalar section consumed is skipped (it is already in the
-    // list); every other entry — same-named ones included — is processed by
-    // INDEX, never merged by name (RENG-75).
+    // ── The llm provider SET is re-derived only when this request states it ──
     //
-    // `resolved` is aligned with providers[] indices and feeds the masked
-    // write-back below: what each submitted entry resolved to (RENG-75's
-    // `disabled`, RENG-77's `disable_thinking`).
-    let mut resolved: Vec<ResolvedEntry> = Vec::with_capacity(body.llm.providers.len());
-    for (i, p) in body.llm.providers.iter().enumerate() {
-        if p.provider.is_empty() {
-            // A nameless entry names no card to keep from, so an omitted
-            // `disable_thinking` stays "never set".
-            resolved.push(ResolvedEntry {
-                key_present: false,
-                disabled: resolve_disabled(p.disabled, None),
-                disable_thinking: resolve_disable_thinking(p.disable_thinking, None),
-            });
-            continue;
-        }
-        if primary_provider == Some(p.provider.as_str()) && legacy_consumed == Some(i) {
-            resolved.push(ResolvedEntry {
-                key_present: true,
-                disabled: new_llm_configs[0].disabled,
-                disable_thinking: new_llm_configs[0].disable_thinking,
-            });
-            continue;
-        }
-        // Same "keep unchanged" semantics as the legacy field: a masked key
-        // must never overwrite the stored secret with the `***` sentinel —
-        // and it must keep THIS entry's secret, not a same-named sibling's.
-        let kept = stored_for(Some(i), &p.provider, &p.api_base_url, &p.default_model);
-        let key = if is_blank_or_masked(&p.api_key) {
-            kept.as_ref().map(|c| c.api_key.clone()).unwrap_or_default()
-        } else {
-            p.api_key.clone()
-        };
-        let disabled = resolve_disabled(p.disabled, kept.as_ref());
-        // RENG-77: the SAME `kept` card resolves the thinking opt-out, so a
-        // card edit that omits the key cannot silently re-enable thinking on
-        // the very card it edits.
-        let disable_thinking = resolve_disable_thinking(p.disable_thinking, kept.as_ref());
-        if key.is_empty() {
-            resolved.push(ResolvedEntry {
-                key_present: false,
-                disabled,
-                disable_thinking,
-            });
-            continue;
-        }
-        new_llm_configs.push(crate::models::LLMConfig {
-            provider: p.provider.clone(),
-            model: p.default_model.clone(),
-            api_key: key,
-            api_base: p.api_base_url.clone(),
-            max_tokens: p.max_tokens,
-            temperature: p.temperature,
-            disable_thinking,
-            disabled,
-        });
-        resolved.push(ResolvedEntry {
-            key_present: true,
-            disabled,
-            disable_thinking,
-        });
-    }
-
-    // Sync the persisted UI config's key fields with what was actually stored:
-    // a configured provider is recorded as the mask sentinel (never a live
-    // key, never a blank that would read as "unconfigured"), so GET /config
-    // stays self-consistent across "leave blank = unchanged" saves.
-    let has_stored_key = |provider: &str| -> bool {
-        new_llm_configs
-            .iter()
-            .any(|c| c.provider == provider && !c.api_key.is_empty())
-    };
-    // The legacy scalar field echoes the PRIMARY provider's key
-    // (`UiConfig::from_app_config` fills the scalars from the primary entry,
-    // whatever its name), so the mask marker must key off the effective
-    // primary — keying it off the literal "openai" would show a configured
-    // non-openai primary as "unset" in GET /config after any save.
-    let scalar_provider = {
-        let p = body.llm.primary_provider.trim();
-        if p.is_empty() {
-            "openai"
-        } else {
-            p
-        }
-    };
-    body.llm.openai_api_key = if has_stored_key(scalar_provider) {
-        API_KEY_MASK.to_string()
+    // `PUT /config` is a partial update, and the provider set has exactly two
+    // representations: a stated `providers` array and the legacy scalar mirror.
+    // An `llm` member that states neither (`{"llm":{}}`, or a lone
+    // `primaryProvider`) patches the projection but says nothing about the set,
+    // so the stored set is kept verbatim.
+    //
+    // Re-deriving from anything else is data loss, and both directions have
+    // been measured. The Configuration page's auto-save omits `llm` entirely
+    // (LLM settings are managed on the /llm page — see `useConfigForm`), and
+    // resolving the set anyway applied the merged projection's legacy mirror —
+    // EMPTY on any `ui` row written before the mirror existed — as the primary
+    // instead of `providers[0]`, replacing the list with one entry carrying no
+    // api_base (the 0.10.46 release gate: `GET /llm/providers` unusable, every
+    // `POST /reviews` 422 `llmNotConfigured`). The projection's `providers[]`
+    // is not authoritative either — `sync_llm_projection` keeps the scalar
+    // mirror in sync and never the array, so a scan that configures a provider
+    // through the legacy scalars only leaves the array empty while the table
+    // holds the row, and re-deriving from the empty array deleted the provider
+    // on a 200-OK save (visible only after the next boot).
+    let submitted_llm = payload.get("llm").and_then(serde_json::Value::as_object);
+    // Does the REQUEST state the legacy scalar mirror? The merged body always
+    // carries it (it is part of the stored projection), so only a key on the
+    // submitted `llm` object marks it as an edit a client actually made — see
+    // [`resolve_llm_section`].
+    let states_legacy_scalars =
+        submitted_llm.is_some_and(|llm| LEGACY_SCALAR_KEYS.iter().any(|key| llm.contains_key(*key)));
+    // A stated `providers` array REPLACES the set (an empty array is the
+    // explicit "every provider was deleted" the /llm page sends); a stated
+    // legacy scalar describes the set through the legacy path.
+    let states_the_provider_set =
+        submitted_llm.is_some_and(|llm| llm.contains_key("providers")) || states_legacy_scalars;
+    let new_llm_configs = if states_the_provider_set {
+        resolve_llm_section(&mut body, &existing_llm, states_legacy_scalars)
     } else {
-        String::new()
+        // Persistence keeps the stored set; the runtime set and the projection
+        // are left exactly as they are, so this save cannot touch a provider.
+        existing_llm.clone()
     };
-    for (i, p) in body.llm.providers.iter_mut().enumerate() {
-        let entry = resolved.get(i).copied().unwrap_or_default();
-        p.api_key = if entry.key_present {
-            API_KEY_MASK.to_string()
-        } else {
-            String::new()
-        };
-        // Store the RESOLVED flag (keep semantics applied) so `GET /config`
-        // always reports a concrete bool and the next merge starts from it.
-        p.disabled = Some(entry.disabled);
-        // RENG-77: same rule for the thinking opt-out — the resolved
-        // (post-keep) value is what the projection echoes, so the next merge
-        // starts from what was actually applied. `None` stays `None` (the
-        // flag is not sent to the provider), never a fabricated `false`.
-        p.disable_thinking = entry.disable_thinking;
-    }
-
-    // RENG-75: the effective head is always an ENABLED provider. A recorded
-    // primary that still names an enabled entry is kept verbatim — RENG-72: a
-    // save that does not speak for the primary must never change it. One that
-    // is empty, unmatched, or names a now-DISABLED entry is normalised to the
-    // first enabled provider (or emptied when none are enabled — the stored
-    // order then stays authoritative until an entry is re-enabled).
-    if !new_llm_configs.is_empty()
-        && !new_llm_configs
-            .iter()
-            .any(|c| !c.disabled && c.provider == body.llm.primary_provider)
-    {
-        body.llm.primary_provider = new_llm_configs
-            .iter()
-            .find(|c| !c.disabled)
-            .map(|c| c.provider.clone())
-            .unwrap_or_default();
-    }
 
     // Git platforms: resolve the submitted array (full-replace with
     // secret-keep, see `resolve_git_platforms`). Validation only — the
@@ -610,8 +724,29 @@ pub(crate) fn apply_ui_config(
         if !new_llm_configs.is_empty() {
             new_cfg.llm = new_llm_configs.clone();
         }
-        new_cfg.max_concurrent_llm_calls = Some(body.advanced.max_concurrent_reviews as usize);
-        new_cfg.max_team_size = Some(body.advanced.max_concurrent_reviews as usize);
+        // RENG-107: the two caps the review pipeline enforces, set together
+        // exactly as the DB overlay sets them.
+        //
+        // A value of 0 — what a payload, or a STORED ui row, yields when its
+        // `advanced` section is absent (serde then fills the derived
+        // `UiAdvancedConfig::default()`) — is not a decision: the pipeline
+        // builds a 0-permit `Semaphore` from these caps, so every expert task
+        // would wait forever instead of running, and the startup replay would
+        // re-apply that zero on every boot. So 0 means "this update did not
+        // decide the caps": the running values stay, and the projection is
+        // published with the value actually in force, so the Configuration page
+        // neither shows a cap that cannot apply nor persists it again (this
+        // heals a legacy row on the next save).
+        let submitted_caps = body.advanced.max_concurrent_reviews as usize;
+        if submitted_caps > 0 {
+            new_cfg.max_concurrent_llm_calls = Some(submitted_caps);
+            new_cfg.max_team_size = Some(submitted_caps);
+        } else {
+            body.advanced.max_concurrent_reviews = new_cfg
+                .max_concurrent_llm_calls
+                .unwrap_or(default_max_concurrent_reviews() as usize)
+                as u32;
+        }
         // RENG-95: the aggregation flag is part of the UI projection, so a
         // `PUT /config` that mentions it applies it here (the config page never
         // sends it — it is controlled from the experts page — and a save that

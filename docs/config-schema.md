@@ -11,8 +11,20 @@ The config file uses TOML format. Below is the complete schema with all availabl
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `output_dir` | string | `<state dir>/reports/` (`~/.config/review-engine/reports/` unless `serve --data-dir` moved the root) | Directory for auto-saved reports |
-| `max_team_size` | integer (optional) | `6` | Maximum number of experts per review |
-| `max_concurrent_llm_calls` | integer (optional) | `6` | Maximum concurrent LLM API calls |
+| `max_team_size` | integer (optional) | `6` | Maximum number of experts per review. Parsed and carried in the resolved config, but **no review path enforces it today**: the pipelines build the enabled expert team directly (`AppConfig::build_expert_defs`), and the team-selection code that does read this key is not called by the CLI, `serve` or the webhook handler. A `0` is therefore never honoured either — see [Concurrency keys](#concurrency-keys-max_team_size--max_concurrent_llm_calls) |
+| `max_concurrent_llm_calls` | integer (optional) | `6` | Maximum concurrent LLM API calls, enforced by the review pipelines. Read only when the file is passed as the whole configuration (`--config <file>`); a value of `0` is treated as "not decided" (the default applies) rather than as a limit |
+
+### Concurrency keys (`max_team_size` / `max_concurrent_llm_calls`)
+
+Whether these two top-level scalars are honoured depends on how the file is read:
+
+| How the file is read | Are the keys honoured? |
+|---|---|
+| `--config <file>` (and the library's `ConfigSource::Path` / `Inline`) | Yes — the whole `AppConfig` is deserialized, so `max_concurrent_llm_calls` bounds the review's LLM concurrency. `max_team_size` reaches the config but is not enforced by any review path (see above) |
+| The auto-detected `.code-audit-config.toml` (user-level `~/.config/review-engine/` or project-level, i.e. what `reng review` reads without `--config`) | **No** — the resolver lifts only `llm`, `report`, `commands` and `review_experts` out of the file, so both scalars are ignored there |
+| The Web UI / database (`serve`) | The Configuration page's `advanced.maxConcurrentReviews` is stored in `review.db` and written to both `AppConfig` fields; `max_concurrent_llm_calls` is the one that actually limits concurrency |
+
+A value of **`0` is treated as "not decided", never as a limit**: a concurrency semaphore with zero permits would leave every expert task waiting forever — a silent hang with no error, no timeout and no last log line — so the built-in default `6` applies instead. `reng` prints one warning naming the key it ignored, and the review and repo-review pipelines carry their own backstop for callers that never go through the CLI (they warn if a `0` reaches a semaphore at all).
 
 ## `[project]`
 
@@ -237,7 +249,7 @@ window_seconds = 60
 
 ## `[[git_platforms]]` (Web UI, persisted to `ui-state.toml`)
 
-Git platform instances are **not** read from `.code-audit-config.toml`: they are managed in the Web UI (**Git 平台** card) and persisted to `ui-state.toml` in the config directory (default `ui-state.toml` in the state directory — `~/.config/review-engine/ui-state.toml` unless `serve --data-dir` moved the root — overridable via `REVIEW_UI_STATE_FILE`, `REVIEW_ENGINE_CONFIG_DIR` or `--data-dir`) as `[[git_platforms]]` entries. They are hot-effective and drive webhook verification, review-time GitLab API pulls, admin-level System Hook dispatch, and per-platform project filtering. Only `type = "gitlab"` is implemented today.
+Git platform instances are **not** read from `.code-audit-config.toml`: they are managed in the Web UI (**Git 平台** card) and persisted to `ui-state.toml` in the config directory (default `ui-state.toml` in the state directory — `~/.config/review-engine/ui-state.toml` unless `serve --data-dir` or the global `--config-dir` moved the root — overridable via `REVIEW_UI_STATE_FILE`, `REVIEW_ENGINE_CONFIG_DIR` or `--data-dir`) as `[[git_platforms]]` entries. They are hot-effective and drive webhook verification, review-time GitLab API pulls, admin-level System Hook dispatch, and per-platform project filtering. Only `type = "gitlab"` is implemented today.
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
@@ -269,10 +281,14 @@ allowed_projects = ["group/project-a", "group/project-b"]   # empty = all projec
 
 ## Configuration Loading Order
 
-1. Built-in defaults (`docs/code-audit-default.toml`) with environment overrides
-2. User-level config (`.code-audit-config.toml` in the state directory, `~/.config/review-engine/` by default)
-3. Project-level config (`.code-audit-config.toml` in the project root)
-4. Environment variables (`LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.)
-5. CLI arguments (`--llm-config`, `--config`)
+Later sources override earlier ones:
+
+1. Built-in defaults (`docs/code-audit-default.toml`)
+2. Environment variables (`CODE_AUDIT_COMMANDS`, `CODE_AUDIT_SCORING_ENABLED`, etc.), applied to the built-in defaults
+3. User-level config (`.code-audit-config.toml` in the state directory, `~/.config/review-engine/` by default)
+4. Project-level config (`.code-audit-config.toml` in the project root, or the file named by `--config`)
+5. **The configuration database** (`review.db` in the config directory) — highest priority, applied **per key**: a key the database carries wins, a key it does not carry keeps the TOML value
+
+`--config` selects the project-level file in step 4 and `--llm-config` replaces the resolved `[[llm]]` list for one run; neither is a further layer. `LLM_CONFIG` is the one surface that does not follow the order above on the CLI — there it outranks both the file and the database (see the priority note in [`[[llm]]`](#llm)). See [Configuration resolution order](configuration.md#config-resolution-order) for the full rules and how to point the CLI at a server's config directory with `--config-dir`.
 
 When no `--config` is given, the user-level file contributes `[[llm]]` (as a fallback) and `[report]` (as global defaults); the project-level file then overrides `commands`/`review_experts` (extended) and `[report]` (replaced wholesale — fields omitted in the project file fall back to serde defaults, not user-level values).

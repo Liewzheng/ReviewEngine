@@ -8,15 +8,60 @@ review-engine is driven by a TOML config file named `.code-audit-config.toml`. Y
 
 Configuration is merged from multiple sources. Later sources override earlier ones:
 
-1. **Embedded default** — `docs/code-audit-default.toml` built into the binary (plus environment overrides for built-in values).
-2. **User-level config** — `~/.config/review-engine/.code-audit-config.toml`.
-3. **Project-level config** — `.code-audit-config.toml` in the current working directory.
-4. **Environment variables** — `LLM_CONFIG`, `CODE_AUDIT_COMMANDS`, etc.
-5. **CLI arguments** — `--config`, `--llm-config`, etc.
+1. **Built-in defaults** — `docs/code-audit-default.toml` embedded in the binary.
+2. **Environment variables** — `CODE_AUDIT_COMMANDS`, `CODE_AUDIT_SCORING_ENABLED`, `LLM_CONFIG`, etc. Applied **to the built-in defaults**, so a config file entry overrides them. `LLM_CONFIG` behaves differently from the rest and differently on each front end — see the exception note below.
+3. **User-level config** — `~/.config/review-engine/.code-audit-config.toml` (or `<state dir>/.code-audit-config.toml` — see [Data directory](#data-directory-serve---data-dir)). Provides a global `[[llm]]` fallback and global `[report]` defaults.
+4. **Project-level config** — `.code-audit-config.toml` in the current working directory, or the file you name with `--config`. Overrides the above for the keys it carries.
+5. **Database overrides (what the Web UI configured)** — the configuration database wins over everything above. **This is the highest-priority source, and it applies to every command, not only `serve`** — with one documented exception for the provider list, in step 2.
+
+`--config` and `--llm-config` are not a sixth layer: `--config` picks which file plays the project-level role in step 4, and `--llm-config` replaces the resolved `[[llm]]` list for that one run.
+
+**`LLM_CONFIG` is the exception, and it differs by front end.** On `serve` it is a **fallback only** — it is read when no config file supplies a non-empty `[[llm]]`, so a file that does always wins (`apply_llm_env_fallback`, `src/config/resolver/env.rs:59`, called from the serve path only). On the CLI it is the opposite: `resolve_llm_configs` (`src/cli/handlers/review.rs:32-48`) takes `--llm-config` first, then `LLM_CONFIG`, and only then the resolved providers — so on a CLI run the environment **outranks** both the file and the database for the provider list. Every other surface follows the order above unchanged.
 
 Use this to keep secrets (API keys) in your user config and share project-specific expert settings in the repo.
 
-**Web UI layer (a running server).** `review-engine serve` also stores what the Web UI configures — LLM providers, git platforms, review rules, and per-expert `enabled` / `weight` edits — in its configuration database (`review.db` by default). On startup that stored state is applied **over** the config file: `config files / env / CLI < database`. The file stays the base/default; a stored value wins where it exists, and everything the Web UI never touched keeps its file value. See [Web UI](#web-ui).
+### The database layer: per key, and not server-only
+
+`review-engine serve` stores what the Web UI configures — LLM providers, git platforms, review rules, and per-expert `enabled` / `weight` edits — in its configuration database (`review.db` by default). That stored state is applied **over** the config file, and since 0.10.46 the rule is:
+
+```text
+config file / env / CLI  <  database
+```
+
+**The rule is per key, not per source.** A key the database carries wins over the TOML value; a key the database does not carry keeps the TOML value. A stored row therefore *patches* the base — it never replaces the file's configuration wholesale — so editing one provider in the Web UI does not freeze the values you set by hand for the others, and a config file that is never touched by the Web UI is followed exactly as written.
+
+**It holds for the CLI as much as for the server.** DB-override resolution lives in the config layer, so `review-engine review` / `describe` / `improve` / `repo-review` apply it the same way `serve` does. The point is that one machine has one answer to "which providers and experts are configured": the same `review.db` the container runs on. Configure through the Web UI and the CLI follows.
+
+The two sides are not symmetric in *role*, even though they read the same file. For `serve` the database is the runtime source of truth — everything changed in the Web UI lands there, and the TOML file is bootstrap/fallback. For the CLI the TOML file is the complete source and the database is a "prefer it where present" overlay, which is what makes a CLI run work on a machine that has never run `serve`. Both sides read the same `secrets.key` from the same directory, so the **LLM provider API keys** the Web UI stored encrypted (the `enc:` values in the `llm_providers` rows, and in `ui-state.toml` before the migration) are decrypted by the CLI with no extra setup.
+
+That covers provider credentials **only**. A CLI review still needs its own git credential: the CLI's review path resolves the Git token from `--gitlab-token` / `GITLAB_TOKEN` (or the GitHub equivalents) and does not reuse the **Git platform** entries stored in the database. Pointing `--config-dir` at the server's directory gives the CLI the same *providers and experts* (and the concurrency caps and the aggregation flag) — not the same GitLab token. Set `GITLAB_TOKEN` for CLI runs, or fetch the token from the Web UI and export it.
+
+With no database reachable — `REVIEW_DISABLE_DB=1`, or no state directory to resolve — nothing changes and nothing fails: the CLI runs on exactly the file-based configuration it always did, and a missing database is a normal state (dev machines, CI), so it is not even a warning. A warning is logged in the one case worth knowing about: a `review.db` that **exists but cannot be read or applied** (typically a permission problem) — the command still proceeds on the TOML values.
+
+The CLI only ever **reads** the database; the running server is what writes. It opens the database read-only and takes no write lock, so it never creates or replaces the WAL sidecars (`review.db-wal` / `-shm`) — a host-side process minting those sidecars with its own uid is exactly what broke every write in the storage incident fixed in 0.10.45. Reading while `serve` holds the database open is safe (SQLite in WAL mode allows concurrent readers), so a CLI run alongside the server needs no coordination.
+
+See [Web UI](#web-ui) for what the page edits.
+
+### Pointing the CLI at the server's configuration (`--config-dir`)
+
+Because the database is where the answer lives, a CLI run must be able to find the *same* state directory the server uses. **`--config-dir <path>` is a global flag — every command accepts it — that names that directory**, and it is resolved before anything else reads or writes a state path, so it works for `review`, `repo-review`, `validate`, `doctor` and `serve` alike.
+
+```bash
+review-engine review --local-path . --base main --progress \
+  --config-dir /volume1/docker/reng/config
+```
+
+The shipped compose files mount their deploy directory at `/app/config` and set `REVIEW_ENGINE_CONFIG_DIR=/app/config` for the container. On a NAS that directory is a plain host path, so pointing the CLI at it is all that is needed to share the container's configuration — no copy, no sync:
+
+| What you want | How |
+|---|---|
+| One-off CLI run against the container's config | `--config-dir /volume1/docker/reng/config` |
+| Every shell in your session, no flag | `export REVIEW_ENGINE_CONFIG_DIR=/volume1/docker/reng/config` in `.bashrc` — the environment equivalent of the flag |
+| Running inside the container | nothing: `REVIEW_ENGINE_CONFIG_DIR=/app/config` is already set by the compose file |
+
+The flag and the variable resolve the same directory; pick whichever suits the call site. `--config-dir` takes the same slot as `serve --data-dir` (`--data-dir` > `--config-dir` > `REVIEW_DATA_DIR` > `REVIEW_ENGINE_CONFIG_DIR` > `~/.config/review-engine`), and the directory holds everything the server persists — `review.db`, `ui-state.toml`, `secrets.key` and the user-level `.code-audit-config.toml`. See [Data directory](#data-directory-serve---data-dir) for the full artifact list.
+
+**The directory must be readable by the user running the CLI.** On a NAS the container's app user owns it (the deployment docs give it a non-root uid), so run the CLI as that user, or grant it read access to `review.db` **and its WAL sidecars** (`review.db-wal`, `review.db-shm`) — those are what the CLI actually reads. When a `review.db` is present but unreadable, the CLI falls back to the plain TOML configuration and logs a warning; it never treats a permission failure as "the database said nothing", and it cannot disturb the running server either way.
 
 ---
 
@@ -81,7 +126,7 @@ With the stored list `[xiaomi, deepseek]` and `deepseek` selected as primary, a 
 - **Custom expert model** (`[review_experts.<name>] model = "…"`): that expert runs **on the chain head** with its model substituted (the head's endpoint and key, the expert's model id). This case has no fallback — the custom model is not assumed to exist on the other providers.
 - **All providers disabled** (or none configured): submitting a review fails fast at enqueue time with `422` and the machine-readable code `llmAllDisabled` ("all LLM providers are disabled: re-enable one …") — a named cause, never a generic per-provider failure deep in the pipeline. With nothing configured at all the code stays `llmNotConfigured`.
 - **The selection only moves when the user moves it**: setting a card as primary, adding the first provider to an empty page, and deleting the last provider are the only saves that carry `llm.primaryProvider`. An ordinary card add/edit omits it (the backend keeps the stored value), so saving from a page that is out of date — a second tab, a window opened before the change — cannot drag the selection back to the value that page last saw, and neither can deleting a *non-primary* card. Deleting the primary card itself is refused while another provider remains, naming the card and pointing at **Set as Primary**: the successor is the user's choice, never the array head picked on their behalf (RENG-72). Disabling the primary card is the one explicit action that moves the recorded selection — to the first enabled provider, since the head is always enabled.
-- **Config file vs Web UI**: when the config file holds `[[llm]]` entries, CLI and webhook-triggered reviews use those in **file order** — the file is the explicit configuration for that run. The UI's primary applies to providers configured through the Web UI / database. Configure providers in one place to avoid ambiguity.
+- **Config file vs Web UI**: providers follow the [config resolution order](#config-resolution-order) like every other surface — the stored `llm_providers` rows win where the database carries them, so under `serve` (and, since 0.10.46, in any CLI run that resolves the same `review.db`) the Web UI's cards are what actually runs. When the database carries no providers — `REVIEW_DISABLE_DB=1`, no `review.db`, or a Web UI that never configured one — the config file's `[[llm]]` entries are used, in **file order**, for that run. Configure providers in one place to avoid ambiguity.
 - **Order is persisted, not recomputed**: `llm_providers` rows store their list index in `raw.position`, and the loader orders by it, so the order the UI shows survives a restart. Rows without a `position` (hand-written import) sort last, in `updated_at` order. The `disabled` flag travels inside the same `raw` JSON bag, so no database migration is needed and rows written by older versions (no key) load as enabled.
 - **Duplicate names and the recorded primary**: two cards may share a provider name (two accounts of one service). The recorded `llm.primaryProvider` is matched by NAME, so it always resolves to the first same-named enabled entry — which is exactly what "the head is the first enabled card" means under stored-order-is-the-chain, so no index-based echo is needed.
 
@@ -328,13 +373,17 @@ Everything the server persists lives in one directory — the **state dir**. `se
 
 The state dir itself is resolved in this order (first match wins):
 
-1. `--data-dir <path>` / `REVIEW_DATA_DIR=<path>` — equivalent, the flag wins;
-2. `REVIEW_ENGINE_CONFIG_DIR` — the override that predates the flag (the shipped images set it to `/app/config`);
-3. `~/.config/review-engine`.
+1. `serve --data-dir <path>` — serve-only, and the flag form of `REVIEW_DATA_DIR`;
+2. `--config-dir <path>` — the new global flag, accepted by every command (see [Pointing the CLI at the server's configuration](#pointing-the-cli-at-the-servers-configuration---config-dir));
+3. `REVIEW_DATA_DIR=<path>` — the environment form of `--data-dir`;
+4. `REVIEW_ENGINE_CONFIG_DIR` — the environment form of `--config-dir`, and the override that predates both flags (the shipped images set it to `/app/config`);
+5. `~/.config/review-engine`.
+
+A flag always beats the environment variable of the same level, so `--config-dir` outranks `REVIEW_DATA_DIR`; on `serve`, `--data-dir` outranks `--config-dir` when both are given.
 
 **A per-artifact variable still wins for its own artifact**, even against `--data-dir`: `REVIEW_UI_STATE_FILE` (which also moves `review.db` and `secrets.key`, they are derived from its directory), `REVIEW_AUTH_FILE`, `REVIEW_DISPATCH_STATE`, `REVIEW_FEEDBACK_PATH`, `REVIEW_MODELS_DEV_CACHE`, and `DATABASE_URL` (a PostgreSQL server instead of the embedded database). They are absolute paths written by an operator, so existing deployments that point one file at a mount keep working. They are also process-wide, so an instance started with `--data-dir` *and* one of them set is not isolated for that artifact — `serve` logs one warning per hit at startup (`<VAR> is set — <artifact> stays outside the data dir (<path>)`). Two instances that each get their own `--data-dir` and a clean environment share nothing.
 
-Without the flag, nothing changes: the defaults are exactly the paths in the table above, and every existing env override keeps working.
+Without either flag, nothing changes: the defaults are exactly the paths in the table above, and every existing env override keeps working.
 
 ### Running two isolated instances
 

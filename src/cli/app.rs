@@ -31,14 +31,29 @@ pub fn parse_cli() -> Cli {
     Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
 }
 
-/// Apply the explicit data dir (`serve --data-dir`, or `REVIEW_DATA_DIR`) —
-/// RENG-37. Called by `main` before anything can resolve or write a state
-/// path, including the log collector's `logs.ndjson`.
+/// Apply the explicit state root — `serve --data-dir`, the global
+/// `--config-dir`, or `REVIEW_DATA_DIR` (RENG-37, RENG-107). Called by `main`
+/// before anything can resolve or write a state path, including the log
+/// collector's `logs.ndjson`.
+///
+/// Precedence, highest first: `serve --data-dir` > `--config-dir` >
+/// `REVIEW_DATA_DIR` > `REVIEW_ENGINE_CONFIG_DIR` > `~/.config/review-engine`.
+/// The first two are CLI requests for *this* run and are applied as the
+/// process data dir, which is exactly what puts them above the environment
+/// variables (see `review_engine::paths`); `REVIEW_ENGINE_CONFIG_DIR` needs no
+/// handling here — the resolvers read it themselves.
 pub fn apply_data_dir(cli: &Cli) -> Result<()> {
     let flag = match &cli.command {
         Some(Commands::Serve { data_dir, .. }) => data_dir.clone(),
         _ => None,
     };
+    // `--config-dir` is the global form of REVIEW_ENGINE_CONFIG_DIR: it pins
+    // the same root for every command, and only when `serve` did not name one
+    // itself. Passing it as the data-dir flag (rather than leaving it to the
+    // env var) is what places it ABOVE REVIEW_DATA_DIR — the CLI request for
+    // this run outranks a deployment-wide default. Creating the directory
+    // matches `--data-dir`.
+    let flag = flag.or_else(|| cli.config_dir.clone());
     review_engine::paths::apply_data_dir(flag.as_deref())?;
     Ok(())
 }
@@ -58,6 +73,32 @@ fn warn_escaping_overrides() {
             "{env} is set — {artifact} stays outside the data dir ({})",
             root.display()
         );
+    }
+}
+
+/// Resolve the file `reng validate` reads.
+///
+/// `reng validate <file>` and `reng validate --config <file>` reach this
+/// function identically — the caller merges both forms into one `explicit`
+/// path (RENG-81). With no explicit path the current directory's
+/// `.code-audit-config.toml` wins, then the user-level one.
+pub(super) fn resolve_validate_target(
+    explicit: Option<String>,
+    cwd: Option<&std::path::Path>,
+    user_config: Option<std::path::PathBuf>,
+) -> Result<String> {
+    if let Some(path) = explicit {
+        return Ok(path);
+    }
+    let found = [cwd.map(|dir| dir.join(".code-audit-config.toml")), user_config]
+        .into_iter()
+        .flatten()
+        .find(|path| path.exists());
+    match found {
+        Some(path) => Ok(path.to_string_lossy().into_owned()),
+        None => anyhow::bail!(
+            "No config file found. Pass one (`reng validate <file>` or `--config <file>`) or run review-engine init."
+        ),
     }
 }
 
@@ -192,25 +233,24 @@ pub async fn run(cli: Cli) -> Result<()> {
         Commands::Review { .. } => {
             anyhow::bail!("Please specify --mr-url, --diff, --stdin, --local-path, or --path");
         }
-        Commands::Validate { config } => {
-            let config = match config {
-                Some(path) => path,
-                None => {
-                    let candidates = [
-                        std::env::current_dir().ok().map(|p| p.join(".code-audit-config.toml")),
-                        review_engine::paths::user_config_path(),
-                    ];
-                    candidates
-                        .into_iter()
-                        .flatten()
-                        .find(|p| p.exists())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!("No config file found. Use --config or run review-engine init.")
-                        })?
-                        .to_string_lossy()
-                        .to_string()
-                }
-            };
+        Commands::Doctor { fix, quiet } => {
+            // The doctor prints its own report (and its own failures); all this
+            // layer owns is the exit code, which is what scripts and the
+            // entrypoint's `|| true` read.
+            let code = review_engine::doctor::run(fix, quiet).await;
+            if code != 0 {
+                std::process::exit(code);
+            }
+        }
+        Commands::Validate { config, file } => {
+            // `reng validate <file>` and `reng validate --config <file>` are
+            // the same request (RENG-81); clap rejects passing both.
+            let cwd = std::env::current_dir().ok();
+            let config = resolve_validate_target(
+                config.or(file),
+                cwd.as_deref(),
+                review_engine::paths::user_config_path(),
+            )?;
             let content = tokio::fs::read_to_string(&config).await?;
             let parsed = review_engine::config::load_and_apply(&content)?;
             println!("✓ Valid config: {} experts defined", parsed.review_experts.len());
@@ -325,6 +365,9 @@ pub async fn run(cli: Cli) -> Result<()> {
             // 0.10.0 persistence (design/persistence.md §6.1, strict order):
             // 1) resolve DB URL → pool → migrate (failure aborts startup;
             //    REVIEW_DISABLE_DB=1 bypasses to 0.9 behaviour);
+            // 1b) overlay the DB configuration onto the file-resolved config
+            //    (db_overlay::apply_db_overrides — the same call the CLI paths
+            //    make: DB over file, key by key);
             // 2) §5.3 interrupted sweep + TaskStore write-through injection
             //    (below, right after migrate);
             // 3) one-shot ui-state.toml import (single transaction; failure
@@ -334,6 +377,44 @@ pub async fn run(cli: Cli) -> Result<()> {
                 .await?
                 .map(Arc::new);
             if let Some(store) = app_state.db.clone() {
+                // DB over file: the config dir's `review.db`, when it exists, is
+                // the HIGHEST-priority configuration layer. Read it here — before
+                // the WebUI replay below — and let it override the file-resolved
+                // config key by key, through the same `AppState`-free function the
+                // CLI paths use. The replay that follows still owns the UI
+                // projection, the GitLab runtime and the masked shapes, and
+                // re-applies the same DB values, so the running configuration is
+                // unchanged. A database that carries nothing (fresh deploy, or
+                // `REVIEW_DISABLE_DB=1`) leaves the file resolution in force.
+                let file_experts = config.review_experts.clone();
+                let env_overrides = app_state.ui_state_env.clone().unwrap_or_default();
+                match review_engine::server::api::config::db_overlay::apply_db_overrides(
+                    &mut config,
+                    &store,
+                    &env_overrides,
+                )
+                .await
+                {
+                    Ok(applied) if !applied.is_empty() => {
+                        if applied.experts_patched > 0 {
+                            // RENG-93: the WebUI expert edits are re-applied over
+                            // the FILE-resolved team, never over the DB-overlaid
+                            // one published here — clearing an override must fall
+                            // back to the config file's value.
+                            *app_state.expert_base.write().unwrap_or_else(|e| e.into_inner()) = Some(file_experts);
+                        }
+                        // Poisoning is not a concern here: the state is still local
+                        // to startup, so a poisoned lock only means an earlier
+                        // panicking thread — publishing the config still beats
+                        // silently leaving the file resolution in force.
+                        let mut running = app_state.app_config.write().unwrap_or_else(|e| e.into_inner());
+                        *running = Some(Arc::new(config.clone()));
+                        drop(running);
+                        tracing::info!("applied the database configuration over the config file");
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!("failed to apply the database configuration over the config file: {e:#}"),
+                }
                 // §5.3: tasks still pending/running when the previous process
                 // died are marked failed with an 'interrupted' error. They are
                 // NOT re-queued automatically (LLM quota / duplicate MR
@@ -735,7 +816,9 @@ pub async fn run(cli: Cli) -> Result<()> {
 
             // Resolve LLM config
             let config_source = config_path.clone().map(ConfigSource::Path);
-            let config = review_engine::config::resolve_config(config_source).await?;
+            let config = crate::cli::db_config::resolve_cli_config(config_source)
+                .await?
+                .into_config();
             let llm_configs = handlers::resolve_llm_configs(&llm_config, &config)?;
 
             let has_llm = !llm_configs.is_empty() || std::env::var("LLM_CONFIG").is_ok() || !config.llm.is_empty();

@@ -267,6 +267,14 @@ migrations/
 ### 6.1 启动序列（严格按序）
 
 1. 解析 DB URL（§4.3）→ 建池 → `Migrator::run` → **失败即退出非零**（§9）。
+1b. **把 DB 配置叠加到文件解析结果之上**（RENG-107，`src/cli/app.rs`）。紧跟 DB bootstrap、第 2 步之前调用 `server::api::config::db_overlay::apply_db_overrides(&mut AppConfig, &SqlxStore, &UiStateEnvOverrides) -> AppliedDbOverrides`（`src/server/api/config/db_overlay.rs`）。
+   - **为什么排在这里**：顺序是「文件解析结果 → DB 叠加 → WebUI 回放」。叠加必须先于第 4 步的回放，因为它建立的是**基线**；而回放（`load_and_apply_ui_state_from_db`）继续独占 `ui_config`、GitLab 运行时与掩码投影，并会把同一批 DB 值再应用一次，所以运行态配置不变——这是「提取核心、不改行为」而非第二套回放。
+   - **这条规则本身**：`review.db` 所在的配置目录一旦存在库，该库就是**最高优先级**的配置层，且**逐键**生效——库里有的面（行 / `app_settings` 条目）覆盖文件解析结果，库里没有的键保留 TOML 值，因此只存在于配置文件的策略值（`[report]` / `[scoring]` / `[review_experts]` 预设、语言档案）不会被动到。库不存在（全新部署）或 `REVIEW_DISABLE_DB=1` 时，结果与旧的纯 TOML 解析完全一致。
+   - **`AppState`-free 是刻意的**：签名只吃已解析的 `AppConfig`、store 与 env/CLI 覆盖，不碰 `AppState`，所以 CLI 各条路径调用**同一个函数**，serve 与 CLI 的优先级不可能漂移。
+   - **哪些面落地、哪些只能返回**：`llm_providers` 行 → `AppConfig::llm`（**链序**：持久化的 `ui.llm.primaryProvider` 排首位，其余按存储顺序，`disabled` 的条目不进链 —— RENG-55 / RENG-75，与 `AppState::ordered_llm_configs` 同一规则；`AppliedDbOverrides::llm` 返回的就是这条已排好序的链，调用方不得自行重排）；`app_settings` 的 `experts` override → `AppConfig::review_experts`（补丁）；`ui` 行的 `advanced.maxConcurrentReviews` → `max_concurrent_llm_calls` 与 `max_team_size`，`aggregated`（RENG-95 三态）→ `report.aggregated`。**但 `AppConfig` 没有 `git_platforms` 字段**，所以 git 平台条目与遗留 gitlab 凭据是**返回**在 `AppliedDbOverrides` 里而不是写进 config；`rules` 同理（UI 投影在 `AppConfig` 上没有对应物）。`is_empty()` 表示「库里没有任何配置」。
+   - **CLI 走同一条路（RENG-107）**：`review` / `repo-review` / `improve` / `ask` / `update-changelog` 五个入口经 `src/cli/db_config.rs::resolve_cli_config` 解析配置——先 TOML，再（状态根里存在 `review.db` 时）调用上面同一个 `apply_db_overrides`，所以 DB 优先级在 serve 与 CLI 之间不可能漂移。状态根由全局 `--config-dir <path>` 指定（等价于 `REVIEW_ENGINE_CONFIG_DIR`，优先级：`serve --data-dir` > `--config-dir` > `REVIEW_DATA_DIR` > `REVIEW_ENGINE_CONFIG_DIR` > `~/.config/review-engine`）。CLI **只读**该库：`mode=ro` 打开、不取写锁、不切 journal mode，并且**绝不创建/替换 WAL sidecar**（`-wal` 已 checkpoint 时改走 `mode=ro&immutable=1`，读主文件而不落 sidecar）——这正是 0.10.45 存储事故（RENG-105/106）的成因类别。库不存在或 `REVIEW_DISABLE_DB=1` → 静默沿用 TOML；库打不开 / 迁移缺失 / 行读不出 / `secrets.key` 缺失 → **一条 warn**，命令照常按 TOML 运行。
+   - 凭据经 `ConfigStore` 边界读取，`enc:` 由配置目录的 `secrets.key` 解密（§2.4、`secrets.rs`）——与 serve 解析的是同一把钥匙，叠加层自己不碰密文。`experts` 行读失败降级为「无覆盖 + WARN」，不能让一条手改行挡住其他面。
+   - 第 4 步回放之后，`AppState::expert_overrides` 的基线仍是**文件解析**的专家团队（RENG-93）：清除某条覆盖必须回落到配置文件的值，而不是回落到这里叠加出来的团队。
 2. 恢复语义扫尾（§5.3 的 interrupted UPDATE）。
 3. **一次性导入**：`git_platforms`、`llm_providers`、`app_settings` 三表合计为空 且 `ui-state.toml` 存在 → 走现有 `load_ui_state`（persist.rs:310，含解密）读入 → 经 `rows.rs` 加密边界写库（git 凭据 + LLM key 全部 `enc:`）→ `std::fs::rename("ui-state.toml", "ui-state.toml.migrated")`。**备份不删**。
    - 导入失败：记 error、**不改名原文件**、回退到现有 `load_and_apply_ui_state` 文件回放路径继续启动——迁移失败不能让用户丢配置。

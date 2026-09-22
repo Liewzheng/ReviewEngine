@@ -43,6 +43,165 @@ fn stored_openai_key(state: &Arc<AppState>) -> String {
         .unwrap_or_default()
 }
 
+/// The concurrency caps the running config carries — what the review pipeline
+/// turns into its `Semaphore`.
+fn running_caps(state: &Arc<AppState>) -> (Option<usize>, Option<usize>) {
+    let cfg = state.app_config.read().unwrap();
+    let cfg = cfg.as_ref().expect("app_config seeded");
+    (cfg.max_concurrent_llm_calls, cfg.max_team_size)
+}
+
+/// Set the caps the running config carries (the pipeline's semaphore size).
+fn set_running_caps(state: &Arc<AppState>, cap: Option<usize>) {
+    let mut slot = state.app_config.write().unwrap();
+    let mut cfg = (**slot.as_ref().expect("app_config seeded")).clone();
+    cfg.max_concurrent_llm_calls = cap;
+    cfg.max_team_size = cap;
+    *slot = Some(Arc::new(cfg));
+}
+
+/// RENG-107 regression: a config update that does not carry a concurrency cap
+/// must not zero the caps.
+///
+/// 0 is not "no concurrent LLM calls", it is a 0-permit `Semaphore`: every
+/// expert task would wait forever instead of running, so a review hangs
+/// silently. The shape that produced it is ordinary — a `ui` row written
+/// before `advanced` existed deserializes to the DERIVED
+/// `UiAdvancedConfig::default()`, whose cap is 0 — and the startup replay
+/// re-applies exactly that row on every boot, which is why the guard belongs in
+/// this path and not only in the DB overlay.
+///
+/// 0 therefore means "this update did not decide the caps": the running values
+/// stay, and the published projection carries the value actually in force
+/// rather than a cap that cannot apply (which also heals the stored row on the
+/// next save).
+#[tokio::test]
+async fn put_config_without_a_concurrency_cap_keeps_the_caps_in_force() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai("sk-primary");
+    // A legacy deployment: the config file's cap is what runs, and the stored
+    // ui row predates the field.
+    set_running_caps(&state, Some(2));
+    state.ui_config.write().unwrap().advanced.max_concurrent_reviews = 0;
+    assert_eq!(running_caps(&state), (Some(2), Some(2)));
+
+    // 1) A sparse update (or the startup replay of that row) must leave the
+    //    effective cap alone rather than freezing the pipeline.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        running_caps(&state),
+        (Some(2), Some(2)),
+        "a row that did not decide the caps must not zero them"
+    );
+    assert_eq!(
+        state.ui_config.read().unwrap().advanced.max_concurrent_reviews,
+        2,
+        "the projection carries the cap in force, never 0"
+    );
+
+    // 2) An explicit 0 is the same statement, not a request for "nothing runs".
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "advanced": { "maxConcurrentReviews": 0 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(running_caps(&state), (Some(2), Some(2)));
+    assert_eq!(state.ui_config.read().unwrap().advanced.max_concurrent_reviews, 2);
+
+    // 3) Positive control: a cap the update really carries still applies — the
+    //    guard must not disable the setting. And a state with no cap of its own
+    //    publishes the documented default rather than 0.
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "advanced": { "maxConcurrentReviews": 9 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(running_caps(&state), (Some(9), Some(9)));
+    assert_eq!(state.ui_config.read().unwrap().advanced.max_concurrent_reviews, 9);
+
+    let _ = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "advanced": { "maxConcurrentReviews": 0 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(running_caps(&state), (Some(9), Some(9)));
+}
+
+/// RENG-107 sibling audit: `ui.advanced`'s OTHER fields — `logLevel`,
+/// `logRetentionDays`, `sseHeartbeatInterval`, `requestTimeout`,
+/// `enableMetrics`, `debugMode` — share the shape of the cap bug (a row
+/// without the `advanced` section gives them the derived defaults: `0`, `""`,
+/// `false`), so they were swept for the same hazard: is any of them applied to
+/// something that RUNS?
+///
+/// Verdict, pinned here: no. Nothing outside `server::api::config` reads any of
+/// them (a tree-wide search leaves `maxConcurrentReviews` as the only
+/// `advanced` field with a consumer — the guard in this file); they are
+/// display-only, fed back by the Configuration page's own form defaults
+/// (`frontend/src/composables/useConfigForm.ts`: info / 30 / 15 / 120 / true /
+/// false). The proof that no sibling reaches the running configuration is this
+/// test: a `PUT /config` that zeroes all of them changes the `AppConfig` in
+/// exactly one place — the caps it also submits.
+///
+/// `enableMetrics`/`debugMode` are deliberately NOT guarded even so: `false` is
+/// a legitimate choice a user can make, indistinguishable from the derived
+/// default, and with no consumer there is nothing to protect.
+#[tokio::test]
+async fn advanced_siblings_are_projection_only() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai("sk-primary");
+    let before =
+        serde_json::to_value(&**state.app_config.read().unwrap().as_ref().expect("app_config seeded")).unwrap();
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({
+            "advanced": {
+                "logLevel": "",
+                "logRetentionDays": 0,
+                "sseHeartbeatInterval": 0,
+                "requestTimeout": 0,
+                "enableMetrics": false,
+                "debugMode": false,
+                "maxConcurrentReviews": 4
+            }
+        })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let after = serde_json::to_value(&**state.app_config.read().unwrap().as_ref().expect("app_config seeded")).unwrap();
+    let mut expected = before.clone();
+    expected["max_concurrent_llm_calls"] = serde_json::json!(4);
+    expected["max_team_size"] = serde_json::json!(4);
+    assert_eq!(
+        after, expected,
+        "no `advanced` sibling may reach the running configuration — only the caps are applied"
+    );
+
+    // The projection, on the other hand, echoes what was submitted: the only
+    // consumer of these fields is the Configuration page.
+    let ui = state.ui_config.read().unwrap();
+    assert_eq!(ui.advanced.log_level, "");
+    assert_eq!(ui.advanced.log_retention_days, 0);
+    assert_eq!(ui.advanced.sse_heartbeat_interval, 0);
+    assert_eq!(ui.advanced.request_timeout, 0);
+    assert!(!ui.advanced.enable_metrics);
+    assert!(!ui.advanced.debug_mode);
+}
+
 /// Security regression: `GET /config` must never return a live LLM key.
 #[tokio::test]
 async fn get_config_never_leaks_llm_api_key() {
@@ -2521,4 +2680,192 @@ async fn git_platform_probe_allows_loopback_and_private_targets() {
             "{base} must pass SSRF validation and fail at connect time instead: {body}"
         );
     }
+}
+
+// ── The legacy scalar mirror describes the PRIMARY, whatever its name ──
+
+/// Two accounts with an `openai`-labelled one, and a recorded primary that is
+/// the OTHER provider. The legacy scalar mirror is filled from the primary
+/// (`sync_llm_projection`), so in this shape it describes the `deepseek` entry
+/// while the mirror's field names (`openaiApiKey`, …) suggest the openai one —
+/// the mismatch that repointed an account at another provider's endpoint.
+fn state_with_openai_and_another_primary() -> Arc<AppState> {
+    let app: crate::models::AppConfig = serde_json::from_value(serde_json::json!({
+        "llm": [
+            {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "api_key": "sk-openai-acct",
+                "api_base": "https://api.openai.com/v1",
+                "max_tokens": 4096,
+                "temperature": 0.7
+            },
+            {
+                "provider": "deepseek",
+                "model": "deepseek-v4-flash",
+                "api_key": "sk-deepseek-acct",
+                "api_base": "https://api.deepseek.com/v1",
+                "max_tokens": 4096,
+                "temperature": 0.7
+            }
+        ]
+    }))
+    .expect("two-account AppConfig must deserialize");
+    let mut ui = UiConfig::from_app_config(&app);
+    // The user's recorded choice, exactly as "set as primary" persists it.
+    ui.llm.primary_provider = "deepseek".to_string();
+    // `sync_llm_projection` fills the mirror from the recorded primary, whatever
+    // its name — so the stored mirror now describes the `deepseek` entry even
+    // though the field names say `openai`.
+    ui.llm.api_base_url = "https://api.deepseek.com/v1".to_string();
+    ui.llm.default_model = "deepseek-v4-flash".to_string();
+    ui.llm.openai_api_key = API_KEY_MASK.to_string();
+    let state = Arc::new(AppState::new(app.llm.clone()));
+    *state.app_config.write().unwrap() = Some(Arc::new(app.clone()));
+    *state.ui_config.write().unwrap() = ui;
+    state
+}
+
+/// The card grid the `/llm` page submits for an ordinary edit: every card with
+/// masked keys and — the RENG-72 rule — no `primaryProvider` and no scalar
+/// mirror, because an edit does not speak for the primary.
+fn two_account_card_edit(deepseek_max_tokens: u32) -> serde_json::Value {
+    serde_json::json!({
+        "llm": {
+            "providers": [
+                {
+                    "provider": "openai",
+                    "apiKey": API_KEY_MASK,
+                    "apiBaseUrl": "https://api.openai.com/v1",
+                    "defaultModel": "gpt-4o",
+                    "maxTokens": 4096,
+                    "temperature": 0.7,
+                    "timeoutSeconds": 60,
+                    "retryAttempts": 3
+                },
+                {
+                    "provider": "deepseek",
+                    "apiKey": API_KEY_MASK,
+                    "apiBaseUrl": "https://api.deepseek.com/v1",
+                    "defaultModel": "deepseek-v4-flash",
+                    "maxTokens": deepseek_max_tokens,
+                    "temperature": 0.7,
+                    "timeoutSeconds": 60,
+                    "retryAttempts": 3
+                }
+            ]
+        }
+    })
+}
+
+/// A save that does not state the legacy scalar mirror must never apply it:
+/// the merged projection always carries the mirror (it is stored UI state), and
+/// reading it back as an edit rebuilt the `openai`-labelled account out of the
+/// primary's mirror — measured as `openai|gpt-4o|api.openai.com` becoming
+/// `openai|deepseek-v4-flash|api.deepseek.com`, i.e. one account's key aimed at
+/// another provider's endpoint.
+#[tokio::test]
+async fn card_edit_without_the_scalar_mirror_keeps_each_accounts_endpoint() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai_and_another_primary();
+    let resp = put_config(State(state.clone()), Json(two_account_card_edit(2048)))
+        .await
+        .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let live = state.llm_configs.read().unwrap().clone();
+    let openai = live
+        .iter()
+        .find(|c| c.provider == "openai")
+        .expect("the openai account survives the edit");
+    assert_eq!(
+        openai.api_base, "https://api.openai.com/v1",
+        "the mirror describes the primary, not this account"
+    );
+    assert_eq!(openai.model, "gpt-4o");
+    assert_eq!(openai.api_key, "sk-openai-acct", "its OWN key");
+    let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+    assert_eq!(deepseek.max_tokens, 2048, "the edit itself is applied");
+    assert_eq!(deepseek.api_base, "https://api.deepseek.com/v1");
+    assert_eq!(deepseek.api_key, "sk-deepseek-acct");
+    assert_eq!(state.ui_config.read().unwrap().llm.primary_provider, "deepseek");
+}
+
+/// "Set as primary" on the non-openai card DOES send the primary's full scalar
+/// mirror (that is how the /llm page asserts a choice), and that mirror
+/// describes THIS card — so it must not be read as a description of the
+/// `openai`-labelled account either.
+#[tokio::test]
+async fn promoting_a_non_openai_account_does_not_repoint_the_openai_account() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai_and_another_primary();
+    let mut payload = two_account_card_edit(4096);
+    payload["llm"]["primaryProvider"] = serde_json::json!("deepseek");
+    payload["llm"]["openaiApiKey"] = serde_json::json!(API_KEY_MASK);
+    payload["llm"]["apiBaseUrl"] = serde_json::json!("https://api.deepseek.com/v1");
+    payload["llm"]["defaultModel"] = serde_json::json!("deepseek-v4-flash");
+    payload["llm"]["maxTokens"] = serde_json::json!(4096);
+    payload["llm"]["temperature"] = serde_json::json!(0.7);
+    payload["llm"]["timeoutSeconds"] = serde_json::json!(60);
+    payload["llm"]["retryAttempts"] = serde_json::json!(3);
+
+    let resp = put_config(State(state.clone()), Json(payload)).await.into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let live = state.llm_configs.read().unwrap().clone();
+    let openai = live.iter().find(|c| c.provider == "openai").unwrap();
+    assert_eq!(openai.api_base, "https://api.openai.com/v1");
+    assert_eq!(openai.model, "gpt-4o");
+    assert_eq!(openai.api_key, "sk-openai-acct");
+    let deepseek = live.iter().find(|c| c.provider == "deepseek").unwrap();
+    assert_eq!(deepseek.api_base, "https://api.deepseek.com/v1");
+    assert_eq!(deepseek.api_key, "sk-deepseek-acct");
+    assert_eq!(state.ui_config.read().unwrap().llm.primary_provider, "deepseek");
+}
+
+/// A `PUT /config` carrying no `llm` member speaks for nothing there — that is
+/// the Configuration page's auto-save contract (LLM settings are managed on the
+/// /llm page). The stored provider set and the projection's `llm` section must
+/// both be left exactly as they are, even when the projection's legacy scalar
+/// mirror is empty: the release gate measured the opposite, an unrelated save
+/// replacing a configured provider with one empty entry (`api_base: ""`), after
+/// which `GET /llm/providers` was unusable and every `POST /reviews` answered
+/// 422 `llmNotConfigured`.
+#[tokio::test]
+async fn payload_without_the_llm_section_leaves_the_provider_set_untouched() {
+    let _rt_lock = GITLAB_RUNTIME_LOCK.lock().await;
+    let state = state_with_openai("sk-primary");
+    {
+        // A stored projection whose mirror carries no values — the shape a
+        // `ui` row written before the mirror existed replays into.
+        let mut ui = state.ui_config.write().unwrap();
+        ui.llm.api_base_url = String::new();
+        ui.llm.default_model = String::new();
+        ui.llm.max_tokens = 0;
+        ui.llm.temperature = 0.0;
+    }
+
+    let resp = put_config(
+        State(state.clone()),
+        Json(serde_json::json!({ "rules": { "minScore": 90 } })),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let live = state.llm_configs.read().unwrap().clone();
+    assert_eq!(live.len(), 1, "the provider set is untouched: {live:?}");
+    assert_eq!(
+        live[0].api_base, "https://api.openai.com/v1",
+        "an unspoken-for save must not rebuild the provider out of the empty mirror"
+    );
+    assert_eq!(live[0].model, "gpt-4o");
+    assert_eq!(live[0].api_key, "sk-primary");
+    let ui = state.ui_config.read().unwrap();
+    assert_eq!(ui.rules.min_score, 90, "the field the request did state is applied");
+    assert_eq!(
+        ui.llm.api_base_url, "",
+        "the llm projection is left as stored, not repaired behind the caller's back"
+    );
+    assert_eq!(ui.llm.providers.len(), 1);
 }

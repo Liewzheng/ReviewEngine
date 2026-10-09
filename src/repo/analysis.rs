@@ -136,8 +136,16 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
 
     for (i, line) in content.lines().enumerate() {
         if skip_test {
-            // Test files everywhere on the line are exempt; mixed docs
-            // (e.g. a README.md inside tests/) still get scanned.
+            // Test files are skipped wholesale: every line of a path
+            // recognised by `is_test_file` is exempt, regardless of
+            // what it carries. The fixture may well live next to a
+            // `README.md` or a sample `.env`, but a config-shaped
+            // value on a "test-blessed" path is still a fixture by
+            // our rule of thumb and not a real secret. The same
+            // exclusion is enforced at the entry level by
+            // `scan_security_patterns`, so a file the regex never
+            // reaches is also never inspected line by line — the two
+            // layers are belt-and-braces for the same reason.
             continue;
         }
         for (re, desc) in &re_list {

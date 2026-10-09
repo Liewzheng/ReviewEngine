@@ -185,21 +185,19 @@ impl RepoExpert for CodeStyle {
 mod tests {
     use super::*;
 
-    /// Helper that strips the `[hygiene]` tag and surrounding
-    /// whitespace from a message so existing tests that look for
-    /// substrings like "Missing .editorconfig" / "mypy.ini" still
-    /// match even after the tag prefix lands.
-    pub(crate) fn untag(msg: &str) -> &str {
-        msg.trim_start_matches(HYGIENE_TAG).trim_start()
-    }
-
+    /// Sanity pin the [`HYGIENE_TAG`] prefix contract: every missing-
+    /// config finding in production carries it, so the report-layer
+    /// filter (`scoring::is_hygiene_finding`) can distinguish them
+    /// from genuine style defects without depending on the precise
+    /// tag string. The shared `static_experts::tests::code_style_*`
+    /// tests cover the produced findings in full.
     #[test]
     fn hygiene_tag_prefix_marks_missing_config_findings() {
         assert!(HYGIENE_TAG.starts_with('['));
         assert!(HYGIENE_TAG.ends_with(']'));
         // Sanity: the constant is what messages get prefixed with.
-        let msg = format!("{HYGIENE_TAG} Missing .editorconfig");
-        assert!(msg.starts_with(HYGIENE_TAG));
-        assert!(untag(&msg).starts_with("Missing .editorconfig"));
+        let tagged = format!("{HYGIENE_TAG} Missing .editorconfig");
+        assert!(tagged.starts_with(HYGIENE_TAG));
+        assert!(tagged.ends_with("Missing .editorconfig"));
     }
 }

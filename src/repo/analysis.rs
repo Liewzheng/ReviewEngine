@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::experts::facts::is_test_file;
+use super::experts::facts::{cfg_test_line_spans, is_test_file};
 use super::FileEntry;
 
 /// Classification of a [`SecurityFinding`].
@@ -126,13 +126,23 @@ fn is_placeholder_bracket(line: &str, match_start: usize, match_end: usize) -> b
 /// Scan a single text block for security patterns. Exposed for unit testing.
 ///
 /// Every hit is tagged [`FindingKind::Mechanical`]. Lines whose file path
-/// looks like a test file or whose matched portion is a placeholder
-/// (`〈…〉`, `<…>`, or all-`x`/`*` token after a structural prefix) are
-/// suppressed rather than reported.
+/// looks like a test file, whose matched portion is a placeholder
+/// (`〈…〉`, `<…>`, or all-`x`/`*` token after a structural prefix), or
+/// whose line falls inside a `#[cfg(test)] mod … { … }` block (an
+/// inline test module inside a regular source file — RENG-114
+/// follow-up, sirena reproducer) are suppressed rather than reported.
 pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<SecurityFinding> {
     let re_list = build_security_regexes();
     let mut findings = Vec::new();
     let skip_test = is_test_file_path(file);
+    // Inline `#[cfg(test)] mod … { … }` blocks live inside regular
+    // source files, so `is_test_file_path` cannot see them. The span
+    // list is computed once per file (a brace-counting pass) and
+    // every line is tested against it — the cost is O(L + B·K)
+    // where L is the line count, B is the block count and K is the
+    // average block length; for sirena's `upload.rs` (1257 lines, 1
+    // block) it is one comparison per regex-bearing line.
+    let cfg_test_spans = cfg_test_line_spans(content);
 
     for (i, line) in content.lines().enumerate() {
         if skip_test {
@@ -148,6 +158,16 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
             // layers are belt-and-braces for the same reason.
             continue;
         }
+        let line_no = i + 1;
+        if cfg_test_spans.iter().any(|&(s, e)| line_no >= s && line_no <= e) {
+            // Line is inside an inline `#[cfg(test)] mod … { … }`
+            // block — treat it the same as a dedicated test file.
+            // Without this layer, sirena's `upload.rs` lines 673 /
+            // 741 / 843 / 994 (every one inside `mod tests { … }`)
+            // fire as `[mechanical] Hardcoded password` and the
+            // security score drops by 16 points (4 × MECHANICAL_PER_HIT).
+            continue;
+        }
         for (re, desc) in &re_list {
             for mat in re.find_iter(line) {
                 if is_placeholder_token(mat.as_str()) {
@@ -159,7 +179,7 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
                 findings.push(SecurityFinding {
                     file: file.to_string(),
                     pattern: desc.to_string(),
-                    line: i + 1,
+                    line: line_no,
                     severity: "medium".to_string(),
                     kind: FindingKind::Mechanical,
                 });
@@ -361,5 +381,81 @@ mod tests {
             "the surviving hit must be the non-test file: {:?}",
             findings[0]
         );
+    }
+
+    /// RENG-114 follow-up (sirena): four password-shaped assignments
+    /// inside a regular `.rs` file's inline `#[cfg(test)] mod tests
+    /// { … }` block must NOT produce any finding. The file is
+    /// production-named (not a test file by path) and every regex
+    /// hit is inside the test module — the same shape as the four
+    /// lines the sirena repro hit (`crates/sirena-cli/src/upload.rs`
+    /// 673 / 741
+    /// / 843 / 994, all four are `password: "sk"`-shaped and all four
+    /// match the Hardcoded-password regex). Without this pin the
+    /// security scan would emit 4 `[mechanical] Hardcoded password`
+    /// findings, dragging the security score down by 16 points on a
+    /// repo with no real leak. The pin asserts **zero** findings in
+    /// the cfg-test block; production lines that carry the same
+    /// payload still flag (pinned by
+    /// `…_keeps_production_lines_outside_cfg_test`).
+    ///
+    /// M19 r2 (reviewer-facts P2-1): all four fixture sites are
+    /// password-shaped like the sirena reproducer — three of the
+    /// four forms the sirena file actually carries (`t.password =`,
+    /// struct-literal `password: "sk".into()`, and `.to_string()`)
+    /// plus the simpler `let password = "sk";` — so reverting the
+    /// cfg-test skip yields exactly 4 findings (one per fixture),
+    /// not 1.
+    #[test]
+    fn scan_security_patterns_in_text_skips_cfg_test_blocks() {
+        // Mimic the sirena shape: 4 password-shaped fixture
+        // assignments inside an inline `#[cfg(test)] mod tests { … }`,
+        // with no `password` / `api_key` / `token` pattern on any
+        // production line — so the only regex candidates are inside
+        // the cfg-test block, and a clean result proves the skip.
+        // Reverting the skip must surface exactly 4 findings, one
+        // per fixture line (M19 r2 fixture fix: every fixture line
+        // is password-shaped so the pin matches the sirena shape).
+        let content = "fn real() { let config_name = \"upload\"; }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn creds() {\n        let password = \"sk\";\n    }\n    #[test]\n    fn another() {\n        t.password = \"sk\".into();\n    }\n    #[test]\n    fn third() {\n        let password = \"sk\".into();\n    }\n    #[test]\n    fn fourth() {\n        let password = \"sk\".to_string();\n    }\n}\n";
+        let findings = scan_security_patterns_in_text("src/upload.rs", content);
+        assert!(
+            findings.is_empty(),
+            "inline #[cfg(test)] mod tests blocks must be skipped wholesale, got {findings:?}"
+        );
+    }
+
+    /// RENG-114 follow-up: a `#[cfg(test)] mod … { … }` block is
+    /// skipped, but a regex hit on a production line of the same
+    /// file (above the `#[cfg(test)]` opener) must still report.
+    /// The two layers (`is_test_file_path` for whole test files,
+    /// `cfg_test_line_spans` for inline blocks) must compose so a
+    /// regular `.rs` file with a single cfg-test block still surfaces
+    /// genuine production leaks.
+    #[test]
+    fn scan_security_patterns_in_text_keeps_production_lines_outside_cfg_test() {
+        let real = "a".repeat(16);
+        // Production line carries the credential; inline test block
+        // carries a placeholder password (would have hit without the
+        // cfg-test skip). The production hit must survive; the test
+        // hit must be suppressed.
+        let content = format!(
+            "fn real() {{ let api_key = \"{real}\"; }}\n\
+             \n\
+             #[cfg(test)]\n\
+             mod tests {{\n\
+                 #[test]\n\
+                 fn t() {{\n\
+                     let password = \"sk\";\n\
+                 }}\n\
+             }}\n"
+        );
+        let findings = scan_security_patterns_in_text("src/upload.rs", &content);
+        assert_eq!(
+            findings.len(),
+            1,
+            "exactly one production hit must survive, got {findings:?}"
+        );
+        assert_eq!(findings[0].line, 1, "the surviving hit is the production line");
+        assert_eq!(findings[0].pattern, "Possible API key");
     }
 }

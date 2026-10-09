@@ -11,18 +11,26 @@ use crate::repo::experts::{self, ExpertScore, RepoExpert};
 const HYGIENE_TAG: &str = "[hygiene]";
 
 /// `true` when the given finding is a hygiene reminder rather than a
-/// genuine code-quality or risk observation. A hygiene finding is
-/// one of:
-/// - severity `note` (the longstanding convention for reminders), OR
-/// - a message that starts with the [`HYGIENE_TAG`] prefix
-///   (`[hygiene] Missing .editorconfig — …`, etc.).
+/// genuine code-quality or risk observation.
 ///
-/// Either signal is sufficient because producers may use one or both,
-/// and we want a hygiene-only area — even at 100/100 — to be invisible
-/// to the Top-Risks ranking and the per-expert `risk_categories`
-/// surface (RENG-115 / RENG-117 report-layer rework).
+/// Only the explicit `[hygiene]` tag qualifies — producers (currently
+/// `code_style` for missing-config reminders) prepend the tag when the
+/// detail is a hygiene-style reminder that should not climb the risk
+/// ranking. A bare `note` severity is **not** sufficient any more:
+///
+/// - The RENG-115 round-3 logic also accepted `severity == "note"` as
+///   a hygiene signal, but the broadened predicate swallowed
+///   `test_coverage` on sirena — its only emitted detail was the
+///   `severity: note` "No CI test step detected" line, and the 70/100
+///   expert vanished from Top Risks and Risk Map while staying in the
+///   breakdown table (a 14.0 contribution with no visible rank).
+/// - Hygiene filter now matches the producer's actual contract:
+///   only `code_style` (and any future expert that opts in by
+///   tagging its reminders `[hygiene]`) gets filtered. Everything
+///   else surfaces normally; the report's Top Risks and Risk Map
+///   agree on the same set of areas.
 pub(crate) fn is_hygiene_finding(detail: &ScoreItemDetail) -> bool {
-    detail.severity == "note" || detail.message.starts_with(HYGIENE_TAG)
+    detail.message.starts_with(HYGIENE_TAG)
 }
 
 /// `true` when **every** detail on the expert is a hygiene reminder

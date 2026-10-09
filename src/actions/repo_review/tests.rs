@@ -593,20 +593,36 @@ fn build_risk_categories_drops_hygiene_only_experts() {
     assert_eq!(cats[0].area, "security");
     // And `is_hygiene_finding` is the canonical predicate:
     assert!(is_hygiene_finding(&detail("note", "[hygiene] Missing .editorconfig")));
-    assert!(is_hygiene_finding(&detail("note", "Reminder: add a .editorconfig")));
+    // A bare `note` severity without the `[hygiene]` tag is NOT a
+    // hygiene finding (RENG-115 follow-up, M19): a producer that
+    // wants to opt into the hygiene filter must tag its reminders.
+    assert!(!is_hygiene_finding(&detail("note", "Reminder: add a .editorconfig")));
     assert!(!is_hygiene_finding(&detail("medium", "Possible credential leak")));
 }
 
-/// RENG-115 / reworked-M15: a `note`-severity finding without the
-/// explicit `[hygiene]` tag still counts as hygiene — the
-/// `is_hygiene_finding` predicate accepts both signals. The
-/// producer can pick one or both, and the filter must accept either.
+/// RENG-115 follow-up (M19): the hygiene predicate is narrowed to the
+/// explicit `[hygiene]` tag — `severity == "note"` no longer triggers
+/// the filter. Only producers that opt in by tagging their reminders
+/// (`code_style` today) get filtered; everything else surfaces
+/// normally. The M17 sirena repro is the case this fixes:
+/// `test_coverage` 70/100 with a single `severity: note` "No CI test
+/// step detected" detail used to vanish from Top Risks / Risk Map;
+/// the broadened note-severity predicate caught it as hygiene-only
+/// even though the score reflected a real coverage problem.
 #[test]
-fn hygiene_predicate_accepts_note_only_and_tagged_findings() {
-    assert!(is_hygiene_finding(&detail("note", "Reminder without tag")));
+fn hygiene_predicate_accepts_only_tagged_findings() {
     assert!(is_hygiene_finding(&detail("note", "[hygiene] Tagged reminder")));
-    // Anything that is not note and not tagged must NOT be hygiene
-    // — those are real findings and the filter must keep them.
+    assert!(is_hygiene_finding(&detail(
+        "high",
+        "[hygiene] Tagged high-severity reminder"
+    )));
+    // A bare `note` severity is NOT hygiene any more — the score it
+    // sits on is the user's signal, not the severity alone. The
+    // sirena case (`test_coverage` 70/100, single note detail) must
+    // surface in Top Risks.
+    assert!(!is_hygiene_finding(&detail("note", "Reminder without tag")));
+    assert!(!is_hygiene_finding(&detail("note", "No CI test step detected")));
+    // Real findings (medium/high/etc., no tag) must never be hygiene.
     assert!(!is_hygiene_finding(&detail("medium", "Real concern")));
     assert!(!is_hygiene_finding(&detail("high", "[mechanical] Possible secret key")));
 }
@@ -645,6 +661,63 @@ fn pick_top_risks_drops_hygiene_only_risk_categories() {
         top.first().map(|(n, _)| n.as_str()),
         Some("security"),
         "the genuinely weakest expert stays at the top: {names:?}"
+    );
+}
+
+/// RENG-115 follow-up (M19) — `test_coverage` reproducer pin.
+/// `test_coverage` 70/100 with a single `severity: note` "No CI test
+/// step detected" detail is the exact shape the sirena repro
+/// surfaced: the breakdown row shows 70/100 medium with a 14.0
+/// contribution, but `expert_is_hygiene_only` returned true under
+/// the old broad predicate (note-severity counted as hygiene), so
+/// `build_risk_categories` and `pick_top_risks` filtered the
+/// expert out — visible Top Risks and Risk Map disagreed with the
+/// breakdown table. After narrowing the predicate to
+/// `[hygiene]`-tag-only, `test_coverage` returns to both surfaces.
+#[test]
+fn note_only_test_coverage_stays_in_risk_categories_and_top_risks() {
+    // 70/100 with one `note`-severity detail, no `[hygiene]` tag.
+    let mut test_coverage = score_output("test_coverage", 70, 20);
+    test_coverage.details = vec![detail("note", "No CI test step detected")];
+
+    // A real hygiene-only expert (the code_style case the round-3
+    // filter was designed for): 100/100, every detail tagged
+    // `[hygiene]`. Must still be filtered out.
+    let mut code_style = score_output("code_style", 100, 5);
+    code_style.details = vec![
+        detail("note", "[hygiene] Missing .editorconfig"),
+        detail("note", "[hygiene] Missing rustfmt.toml"),
+        detail("note", "[hygiene] Missing clippy.toml"),
+    ];
+
+    // A genuine risk on the same set: must still surface.
+    let mut security = score_output("security", 50, 15);
+    security.details = vec![detail("medium", "Possible credential leak")];
+
+    let cats = build_risk_categories(&[test_coverage.clone(), code_style.clone(), security.clone()]);
+    let areas: Vec<&str> = cats.iter().map(|c| c.area.as_str()).collect();
+    assert!(
+        areas.contains(&"test_coverage"),
+        "test_coverage 70/100 must stay in risk_categories: {areas:?}"
+    );
+    assert!(
+        !areas.contains(&"code_style"),
+        "code_style [hygiene]-only must still be filtered: {areas:?}"
+    );
+    assert!(
+        areas.contains(&"security"),
+        "a genuinely-scored expert must stay: {areas:?}"
+    );
+
+    let top = pick_top_risks(&cats);
+    let names: Vec<&str> = top.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        names.contains(&"test_coverage"),
+        "test_coverage must reappear in Top Risks (sirena pin): {names:?}"
+    );
+    assert!(
+        !names.contains(&"code_style"),
+        "code_style [hygiene]-only must still be absent from Top Risks: {names:?}"
     );
 }
 

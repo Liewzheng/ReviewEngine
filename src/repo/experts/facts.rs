@@ -166,6 +166,94 @@ pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
         || path.contains("/spec/")
 }
 
+/// Return inclusive line ranges (1-based, both ends inclusive) of any
+/// `#[cfg(test)] mod <name> { ... }` block found in `content`.
+///
+/// Returns an empty Vec when the source has no inline tests. This is
+/// the bridge that lets the security sweep treat an inline
+/// `#[cfg(test)] mod tests { ... }` block the same way it treats a
+/// dedicated `tests/foo.rs` file: a regex hit inside the block is a
+/// fixture, not a real leak. The exact reproducer the predicate must
+/// silence is `crates/sirena-cli/src/upload.rs` lines 673 / 741 / 843
+/// / 994 — four `password: "sk"` assignments inside the file's
+/// `#[cfg(test)] mod tests { ... }` (RENG-114 follow-up).
+///
+/// Pragmatic containment heuristic, **not** a full Rust parser:
+/// - The attribute must be the bare `#[cfg(test)]` on its own line
+///   (with optional whitespace). A `#[cfg(all(test, feature = "…"))]`
+///   combination is recognised by a future round; today's reproducer
+///   shape is the bare form.
+/// - Any number of additional `#[…]` attribute lines between
+///   `#[cfg(test)]` and the `mod` opener are skipped — the test
+///   modules in the wild carry `#[allow(unused)]`, `#[cfg(feature)]`
+///   and similar companions.
+/// - The `mod` opener must contain a `{` on the same line (the
+///   standard convention). Multi-line `mod` declarations (no opening
+///   brace on the opener line) fall through to the next `#[cfg(test)]`
+///   search, so no production code is mistakenly swallowed.
+/// - Brace counting uses `{` / `}` byte counts per line; it tracks
+///   depth across continuation lines so nested blocks (a `fn` body
+///   containing its own `{}` group, or a nested `mod` inside a test
+///   module) don't terminate the outer block early. String / char
+///   literals are not tracked — a `"{"` or `"}"` inside a string
+///   would skew the counter, but the only consequence is a span that
+///   ends too early, which means at worst one extra regex hit on
+///   the production side, never a swallowed leak.
+///
+/// Returns `Vec<(start_line, end_line)>` in 1-based inclusive
+/// coordinates so callers can compare against `enumerate() + 1`
+/// directly without an off-by-one.
+pub(crate) fn cfg_test_line_spans(content: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let lines: Vec<&str> = content.lines().collect();
+    let mut i = 0usize;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed != "#[cfg(test)]" {
+            i += 1;
+            continue;
+        }
+        // Allow additional attribute lines between `#[cfg(test)]` and the `mod`.
+        let mut j = i + 1;
+        while j < lines.len() && lines[j].trim_start().starts_with('#') {
+            j += 1;
+        }
+        if j >= lines.len() {
+            break;
+        }
+        let mod_trimmed = lines[j].trim();
+        if !mod_trimmed.starts_with("mod ") || !mod_trimmed.contains('{') {
+            // Not a `mod` opener on the same line — advance past the
+            // attribute block so we don't re-match the same `#[cfg(test)]`
+            // if a stray line follows.
+            i = j + 1;
+            continue;
+        }
+        // Walk from the `mod` line forward, tracking braces until depth returns to 0.
+        let mut depth: i32 = 0i32;
+        let mut k = j;
+        loop {
+            let line = lines[k];
+            depth += line.matches('{').count() as i32;
+            depth -= line.matches('}').count() as i32;
+            if depth <= 0 {
+                break;
+            }
+            k += 1;
+            if k >= lines.len() {
+                break;
+            }
+        }
+        // Convert to 1-based inclusive coordinates.
+        let start_line = i + 1;
+        let end_line = k + 1;
+        spans.push((start_line, end_line));
+        // Resume scanning past the closing brace.
+        i = k + 1;
+    }
+    spans
+}
+
 /// Whether `path` is a well-known CI configuration file.
 ///
 /// Matches on file name / directory location only; entries have already
@@ -615,5 +703,72 @@ def multi(
         // A backslash-escaped quote inside a string must not terminate it.
         let parts = split_top_level_commas("x: str = \"a\\\"b\", y: int");
         assert_eq!(parts, vec!["x: str = \"a\\\"b\"".to_string(), " y: int".to_string()]);
+    }
+
+    #[test]
+    fn cfg_test_line_spans_finds_a_single_block() {
+        // Canonical sirena shape: `#[cfg(test)]` on its own line,
+        // then `mod tests {`, then a body, then a closing `}`.
+        let src = "\
+fn real() {}\n\
+#[cfg(test)]\n\
+mod tests {\n\
+    #[test]\n\
+    fn t() {\n\
+        let password = \"sk\";\n\
+    }\n\
+}\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(spans, vec![(2, 8)], "single cfg-test block: {spans:?}");
+    }
+
+    #[test]
+    fn cfg_test_line_spans_returns_empty_without_attribute() {
+        let src = "fn real() { let password = \"sk\"; }\n";
+        assert!(cfg_test_line_spans(src).is_empty());
+    }
+
+    #[test]
+    fn cfg_test_line_spans_handles_nested_braces() {
+        // The body itself contains nested braces (a `fn` body and a
+        // nested struct / map literal); the depth counter must wait
+        // for the *outer* closing brace, not the first one it sees.
+        let src = "#[cfg(test)]\nmod tests {\n    #[test]\n    fn t() {\n        let s = Some(1).map(|x| { x + 1 });\n        let _ = s;\n    }\n}\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 8)],
+            "nested braces must not shorten the span: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn cfg_test_line_spans_handles_multiple_attributes_between_cfg_and_mod() {
+        // A `#[cfg(test)]` followed by another attribute (commonly
+        // `#[allow(...)]`) before the `mod` opener must still resolve
+        // to one block. The reproducer repo carries no such companion
+        // attributes, but the wider Rust ecosystem does.
+        let src = "\
+#[cfg(test)]\n\
+#[allow(unused)]\n\
+mod tests {\n\
+    fn helper() {}\n\
+}\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 5)],
+            "the second attribute must not split the block: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn cfg_test_line_spans_finds_multiple_blocks() {
+        // Two distinct `#[cfg(test)] mod ...` blocks (e.g. one for unit
+        // tests, one for integration-style tests in the same file) —
+        // each must produce its own span.
+        let src = "#[cfg(test)]\nmod unit {\n    fn a() {}\n}\n#[cfg(test)]\nmod integration {\n    fn b() {}\n}\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(spans, vec![(1, 4), (5, 8)], "two blocks: {spans:?}");
     }
 }

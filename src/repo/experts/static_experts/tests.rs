@@ -686,10 +686,15 @@ async fn code_style_zero_configs_is_never_top_risk() {
     );
 }
 
-/// RENG-115: every missing-config finding carries the `[hygiene]`
-/// tag in the message, severity `note`, and a concrete
-/// recommendation — same contract as before the split, just
-/// redirected into the hygiene channel so the score ignores it.
+/// RENG-115 + RENG-115 follow-up (M19): every missing-config finding
+/// carries the `[hygiene]` tag in the message (the predicate the
+/// report-layer filter actually reads), severity `note` (a
+/// presentational choice — the tag is what makes it hygiene), and a
+/// concrete recommendation. The RENG-115 follow-up narrowed the
+/// filter to `[hygiene]`-tag-only: `severity == "note"` is no longer
+/// enough on its own, so a non-`code_style` expert that happens to
+/// emit a single `note`-severity detail (the M17 sirena
+/// `test_coverage` repro) surfaces in Top Risks again.
 #[tokio::test]
 async fn code_style_hygiene_findings_carry_tag_note_and_recommendation() {
     let context = ctx(vec![entry("src/main.rs", "Rust", 10)]);
@@ -698,10 +703,13 @@ async fn code_style_hygiene_findings_carry_tag_note_and_recommendation() {
     for d in &score.details {
         assert!(
             d.message.contains("[hygiene]"),
-            "missing-config finding must be tagged [hygiene]: {}",
+            "missing-config finding must be tagged [hygiene] (the report-layer filter reads the tag, not the severity): {}",
             d.message
         );
-        assert_eq!(d.severity, "note", "hygiene findings are note-severity");
+        assert_eq!(
+            d.severity, "note",
+            "code_style's hygiene findings are note-severity (the severity is incidental — the tag is what filters)"
+        );
         assert!(
             !d.recommendation.as_deref().unwrap_or("").trim().is_empty(),
             "hygiene finding must say how to add the config: {}",

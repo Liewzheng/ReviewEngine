@@ -838,3 +838,92 @@ fn render_team_report_leaves_benign_text_unchanged() {
     let summary = crate::output::renderer::render_expert_markdown("security", &reports[0].findings);
     assert!(summary.contains("subtle::ConstantTimeEq"));
 }
+
+/// RENG-113 round 2: `Finding::title` reaches both the team-rendered
+/// findings section and the per-expert pre-rendered markdown. The
+/// reviewer's probe (`/tmp/reng113-probe/rust-probe`) showed a title like
+/// `leaked: password = "hunter2_real_secret"` carrying the plaintext
+/// through `render_expert_markdown` line 39 — the publish gate caught the
+/// subsequent board (its `title` field becomes the inline note body), but
+/// the local report file at 0600 was the unredacted exposure.
+#[test]
+fn render_team_report_redacts_finding_title() {
+    let mut finding = make_test_finding(Severity::High, "src/auth.rs");
+    finding.title = "leaked: password = \"hunter2_real_secret\"".to_string();
+    let reports = vec![ExpertReport {
+        expert_name: "security".to_string(),
+        findings: vec![finding.clone()],
+        markdown: String::new(),
+        raw_llm_response: String::new(),
+        parse_error: None,
+        raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
+        llm_fp: None,
+    }];
+    let metrics = vec![ExpertMetrics {
+        name: "security".to_string(),
+        latency_ms: 1000,
+        tokens_used: 100,
+    }];
+
+    let rendered = render_team_report_with_scoring("Team", &reports, &metrics, &[], None, None);
+
+    assert!(
+        !rendered.contains("hunter2_real_secret"),
+        "the team renderer must not carry the plaintext title: {rendered}"
+    );
+    assert!(
+        rendered.contains("kind=password"),
+        "the title redaction is named in the marker: {rendered}"
+    );
+
+    // Same expectation in the pre-rendered per-expert path that the team
+    // renderer pulls from (render_expert_markdown → render_expert_section).
+    let expert_md = crate::output::renderer::render_expert_markdown("security", &reports[0].findings);
+    assert!(
+        !expert_md.contains("hunter2_real_secret"),
+        "the per-expert pre-rendered markdown must not carry the plaintext title either: {expert_md}"
+    );
+
+    // And the aggregated path (render_aggregated_markdown), which is the
+    // second board-side source.
+    let aggregated = crate::output::renderer::render_aggregated_markdown(&reports[0].findings);
+    assert!(
+        !aggregated.contains("hunter2_real_secret"),
+        "the aggregated report must not carry the plaintext title either: {aggregated}"
+    );
+}
+
+/// RENG-113 round 2: the dropped-findings appendix exposes the verifier's
+/// `reason` (LLM-derived) and the finding's `title` (LLM-derived). Both
+/// pass through `redact` so a verifier explaining "the password = '…'
+/// claim is wrong, the real value is in env vars" doesn't smuggle the
+/// plaintext through the appendix.
+#[test]
+fn render_dropped_findings_appendix_redacts_title_and_reason() {
+    use crate::team::verifier::DroppedFinding;
+    let mut finding = make_test_finding(Severity::Medium, "config.toml");
+    finding.title = "leaked via password = \"hunter2_real_secret\"".to_string();
+    let dropped = vec![DroppedFinding {
+        finding,
+        reason: "the credential is loaded from os.getenv(\"TOKEN\") at startup, not from config.toml".to_string(),
+    }];
+    let md = crate::output::renderer::render_dropped_findings_appendix(&dropped, false, 1);
+    assert!(!md.contains("hunter2_real_secret"), "title plaintext is gone: {md}");
+    assert!(md.contains("kind=password"), "title is masked: {md}");
+
+    // The "list-only" path (publish / no run-summary) — same redaction.
+    let md = crate::output::renderer::render_dropped_findings_appendix_with_state(&dropped, false, false, 1);
+    assert!(
+        !md.contains("hunter2_real_secret"),
+        "title plaintext is gone in the list-only path: {md}"
+    );
+
+    // The "ran" path (with run-summary line at the end) — same redaction.
+    let md = crate::output::renderer::render_dropped_findings_appendix_with_state(&dropped, true, true, 1);
+    assert!(
+        !md.contains("hunter2_real_secret"),
+        "title plaintext is gone in the ran path: {md}"
+    );
+}

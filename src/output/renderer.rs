@@ -36,7 +36,18 @@ pub fn render_expert_markdown(expert_name: &str, findings: &[Finding]) -> String
     let mut body = String::new();
     for f in findings {
         let line_info = f.line.map_or(String::new(), |l| format!(":{}", l));
-        body.push_str(&format!("### [{}] {}\n\n", severity_label(&f.severity), f.title,));
+        // RENG-113 round 2: `f.title` is LLM-derived prose — same class as
+        // `summary` below (already redacted at r1). Without this, a finding
+        // whose title quotes a config line (e.g. "leaked: password =
+        // \"hunter2_real\"") carries the plaintext into the report file and
+        // (through `render_expert_section` → `render_board`) into the MR
+        // discussion. The publish-time gate would catch it, but the local
+        // report file is the primary exposure.
+        body.push_str(&format!(
+            "### [{}] {}\n\n",
+            severity_label(&f.severity),
+            redact(&f.title)
+        ));
         body.push_str(&format!(
             "**File**: `{file}{line}`\n\n{summary}\n\n",
             file = f.file,
@@ -74,7 +85,10 @@ pub fn render_aggregated_markdown(findings: &[Finding]) -> String {
             severity = severity_label(&f.severity),
             file = f.file,
             line = line,
-            title = f.title,
+            // RENG-113 round 2: title is LLM prose (see [`render_expert_markdown`]
+            // for the same treatment there) — redact before the aggregated
+            // report line lands in the file.
+            title = redact(&f.title),
         ));
     }
 
@@ -135,13 +149,20 @@ pub fn render_dropped_findings_appendix_with_state(
         let mut out = String::from("## Dropped by verification\n\n");
         for d in dropped {
             let line = d.finding.line.map_or(String::new(), |l| format!(":{}", l));
+            // RENG-113 round 2: dropped-findings title and verifier reason
+            // are LLM prose (the verifier is itself an LLM pass), so they
+            // re-enter the same plaintext class as Evidence. Redact here so
+            // a verifier that quotes a config line in its reason ("the
+            // password = 'hunter2_real' claim is wrong, the actual value
+            // is in env vars") doesn't smuggle the value through the
+            // dropped-list path.
             out.push_str(&format!(
                 "- `{file}{line}` — **{title}** ({expert}): {reason}\n",
                 file = d.finding.file,
                 line = line,
-                title = d.finding.title,
+                title = redact(&d.finding.title),
                 expert = d.finding.expert_name,
-                reason = d.reason,
+                reason = redact(&d.reason),
             ));
         }
         return out;
@@ -163,9 +184,9 @@ pub fn render_dropped_findings_appendix_with_state(
                 "- `{file}{line}` — **{title}** ({expert}): {reason}\n",
                 file = d.finding.file,
                 line = line,
-                title = d.finding.title,
+                title = redact(&d.finding.title),
                 expert = d.finding.expert_name,
-                reason = d.reason,
+                reason = redact(&d.reason),
             ));
         }
         return out;
@@ -185,9 +206,9 @@ pub fn render_dropped_findings_appendix_with_state(
             "- `{file}{line}` — **{title}** ({expert}): {reason}\n",
             file = d.finding.file,
             line = line,
-            title = d.finding.title,
+            title = redact(&d.finding.title),
             expert = d.finding.expert_name,
-            reason = d.reason,
+            reason = redact(&d.reason),
         ));
     }
     out.push_str(&format!(

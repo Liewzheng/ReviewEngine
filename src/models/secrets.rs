@@ -33,22 +33,28 @@
 //!   The value is whatever follows the separator, quoted or bare.
 //! - **value by itself** — a high-entropy token from a fixed catalogue of
 //!   provider prefixes (`glpat-…`, `ghp_…`, `AKIA…`, a PEM block, a
-//!   `https://user:pass@host` URL, …) and any sufficiently long hex/base64
-//!   string that is not a line number or a hash digest of the kind the report
-//!   already prints.
+//!   `https://user:pass@host` URL, an `Authorization: Bearer …` header, …).
+//!   There is **no** generic hex/base64 entropy detector — false positives
+//!   would dominate (every long SHA / UUID is. RFC 4648). The catalogue is
+//!   the surface; what isn't named isn't masked.
 //!
 //! ## What the marker looks like
 //!
 //! A redacted line reads:
 //!
 //! ```text
-//! password = "***[redacted:len=12,fp=abc12345]***"
+//! password = "***[redacted:kind=password,len=12,fp=abcdef0123456789,key=password]***"
 //! ```
 //!
-//! — `len=` is the original value's length, `fp=` is the first 8 bytes of the
-//! SHA-256 digest (16 hex chars, the same length the codebase prints as
-//! `feedback::fingerprint`). That is enough to recognise "the same value
-//! appears again on line 73" without revealing the value.
+//! — `kind=` is the [`SecretKind`] label, `len=` is the original value's
+//! length (in chars), `fp=` is the **first 8 bytes** of the SHA-256 digest
+//! of the value (**16 hex chars**, the same length the codebase prints as
+//! `feedback::fingerprint`). For value-only patterns where no key name
+//! exists, the `key=` field is omitted. That is enough to recognise "the
+//! same value appears again on line 73" without revealing the value, and
+//! it lets [`SecretHit::fingerprint_short`] print an 8-hex prefix in the
+//! publish-refusal error message (the operator greps the local report file
+//! for the same 8-hex prefix to find the offending line).
 //!
 //! ## Failure mode
 //!
@@ -313,18 +319,61 @@ fn compiled_detectors() -> &'static [CompiledDetector] {
 /// the report noisier than the original.
 pub const MIN_VALUE_LEN: usize = 6;
 
-/// A value below this length is also skipped from the *publish* gate — the
-/// marker counts char length, so a `len=4` marker is still a leak indicator,
-/// but a `len=4` raw value isn't a credible secret either. Combined with
-/// `MIN_VALUE_LEN`, this keeps the gate in lockstep with the redaction.
-pub const MIN_PUBLISH_HIT_LEN: usize = MIN_VALUE_LEN;
+/// Regex matching the marker the redact pass itself emits: `***[redacted:…]***`.
+///
+/// Compiled once. Used both to make the scan marker-aware (so a board
+/// carrying markers doesn't trip the publish gate — see [`scan_secrets`])
+/// and to drive the redact pass's idempotence: `redact_text(x) == redact_text(redact_text(x))`,
+/// because every marker span is treated as already redacted.
+fn marker_regex() -> &'static Regex {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Result<Regex, String>> = OnceLock::new();
+    let result = CACHE.get_or_init(|| {
+        // The marker's body is comma-separated `key=value` pairs. The
+        // delimiter is `]` (right square bracket); a future field that
+        // happened to contain one would break this — kept on the
+        // conservative side, since `placeholder()` only writes the
+        // field names documented at [`SecretKind::label`] / `key`.
+        Regex::new(r"\*\*\*\[redacted:[^]]*\]\*\*\*").map_err(|e| format!("marker regex failed to compile: {e}"))
+    });
+    // A pattern that fails to compile is a programmer error in this file:
+    // the literal is right next to the call. A failed compile here means
+    // the binary cannot serve the publish-time gate, so the process is
+    // already doomed — panic with the diagnostic instead of swallowing it.
+    match result {
+        Ok(rx) => rx,
+        Err(msg) => panic!("{msg}"),
+    }
+}
+
+/// Find every byte range of `text` covered by a redaction marker.
+///
+/// Marker spans are sorted by start and do not overlap (a redaction marker
+/// cannot contain another). Empty input yields no spans.
+fn marker_spans(text: &str) -> Vec<Range<usize>> {
+    marker_regex().find_iter(text).map(|m| m.start()..m.end()).collect()
+}
 
 /// Scan `text` for suspected credentials. Hits do *not* overlap — a later
 /// detector never re-matches inside a value already covered by an earlier
 /// one (the structured assignment set fires before the value-only set, so a
 /// `password = "glpat-…"` line is reported as `password`, not also as a
 /// `gitlab_token`).
+///
+/// RENG-113 round 2: any hit whose range overlaps an existing redaction
+/// marker is dropped. The marker's `***[redacted:…]***` is structurally a
+/// `key = value` line (`kind=<x>` is a key, the comma-joined fields are a
+/// value class `[^\s,]+`) and the basic-auth URL pattern matches the
+/// `user:***[…]***@host` shape. Without this guard a redacted body would
+/// re-fire the gate on its own output (and a non-credential text would too
+/// — `api_key = process.env.API_KEY` redacts to a marker, the marker
+/// re-matches the password detector, and the publish is refused with an
+/// unactionable "re-redact locally" message). Treating marker spans as
+/// "already redacted, do not look inside" keeps the gate, the renderer
+/// and the redact pass composable.
 pub fn scan_secrets(text: &str) -> Vec<SecretHit> {
+    // Marker spans first — cheap (a single regex pass) and load-bearing.
+    let markers = marker_spans(text);
     let mut hits: Vec<SecretHit> = Vec::new();
     for detector in compiled_detectors() {
         for caps in detector.regex.captures_iter(text) {
@@ -350,6 +399,18 @@ pub fn scan_secrets(text: &str) -> Vec<SecretHit> {
                 }
             };
             if value_range.start >= value_range.end {
+                continue;
+            }
+            // RENG-113 round 2: drop any hit whose value range starts
+            // inside a marker span. The marker is, by construction, the
+            // replacement for an earlier hit — re-scanning it would
+            // either re-fire the same detector or, worse, match a
+            // different one (the basic-auth URL pattern catches the
+            // `user:***[…]***@host` shape).
+            if markers
+                .iter()
+                .any(|m| value_range.start >= m.start && value_range.start < m.end)
+            {
                 continue;
             }
             let value = text[value_range.clone()].to_string();
@@ -413,11 +474,15 @@ pub fn redact_text(text: &str) -> String {
 ///
 /// The publish gate surfaces only the first few hits, by [`SecretHit::range`]
 /// order, so a reviewer reading the error knows what slipped through.
+///
+/// RENG-113 round 2: the gate does **not** carry the rendered body — the
+/// body is the very thing the gate is refusing, and putting it on the
+/// error path means the next layer that logs / serializes / displays the
+/// `Debug` impl on this type prints plaintext. The fingerprint the error
+/// names is the join key: the operator greps the local report file for
+/// the 8-hex-char prefix and lands on the offending line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PublishRefusal {
-    /// The rendered body the gate ran over. Always included so the operator
-    /// can see the offending context without re-running the review.
-    pub body: String,
     /// Up to [`PUBLISH_REFUSAL_HITS`] hits, in source order.
     pub hits: Vec<SecretHit>,
 }
@@ -436,10 +501,7 @@ pub fn scan_for_publish(text: &str) -> Result<(), PublishRefusal> {
     }
     let mut shown = hits;
     shown.truncate(PUBLISH_REFUSAL_HITS);
-    Err(PublishRefusal {
-        body: text.to_string(),
-        hits: shown,
-    })
+    Err(PublishRefusal { hits: shown })
 }
 
 #[cfg(test)]
@@ -630,5 +692,95 @@ mod tests {
         let body = "password = \"hunter2_real\"\napi_key = \"sk-live-XXXXXXXXXXXXXXXXXXXX\"\n";
         assert_eq!(hit_count(body), 2);
         assert_eq!(redact_text(body).matches("redacted:").count(), 2);
+    }
+
+    // ── RENG-113 round 2: marker awareness + redact idempotence ────────
+
+    /// RENG-113 round 2 (P1): a redacted body re-scanned must produce zero
+    /// hits — the marker is structurally a `kind=…,len=…,fp=…` field pair
+    /// that the password / token / etc. structured-assignment detector would
+    /// otherwise match as if the marker were a fresh secret. Without the
+    /// marker-skip, the publish gate refuses every board that carries a
+    /// marker, and the renderer is also rejected by the gate it is supposed
+    /// to feed.
+    #[test]
+    fn scan_does_not_re_match_the_redaction_marker_itself() {
+        for body in [
+            r#"password = "hunter2_real_secret""#,
+            r#"api_key = "sk-live-XXXXXXXXXXXXXXXXXXXX""#,
+            r#"token = "glpat-AbCdEfGhIjKlMnOpQrStUv""#,
+            "see https://alice:s3cret@example.com/data",
+            "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        ] {
+            let redacted = redact_text(body);
+            assert!(
+                scan_for_publish(&redacted).is_ok(),
+                "redacted body must not trip the publish gate; got redaction: {redacted:?}"
+            );
+            assert_eq!(
+                scan_secrets(&redacted).len(),
+                0,
+                "a redacted body must scan to zero hits: {redacted}"
+            );
+        }
+    }
+
+    /// RENG-113 round 2: re-running the redact pass must not modify the
+    /// output. The redact→scan→redact loop is what would otherwise keep
+    /// growing the marker (each pass wraps the marker in another marker,
+    /// because the structured-assignment detectors see the marker's own
+    /// `kind=…,len=…,fp=…` body as a value).
+    #[test]
+    fn redact_text_is_idempotent() {
+        let cases = [
+            r#"password = "hunter2_real_secret""#,
+            "see https://alice:s3cret@example.com/data",
+            "Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+            "multiple credentials in one body: password = \"hunter2_real\" api_key = \"sk-live-XXXXXXXXXXXXXXXXXXXX\"",
+        ];
+        for body in cases {
+            let once = redact_text(body);
+            let twice = redact_text(&once);
+            assert_eq!(once, twice, "redact must converge: once={once:?} twice={twice:?}");
+        }
+    }
+
+    /// RENG-113 round 2 (false-positive case): a value the structured
+    /// detectors *would* flag but that is not actually a secret (a
+    /// reference to a key, an environment lookup, an injected token)
+    /// still must not block --publish. The redaction masks the line
+    /// (a false positive marker is cheaper than a leaked secret), and the
+    /// marker must then be invisible to the gate.
+    #[test]
+    fn publish_gate_accepts_a_board_redacted_from_false_positives() {
+        let body = "\
+            config reading:\n\
+            api_key = process.env.API_KEY\n\
+            token = os.getenv(\"TOKEN\")\n\
+            password = user_input\n";
+        let redacted = redact_text(body);
+        // All three lines redaction-falsely-fire on the structured detector
+        // (the keys match the structured vocabulary). Markers are emitted.
+        assert!(redacted.contains("kind=api_key"));
+        assert!(redacted.contains("kind=token"));
+        assert!(redacted.contains("kind=password"));
+        // And the gate is happy — the markers don't re-fire.
+        assert!(
+            scan_for_publish(&redacted).is_ok(),
+            "false-positive mask must not leak as a gate hit"
+        );
+    }
+
+    /// RENG-113 round 2: marker spans are found correctly across all
+    /// structured + value-only kinds. Used to keep `marker_spans` honest
+    /// even if the placeholder format ever changes.
+    #[test]
+    fn marker_spans_find_every_marker_in_a_mixed_body() {
+        let body = "\
+            password = \"***[redacted:kind=password,len=12,fp=0123456789abcdef,key=password]***\"\n\
+            api_key = \"***[redacted:kind=api_key,len=27,fp=0123456789abcdef,key=api_key]***\"\n\
+            see https://example.com/***[redacted:kind=basic_auth_url,len=6,fp=0123456789abcdef]***@host\n";
+        let spans = marker_spans(body);
+        assert_eq!(spans.len(), 3, "every ***[redacted:…]*** is a marker: {body}");
     }
 }

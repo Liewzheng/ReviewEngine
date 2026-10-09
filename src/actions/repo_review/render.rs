@@ -126,7 +126,11 @@ pub fn render_repo_review_output(
             ));
 
             if let Some(ref summary) = output.overview.lead_summary {
-                md.push_str(&format!("> {}\n\n", summary));
+                // RENG-113 round 2: lead_summary is the architecture expert's
+                // LLM prose — same class as `s.summary` (redacted at line 154),
+                // and the same class as Evidence blocks (the team renderer's
+                // TL;DR is redacted through `redact()` too).
+                md.push_str(&format!("> {}\n\n", redact(summary)));
             }
 
             md.push_str("---\n\n");
@@ -210,7 +214,14 @@ pub fn render_repo_review_output(
                 }
             }
             md.push('\n');
-            md.push_str(&format!("**Recommendation**: {}\n", output.conclusion.recommendation));
+            md.push_str(&format!(
+                "**Recommendation**: {}\n",
+                // RENG-113 round 2: the aggregator's LLM prose — same class as
+                // the per-finding recommendation (redacted inside the action
+                // items table at line 191). Without this, the conclusion
+                // section is the last unredacted channel in the report.
+                redact(&output.conclusion.recommendation)
+            ));
 
             // ── Verification appendix ──
             // checked = surviving code_quality findings + dropped ones, the

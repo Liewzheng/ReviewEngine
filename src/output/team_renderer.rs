@@ -232,7 +232,14 @@ pub fn render_team_report_with_scoring(
             out.push_str(&format!("#### {:?}\n\n", severity));
 
             for f in severity_findings {
-                out.push_str(&format!("**{}** — Confidence {}/10\n", f.title, f.confidence,));
+                // RENG-113 round 2: title is LLM prose — same treatment as
+                // Evidence / impact / recommendation below. The reviewer
+                // probe (`/tmp/reng113-probe/rust-probe`) showed a title
+                // like `leaked: password = "hunter2_real_secret"` reaching
+                // this line verbatim; the publish gate caught it (the e2e
+                // refusal test still passes), and the report file was the
+                // unredacted exposure.
+                out.push_str(&format!("**{}** — Confidence {}/10\n", redact(&f.title), f.confidence,));
                 out.push_str(&format!(
                     "> [{}] {} `{}:{}`\n\n",
                     f.expert_name,

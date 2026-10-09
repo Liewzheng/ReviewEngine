@@ -147,7 +147,157 @@ async fn security_clean_repo_has_no_findings() {
     let score = evaluate(&Security, &context).await;
     assert_eq!(score.score, 100);
     assert!(score.details.is_empty());
-    assert_eq!(score.summary, "0 security findings");
+    // The summary carries the mechanical/semantic split so the user
+    // can tell at a glance that no findings of either kind remain.
+    assert_eq!(score.summary, "0 security findings (0 mechanical, 0 semantic)");
+}
+
+/// Helper that materialises a real file on disk under the tempdir and
+/// returns the entry. Mirrors the helper the file-level static tests
+/// already use, but located here because it is specific to the security
+/// fixture/placeholder cases.
+fn write_entry(dir: &tempfile::TempDir, relative: &str, body: &str, language: &str) -> FileEntry {
+    let path = dir.path().join(relative);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("create parent dir");
+    }
+    std::fs::write(&path, body).expect("write security fixture");
+    entry(path.to_str().expect("utf-8 path"), language, body.lines().count())
+}
+
+/// RENG-114: a fixture file with a fake credential (`api_key = "xxxx..."`)
+/// must be classified as a test file and skipped entirely, so the
+/// security score stays at 100. Catches the RENG-19 false positive where
+/// the same payload in a non-test file would still be reported.
+#[tokio::test]
+async fn security_skips_test_fixtures_end_to_end() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real = "a".repeat(16);
+    let body = format!(r#"api_key = "{}""#, real);
+
+    // Fixture (test) paths — all five are recognised by the test-file
+    // heuristic and must be dropped.
+    let _fixture_a = write_entry(&dir, "tests/fixtures.rs", &body, "Rust");
+    let _fixture_b = write_entry(&dir, "src/upload_tests.rs", &body, "Rust");
+    let _fixture_c = write_entry(&dir, "src/__tests__/helper.ts", &body, "TypeScript");
+    let _fixture_d = write_entry(&dir, "src/output/parser/tests.rs", &body, "Rust");
+
+    // One source-file hit in a non-test path — must survive.
+    let source = write_entry(&dir, "src/upload.rs", &body, "Rust");
+
+    let entries = vec![_fixture_a, _fixture_b, _fixture_c, _fixture_d, source];
+    let context = ctx(entries);
+    let score = evaluate(&Security, &context).await;
+
+    assert_eq!(score.score, 96, "one mechanical hit scores 100 - 4: {}", score.summary);
+    assert_eq!(score.details.len(), 1, "exactly one finding: {:?}", messages(&score));
+    let detail = &score.details[0];
+    assert!(
+        detail.message.contains("[mechanical]"),
+        "the surviving hit must be a mechanical regex hit: {}",
+        detail.message
+    );
+    assert!(detail.message.contains("upload.rs"));
+    assert!(
+        score.summary.contains("1 mechanical"),
+        "summary must report the mechanical count: {}",
+        score.summary
+    );
+}
+
+/// RENG-114: documentation samples that wrap their value in
+/// typewriter brackets (`〈写账号密码〉`) or ASCII angle brackets must be
+/// classified as placeholders and skipped. The hit counter and the
+/// security score must both stay clean.
+#[tokio::test]
+async fn security_skips_placeholder_bracket_lines() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let body_zh = format!(r#"password = "〈{}〉""#, "写账号密码");
+    let body_ascii = r#"password = "<YOUR_PASSWORD_HERE>""#;
+
+    let _zh = write_entry(&dir, "docs/upload.rs", &body_zh, "Rust");
+    let _ascii = write_entry(&dir, "docs/sample.env", &body_ascii, "Config");
+
+    let entries = vec![_zh, _ascii];
+    let context = ctx(entries);
+    let score = evaluate(&Security, &context).await;
+
+    assert_eq!(
+        score.score, 100,
+        "placeholder-bracket values are not real secrets: {}",
+        score.summary
+    );
+    assert!(
+        score.details.is_empty(),
+        "no findings expected, got {:?}",
+        messages(&score)
+    );
+}
+
+/// RENG-114: classification metadata on findings. Every emitted detail
+/// carries the `[mechanical]` / `[semantic]` tag in its message and the
+/// summary line reports both counts — so the reader can tell at a glance
+/// which kind of hit dragged the score down.
+#[tokio::test]
+async fn security_findings_carry_kind_tag_and_summary_distinguishes_counts() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Two distinct files; the body has two regex patterns per file
+    // (api_key + password), so the scan produces four mechanical hits
+    // total (2 files × 2 patterns). All four must carry the kind tag
+    // and count toward the mechanical bucket — none should leak into
+    // the semantic bucket since only the static regex is producing them.
+    let body = r#"api_key = "abcdef0123456789"
+password = "real_pass_value_xyz""#;
+    let _a = write_entry(&dir, "src/a.rs", body, "Rust");
+    let _b = write_entry(&dir, "src/b.rs", body, "Rust");
+
+    let entries = vec![_a, _b];
+    let context = ctx(entries);
+    let score = evaluate(&Security, &context).await;
+
+    assert_eq!(score.details.len(), 4, "details: {:?}", messages(&score));
+    let summary = &score.summary;
+    assert!(
+        summary.contains("4 mechanical"),
+        "summary must expose the mechanical count: {summary}"
+    );
+    assert!(
+        summary.contains("0 semantic"),
+        "summary must expose the semantic count: {summary}"
+    );
+
+    for d in &score.details {
+        assert!(
+            d.message.starts_with("[mechanical]") || d.message.starts_with("[semantic]"),
+            "every finding must carry a kind tag: {}",
+            d.message
+        );
+    }
+}
+
+/// RENG-114: the security expert's `check_items()` helper exposes the
+/// canonical semantic-check catalogue so a future LLM-driven security
+/// expert can render it into a prompt without hard-coding the items in
+/// two places.
+#[test]
+fn security_check_items_are_reachable_from_the_expert() {
+    use crate::repo::experts::static_experts::Security;
+    let items = Security::check_items();
+    assert!(!items.is_empty());
+    // Every item must carry the four topic areas called out in the
+    // RENG-19 follow-up so the contract is pinned here, not in a
+    // downstream prompt template that can drift.
+    for required in [
+        "output_channel_redaction",
+        "proxy_bypass_evasion",
+        "temp_file_permissions",
+        "token_in_query_or_path",
+    ] {
+        assert!(
+            items.iter().any(|i| i.id == required),
+            "missing required semantic check: {required}"
+        );
+    }
 }
 
 // ─── CodeOrganization large-file scope ───────────────────

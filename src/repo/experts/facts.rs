@@ -206,25 +206,35 @@ pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
 ///   ones: `\\`, `\"`, `\'`, `\n` and any other `\X` pair is consumed
 ///   as a two-character escape (the scanner advances by 2, no
 ///   semantic interpretation). Backslash-newline (line continuation
-///   inside a string) is **not** tracked across lines: a string that
-///   starts on one line and is not closed on the same line is a Rust
-///   syntax error, and the per-line scan handles it by exiting the
-///   string-scanning loop on EOL without flipping the open state.
-///   Multi-line block comments (`/* … */` that cross a newline) are
-///   tracked via the `in_block_comment` state threaded through
-///   successive calls.
-/// - Raw string literals `r"..."` / `r#"..."#` and byte / c-string
-///   prefixes are not specially recognised: the `r` / `b` / `c` /
-///   `#` characters are not brace or quote delimiters, so the
-///   scanner enters and exits the literal at the next `"` it sees,
-///   exactly like an ordinary string literal. The only failure mode
-///   is a `{` or `}` **inside** a raw string being counted as code
-///   (raw strings are a Rust-supported way to embed braces in
-///   string content). The reproducer corpus — sirena's `upload.rs`
-///   and the sirena-shape pin fixtures — does not exercise this,
-///   and no file in this repo that has been audited contains a
-///   raw-string brace pattern. If a future reproducer does, the
-///   helper can be extended.
+///   inside a string) **is** tracked across lines via the
+///   `in_string` state threaded through successive calls: a
+///   `"…\"` at the end of one line keeps the string open on the next
+///   line until the matching closing `"`. Multi-line block comments
+///   (`/* … */` that cross a newline) are tracked the same way via
+///   the `in_block_comment` state.
+/// - The single-quote rule: a `'` opens a char literal only when the
+///   pattern is `'\…'` (escape) or `'<X>'` (X is exactly one byte
+///   then a closing `'`); otherwise the `'` starts a Rust lifetime
+///   reference (`&'static str`, `'_`, `<'a>`) and the scanner
+///   consumes the `'` + following identifier without entering a
+///   literal state. Treating lifetimes as literals would swallow
+///   the line's `{` / `}` and bring the RENG-114 false positive
+///   back (false-negative direction: production code after the
+///   test module loses its security sweep coverage).
+/// - Raw string literals `r"…"` / `r#"…"#` and byte / c-string
+///   prefixes are recognised: the `#`s after the prefix are
+///   consumed and the matching `"<#×N>` is found. Inside a raw
+///   string the backslash is a literal character (Rust does not
+///   interpret escapes in raw strings), so a `\"` inside
+///   `r#"…"#` is two characters and must not close the literal.
+///   The reproducer in `src/publisher/mod.rs` line 1171
+///   (`r#"{\"message\":…}"#`) has exactly this shape. The only
+///   documented limitation is a multi-line raw string that crosses
+///   a newline: the hash count is captured on the opening line
+///   and the body is scanned for the matching `"<#×N>`; the r2
+///   reproducer corpus does not have such a pattern, but if a
+///   future reproducer does, the helper can be extended to
+///   re-detect the prefix on continuation lines.
 ///
 /// Returns `Vec<(start_line, end_line)>` in 1-based inclusive
 /// coordinates so callers can compare against `enumerate() + 1`
@@ -322,6 +332,16 @@ pub(crate) fn cfg_test_line_spans(content: &str) -> Vec<(usize, usize)> {
 ///   `"`. (Rust's backslash-newline continuation is what makes
 ///   this necessary; the reproducer in `src/publisher/mod.rs` uses
 ///   the pattern at lines 1518–1519.)
+/// - Rust lifetimes (`&'static str`, `'_`, `<'a>`) are NOT char
+///   literals. A `'` opens a char literal only when the pattern is
+///   `'\…'` (escape) or `'<X>'` (X is exactly one byte, then a
+///   closing `'`); any other shape — `'static`, `'_`, `'a_b_c` —
+///   is a lifetime reference, and the scanner consumes the `'` +
+///   following identifier and continues. Treating lifetimes as
+///   literals swallows the line's `{` / `}` (the reviewer-facts
+///   r2 counterexample: `assert_eq!(brace("{"), 1);` inside a test
+///   pushed the r2 span past the real close at line 8 and made
+///   the security sweep miss the production `api_key` at line 10).
 /// - Raw string literals `r"…"` / `r#"…"#` and the byte / c-string
 ///   prefixes are recognised: the `#`s after the prefix are
 ///   consumed and the matching `"<#×N>` is found. Inside a raw
@@ -403,21 +423,57 @@ fn count_code_braces(line: &str, mut in_block_comment: bool, mut in_string: bool
                 }
             }
             b'\'' => {
-                // Char literal: same rules as the string literal,
-                // with `'`. Char literals never cross a newline
-                // (Rust syntax error otherwise), so no per-line
-                // state is needed.
-                i += 1;
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b'\\' if i + 1 < bytes.len() => {
-                            i += 2;
+                // Either a char literal or a Rust lifetime reference
+                // (`&'static str`, `'_`, `<'a>`). Distinguish by what
+                // follows the `'`. A char literal is exactly one of:
+                //   - `'\X'` — an escape sequence; `\` is the
+                //     leading byte, the X is consumed as part of
+                //     the escape (the scanner advances by 2)
+                //   - `'<X>'` — a single byte X then a closing `'`
+                // Anything else — `'<identifier>` (multi-char idents
+                // include `_`, letters, digits), `'<no close>` — is
+                // a lifetime reference, NOT a literal: consume the `'`
+                // and the following identifier chars and continue
+                // scanning. Treating lifetimes as char literals
+                // would start a bogus scan that swallows the line's
+                // remaining `{` / `}`, under-counting opens and
+                // making the outer loop's depth-0 break fire at an
+                // inner `}` (false-negative direction: production
+                // code after the test module loses its security
+                // sweep coverage, and the RENG-114 false positive
+                // can come back). The reviewer-facts r2
+                // counterexample (`assert_eq!(brace("{"), 1);`
+                // inside a test) and the audit on the 4 repo files
+                // + sirena `upload.rs` both relied on this rule.
+                let next = if i + 1 < bytes.len() { Some(bytes[i + 1]) } else { None };
+                let is_escape = next == Some(b'\\');
+                let is_one_char_literal =
+                    !is_escape && next.is_some() && next != Some(b'\'') && i + 2 < bytes.len() && bytes[i + 2] == b'\'';
+                if is_escape || is_one_char_literal {
+                    // Char literal: scan to the closing `'`,
+                    // honouring `\<X>` escape pairs (e.g. `'\n'`,
+                    // `'\''`, `'\\'`). The two-byte escape rule
+                    // matches the string-literal arm above; any
+                    // specific escape sequence is uninterpreted.
+                    i += 1;
+                    while i < bytes.len() {
+                        match bytes[i] {
+                            b'\\' if i + 1 < bytes.len() => {
+                                i += 2;
+                            }
+                            b'\'' => {
+                                i += 1;
+                                break;
+                            }
+                            _ => i += 1,
                         }
-                        b'\'' => {
-                            i += 1;
-                            break;
-                        }
-                        _ => i += 1,
+                    }
+                } else {
+                    // Lifetime or stray `'`: skip the `'` and the
+                    // identifier (or empty run) that follows.
+                    i += 1;
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                        i += 1;
                     }
                 }
             }
@@ -1209,27 +1265,33 @@ mod tests {\n\
         );
     }
 
-    /// RENG-114 follow-up (M19 r2, reviewer-facts counterexample):
+    /// RENG-114 follow-up (M19 r2 + r3, reviewer-facts counterexamples):
     /// the r1 byte-counting algorithm over-ran past the real
-    /// closing brace on at least one file in this repo
-    /// (the reviewer-facts audit: `src/feedback.rs`,
-    /// `src/publisher/mod.rs`, `src/team/adjudicator.rs`,
-    /// `src/server/dispatcher.rs` — all four carry a `{` or `}`
-    /// inside a string literal in their `#[cfg(test)] mod tests`
-    /// body, and r1 returned spans with end-line *past* the real
-    /// closing brace). The r2 string-aware counter must close the
-    /// span at the module's real closing brace, not at the first
-    /// unmatched `}` byte it sees.
+    /// closing brace (the r1 direction: `{` / `}` inside a string
+    /// literal pushed the span past the mod close), and the r2
+    /// state machine without lifetime handling had a *second* over-
+    /// run direction: treating every `'` as a char-literal opener
+    /// swallowed the `{` on a line that contains a Rust lifetime
+    /// (`&'static str`, `'_`, `<'a>`), so the depth-0 break fired at
+    /// an inner `}` and the span ended early. The r2 over-run audit
+    /// (the four real-source files) caught the first; the r3 audit
+    /// (the same four files) catches the second after the lifetime
+    /// rule is in place — the reviewer's compiled-harness test
+    /// reported r2 spans of (661, 1868) / (672, 770) / (475, 836)
+    /// / (614, 1203) where the real closes are 1909 / 1549 / 1042 /
+    /// 1257.
     ///
-    /// The audit: the r2 end-line must point at a line whose only
-    /// non-whitespace content is `}` — the module's real closing
-    /// brace. Concretely: every file in the audit has its test
-    /// module at the file tail (no production line after the mod),
-    /// so the end-line is the file's last line, and the audit
-    /// verifies the end-line content. The r1 algorithm returned an
-    /// end-line one past the real brace in every case (547 instead
-    /// of 546, 1910 instead of 1909, etc.); the r2 algorithm must
-    /// hit the brace exactly.
+    /// The audit: the r3 end-line must point at a line whose only
+    /// non-whitespace content is `}` **at column 0** — the module's
+    /// real closing brace. An indented inner `}` is NOT the mod
+    /// close (the r2 pin accepted `end_line.trim() == "}"`, which
+    /// would pass on an inner `    }` and silently mask an
+    /// early-end bug; the r3 fix tightens to `end_line == "}"`).
+    /// Every file in the audit has its test module at the file tail
+    /// (no production line after the mod), so the end-line is the
+    /// file's last line, and the r2 algorithm returned an end-line
+    /// one past the real close in every case (547 / 1910 / etc.);
+    /// the r3 lifetime rule hits the brace exactly.
 
     #[test]
     fn cfg_test_line_spans_does_not_overrun_on_real_source_files() {
@@ -1244,18 +1306,62 @@ mod tests {\n\
             let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
             let spans = cfg_test_line_spans(&src);
             assert!(!spans.is_empty(), "{rel}: must find at least one cfg-test span");
-            // The last span's end-line must be the line whose only
-            // non-whitespace content is `}` — the module's real
-            // closing brace. (The r1 algorithm returned an
-            // end-line one past this brace on all four files, so
-            // a check that the end-line content is exactly `}`
-            // is the tightest possible audit of the over-run fix.)
+            // The last span's end-line must be the module's real
+            // closing brace at column 0 — NOT an indented inner `}`.
+            // (The r2 assertion `end_line.trim() == "}"` accepted
+            // indented inner closes and was a false green; the r3
+            // pin is `end_line == "}"`, exactly the column-0 brace.)
             let (_, e) = spans.last().unwrap();
             let end_line = src.lines().nth(*e - 1).unwrap_or("");
             assert!(
-                end_line.trim() == "}",
-                "{rel}: last span ends at line {e} ({end_line:?}); r2 must close at the module's `}}` brace: spans={spans:?}"
+                end_line == "}",
+                "{rel}: last span ends at line {e} ({end_line:?}); r3 must close at the module's column-0 `}}` brace: spans={spans:?}"
             );
         }
+    }
+
+    /// RENG-114 follow-up (M19 r3, reviewer-facts counterexample):
+    /// Rust lifetimes (`&'static str`, `'_`, `<'a>`) must NOT be
+    /// parsed as char literals. The reviewer reproduced the
+    /// RENG-114 false positive with this minimal fixture:
+    /// ```text
+    /// #[cfg(test)]
+    /// mod tests {
+    ///     fn a(&self) -> &'static str { "x" }
+    ///     #[test]
+    ///     fn t() { let password = "sk"; }
+    /// }
+    /// fn prod() {}
+    /// ```
+    /// The r2 algorithm (every `'` opens a char-literal scan)
+    /// reported span (1, 5) here: the `'` in `&'static` started a
+    /// scan that consumed the line's `{`, depth went from 1 to 0
+    /// at the first `}` it saw, and the span closed early. The
+    /// security sweep then reported `Hardcoded password` on the
+    /// `let password = "sk";` line at L8, which is inside the test
+    /// module — the RENG-114 false positive the mission closes.
+    /// The r3 lifetime rule (only `'\…'` or `'<X>'` opens a char
+    /// literal) keeps the span at (1, 8) so the password line is
+    /// suppressed.
+    #[test]
+    fn cfg_test_line_spans_treats_lifetimes_as_lifetimes_not_char_literals() {
+        let src = "\
+#[cfg(test)]\n\
+mod tests {\n\
+    fn a(&self) -> &'static str {\n\
+        \"x\"\n\
+    }\n\
+    #[test]\n\
+    fn t() {\n\
+        let password = \"sk\";\n\
+    }\n\
+}\n\
+fn prod() {}\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 10)],
+            "the r3 lifetime rule must keep the cfg-test span open through the `&'static` line: {spans:?}"
+        );
     }
 }

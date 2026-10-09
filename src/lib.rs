@@ -179,7 +179,38 @@ pub async fn run_review(
     Ok(output)
 }
 
-/// Publish review results back to an MR/PR discussion.
+/// Format a [`PublishRefusal`](crate::models::PublishRefusal) for the
+/// publish-time error message.
+///
+/// Each hit's `kind`, `key` (when present), length and fingerprint prefix
+/// are named — exactly the context the operator needs to find the offending
+/// line locally without the value itself being echoed. The full body is
+/// dropped from the message: surfacing the rendered text in an error path
+/// would itself be a leak vector (any logger / formatter that calls
+/// `Debug` on this type would print the body — see [`PublishRefusal`]).
+pub(crate) fn format_publish_refusal(refusal: &crate::models::PublishRefusal, surface: &str) -> String {
+    let mut msg = format!(
+        "refusing to publish: {review} body carries {n} suspected plaintext credential(s); \
+         re-redact the offending finding locally before retrying. Detected:",
+        review = surface,
+        n = refusal.hits.len(),
+    );
+    for hit in &refusal.hits {
+        let key = hit.key.as_deref().unwrap_or("(no key)");
+        // 8 hex chars is enough to identify the value in the local file.
+        // The marker in the rendered text prints the full 16-hex fp — an
+        // operator who greps for the 8-hex prefix lands on the marker.
+        let fp = hit.fingerprint_short();
+        msg.push_str(&format!(
+            "\n  - kind={kind}, key={key}, len={len}, fp={fp}",
+            kind = hit.kind.label(),
+            key = key,
+            len = hit.value.chars().count(),
+            fp = fp,
+        ));
+    }
+    msg
+}
 ///
 /// Automatically selects the right Git provider based on the MR URL:
 /// - `github.com` → `GitHubProvider`
@@ -273,6 +304,27 @@ pub async fn publish_review_with_diff(
     let plan = crate::publisher::plan_inline_notes_for_output(output, diff_index.as_ref(), docs_only, &policy);
 
     let md = crate::publisher::render_board(output, &plan, &policy);
+    // RENG-113 publish-time gate: every body we are about to send to the
+    // provider (the board, every inline note) is scanned for plaintext
+    // credentials. The renderer redacts Evidence blocks and other LLM-
+    // derived prose at the source (the report file is already safe), so
+    // the gate is a defence-in-depth: a value that slipped through a
+    // renderer path we forgot to update still blocks the post instead of
+    // landing in the MR discussion history. A hit refuses the whole
+    // publish, board and inline notes alike — the operator can then
+    // re-mask the offending finding locally and retry.
+    if let Err(refusal) = crate::models::scan_for_publish(&md) {
+        return Err(anyhow::anyhow!(format_publish_refusal(&refusal, "board")));
+    }
+    for finding in &plan.selected {
+        let body = crate::publisher::format_inline_body(finding);
+        if let Err(refusal) = crate::models::scan_for_publish(&body) {
+            return Err(anyhow::anyhow!(format_publish_refusal(
+                &refusal,
+                &format!("inline note for `{}:{}`", finding.file, finding.line.unwrap_or(0)),
+            )));
+        }
+    }
     // The board's id, when it went up: the inline-note failures can only be
     // reported in the board if there is a board to update.
     let board_id = match provider.find_or_update_discussion(&md).await {
@@ -362,6 +414,28 @@ mod publish_policy_e2e_tests {
                 .iter()
                 .map(|f| format!("### {}\n", f.title))
                 .collect::<String>(),
+            findings,
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: None,
+            llm_model: None,
+            llm_fp: None,
+        }])
+    }
+
+    /// Build a `ReviewOutput` whose `report.markdown` is the actual
+    /// production `render_expert_markdown` output — the same code path
+    /// `render_expert_section` reads and `render_board` composes into the
+    /// board body. The P1 regression (round 1 missed this; round 2 pins
+    /// it) needs the production renderer in the loop because the marker
+    /// only fires on a redacted body, and the renderer is what produces
+    /// the redacted body.
+    fn output_via_render(findings: Vec<Finding>) -> ReviewOutput {
+        let markdown = crate::output::renderer::render_expert_markdown("security", &findings);
+        ReviewOutput::new(vec![ExpertReport {
+            expert_name: "security".to_string(),
+            markdown,
             findings,
             raw_llm_response: String::new(),
             parse_error: None,
@@ -730,5 +804,302 @@ mod publish_policy_e2e_tests {
             !requests.iter().any(|(method, _, _)| method == "PUT"),
             "no failure, no addendum: {requests:?}"
         );
+    }
+
+    // ── RENG-113: the publish-time credential gate ─────────────────────────
+
+    /// An inline note body that carries a plaintext password must NOT be
+    /// posted: round-2 redacts `title` / `recommendation` inside
+    /// [`format_inline_body`] itself, so the gate scans a body the
+    /// renderer already masked. To exercise the gate's still-active
+    /// defense-in-depth check, this test bypasses the redactor by handing
+    /// the gate a *hand-built* body — the same shape `output_with`
+    /// produces, which is what the round-1 test did. Round 2 keeps the
+    /// refusal contract: even when a plaintext title somehow survives to
+    /// the inline note (a renderer regression, a manual override), the
+    /// gate still refuses, never posts.
+    #[tokio::test]
+    async fn publish_review_refuses_an_inline_note_with_a_plaintext_credential() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        // The `file` field is the only structural channel the inline note
+        // body carries that the round-2 fix left unredacted (paths are
+        // put-incredible by the inline-anchor gate). To exercise the
+        // refusal contract with a *real* leak vector, route the plaintext
+        // through `title` and use the hand-built renderer (so the redactor
+        // never sees it).
+        let f = finding("src/auth.rs", 3, "leaked: password = \"hunter2_real_secret\"");
+        let output = output_with(vec![f]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        let err = crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect_err("a hand-built body whose inline note carries the plaintext must refuse");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to publish"),
+            "the gate's first-line reason: {msg}"
+        );
+        assert!(
+            !msg.contains("hunter2_real_secret"),
+            "the value itself must never appear in the error: {msg}"
+        );
+
+        // Defence in depth: the gate ran before the provider saw the body,
+        // so the mock server received neither a board POST nor an inline
+        // POST.
+        let requests = received(&server).await;
+        assert!(
+            requests.is_empty(),
+            "no provider call may happen on a refused publish: {requests:?}"
+        );
+    }
+
+    /// A finding whose title (rendered verbatim by the hand-built
+    /// `output_with` fixture, which round 1 used to expose the leak) carries
+    /// a credential triggers the same refusal. Round 2 closes the renderer
+    /// channel too (the e2e tests above use the real renderer), so this
+    /// is the negative half of round 2 — the gate stays live as a
+    /// defense-in-depth check.
+    #[tokio::test]
+    async fn publish_review_refuses_a_board_with_a_plaintext_credential() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let f = finding("src/auth.rs", 3, "leaked: password = \"hunter2_real_secret\"");
+        let output = output_with(vec![f]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        let err = crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect_err("publishing must refuse a credential in the board");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to publish"),
+            "the gate's first-line reason: {msg}"
+        );
+        assert!(
+            msg.contains("board body"),
+            "the gate names the offending surface: {msg}"
+        );
+        assert!(
+            !msg.contains("hunter2_real_secret"),
+            "the value itself must never appear in the error: {msg}"
+        );
+
+        let requests = received(&server).await;
+        assert!(
+            requests.is_empty(),
+            "no provider call may happen on a refused publish: {requests:?}"
+        );
+    }
+
+    /// A clean review still publishes: the gate must not be a false-positive
+    /// time bomb. (The existing e2e tests already cover the canonical
+    /// happy path; this one is the same shape with credentials absent.)
+    #[tokio::test]
+    async fn publish_review_passes_when_no_credentials_are_present() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let output = output_with(vec![finding("src/auth.rs", 3, "Constant-time compare missing")]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("clean publish must succeed");
+    }
+
+    /// `format_publish_refusal` prints hit context (kind, key, len, fp)
+    /// without echoing the value itself — the operator can grep the local
+    /// report file for the fingerprint to find the offending line, but the
+    /// error path itself stays credential-free.
+    #[test]
+    fn publish_refusal_error_names_context_without_the_value() {
+        let body = "config.toml: password = \"hunter2_real_secret\"";
+        let refusal = crate::models::scan_for_publish(body).unwrap_err();
+        let msg = crate::format_publish_refusal(&refusal, "board");
+
+        assert!(msg.contains("kind=password"));
+        assert!(msg.contains("key=password"));
+        assert!(msg.contains("len=19"), "the real length is 19 chars: {msg}");
+        assert!(!msg.contains("hunter2_real_secret"), "the value is never echoed: {msg}");
+        // The fingerprint is short (8 hex chars) and stable, so a reviewer
+        // can grep the local report file for it.
+        let fp_start = msg.find("fp=").expect("fp is in the error");
+        let fp = &msg[fp_start + 3..fp_start + 3 + 8];
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()), "fp is hex: {fp}");
+    }
+
+    // ── RENG-113 round 2: the render→board→gate chain (P1 regression) ───
+
+    /// RENG-113 round 2: a credential that lives in a field the renderer
+    /// redacts (here `Finding::summary`) must NOT block `--publish` — the
+    /// renderer is supposed to mask it, and the board that lands on the
+    /// MR discussion must therefore carry the masked form. Before round 2
+    /// the gate re-fired on its own marker and refused the post; this
+    /// test pins the production call sequence (`render_expert_markdown` →
+    /// `render_board` → `scan_for_publish`) so the regression cannot return
+    /// through a renderer-rewrite that breaks the marker-aware scan.
+    #[tokio::test]
+    async fn publish_review_passes_through_a_masked_board_with_credential_in_summary() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        // The summary quotes a config line. The renderer masks it; the
+        // gate must accept the masked board.
+        let mut f = finding("src/auth.rs", 3, "Constant-time compare missing");
+        f.summary = "the committed config line is password = \"hunter2_real_secret\" in config.toml.".to_string();
+        f.evidence = "the line is password = \"hunter2_real_secret\"".to_string();
+        let output = output_via_render(vec![f]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("a board whose renderer masked the credential must publish");
+
+        // The board that landed on GitLab carries the marker, never the
+        // plaintext — the same masked form the report file holds.
+        let board = board_body(&server).await;
+        assert!(
+            !board.contains("hunter2_real_secret"),
+            "the board body must not carry the plaintext: {board}"
+        );
+        assert!(board.contains("kind=password"), "the board carries the marker: {board}");
+    }
+
+    /// RENG-113 round 2: a credential that the renderer could not mask (the
+    /// `title` field, before round 2) used to reach the board verbatim and
+    /// trip the gate. After round 2 the title is also redacted — the gate
+    /// still refuses, because the masked title's marker must NOT re-fire
+    /// the scan (that's the round 2 fix). This test pins the "title is
+    /// masked at render time, gate accepts the masked board" path.
+    #[tokio::test]
+    async fn publish_review_passes_through_a_masked_board_with_credential_in_title() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        // Title itself used to be the title channel that round 1 missed.
+        // After round 2 it goes through `redact()` in both
+        // `render_expert_markdown` and `render_team_report_with_scoring`.
+        let mut f = finding("src/auth.rs", 3, "");
+        f.title = "leaked: password = \"hunter2_real_secret\"".to_string();
+        let output = output_via_render(vec![f]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("a board whose renderer masked the title must publish");
+
+        let board = board_body(&server).await;
+        assert!(
+            !board.contains("hunter2_real_secret"),
+            "the board body must not carry the plaintext title: {board}"
+        );
+    }
+
+    /// RENG-113 round 2: a credential that lives in a channel the renderer
+    /// does *not* mask (today `Finding::file`; a path is structural) must
+    /// still be caught by the gate, so the publish refuses and the value
+    /// never goes through. This is the negative half of the round-2 fix:
+    /// the gate refuses on a real hit, even though the renderer has redacted
+    /// everything it can see.
+    #[tokio::test]
+    async fn publish_review_still_refuses_when_credential_survives_every_redaction_path() {
+        // Bypass the renderer entirely: hand the gate a board body that
+        // contains a real password, even though the renderer would have
+        // caught it. This is the same hand-built shape the round-1 tests
+        // use — round 2 keeps the round-1 contract: a real plaintext hit
+        // still refuses.
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let f = finding("src/auth.rs", 3, "leaked: password = \"hunter2_real_secret\"");
+        // Hand-build the markdown so the redactor never sees the title.
+        // The board will carry the title verbatim; the gate must refuse.
+        let output = output_with(vec![f]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        let err = crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect_err("a board whose renderer could not mask the credential must refuse");
+
+        let msg = err.to_string();
+        assert!(msg.contains("refusing to publish"), "{msg}");
+        assert!(!msg.contains("hunter2_real_secret"), "the value is never echoed: {msg}");
+
+        // Defence in depth: the gate ran before the provider saw the body.
+        let requests = received(&server).await;
+        assert!(
+            requests.is_empty(),
+            "no provider call may happen on a refused publish: {requests:?}"
+        );
+    }
+
+    /// RENG-113 round 3: a credential in a *rolled-up* title (admitted
+    /// by the policy but withheld from inline delivery past the per-round
+    /// cap, default 2 → posts two notes inline, the rest go up the board)
+    /// used to refuse the publish on its own rendered list — fail-closed,
+    /// but a user-facing publish dead-end the operator couldn't resolve,
+    /// and confusing because the per-expert section already masked the same
+    /// title. Round 3 masks the rolled-up list in `board_section`, so the
+    /// gate passes and the board carries the marker.
+    #[tokio::test]
+    async fn publish_review_passes_through_a_rolled_up_credential_title() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        // Three admitted findings, default cap is 2 → three goes to the
+        // rolled-up list. The credential lives in that title.
+        let files = ["src/f1.rs", "src/f2.rs", "src/f3.rs"];
+        let mut findings: Vec<Finding> = files
+            .iter()
+            .enumerate()
+            .map(|(i, file)| finding(file, 1, &format!("Issue {i}")))
+            .collect();
+        findings[2].title = "leaked: password = \"hunter2_real_secret\"".to_string();
+        let output = output_via_render(findings);
+        let diff = diff_for(&files);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("a board whose rolled-up list masked the credential must publish");
+
+        // The board carries the marker, never the value.
+        let board = board_body(&server).await;
+        assert!(
+            !board.contains("hunter2_real_secret"),
+            "the rolled-up title must be masked: {board}"
+        );
+        assert!(
+            board.contains("kind=password"),
+            "the rolled-up marker is named in the board: {board}"
+        );
+        // The rolled-up list still names the anchor and the cap that
+        // pulled the finding out of inline delivery — what the reviewer
+        // expects to see.
+        assert!(board.contains("`src/f3.rs:1`"), "the anchor is named: {board}");
+        assert!(
+            board.contains("exceeded the 2-note per-round cap"),
+            "the cap explanation is named: {board}"
+        );
+
+        // Two inline notes went up (the first two), the third was the
+        // rolled-up one. The inline notes' bodies are masked at source
+        // (round-2 `format_inline_body`); the gate sees them masked too.
+        let requests = received(&server).await;
+        let posted = inline_posts(&requests);
+        assert_eq!(posted.len(), 2, "the default cap is two notes per round: {requests:?}");
+        // And the inline-note bodies are themselves masked — the
+        // plaintext does not leak through the inline path either.
+        for body in &posted {
+            assert!(
+                !body.contains("hunter2_real_secret"),
+                "inline note body carries no plaintext: {body}"
+            );
+        }
     }
 }

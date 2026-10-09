@@ -13,11 +13,13 @@ mod config;
 mod expert;
 mod finding;
 mod git_platform;
+mod secrets;
 
 pub use config::*;
 pub use expert::*;
 pub use finding::*;
 pub use git_platform::*;
+pub use secrets::*;
 
 use serde::{Deserialize, Serialize};
 

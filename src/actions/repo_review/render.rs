@@ -3,6 +3,13 @@ use super::types::*;
 use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
 use anyhow::Result;
 
+/// RENG-113: redact suspected credential values in LLM-derived prose before
+/// it lands in the report (the security expert's static `Security` finding
+/// is exactly the path that quotes a config line with a real password).
+fn redact(text: &str) -> String {
+    crate::models::redact_text(text)
+}
+
 /// Render an expert-score detail line as markdown.
 pub(crate) fn render_detail(d: &ScoreItemDetail) -> String {
     let mut buf = String::new();
@@ -10,7 +17,11 @@ pub(crate) fn render_detail(d: &ScoreItemDetail) -> String {
     if d.message.trim().is_empty() {
         return buf;
     }
-    buf.push_str(&format!("\n#### {} — {}\n", d.severity.to_uppercase(), d.message));
+    buf.push_str(&format!(
+        "\n#### {} — {}\n",
+        d.severity.to_uppercase(),
+        redact(&d.message)
+    ));
 
     if let Some(ref file) = d.file {
         buf.push_str(&format!("**File**: `{file}`\n"));
@@ -18,18 +29,18 @@ pub(crate) fn render_detail(d: &ScoreItemDetail) -> String {
     if let Some(ref evidence) = d.evidence {
         let evidence = strip_markdown_fences(evidence);
         if !evidence.is_empty() {
-            let evidence = close_unclosed_code_fences(&evidence);
+            let evidence = close_unclosed_code_fences(&redact(&evidence));
             buf.push_str(&format!("**Evidence**:\n```\n{evidence}\n```\n"));
         }
     }
     if let Some(ref impact) = d.impact {
         if !impact.is_empty() {
-            buf.push_str(&format!("**Impact**: {impact}\n"));
+            buf.push_str(&format!("**Impact**: {}\n", redact(impact)));
         }
     }
     if let Some(ref rec) = d.recommendation {
         if !rec.is_empty() {
-            buf.push_str(&format!("**Recommendation**: {rec}\n"));
+            buf.push_str(&format!("**Recommendation**: {}\n", redact(rec)));
         }
     }
     if let Some(ref effort) = d.effort {
@@ -115,7 +126,11 @@ pub fn render_repo_review_output(
             ));
 
             if let Some(ref summary) = output.overview.lead_summary {
-                md.push_str(&format!("> {}\n\n", summary));
+                // RENG-113 round 2: lead_summary is the architecture expert's
+                // LLM prose — same class as `s.summary` (redacted at line 154),
+                // and the same class as Evidence blocks (the team renderer's
+                // TL;DR is redacted through `redact()` too).
+                md.push_str(&format!("> {}\n\n", redact(summary)));
             }
 
             md.push_str("---\n\n");
@@ -140,7 +155,7 @@ pub fn render_repo_review_output(
                          the summary below records why.\n\n",
                     );
                 }
-                md.push_str(&format!("**Summary**: {}\n\n", s.summary));
+                md.push_str(&format!("**Summary**: {}\n\n", redact(&s.summary)));
                 for d in &s.details {
                     md.push_str(&render_detail(d));
                 }
@@ -167,13 +182,17 @@ pub fn render_repo_review_output(
                 md.push_str("|---|------|----------|-------|---------------|--------|\n");
                 for (i, item) in output.action_items.iter().enumerate() {
                     let eff = item.effort.as_deref().unwrap_or("—");
+                    // RENG-113: `message` and `recommendation` are LLM-derived
+                    // prose — the same detector that masks Evidence runs here,
+                    // so a security finding's quoted config line doesn't
+                    // smuggle plaintext into the action-items table.
                     md.push_str(&format!(
                         "| {} | {} | {} | {} | {} | {} |\n",
                         i + 1,
                         item.area,
                         item.severity,
-                        item.message,
-                        item.recommendation,
+                        redact(&item.message),
+                        redact(&item.recommendation),
                         eff,
                     ));
                 }
@@ -195,7 +214,14 @@ pub fn render_repo_review_output(
                 }
             }
             md.push('\n');
-            md.push_str(&format!("**Recommendation**: {}\n", output.conclusion.recommendation));
+            md.push_str(&format!(
+                "**Recommendation**: {}\n",
+                // RENG-113 round 2: the aggregator's LLM prose — same class as
+                // the per-finding recommendation (redacted inside the action
+                // items table at line 191). Without this, the conclusion
+                // section is the last unredacted channel in the report.
+                redact(&output.conclusion.recommendation)
+            ));
 
             // ── Verification appendix ──
             // checked = surviving code_quality findings + dropped ones, the

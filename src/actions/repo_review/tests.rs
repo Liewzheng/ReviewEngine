@@ -1181,6 +1181,121 @@ fn test_render_markdown_marks_fallback_experts() {
     assert!(md.contains(&row), "{md}");
 }
 
+// ── RENG-113: credential redaction in repo-review markdown ────────
+
+/// The static `Security` expert quotes a config line in its Evidence /
+/// message / recommendation fields. The Markdown renderer must mask any
+/// plaintext credential it carries, so the repo-review report file (and
+/// anything that copies it) doesn't leak real passwords.
+#[test]
+fn test_render_repo_review_markdown_redacts_password_in_evidence() {
+    let mut output = minimal_output();
+    let mut security = expert_output("security", 60, "see evidence", false);
+    security.details.push(ScoreItemDetail {
+        severity: "high".to_string(),
+        message: "config exposes a password".to_string(),
+        file: Some("config.toml".to_string()),
+        evidence: Some("password = \"hunter2_real_secret\"".to_string()),
+        impact: None,
+        recommendation: Some("rotate the credential".to_string()),
+        effort: None,
+    });
+    output.expert_scores.push(security);
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+
+    assert!(!md.contains("hunter2_real_secret"), "Evidence must be redacted: {md}");
+    assert!(md.contains("kind=password"), "the marker is named: {md}");
+    assert!(md.contains("password = "), "the assignment shape is preserved: {md}");
+}
+
+/// RENG-113: the action-items table — the most-skimmed section — also
+/// runs through the same redactor, so a `recommendation` column quoting
+/// a config line doesn't smuggle the plaintext into a `~/.config/...`
+/// report file.
+#[test]
+fn test_render_repo_review_markdown_redacts_password_in_action_items() {
+    let mut output = minimal_output();
+    output.action_items.push(ActionItem {
+        area: "security".to_string(),
+        severity: "high".to_string(),
+        message: "see config".to_string(),
+        file: Some("config.toml".to_string()),
+        recommendation: "rotate password = \"hunter2_real_secret\"".to_string(),
+        effort: None,
+    });
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+
+    assert!(
+        !md.contains("hunter2_real_secret"),
+        "action-items recommendation must be redacted: {md}"
+    );
+    assert!(md.contains("kind=password"), "the marker is named: {md}");
+}
+
+/// RENG-113 round 2: `overview.lead_summary` is the architecture expert's
+/// LLM prose. The reviewer's prose detected that this field was rendered
+/// raw at `render.rs:129` while the same field was redacted on line 154 —
+/// inconsistent within one report. The reviewer also observed the marker
+/// class drift between the two sites. The lead_summary path now runs
+/// through `redact()` so the report is consistent.
+#[test]
+fn test_render_repo_review_markdown_redacts_password_in_lead_summary() {
+    let mut output = minimal_output();
+    output.overview.lead_summary = Some("config: password = \"hunter2_real_secret\"".to_string());
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    assert!(
+        !md.contains("hunter2_real_secret"),
+        "lead_summary must be redacted: {md}"
+    );
+    assert!(md.contains("kind=password"), "the lead_summary marker is named: {md}");
+}
+
+/// RENG-113 round 2: `conclusion.recommendation` is the aggregator's LLM
+/// prose. The reviewer's prose noted the field was reaching the report
+/// verbatim at `render.rs:213` (the last unredacted channel in the
+/// report). The conclusion-recommendation path now runs through
+/// `redact()`.
+#[test]
+fn test_render_repo_review_markdown_redacts_password_in_conclusion_recommendation() {
+    let mut output = minimal_output();
+    output.conclusion.recommendation = "rotate the credential: password = \"hunter2_real_secret\"".to_string();
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    assert!(
+        !md.contains("hunter2_real_secret"),
+        "conclusion.recommendation must be redacted: {md}"
+    );
+    assert!(md.contains("kind=password"), "the conclusion marker is named: {md}");
+}
+
+/// RENG-113 round 2 (added coverage): the per-detail `message` field in
+/// `render_detail` (the summary line above each finding) is LLM prose —
+/// already redacted in round 1 at `d5fc1d4` (see `render.rs:23`,
+/// `format!("#### {} — {}", …, redact(&d.message))`). The round-2 test
+/// pins the contract: the visible report carries the marker, the plaintext
+/// is gone.
+#[test]
+fn test_render_repo_review_markdown_redacts_password_in_detail_message() {
+    let mut output = minimal_output();
+    let mut security = expert_output("security", 60, "see evidence", false);
+    security.details.push(ScoreItemDetail {
+        severity: "high".to_string(),
+        // The message is the human-readable summary above the evidence
+        // block — same class as the evidence it precedes.
+        message: "the config exposes password = \"hunter2_real_secret\"".to_string(),
+        file: Some("config.toml".to_string()),
+        evidence: Some("password = \"hunter2_real_secret\"".to_string()),
+        impact: None,
+        recommendation: None,
+        effort: None,
+    });
+    output.expert_scores.push(security);
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    assert!(
+        !md.contains("hunter2_real_secret"),
+        "render_detail.message must be redacted: {md}"
+    );
+}
+
 // ── RENG-107 r2: the repo-review site's zero-concurrency backstop ───
 
 /// The repo-review LLM-enhancement pass builds its OWN semaphore, so it needs

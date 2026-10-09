@@ -5,6 +5,19 @@ use crate::models::*;
 use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
 use crate::team::lead_consolidator::{ConsolidatedReport, ExpertWeights};
 
+/// Redact suspected credential values in `text` before the field is rendered.
+///
+/// Applied to every piece of LLM-derived text that lands in a report
+/// (`summary`, `impact`, `recommendation`, `evidence`, the raw-response
+/// excerpt): the expert is supposed to *quote* a misconfigured line, and the
+/// quote is what carries the plaintext. The marker preserves the diagnostic
+/// context — key name + length + fingerprint — so the reader still knows
+/// *which* line had the hit. See [`crate::models::redact_text`] for the
+/// patterns.
+fn redact(text: &str) -> String {
+    crate::models::redact_text(text)
+}
+
 /// How many characters of a raw LLM response to inline in the report before
 /// pointing at the full dump file. Keeps the report readable while making the
 /// LLM input/output inspectable.
@@ -58,8 +71,12 @@ pub fn render_expert_section(report: &crate::models::ExpertReport) -> String {
             .take(RAW_RESPONSE_EXCERPT_CHARS)
             .collect();
         let truncated = report.raw_llm_response.chars().count() > RAW_RESPONSE_EXCERPT_CHARS;
+        // The raw LLM response is whatever the expert emitted; a security
+        // finding against a config line echoes the line verbatim. Redact it
+        // here (RENG-113) so the report file and the MR discussion both carry
+        // the masked form.
         extras.push_str("**Raw LLM response**（原始 LLM 输出）\n\n```text\n");
-        extras.push_str(&excerpt);
+        extras.push_str(&redact(&excerpt));
         if truncated {
             extras.push_str("… (truncated)");
         }
@@ -153,7 +170,10 @@ pub fn render_team_report_with_scoring(
     ));
 
     // ── TL;DR ───────────────────────────────────────────────────────────────
-    out.push_str(&format!("### TL;DR\n{}\n\n", close_unclosed_code_fences(&tl_dr)));
+    out.push_str(&format!(
+        "### TL;DR\n{}\n\n",
+        close_unclosed_code_fences(&redact(&tl_dr))
+    ));
 
     // ── Reviewer List ───────────────────────────────────────────────────────
     out.push_str("### Reviewers\n\n");
@@ -212,7 +232,14 @@ pub fn render_team_report_with_scoring(
             out.push_str(&format!("#### {:?}\n\n", severity));
 
             for f in severity_findings {
-                out.push_str(&format!("**{}** — Confidence {}/10\n", f.title, f.confidence,));
+                // RENG-113 round 2: title is LLM prose — same treatment as
+                // Evidence / impact / recommendation below. The reviewer
+                // probe (`/tmp/reng113-probe/rust-probe`) showed a title
+                // like `leaked: password = "hunter2_real_secret"` reaching
+                // this line verbatim; the publish gate caught it (the e2e
+                // refusal test still passes), and the report file was the
+                // unredacted exposure.
+                out.push_str(&format!("**{}** — Confidence {}/10\n", redact(&f.title), f.confidence,));
                 out.push_str(&format!(
                     "> [{}] {} `{}:{}`\n\n",
                     f.expert_name,
@@ -223,15 +250,21 @@ pub fn render_team_report_with_scoring(
                 if !f.evidence.is_empty() {
                     let evidence = strip_markdown_fences(&f.evidence);
                     let evidence = close_unclosed_code_fences(&evidence);
-                    out.push_str(&format!("**Evidence**:\n```\n{}\n```\n\n", evidence));
+                    // RENG-113: an Evidence block is exactly where a security
+                    // finding quotes the offending line, which can carry the
+                    // real secret. Redact before the block lands in the report.
+                    out.push_str(&format!("**Evidence**:\n```\n{}\n```\n\n", redact(&evidence)));
                 }
                 if !f.impact.is_empty() {
-                    out.push_str(&format!("**Impact**: {}\n\n", close_unclosed_code_fences(&f.impact)));
+                    out.push_str(&format!(
+                        "**Impact**: {}\n\n",
+                        close_unclosed_code_fences(&redact(&f.impact))
+                    ));
                 }
                 if !f.recommendation.is_empty() {
                     out.push_str(&format!(
                         "**Recommendation**: {}\n\n",
-                        close_unclosed_code_fences(&f.recommendation)
+                        close_unclosed_code_fences(&redact(&f.recommendation))
                     ));
                 }
                 out.push_str(&format!("Effort: {:?} | Severity: {:?}\n\n", f.effort, f.severity));
@@ -453,18 +486,22 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
     }
     out.push_str(&format!(
         "### TL;DR\n{}\n\n",
-        close_unclosed_code_fences(&assessment.tl_dr)
+        close_unclosed_code_fences(&redact(&assessment.tl_dr))
     ));
 
     if !consolidated.conflicts.is_empty() {
         out.push_str("### ⚖️ Reviewer Discussion\n\n");
         for conflict in &consolidated.conflicts {
             let line = conflict.line.map_or(String::new(), |l| format!(":{}", l));
+            // The conflict description is expert-derived prose — redact it
+            // the same way we redact the per-finding bodies, so a lead
+            // summary on a config-bearing file doesn't smuggle the plaintext
+            // into the report.
             out.push_str(&format!(
                 "#### `{file}{line}` — {issue}\n\n",
                 file = conflict.file,
                 line = line,
-                issue = conflict.issue,
+                issue = redact(&conflict.issue),
             ));
 
             // Look up the severity each expert assigned to this location from
@@ -484,12 +521,12 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                         "- **{}** (severity: {:?}): {}\n",
                         expert,
                         severity,
-                        close_unclosed_code_fences(resolution)
+                        close_unclosed_code_fences(&redact(resolution))
                     )),
                     None => out.push_str(&format!(
                         "- **{}**: {}\n",
                         expert,
-                        close_unclosed_code_fences(resolution)
+                        close_unclosed_code_fences(&redact(resolution))
                     )),
                 }
             }
@@ -514,7 +551,7 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                     "\n**Lead resolution**: Adopt **{}**'s position ({}): {}\n\n",
                     conflict.experts[winner],
                     basis,
-                    close_unclosed_code_fences(resolution),
+                    close_unclosed_code_fences(&redact(resolution)),
                 ));
             }
         }
@@ -533,8 +570,8 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                 f.severity,
                 f.file,
                 line,
-                close_unclosed_code_fences(&f.title),
-                close_unclosed_code_fences(&dropped.reason),
+                close_unclosed_code_fences(&redact(&f.title)),
+                close_unclosed_code_fences(&redact(&dropped.reason)),
             ));
         }
         out.push('\n');

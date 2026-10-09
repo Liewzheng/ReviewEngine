@@ -2,7 +2,7 @@ use super::metadata::*;
 use super::render::*;
 use super::scoring::*;
 use super::types::*;
-use super::{run_local_repo_review, run_repo_review};
+use super::{build_output_from_aggregated, run_local_repo_review, run_repo_review};
 use crate::models::*;
 use crate::repo::experts::{self, ExpertScore, ScoreItem};
 use crate::repo::FileEntry;
@@ -473,6 +473,511 @@ fn score_output(name: &str, score: u8, weight: u8) -> ExpertScoreOutput {
         sample_min: None,
         sample_max: None,
     }
+}
+
+/// Variant of [`score_output`] that lights up the `fallback` flag —
+/// used for the breakdown-consistency pin and the hygiene-only
+/// filter tests, where we need to assert that the report layer
+/// quietly drops the placeholder expert out of the headline math,
+/// the per-expert breakdown, and the risk ranking alike.
+fn score_output_fallback(name: &str, score: u8, weight: u8) -> ExpertScoreOutput {
+    ExpertScoreOutput {
+        fallback: true,
+        ..score_output(name, score, weight)
+    }
+}
+
+/// Convenience builder for a single `ScoreItemDetail`, used by the
+/// hygiene-filter tests below.
+fn detail(severity: &str, message: &str) -> ScoreItemDetail {
+    ScoreItemDetail {
+        severity: severity.to_string(),
+        message: message.to_string(),
+        file: None,
+        evidence: None,
+        impact: None,
+        recommendation: None,
+        effort: None,
+    }
+}
+
+// ── total_weight_f / build_score_breakdown: fallback exclusion (RENG-115 rework) ──
+
+/// RENG-115 / reworked-M15: `total_weight_f` (the divisor used by
+/// the per-expert breakdown table) must sum only non-fallback
+/// weights. Fallback experts carry a placeholder score, and the
+/// weighted aggregate in `repo::experts::weighted_total` already
+/// filters them out — so the divisor and the numerator must agree,
+/// otherwise the breakdown rows would not sum to the headline score.
+#[test]
+fn total_weight_f_excludes_fallback_experts() {
+    let genuine = score_output("a", 80, 50);
+    let only_genuine = total_weight_f(std::slice::from_ref(&genuine));
+    let fallback = score_output_fallback("b", 70, 100);
+    let mixed = total_weight_f(&[genuine, fallback]);
+    assert_eq!(
+        mixed, only_genuine,
+        "fallback weight 100 must NOT enter the divisor (only-genuine={}, mixed={})",
+        only_genuine, mixed,
+    );
+    assert_eq!(mixed, 50.0, "fallback weight excluded, the divisor becomes 50.0");
+}
+
+/// RENG-115 / reworked-M15: with a fallback expert mixed in, the
+/// remaining rows' `weighted_contrib` must sum to the headline
+/// `health_score` that `weighted_total` produces — the breakdown
+/// is now a faithful accounting of the headline math.
+#[test]
+fn build_score_breakdown_sums_to_headline_even_with_a_fallback() {
+    let genuine_a = score_output("a", 80, 60);
+    let genuine_b = score_output("b", 40, 40);
+    let fallback = score_output_fallback("c", 70, 100);
+    let mixed = vec![genuine_a, genuine_b, fallback];
+    let divisor = total_weight_f(&mixed);
+    let rows = build_score_breakdown(&mixed, divisor);
+    let sum: f64 = rows.iter().map(|r| r.weighted_contrib).sum();
+    // Headline via the production scoring math, with the same
+    // fallback filter `weighted_total` applies. We re-derive the
+    // number directly because the report-layer `ExpertScoreOutput`
+    // does not map 1:1 to the internal `ExpertScore` the real
+    // `weighted_total` consumes (the conversion lives in
+    // `convert_scores`); the headline math is identical.
+    let mut weighted_sum = 0.0f64;
+    let mut total_w = 0u32;
+    for s in mixed.iter().filter(|s| !s.fallback) {
+        weighted_sum += f64::from(s.score) * f64::from(s.weight);
+        total_w += s.weight as u32;
+    }
+    let headline_f = if total_w == 0 {
+        0.0
+    } else {
+        weighted_sum / f64::from(total_w)
+    };
+    assert!(
+        (sum - headline_f).abs() < 0.5,
+        "breakdown sum ({sum}) must equal the headline ({headline_f}) for a non-trivial precision; rows={rows:?}"
+    );
+    // Fallback expert must not appear in the breakdown rows at all:
+    // its placeholder must not pollute the visible accounting.
+    assert!(
+        rows.iter().all(|r| r.area != "c"),
+        "fallback expert must be excluded from the breakdown: {rows:?}"
+    );
+}
+
+// ── build_risk_categories / pick_top_risks: hygiene filter (RENG-115 rework) ──
+
+/// RENG-115 / reworked-M15: a 100/100 expert whose only details are
+/// `[hygiene]` reminders (the unconfigured-repo `code_style` shape
+/// that triggered the reviewer-sec P2) must not become a
+/// `RiskCategory` at all — `build_risk_categories` drops the entire
+/// expert so it cannot climb the Top-Risks list via its hygiene
+/// notes.
+#[test]
+fn build_risk_categories_drops_hygiene_only_experts() {
+    let hygiene_expert = score_output("code_style", 100, 5);
+    let mut with_hygiene = hygiene_expert.clone();
+    with_hygiene.details = vec![
+        detail("note", "[hygiene] Missing .editorconfig — …"),
+        detail(
+            "note",
+            "[hygiene] Missing style config for Rust: none of [rustfmt.toml] found",
+        ),
+    ];
+    let real_expert = score_output("security", 70, 15);
+    let mut with_real = real_expert.clone();
+    with_real.details = vec![detail("medium", "[mechanical] Possible API key at src/upload.rs")];
+
+    let cats = build_risk_categories(&[with_hygiene, with_real]);
+    assert_eq!(cats.len(), 1, "hygiene-only expert must be filtered: {cats:?}");
+    assert_eq!(cats[0].area, "security");
+    // And `is_hygiene_finding` is the canonical predicate:
+    assert!(is_hygiene_finding(&detail("note", "[hygiene] Missing .editorconfig")));
+    assert!(is_hygiene_finding(&detail("note", "Reminder: add a .editorconfig")));
+    assert!(!is_hygiene_finding(&detail("medium", "Possible credential leak")));
+}
+
+/// RENG-115 / reworked-M15: a `note`-severity finding without the
+/// explicit `[hygiene]` tag still counts as hygiene — the
+/// `is_hygiene_finding` predicate accepts both signals. The
+/// producer can pick one or both, and the filter must accept either.
+#[test]
+fn hygiene_predicate_accepts_note_only_and_tagged_findings() {
+    assert!(is_hygiene_finding(&detail("note", "Reminder without tag")));
+    assert!(is_hygiene_finding(&detail("note", "[hygiene] Tagged reminder")));
+    // Anything that is not note and not tagged must NOT be hygiene
+    // — those are real findings and the filter must keep them.
+    assert!(!is_hygiene_finding(&detail("medium", "Real concern")));
+    assert!(!is_hygiene_finding(&detail("high", "[mechanical] Possible secret key")));
+}
+
+/// RENG-115 / reworked-M15: a RiskCategory whose findings are all
+/// hygiene reminders must be filtered out of `pick_top_risks` even
+/// when the caller hands in raw categories (defence-in-depth on top
+/// of `build_risk_categories`'s filter).
+#[test]
+fn pick_top_risks_drops_hygiene_only_risk_categories() {
+    let hygiene_cat = RiskCategory {
+        area: "code_style".to_string(),
+        score: 100,
+        risk_level: RiskLevel::Healthy,
+        finding_count: 3,
+        findings: vec![
+            detail("note", "[hygiene] Missing .editorconfig"),
+            detail("note", "[hygiene] Missing clippy.toml"),
+            detail("note", "[hygiene] Missing rustfmt.toml"),
+        ],
+    };
+    let real_cat = RiskCategory {
+        area: "security".to_string(),
+        score: 50,
+        risk_level: RiskLevel::High,
+        finding_count: 1,
+        findings: vec![detail("medium", "Possible credential leak")],
+    };
+    let top = pick_top_risks(&[hygiene_cat, real_cat]);
+    let names: Vec<&str> = top.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        !names.contains(&"code_style"),
+        "hygiene-only code_style must not appear in Top Risks: {names:?}"
+    );
+    assert_eq!(
+        top.first().map(|(n, _)| n.as_str()),
+        Some("security"),
+        "the genuinely weakest expert stays at the top: {names:?}"
+    );
+}
+
+/// Report-layer pin for the canonical RENG-115 reproducer: an
+/// unconfigured Rust repo's `repo-review --local-path` flow MUST NOT
+/// surface a Top-Risks row for `code_style`. Drives the same three
+/// layers the production markdown goes through —
+/// `build_risk_categories`, `pick_top_risks`, `total_weight_f` —
+/// with the exact expert-set one would build locally.
+#[test]
+fn report_top_risks_for_unconfigured_repo_excludes_code_style() {
+    let mut code_style = score_output("code_style", 100, 5);
+    code_style.details = vec![
+        detail("note", "[hygiene] Missing .editorconfig — …"),
+        detail(
+            "note",
+            "[hygiene] Missing style config for Rust: none of [rustfmt.toml] found",
+        ),
+        detail(
+            "note",
+            "[hygiene] Missing style config for Rust: none of [clippy.toml] found",
+        ),
+    ];
+    let mut test_coverage = score_output("test_coverage", 0, 20);
+    test_coverage.details = vec![detail("high", "No tests on src/main.rs")];
+    let mut documentation = score_output("documentation", 30, 10);
+    documentation.details = vec![detail("medium", "Undocumented functions: 42")];
+    let mut dependency = score_output("dependency", 80, 10);
+    dependency.details = vec![detail("note", "Audit next quarter")];
+    let mut architecture = score_output("architecture", 90, 15);
+    architecture.details = vec![detail("note", "Well-structured")];
+
+    let experts = [
+        code_style,
+        test_coverage.clone(),
+        documentation.clone(),
+        dependency.clone(),
+        architecture.clone(),
+    ];
+    let cats = build_risk_categories(&experts);
+    let top = pick_top_risks(&cats);
+    let names: Vec<&str> = top.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        !names.contains(&"code_style"),
+        "Top Risks must NOT list code_style just because it carries [hygiene] notes: {names:?}"
+    );
+    // Sanity: the genuinely weakest expert (test_coverage, 0/100)
+    // must remain at the top of the list.
+    assert_eq!(
+        top.first().map(|(n, _)| n.as_str()),
+        Some("test_coverage"),
+        "real risks still surface: {names:?}"
+    );
+    // And the divisor math is consistent across the same set: the
+    // breakdown sum equals the headline (no fallback here, but the
+    // invariant must hold for any composition of genuine experts).
+    let divisor = total_weight_f(&experts);
+    let rows = build_score_breakdown(&experts, divisor);
+    let sum: f64 = rows.iter().map(|r| r.weighted_contrib).sum();
+    let mut weighted_sum = 0.0f64;
+    let mut total_w = 0u32;
+    for s in experts.iter().filter(|s| !s.fallback) {
+        weighted_sum += f64::from(s.score) * f64::from(s.weight);
+        total_w += s.weight as u32;
+    }
+    let headline_f = if total_w == 0 {
+        0.0
+    } else {
+        weighted_sum / f64::from(total_w)
+    };
+    assert!(
+        (sum - headline_f).abs() < 0.5,
+        "breakdown sum ({sum}) must equal headline ({headline_f}) on the unconfigured-repo path: {rows:?}"
+    );
+}
+
+/// Full (LLM / aggregated) path reproducer pin — exactly the
+/// `build_output_from_aggregated` invocation that r2 showed the
+/// reviewer's three-run probe could push onto a Top-Risks row for
+/// `code_style (100/100)` while the same report's Risk Map omits it.
+/// The fix moves the conclusion's `top_risks` (and the matching
+/// "Prioritize:" recommendation) onto the same hygiene-filtered
+/// `pick_top_risks(&risk_categories)` source the local path uses,
+/// so the two surfaces in one report cannot disagree. This test
+/// builds the same kind of aggregated input the LLM path would
+/// produce when architecture/code_quality fall back (unreachable
+/// endpoint) and the repository has no style configs.
+///
+/// What this test pins:
+/// 1. `top_risks` lists exactly the same areas the Risk Map does.
+/// 2. The recommendation text names only those areas — no code_style,
+///    no fallback architecture/code_quality.
+/// 3. The aggregator's existing `top_risks` (which a different consumer
+///    might still want) is left alone and is allowed to differ.
+#[test]
+fn full_path_top_risks_drop_hygiene_and_fallback_experts() {
+    use crate::models::RiskLevel;
+    use crate::repo::experts::aggregator::{AggregatedResult, ReportConclusion};
+    use crate::repo::experts::{ExpertScore, ScoreItem};
+    use crate::repo::RepoStats;
+
+    // Code style: 100/100, hygiene-only (all `[hygiene]` note
+    // findings, no real defects). The r1/r2 reproducer shape.
+    let mut code_style = ExpertScore {
+        expert_name: "code_style".to_string(),
+        weight: 5,
+        score: 100,
+        summary: "Style hygiene: 0/3 style configs present (editorconfig ✗)".to_string(),
+        details: vec![
+            ScoreItem {
+                severity: "note".to_string(),
+                message: "[hygiene] Missing .editorconfig — …".to_string(),
+                ..score_item_default()
+            },
+            ScoreItem {
+                severity: "note".to_string(),
+                message: "[hygiene] Missing style config for Rust: none of [rustfmt.toml] found".to_string(),
+                ..score_item_default()
+            },
+            ScoreItem {
+                severity: "note".to_string(),
+                message: "[hygiene] Missing style config for Rust: none of [clippy.toml] found".to_string(),
+                ..score_item_default()
+            },
+        ],
+        fallback: false,
+        evaluated_loc: None,
+        samples: None,
+    };
+    // Silence the unused-mut warning without changing behaviour.
+    let _ = &mut code_style;
+
+    // Test coverage: 0/100, one real medium finding → should appear
+    // in both surfaces.
+    let test_coverage = ExpertScore {
+        expert_name: "test_coverage".to_string(),
+        weight: 20,
+        score: 0,
+        summary: "Test ratio 0%".to_string(),
+        details: vec![ScoreItem {
+            severity: "high".to_string(),
+            message: "No tests on src/main.rs".to_string(),
+            ..score_item_default()
+        }],
+        fallback: false,
+        evaluated_loc: None,
+        samples: None,
+    };
+
+    // Documentation: 30/100, two real medium findings + a note that
+    // would be hygiene-flagged if it carried the tag, but here it has
+    // a `medium` severity so it stays in the risk map. Sanity: at
+    // least one genuine risk stays visible.
+    let documentation = ExpertScore {
+        expert_name: "documentation".to_string(),
+        weight: 10,
+        score: 30,
+        summary: "README=missing, CHANGELOG=missing".to_string(),
+        details: vec![
+            ScoreItem {
+                severity: "medium".to_string(),
+                message: "Missing README.md".to_string(),
+                ..score_item_default()
+            },
+            ScoreItem {
+                severity: "medium".to_string(),
+                message: "Missing LICENSE file".to_string(),
+                ..score_item_default()
+            },
+        ],
+        fallback: false,
+        evaluated_loc: None,
+        samples: None,
+    };
+
+    // Two LLM-driven experts with explicit fallbacks (`fallback=true`,
+    // `LLM_FALLBACK_SCORE = 70`). Pretend the LLM endpoint was
+    // unreachable — the reviewer reproduced this shape by pointing
+    // at an unbound port. These MUST NOT climb into Top Risks even
+    // if the aggregator's "5 lowest" list would have included them.
+    let architecture_fallback = ExpertScore {
+        expert_name: "architecture".to_string(),
+        weight: 15,
+        score: crate::repo::experts::LLM_FALLBACK_SCORE,
+        summary: "Module /repo: LLM call failed".to_string(),
+        details: vec![],
+        fallback: true,
+        evaluated_loc: None,
+        samples: None,
+    };
+    let code_quality_fallback = ExpertScore {
+        expert_name: "code_quality".to_string(),
+        weight: 10,
+        score: crate::repo::experts::LLM_FALLBACK_SCORE,
+        summary: "Module /repo: LLM call failed".to_string(),
+        details: vec![],
+        fallback: true,
+        evaluated_loc: None,
+        samples: None,
+    };
+
+    let scores = vec![
+        code_style,
+        test_coverage,
+        documentation,
+        architecture_fallback,
+        code_quality_fallback,
+    ];
+
+    // Aggregator conclusion: simulate what `aggregator::aggregate`
+    // would produce — fallback-filtered "5 lowest scores". This is
+    // exactly the shape the r2 reviewer said leaked into the full
+    // path's report.
+    let aggregated = AggregatedResult {
+        scores: scores.clone(),
+        all_findings: vec![],
+        conclusion: ReportConclusion {
+            aggregated_score: 60,
+            risk_level: RiskLevel::High,
+            top_risks: vec![
+                ("test_coverage".to_string(), 0_u8),
+                ("documentation".to_string(), 30_u8),
+                ("security".to_string(), 100_u8),
+                ("code_style".to_string(), 100_u8), // hygiene-only pollutes the list
+                ("dependency".to_string(), 100_u8),
+            ],
+            recommendation: "Prioritize: test_coverage, documentation, security, code_style, dependency.".to_string(),
+        },
+    };
+
+    let stats = RepoStats::default();
+    let metadata = build_metadata("/tmp/probe", &[], &[], None);
+
+    let output = build_output_from_aggregated(&aggregated, &stats, vec![], false, metadata);
+
+    // Top Risks must agree with the Risk Map. The areas present in
+    // `risk_categories` (drives the Risk Map) and in `top_risks`
+    // (drives the "Top Risks" section) must be the same set.
+    let risk_map_areas: std::collections::BTreeSet<String> =
+        output.risk_categories.iter().map(|rc| rc.area.clone()).collect();
+    let top_areas: std::collections::BTreeSet<String> =
+        output.conclusion.top_risks.iter().map(|(n, _)| n.clone()).collect();
+
+    assert_eq!(
+        risk_map_areas, top_areas,
+        "Risk Map and Top Risks must come from the same source; risk_map={risk_map_areas:?} top={top_areas:?}"
+    );
+
+    // Hygiene-only and fallback experts are excluded from BOTH
+    // surfaces.
+    assert!(
+        !risk_map_areas.contains("code_style"),
+        "hygiene-only code_style must be absent from the Risk Map: {risk_map_areas:?}"
+    );
+    assert!(
+        !top_areas.contains("code_style"),
+        "hygiene-only code_style must be absent from Top Risks: {top_areas:?}"
+    );
+    assert!(
+        !risk_map_areas.contains("architecture") && !top_areas.contains("architecture"),
+        "fallback architecture must not appear in either surface"
+    );
+    assert!(
+        !risk_map_areas.contains("code_quality") && !top_areas.contains("code_quality"),
+        "fallback code_quality must not appear in either surface"
+    );
+
+    // Real risks still surface.
+    assert!(top_areas.contains("test_coverage"));
+    assert!(top_areas.contains("documentation"));
+
+    // The recommendation line MUST be rebuilt from the same
+    // hygiene-filtered list; no mention of code_style or the fallback
+    // experts.
+    assert!(
+        !output.conclusion.recommendation.contains("code_style"),
+        "recommendation must not mention the hygiene-only expert: {}",
+        output.conclusion.recommendation
+    );
+    assert!(
+        !output.conclusion.recommendation.contains("architecture")
+            && !output.conclusion.recommendation.contains("code_quality"),
+        "recommendation must not mention fallback experts: {}",
+        output.conclusion.recommendation
+    );
+    assert!(
+        output.conclusion.recommendation.contains("test_coverage")
+            && output.conclusion.recommendation.contains("documentation"),
+        "recommendation must name the surviving genuine risks: {}",
+        output.conclusion.recommendation
+    );
+
+    // The aggregator's own `top_risks` (the polluted input we
+    // built) is preserved for any other consumer — the report
+    // assembler did not mutate the AggregatedResult.
+    assert_eq!(
+        aggregated.conclusion.top_risks.len(),
+        5,
+        "aggregator surface unchanged: {:?}",
+        aggregated.conclusion.top_risks
+    );
+    assert!(aggregated.conclusion.top_risks.iter().any(|(n, _)| n == "code_style"));
+}
+
+/// Helper for `Default` on `ScoreItem` — keeps the all-fields-explicit
+/// constructors in the full-path reproducer readable.
+fn score_item_default() -> crate::repo::experts::ScoreItem {
+    crate::repo::experts::ScoreItem::default()
+}
+
+/// Pin: `build_conclusion_recommendation` produces the same "Prioritize:
+/// …" text shape as the aggregator (so the two surfaces do not diverge
+/// in wording) and falls back to a "no issues" line when the list is
+/// empty (so the report reads cleanly when nothing is flagged).
+#[test]
+fn build_conclusion_recommendation_matches_prioritize_shape() {
+    let risks = vec![
+        ("test_coverage".to_string(), 0_u8),
+        ("documentation".to_string(), 30_u8),
+    ];
+    let rec = build_conclusion_recommendation(&risks);
+    assert!(rec.starts_with("Prioritize: "), "got: {rec}");
+    assert!(rec.contains("test_coverage"));
+    assert!(rec.contains("documentation"));
+    let empty_rec = build_conclusion_recommendation(&[]);
+    assert!(
+        empty_rec.contains("No significant issues"),
+        "empty Top Risks → friendly 'no issues' line, got: {empty_rec}"
+    );
+    assert!(
+        !empty_rec.starts_with("Prioritize: "),
+        "must NOT pick the 'Prioritize' shape on an empty list"
+    );
 }
 
 // ── parse_repo_review_response ──

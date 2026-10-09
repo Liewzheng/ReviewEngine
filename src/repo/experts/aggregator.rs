@@ -149,7 +149,16 @@ pub fn aggregate(scores: Vec<ExpertScore>, app_config: Option<&AppConfig>) -> Ag
 
     // Build conclusion
     let (aggregated_score, risk_level) = crate::repo::experts::weighted_total(&merged_scores);
-    let mut top_risks: Vec<(String, u8)> = merged_scores.iter().map(|s| (s.expert_name.clone(), s.score)).collect();
+    // Fallback experts carry placeholder scores — they cannot honestly
+    // appear in the per-expert "Top Risks" list either, because any
+    // rank they would claim is an artefact of the fallback heuristic,
+    // not genuine evidence. Filter them out before ranking so the
+    // report only surfaces real assessment data here.
+    let mut top_risks: Vec<(String, u8)> = merged_scores
+        .iter()
+        .filter(|s| !s.fallback)
+        .map(|s| (s.expert_name.clone(), s.score))
+        .collect();
     top_risks.sort_by_key(|(_, score)| *score);
     top_risks.truncate(5);
 

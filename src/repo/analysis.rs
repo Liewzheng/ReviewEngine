@@ -1,20 +1,71 @@
+use std::path::Path;
+
+use super::experts::facts::is_test_file;
 use super::FileEntry;
 
-/// A potential security issue found via pattern matching.
+/// Classification of a [`SecurityFinding`].
+///
+/// Mechanical findings come from regex pattern matching against credential
+/// shapes (api keys, passwords, tokens, private keys). They are
+/// syntax-driven: high false-positive rate on test fixtures, placeholders
+/// and format templates, so by policy their weight on the security score
+/// must be capped — see [`scan_security_patterns`] and the security expert
+/// scoring in `static_experts::security`.
+///
+/// Semantic findings are produced by code-level reasoning (typically an
+/// LLM): output-channel leaks, proxy-bypass evasions, weak temp-file
+/// permissions, tokens in query/path beyond `userinfo`, …  These need
+/// structural understanding of the program rather than a regex sweep, so
+/// they are not produced here. The kind tag is reserved so callers can
+/// attach semantic findings to the same flow without a duplicate type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindingKind {
+    /// Regex-driven secret-detection hit.
+    Mechanical,
+    /// Code-reasoning hit produced by an LLM expert (reserved for future use).
+    Semantic,
+}
+
+impl FindingKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FindingKind::Mechanical => "mechanical",
+            FindingKind::Semantic => "semantic",
+        }
+    }
+}
+
+/// A potential security issue found via pattern matching (mechanical) or
+/// code-level reasoning (semantic).
 #[derive(Debug, Clone)]
 pub struct SecurityFinding {
     pub file: String,
     pub pattern: String,
     pub line: usize,
     pub severity: String,
+    /// Whether the hit came from a mechanical (regex) scan or a semantic
+    /// (LLM) expert. See [`FindingKind`].
+    pub kind: FindingKind,
 }
 
 /// Scan files for common security patterns (API keys, passwords, etc).
+///
+/// Mechanical hits in test files and on placeholder values are suppressed
+/// before reporting — they would otherwise flood the report with fixture
+/// noise (test inputs, formatting examples, illustrative values wrapped
+/// in `〈…〉`) and drown the semantic security signal users actually care
+/// about. The cap on mechanical contribution to the security score lives
+/// in `static_experts::security`.
 pub fn scan_security_patterns(entries: &[FileEntry]) -> Vec<SecurityFinding> {
     let mut findings = Vec::new();
 
     for entry in entries {
         if entry.is_binary || entry.is_generated {
+            continue;
+        }
+        if is_test_file_path(&entry.path) {
+            // Test files are full of mock credentials and fixtures; even
+            // a careful regex sweep would report them all as "secrets".
             continue;
         }
         if let Ok(content) = std::fs::read_to_string(&entry.path) {
@@ -23,6 +74,14 @@ pub fn scan_security_patterns(entries: &[FileEntry]) -> Vec<SecurityFinding> {
     }
 
     findings
+}
+
+/// Wrapper around [`super::experts::facts::is_test_file`] using the path's
+/// file name, kept local so callers don't have to know the facts module's
+/// signature. Reused by [`scan_security_patterns_in_text`].
+fn is_test_file_path(path: &str) -> bool {
+    let name = Path::new(path).file_name().and_then(|n| n.to_str()).unwrap_or("");
+    is_test_file(name, path)
 }
 
 fn build_security_regexes() -> Vec<(regex::Regex, &'static str)> {
@@ -50,22 +109,59 @@ fn is_placeholder_token(token: &str) -> bool {
     !value.is_empty() && value.chars().all(|c| matches!(c, 'x' | 'X' | '*' | '-' | '_'))
 }
 
+/// Detect placeholder text wrapped in angle brackets (Chinese typewriter
+/// `〈…〉` or ASCII `<…>`).
+///
+/// Documentation samples often look like `password="〈写账号密码〉"` or
+/// `password="<YOUR_KEY_HERE>"` — those values are not real secrets, but
+/// the regex would happily match the surrounding `password=` prefix and
+/// report a hit. Real credentials rarely if ever contain literal angle
+/// brackets, so any `<` / `>` / `〈` / `〉` character inside the matched
+/// span is treated as a placeholder marker.
+fn is_placeholder_bracket(line: &str, match_start: usize, match_end: usize) -> bool {
+    let matched = &line[match_start..match_end];
+    matched.contains(['<', '>', '〈', '〉'])
+}
+
 /// Scan a single text block for security patterns. Exposed for unit testing.
+///
+/// Every hit is tagged [`FindingKind::Mechanical`]. Lines whose file path
+/// looks like a test file or whose matched portion is a placeholder
+/// (`〈…〉`, `<…>`, or all-`x`/`*` token after a structural prefix) are
+/// suppressed rather than reported.
 pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<SecurityFinding> {
     let re_list = build_security_regexes();
     let mut findings = Vec::new();
+    let skip_test = is_test_file_path(file);
 
     for (i, line) in content.lines().enumerate() {
+        if skip_test {
+            // Test files are skipped wholesale: every line of a path
+            // recognised by `is_test_file` is exempt, regardless of
+            // what it carries. The fixture may well live next to a
+            // `README.md` or a sample `.env`, but a config-shaped
+            // value on a "test-blessed" path is still a fixture by
+            // our rule of thumb and not a real secret. The same
+            // exclusion is enforced at the entry level by
+            // `scan_security_patterns`, so a file the regex never
+            // reaches is also never inspected line by line — the two
+            // layers are belt-and-braces for the same reason.
+            continue;
+        }
         for (re, desc) in &re_list {
             for mat in re.find_iter(line) {
                 if is_placeholder_token(mat.as_str()) {
                     continue; // example/dummy placeholder, not a real secret
+                }
+                if is_placeholder_bracket(line, mat.start(), mat.end()) {
+                    continue; // `password=〈写账号密码〉` style placeholder
                 }
                 findings.push(SecurityFinding {
                     file: file.to_string(),
                     pattern: desc.to_string(),
                     line: i + 1,
                     severity: "medium".to_string(),
+                    kind: FindingKind::Mechanical,
                 });
                 break; // one finding per (line, pattern) is enough
             }
@@ -88,6 +184,12 @@ mod tests {
         let findings = scan_security_patterns_in_text("config.env", &content);
         assert!(!findings.is_empty());
         assert!(findings.iter().any(|f| f.pattern == "Possible API key"));
+        // Mechanical hits must self-identify so the expert can split them
+        // from semantic findings during scoring.
+        assert!(
+            findings.iter().all(|f| f.kind == FindingKind::Mechanical),
+            "regex hits are mechanical"
+        );
     }
 
     #[test]
@@ -166,5 +268,98 @@ mod tests {
         let content = format!("openaiApiKey: 'sk-{}'", "x".repeat(40));
         let findings = scan_security_patterns_in_text("config.ts", &content);
         assert!(!findings.iter().any(|f| f.pattern == "Possible API key"));
+    }
+
+    /// `password="〈写账号密码〉"` is the form RENG-19 highlighted: a
+    /// documentation sample with a Chinese-style typewriter-bracket
+    /// placeholder. The bracket payload is non-ASCII so the older
+    /// `is_placeholder_token` filter (x/X/*/-/_ only) missed it.
+    #[test]
+    fn scan_security_patterns_in_text_skips_chinese_bracket_placeholder() {
+        let real = "Ab3cD5eF7gH9iJ1kL2mN";
+        let content = format!(r#"password = "〈{}〉""#, real);
+        let findings = scan_security_patterns_in_text("docs/upload.rs", &content);
+        assert!(
+            findings.is_empty(),
+            "Chinese-bracket placeholder is not a real secret: {:?}",
+            findings
+        );
+    }
+
+    /// `password="<YOUR_KEY_HERE>"` is the ASCII-bracket cousin of the
+    /// sample above; both bracket forms must be filtered before reaching
+    /// the report.
+    #[test]
+    fn scan_security_patterns_in_text_skips_ascii_bracket_placeholder() {
+        let content = r#"password = "<YOUR_PASSWORD_HERE>""#;
+        let findings = scan_security_patterns_in_text("docs/sample.env", &content);
+        assert!(
+            findings.is_empty(),
+            "ASCII-bracket placeholder is not a real secret: {:?}",
+            findings
+        );
+    }
+
+    /// Any path recognised by [`crate::repo::experts::facts::is_test_file`]
+    /// must be skipped by the scan entirely: test fixtures are full of
+    /// mock credentials and would drown the report otherwise.
+    #[test]
+    fn scan_security_patterns_skips_test_files() {
+        let real = "a".repeat(16);
+        let content = format!(r#"api_key = "{}""#, real);
+        let cases = [
+            ("tests/fixtures.rs", 0usize),
+            ("src/upload_tests.rs", 0usize),
+            ("src/output/parser/tests.rs", 0usize),
+            ("src/__tests__/helper.ts", 0usize),
+            // Same content in a non-test path must still be flagged.
+            ("src/upload.rs", 1usize),
+        ];
+        for (path, expected) in cases {
+            let findings = scan_security_patterns_in_text(path, &content);
+            assert_eq!(findings.len(), expected, "test-file exclusion: {path} → {findings:?}");
+        }
+    }
+
+    /// The aggregated scan over a real entry list must drop every hit
+    /// whose path is classified as a test file, while non-test paths
+    /// with the same payload still report.
+    #[test]
+    fn scan_security_patterns_skips_test_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = "a".repeat(16);
+        let body = format!(r#"api_key = "{}""#, real);
+
+        let fixture_path = dir.path().join("tests").join("fixtures.rs");
+        let source_path = dir.path().join("src").join("upload.rs");
+        std::fs::create_dir_all(fixture_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(&fixture_path, &body).unwrap();
+        std::fs::write(&source_path, &body).unwrap();
+
+        let entries = vec![
+            FileEntry {
+                path: fixture_path.to_string_lossy().into_owned(),
+                language: "Rust".to_string(),
+                loc: 1,
+                is_binary: false,
+                is_generated: false,
+            },
+            FileEntry {
+                path: source_path.to_string_lossy().into_owned(),
+                language: "Rust".to_string(),
+                loc: 1,
+                is_binary: false,
+                is_generated: false,
+            },
+        ];
+
+        let findings = scan_security_patterns(&entries);
+        assert_eq!(findings.len(), 1, "exactly one non-test hit expected, got {findings:?}");
+        assert!(
+            findings[0].file.ends_with("upload.rs"),
+            "the surviving hit must be the non-test file: {:?}",
+            findings[0]
+        );
     }
 }

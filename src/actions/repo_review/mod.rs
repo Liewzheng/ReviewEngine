@@ -114,6 +114,18 @@ fn build_output(scores: &[ExpertScore], stats: &crate::repo::RepoStats, metadata
 }
 
 /// Build output from aggregated (deduplicated, filtered) scores.
+///
+/// The conclusion's `top_risks` (and the matching "Prioritize:" line in
+/// `recommendation`) is sourced from the same `pick_top_risks(
+/// &risk_categories)` the local path uses. `agg.conclusion.top_risks`
+/// — the aggregator's own "5 lowest merged experts" list — is
+/// fallback-filtered but **not** hygiene-filtered and would
+/// reintroduce a 100/100 hygiene-only expert (e.g. `code_style` on an
+/// unconfigured repo) into the Top Risks list while the same
+/// report's Risk Map omits it. The aggregator's list is preserved
+/// for whatever other consumer wants "5 lowest experts"; only the
+/// report's conclusion switches sources so both risk surfaces stay
+/// consistent.
 fn build_output_from_aggregated(
     agg: &crate::repo::experts::aggregator::AggregatedResult,
     stats: &crate::repo::RepoStats,
@@ -131,6 +143,15 @@ fn build_output_from_aggregated(
     let risk_categories = build_risk_categories(&conv.expert_scores);
     let action_items = build_action_items(&conv.expert_scores);
 
+    // Conclusion Top Risks / Prioritize line MUST match the Risk Map.
+    // Pick the same surface the local path uses (`pick_top_risks` over
+    // the freshly-built `risk_categories`) so a hygiene-only expert or a
+    // fallback expert that survived `aggregator::aggregate` cannot claim
+    // a Top-Risk slot in one part of the report while being absent
+    // from another.
+    let top_risks = pick_top_risks(&risk_categories);
+    let recommendation = build_conclusion_recommendation(&top_risks);
+
     let overview = ReportOverview {
         health_score,
         risk_level: risk_level.clone(),
@@ -145,8 +166,8 @@ fn build_output_from_aggregated(
     let conclusion = ReportConclusion {
         aggregated_score: agg.conclusion.aggregated_score,
         risk_level: agg.conclusion.risk_level.clone(),
-        top_risks: agg.conclusion.top_risks.clone(),
-        recommendation: agg.conclusion.recommendation.clone(),
+        top_risks,
+        recommendation,
     };
 
     RepoReviewOutput {

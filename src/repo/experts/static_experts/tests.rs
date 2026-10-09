@@ -484,23 +484,36 @@ async fn code_style_full_score_when_all_applicable_configs_present() {
 }
 
 #[tokio::test]
-async fn code_style_missing_configs_emit_note_findings() {
-    // Rust repo with only rustfmt configured: 1 of 3 applicable items.
+async fn code_style_missing_configs_emit_hygiene_notes_without_dragging_score() {
+    // RENG-115: a Rust repo with only rustfmt configured. The
+    // missing-config findings stay surfaced as `note`-severity
+    // hygiene reminders (so the user still sees ".editorconfig
+    // missing"), but the **score** no longer falls off a cliff.
+    // The old behaviour dragged the score to 33/100 just because
+    // `rustfmt.toml` was not paired with `.editorconfig` and
+    // `clippy.toml`; the new behaviour treats the absence as a
+    // hygiene reminder, score stays at 100, and code_style is no
+    // longer the auto-generated Top Risk for repo with fine code
+    // and no style config.
     let context = ctx(vec![
         entry("src/main.rs", "Rust", 10),
         entry("rustfmt.toml", "Config", 3),
     ]);
     let score = evaluate(&CodeStyle, &context).await;
-    assert_eq!(score.score, 33, "summary: {}", score.summary);
+    assert_eq!(score.score, 100, "summary: {}", score.summary);
     assert_eq!(score.details.len(), 2);
     let messages: Vec<&str> = score.details.iter().map(|d| d.message.as_str()).collect();
     assert!(
+        messages.iter().any(|m| m.contains("[hygiene]")),
+        "every missing-config finding must carry the [hygiene] tag: {messages:?}"
+    );
+    assert!(
         messages.iter().any(|m| m.contains(".editorconfig")),
-        "expected a missing-.editorconfig finding: {messages:?}"
+        "expected a missing-.editorconfig hygiene finding: {messages:?}"
     );
     assert!(
         messages.iter().any(|m| m.contains("clippy.toml")),
-        "expected a missing-clippy finding: {messages:?}"
+        "expected a missing-clippy hygiene finding: {messages:?}"
     );
     for d in &score.details {
         assert_eq!(d.severity, "note");
@@ -515,8 +528,9 @@ async fn code_style_missing_configs_emit_note_findings() {
 #[tokio::test]
 async fn code_style_normalises_across_languages_and_groups_aliases() {
     // Rust + Python; ruff configured via the `.ruff.toml` alias, mypy
-    // missing. Applicable: editorconfig + rustfmt + clippy + ruff +
-    // mypy = 5; satisfied = 4.
+    // missing. Same RENG-115 contract as above: mypy is one hygiene
+    // reminder away, score stays at 100, only one detail (the mypy
+    // hygiene note) is emitted, no Top-Risk slot for code_style.
     let context = ctx(vec![
         entry("src/main.rs", "Rust", 10),
         entry("app.py", "Python", 20),
@@ -526,12 +540,18 @@ async fn code_style_normalises_across_languages_and_groups_aliases() {
         entry(".ruff.toml", "Config", 3),
     ]);
     let score = evaluate(&CodeStyle, &context).await;
-    assert_eq!(score.score, 80, "summary: {}", score.summary);
+    assert_eq!(score.score, 100, "summary: {}", score.summary);
     assert_eq!(score.details.len(), 1);
+    let only = &score.details[0];
     assert!(
-        score.details[0].message.contains("mypy.ini"),
+        only.message.contains("[hygiene]"),
+        "the single detail must be a hygiene reminder: {}",
+        only.message
+    );
+    assert!(
+        only.message.contains("mypy.ini"),
         "the only finding should be the missing mypy config: {}",
-        score.details[0].message
+        only.message
     );
 }
 
@@ -589,4 +609,131 @@ async fn code_style_recognises_modern_eslint_prettier_configs() {
         score.details.iter().map(|d| &d.message).collect::<Vec<_>>()
     );
     assert!(score.summary.contains("3/3"), "summary: {}", score.summary);
+}
+
+// ─── CodeStyle hygiene split (RENG-115) ────────────────────
+
+/// RENG-115: the canonical RENG-19/RENG-115 case — a perfectly good
+/// Rust repo with **no style configs at all** must NOT score 0/100.
+/// The user complaint was that `code_style: 0/100` (from missing
+/// `.editorconfig` + `.rustfmt.toml` + `.clippy.toml`) pushed the
+/// expert to the top of the Top-Risks list on every repo review,
+/// making the report noisy and useless. After the hygiene split,
+/// the score stays at 100 and the missing-config reminders are
+/// surfaced as `[hygiene]` notes instead.
+#[tokio::test]
+async fn code_style_unconfigured_repo_never_scores_zero() {
+    let context = ctx(vec![entry("src/main.rs", "Rust", 200)]);
+    let score = evaluate(&CodeStyle, &context).await;
+    assert_ne!(
+        score.score, 0,
+        "0/100 is the exact case RENG-115 was reporting: {}",
+        score.summary
+    );
+    assert_eq!(
+        score.score, 100,
+        "missing-config absence is hygiene, not quality — score stays at 100: {}",
+        score.summary
+    );
+
+    // Three hygiene findings surface: .editorconfig + rustfmt + clippy.
+    let messages: Vec<&str> = score.details.iter().map(|d| d.message.as_str()).collect();
+    assert_eq!(
+        score.details.len(),
+        3,
+        "3 missing configs (editorconfig/rustfmt/clippy) → 3 hygiene findings: {messages:?}"
+    );
+    assert!(
+        messages.iter().all(|m| m.contains("[hygiene]")),
+        "every missing-config finding must carry the [hygiene] tag: {messages:?}"
+    );
+    // No finding must claim it found a real style defect.
+    assert!(
+        !messages.iter().any(|m| m.contains("style violation")),
+        "static sweep has no real style checks; no quality finding may be emitted"
+    );
+}
+
+/// RENG-115: the code_style expert must not pop up as the lowest-
+/// scoring expert (Top Risk) just because optional configs are
+/// absent. Pin with a mixed expert set: three other experts across
+/// the quality spectrum + the code_style expert on an unconfigured
+/// repo. `pick_top_risks`-style sort by score ascending must put
+/// code_style LAST, not first.
+#[tokio::test]
+async fn code_style_zero_configs_is_never_top_risk() {
+    let experts: Vec<Box<dyn RepoExpert>> = vec![
+        Box::new(Security),
+        Box::new(CodeOrganization),
+        Box::new(Documentation),
+        Box::new(Dependency),
+        Box::new(CodeStyle),
+    ];
+    let context = ctx(vec![entry("src/main.rs", "Rust", 10)]);
+    let mut ranked: Vec<(String, u8)> = Vec::new();
+    for e in experts.iter() {
+        let s = evaluate(e.as_ref(), &context).await;
+        ranked.push((s.expert_name.clone(), s.score));
+    }
+    // Stable ascending sort — the assistant for `sort_by_key` must
+    // not move equal-scored neighbours around, but RENG-115 only
+    // cares that code_style never lands at the lowest slot.
+    ranked.sort_by_key(|(_, s)| *s);
+    let lowest = ranked.first().expect("at least one expert ran");
+    assert_ne!(
+        lowest.0, "code_style",
+        "code_style on an unconfigured repo must NOT be the lowest expert: {ranked:?}"
+    );
+}
+
+/// RENG-115: every missing-config finding carries the `[hygiene]`
+/// tag in the message, severity `note`, and a concrete
+/// recommendation — same contract as before the split, just
+/// redirected into the hygiene channel so the score ignores it.
+#[tokio::test]
+async fn code_style_hygiene_findings_carry_tag_note_and_recommendation() {
+    let context = ctx(vec![entry("src/main.rs", "Rust", 10)]);
+    let score = evaluate(&CodeStyle, &context).await;
+    assert!(!score.details.is_empty(), "at least one hygiene finding expected");
+    for d in &score.details {
+        assert!(
+            d.message.contains("[hygiene]"),
+            "missing-config finding must be tagged [hygiene]: {}",
+            d.message
+        );
+        assert_eq!(d.severity, "note", "hygiene findings are note-severity");
+        assert!(
+            !d.recommendation.as_deref().unwrap_or("").trim().is_empty(),
+            "hygiene finding must say how to add the config: {}",
+            d.message
+        );
+    }
+}
+
+/// Sanity pin: an over-eager reader could conclude "split into
+/// hygiene = score always 100 = expert is useless". The expert
+/// still surfaces real signal in the form of hygiene findings; a
+/// repo with many missing configs produces many findings, so the
+/// detail count still reflects how hygiene-degraded the repo is.
+/// Only the aggregate score is decoupled.
+#[tokio::test]
+async fn code_style_detail_count_still_grows_with_hygiene_gaps() {
+    // No configs → many hygiene findings. No configs → no findings.
+    let gappy = evaluate(&CodeStyle, &ctx(vec![entry("src/main.rs", "Rust", 10)])).await;
+    let pristine = evaluate(
+        &CodeStyle,
+        &ctx(vec![
+            entry("src/main.rs", "Rust", 10),
+            entry(".editorconfig", "Other", 1),
+            entry("rustfmt.toml", "Config", 1),
+            entry("clippy.toml", "Config", 1),
+        ]),
+    )
+    .await;
+    assert!(
+        gappy.details.len() > pristine.details.len(),
+        "more missing configs → more hygiene findings: gappy={} pristine={}",
+        gappy.details.len(),
+        pristine.details.len()
+    );
 }

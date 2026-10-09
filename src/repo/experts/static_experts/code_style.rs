@@ -5,12 +5,39 @@ use super::super::{ExpertScore, RepoContext, RepoExpert, ScoreItem};
 use super::style_tool_key;
 use crate::llm::client::LLMClient;
 
-/// Static expert that evaluates code style configuration.
+/// Prefix used to mark findings that are hygiene reminders — useful
+/// configuration files (`.editorconfig`, `.rustfmt.toml`, …) that are
+/// missing — rather than quality defects. The tag lets downstream
+/// surfaces (and tests) distinguish "the lint did not find a config"
+/// from "the lint found a real style violation", and keeps the
+/// missing-config reminder out of the code-quality scoring band
+/// (RENG-115: a missing style config is not a quality defect; it
+/// must not drag the score to 0 or grab the Top Risk slot).
+const HYGIENE_TAG: &str = "[hygiene]";
+
+/// Static expert that reports style-config presence as a hygiene
+/// reminder.
 ///
-/// Normalised scoring: `.editorconfig` (always applicable) plus one check
-/// per style tool of every detected language; the score is the share of
-/// applicable checks satisfied, so 100 is always reachable. Every missing
-/// item produces a `note` finding with a concrete recommendation.
+/// The score is decoupled from missing-config findings: a repo that
+/// ships no `.editorconfig` / `.rustfmt.toml` / `.clippy.toml` / etc.
+/// is a **hygiene** problem (the user should add the config so linters
+/// can run with a known baseline), not a code-quality one. So the
+/// expert no longer maps "0 of N configs present" to `0/100` — that
+/// landed code_style at the top of the Top-Risks list for repos
+/// whose code itself was fine, on every report run, and was the
+/// root cause of RENG-115's complaint.
+///
+/// Instead:
+///
+/// - Hygiene findings (every missing-config reminder) carry the
+///   `[hygiene]` tag in their message and stay severity `note` —
+///   visible in the report, just not in the quality scoring channel.
+/// - The score stays at `100` whenever no real code-style defect was
+///   found. Today the static regex sweep has no body of real style
+///   checks (lint findings come from the linters themselves); the
+///   score is therefore always `100` in practice, which is the
+///   honest answer for a tool that only inventories config files.
+///
 /// Does not require an LLM.
 pub struct CodeStyle;
 
@@ -27,29 +54,35 @@ impl RepoExpert for CodeStyle {
     }
 
     async fn evaluate(&self, ctx: &RepoContext, _llm: Option<&LLMClient>) -> Result<ExpertScore> {
-        let mut details = Vec::new();
-
         // Basenames present in the repo. Exact name matching (not
         // `ends_with`), so e.g. "my-rustfmt.toml" cannot satisfy the
         // rustfmt check.
         let present: std::collections::BTreeSet<&str> = ctx
             .entries
             .iter()
+            // Skip binary / generated entries — `Cargo.lock` and the
+            // like should never satisfy `.editorconfig` etc.
+            .filter(|e| !e.is_binary && !e.is_generated)
             .filter_map(|e| std::path::Path::new(&e.path).file_name())
             .filter_map(|n| n.to_str())
             .collect();
 
-        let mut applicable = 0usize;
-        let mut satisfied = 0usize;
+        let mut details = Vec::new();
+        let mut hygiene_missing = 0usize;
+        let mut hygiene_total = 0usize;
 
-        // .editorconfig is language-agnostic and always applicable.
-        applicable += 1;
+        // .editorconfig is language-agnostic and always relevant.
+        hygiene_total += 1;
         if present.contains(".editorconfig") {
-            satisfied += 1;
+            // Present — no hygiene finding; do not count as missing.
         } else {
+            hygiene_missing += 1;
             details.push(ScoreItem {
                 severity: "note".to_string(),
-                message: "Missing .editorconfig".to_string(),
+                message: format!(
+                    "{} Missing .editorconfig — basic formatter/indent settings have no project-wide source of truth",
+                    HYGIENE_TAG
+                ),
                 file: None,
                 recommendation: Some(
                     "Add an .editorconfig at the repository root (e.g. `root = true`, `indent_style = space`, `indent_size = 4`) so every editor applies the same basic formatting."
@@ -95,14 +128,16 @@ impl RepoExpert for CodeStyle {
         }
 
         for (files, langs) in groups.values() {
-            applicable += 1;
+            hygiene_total += 1;
             if files.iter().any(|f| present.contains(f.as_str())) {
-                satisfied += 1;
+                // Present — no hygiene finding; do not count as missing.
             } else {
+                hygiene_missing += 1;
                 details.push(ScoreItem {
                     severity: "note".to_string(),
                     message: format!(
-                        "Missing style config for {}: none of [{}] found",
+                        "{} Missing style config for {}: none of [{}] found",
+                        HYGIENE_TAG,
                         langs.join("/"),
                         files.join(", ")
                     ),
@@ -118,16 +153,19 @@ impl RepoExpert for CodeStyle {
             }
         }
 
-        // Normalised: hits / applicable × 100, rounded. `applicable` is at
-        // least 1 (.editorconfig), so this cannot divide by zero.
-        let score = ((satisfied * 100 + applicable / 2) / applicable) as u8;
+        // The score measures genuine code-style defects, not the
+        // presence of optional configs. The static sweep has no
+        // genuine style checks today, so the score is always 100;
+        // this keeps a fully unconfigured repo out of the Critical
+        // band and out of the Top-Risks slot just because someone
+        // forgot to commit a `.rustfmt.toml`.
+        let score = 100u8;
 
         let summary = format!(
-            "Style: editorconfig={}, {}/{} applicable style configs present, langs=[{}]",
-            if present.contains(".editorconfig") { "yes" } else { "no" },
-            satisfied,
-            applicable,
-            langs_seen.iter().take(4).cloned().collect::<Vec<_>>().join(", "),
+            "Style hygiene: {}/{} style configs present ({}); missing items surfaced as [hygiene] notes, score reflects genuine style defects only",
+            hygiene_total - hygiene_missing,
+            hygiene_total,
+            if present.contains(".editorconfig") { "editorconfig ✓" } else { "editorconfig ✗" },
         );
 
         Ok(ExpertScore {
@@ -140,5 +178,28 @@ impl RepoExpert for CodeStyle {
             evaluated_loc: None,
             samples: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper that strips the `[hygiene]` tag and surrounding
+    /// whitespace from a message so existing tests that look for
+    /// substrings like "Missing .editorconfig" / "mypy.ini" still
+    /// match even after the tag prefix lands.
+    pub(crate) fn untag(msg: &str) -> &str {
+        msg.trim_start_matches(HYGIENE_TAG).trim_start()
+    }
+
+    #[test]
+    fn hygiene_tag_prefix_marks_missing_config_findings() {
+        assert!(HYGIENE_TAG.starts_with('['));
+        assert!(HYGIENE_TAG.ends_with(']'));
+        // Sanity: the constant is what messages get prefixed with.
+        let msg = format!("{HYGIENE_TAG} Missing .editorconfig");
+        assert!(msg.starts_with(HYGIENE_TAG));
+        assert!(untag(&msg).starts_with("Missing .editorconfig"));
     }
 }

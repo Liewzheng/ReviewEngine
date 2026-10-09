@@ -247,12 +247,31 @@ pub(crate) fn finding_to_score_item(f: &crate::models::Finding) -> ScoreItem {
 /// the sum of all active weights. This normalises the result to a
 /// 0–100 scale even when only a subset of experts is active.
 ///
+/// **Fallback experts are excluded from the math.** A score is marked
+/// `fallback = true` when no genuine assessment could be produced —
+/// e.g. the LLM call failed after every retry or the response was
+/// unparseable. Including those `LLM_FALLBACK_SCORE` (70/100) values
+/// in the aggregate would silently mask a failed expert behind a
+/// "healthy-enough" placeholder and (in adversarial cases) lift the
+/// headline score above what any real data supports. Filter them out
+/// here so a placeholder never enters the weighted total. The
+/// `fallback` flag survives on the per-expert [`ExpertScore`] and
+/// still surfaces through the per-chunk / risk-category render layer.
+///
+/// When **every** expert falls back (or the list is empty),
+/// `compute_weighted` returns 0 — the only honest answer when no
+/// genuine data exists.
+///
 /// Returns `(score, risk_level)` where `risk_level` comes from the unified
 /// [`crate::scoring::review`] mapping with the default thresholds — the
 /// same bands the retired repo-local mapping used (≤40 Critical, 41–60
 /// High, 61–80 Medium, 81–90 LowMedium, 91+ Healthy).
 pub fn weighted_total(scores: &[ExpertScore]) -> (u8, crate::models::RiskLevel) {
-    let pairs: Vec<(u8, u8)> = scores.iter().map(|s| (s.score, s.weight)).collect();
+    let pairs: Vec<(u8, u8)> = scores
+        .iter()
+        .filter(|s| !s.fallback)
+        .map(|s| (s.score, s.weight))
+        .collect();
     let score = crate::scoring::review::compute_weighted(&pairs);
     let risk =
         crate::scoring::review::score_to_risk_level_with_config(score, &crate::models::RiskThresholdConfig::default());
@@ -367,12 +386,52 @@ mod tests {
     }
 
     #[test]
-    fn weighted_total_ignores_fallback_scores_only_in_details_not_math() {
-        // Fallback flag does not change the math: both scores count.
-        let mut a = score("a", 100, 50);
+    fn weighted_total_excludes_fallback_experts_from_the_aggregate() {
+        // RENG-115: a fallback expert's `LLM_FALLBACK_SCORE` (70/100) is
+        // a placeholder, not a genuine assessment, and must not enter
+        // the weighted total. With the fallback score filtered out, the
+        // remaining expert's 50/100 (weight 50) drives the aggregate.
+        // The `fallback` flag still survives on the score for the
+        // per-expert rendering layer — only the headline math changes.
+        let mut fallback = score("architecture", 70, 15);
+        fallback.fallback = true;
+        let (total, risk) = weighted_total(&[fallback, score("security", 50, 15)]);
+        assert_eq!(
+            total, 50,
+            "fallback expert must be excluded, leaving security 50/100 as the total"
+        );
+        assert_eq!(risk, RiskLevel::High, "50 falls in 41–60 High band");
+    }
+
+    #[test]
+    fn weighted_total_when_every_score_is_fallback_returns_zero_critical() {
+        // All-fallback: there is no genuine data, so the aggregate
+        // honestly reports zero. 0 ≤ 40 → Critical band.
+        let mut a = score("a", 70, 50);
         a.fallback = true;
-        let (score, risk) = weighted_total(&[a, score("b", 50, 50)]);
-        assert_eq!(score, 75);
-        assert_eq!(risk, RiskLevel::Medium);
+        let mut b = score("b", 70, 50);
+        b.fallback = true;
+        let (total, risk) = weighted_total(&[a, b]);
+        assert_eq!(total, 0, "all-fallback → 0/100");
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn weighted_total_mixes_fallback_and_genuine_using_only_genuine_math() {
+        // Two genuine scores at weights 50 each: weighted math is
+        // (50*50 + 100*50) / 100 = 7500/100 = 75. A heavy fallback
+        // (70, weight 100) is filtered out before the math. Without
+        // the filter, it would have pulled the aggregate down to
+        // (50*50 + 100*50 + 70*100) / 200 = 72.5 → 73 (and worse, the
+        // placeholder 70 would have masqueraded as a real assessment).
+        let genuine_a = score("a", 50, 50);
+        let genuine_b = score("b", 100, 50);
+        let mut fallback = score("c", 70, 100);
+        fallback.fallback = true;
+        let (total, _risk) = weighted_total(&[genuine_a, genuine_b, fallback]);
+        assert_eq!(
+            total, 75,
+            "only genuine scores participate in the math: (50*50 + 100*50) / 100 = 75"
+        );
     }
 }

@@ -178,6 +178,25 @@ pub(crate) fn build_action_items(expert_scores: &[ExpertScoreOutput]) -> Vec<Act
         .collect()
 }
 
+/// Build the "Prioritize: …" recommendation line that pairs with
+/// `pick_top_risks`'s output. Mirrors the wording the aggregator
+/// uses (`aggregator::aggregate`) so the two paths sound identical
+/// even though the underlying list comes from different sources — the
+/// report assembler's conclusion list (`build_output_from_aggregated`)
+/// now agrees with the local path, and this helper makes sure the
+/// text agrees too.
+///
+/// Empty input → "No significant issues found." so the report reads
+/// cleanly when the report has nothing to flag.
+pub(crate) fn build_conclusion_recommendation(top_risks: &[(String, u8)]) -> String {
+    if top_risks.is_empty() {
+        "No significant issues found.".to_string()
+    } else {
+        let areas: Vec<&str> = top_risks.iter().map(|(n, _)| n.as_str()).collect();
+        format!("Prioritize: {}.", areas.join(", "))
+    }
+}
+
 /// Build the top-3 language list sorted by file count descending.
 pub(crate) fn build_languages(stats: &crate::repo::RepoStats) -> Vec<String> {
     let mut lang_list: Vec<(&str, usize)> = stats.languages.iter().map(|(k, v)| (k.as_str(), v.files)).collect();

@@ -383,26 +383,40 @@ mod tests {
         );
     }
 
-    /// RENG-114 follow-up (sirena): four `password: "sk"` assignments
+    /// RENG-114 follow-up (sirena): four password-shaped assignments
     /// inside a regular `.rs` file's inline `#[cfg(test)] mod tests
     /// { … }` block must NOT produce any finding. The file is
-    /// production-named (not a test file by path) and the regex hits
-    /// are inside the test module — same shape as the four lines the
-    /// sirena repro hit (`crates/sirena-cli/src/upload.rs` 673 / 741
-    /// / 843 / 994). Without this pin the security scan would emit 4
-    /// `[mechanical] Hardcoded password` findings, dragging the
-    /// security score down by 16 points on a repo that has no real
-    /// leak. The pin asserts **zero** findings in the cfg-test
-    /// block; production lines that carry the same payload still
-    /// flag (pinned by `…_keeps_production_lines_outside_cfg_test`).
+    /// production-named (not a test file by path) and every regex
+    /// hit is inside the test module — the same shape as the four
+    /// lines the sirena repro hit (`crates/sirena-cli/src/upload.rs`
+    /// 673 / 741
+    /// / 843 / 994, all four are `password: "sk"`-shaped and all four
+    /// match the Hardcoded-password regex). Without this pin the
+    /// security scan would emit 4 `[mechanical] Hardcoded password`
+    /// findings, dragging the security score down by 16 points on a
+    /// repo with no real leak. The pin asserts **zero** findings in
+    /// the cfg-test block; production lines that carry the same
+    /// payload still flag (pinned by
+    /// `…_keeps_production_lines_outside_cfg_test`).
+    ///
+    /// M19 r2 (reviewer-facts P2-1): all four fixture sites are
+    /// password-shaped like the sirena reproducer — three of the
+    /// four forms the sirena file actually carries (`t.password =`,
+    /// struct-literal `password: "sk".into()`, and `.to_string()`)
+    /// plus the simpler `let password = "sk";` — so reverting the
+    /// cfg-test skip yields exactly 4 findings (one per fixture),
+    /// not 1.
     #[test]
     fn scan_security_patterns_in_text_skips_cfg_test_blocks() {
-        // Mimic the sirena shape: 4 fixture `password = "sk"`
+        // Mimic the sirena shape: 4 password-shaped fixture
         // assignments inside an inline `#[cfg(test)] mod tests { … }`,
         // with no `password` / `api_key` / `token` pattern on any
         // production line — so the only regex candidates are inside
         // the cfg-test block, and a clean result proves the skip.
-        let content = "fn real() { let config_name = \"upload\"; }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn creds() {\n        let password = \"sk\";\n    }\n    #[test]\n    fn another() {\n        let p: &str = \"sk\";\n    }\n    #[test]\n    fn third() {\n        let _ = \"sk\";\n    }\n    #[test]\n    fn fourth() {\n        let _ = \"sk\";\n    }\n}\n";
+        // Reverting the skip must surface exactly 4 findings, one
+        // per fixture line (M19 r2 fixture fix: every fixture line
+        // is password-shaped so the pin matches the sirena shape).
+        let content = "fn real() { let config_name = \"upload\"; }\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn creds() {\n        let password = \"sk\";\n    }\n    #[test]\n    fn another() {\n        t.password = \"sk\".into();\n    }\n    #[test]\n    fn third() {\n        let password = \"sk\".into();\n    }\n    #[test]\n    fn fourth() {\n        let password = \"sk\".to_string();\n    }\n}\n";
         let findings = scan_security_patterns_in_text("src/upload.rs", content);
         assert!(
             findings.is_empty(),

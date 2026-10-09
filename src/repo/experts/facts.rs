@@ -191,14 +191,40 @@ pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
 ///   standard convention). Multi-line `mod` declarations (no opening
 ///   brace on the opener line) fall through to the next `#[cfg(test)]`
 ///   search, so no production code is mistakenly swallowed.
-/// - Brace counting uses `{` / `}` byte counts per line; it tracks
-///   depth across continuation lines so nested blocks (a `fn` body
-///   containing its own `{}` group, or a nested `mod` inside a test
-///   module) don't terminate the outer block early. String / char
-///   literals are not tracked — a `"{"` or `"}"` inside a string
-///   would skew the counter, but the only consequence is a span that
-///   ends too early, which means at worst one extra regex hit on
-///   the production side, never a swallowed leak.
+/// - Brace counting only tallies `{` and `}` that appear **outside**
+///   string literals (`"..."`), char literals (`'...'`), line
+///   comments (`// …`) and block comments (`/* … */`); see
+///   [`count_code_braces`] for the scanner. A `}` inside a string
+///   or comment cannot prematurely close the span, and a `{` inside
+///   a string or comment cannot over-extend the span past the
+///   module's real closing brace. Without the string/comment filter,
+///   a single `assert_eq!(brace("{"), 1);` inside a test would push
+///   the span past every following production line and silently
+///   suppress the security sweep there (false negative — a real
+///   leak can be swallowed).
+/// - Recognised string / char literal escapes are the standard Rust
+///   ones: `\\`, `\"`, `\'`, `\n` and any other `\X` pair is consumed
+///   as a two-character escape (the scanner advances by 2, no
+///   semantic interpretation). Backslash-newline (line continuation
+///   inside a string) is **not** tracked across lines: a string that
+///   starts on one line and is not closed on the same line is a Rust
+///   syntax error, and the per-line scan handles it by exiting the
+///   string-scanning loop on EOL without flipping the open state.
+///   Multi-line block comments (`/* … */` that cross a newline) are
+///   tracked via the `in_block_comment` state threaded through
+///   successive calls.
+/// - Raw string literals `r"..."` / `r#"..."#` and byte / c-string
+///   prefixes are not specially recognised: the `r` / `b` / `c` /
+///   `#` characters are not brace or quote delimiters, so the
+///   scanner enters and exits the literal at the next `"` it sees,
+///   exactly like an ordinary string literal. The only failure mode
+///   is a `{` or `}` **inside** a raw string being counted as code
+///   (raw strings are a Rust-supported way to embed braces in
+///   string content). The reproducer corpus — sirena's `upload.rs`
+///   and the sirena-shape pin fixtures — does not exercise this,
+///   and no file in this repo that has been audited contains a
+///   raw-string brace pattern. If a future reproducer does, the
+///   helper can be extended.
 ///
 /// Returns `Vec<(start_line, end_line)>` in 1-based inclusive
 /// coordinates so callers can compare against `enumerate() + 1`
@@ -206,10 +232,26 @@ pub(crate) fn is_test_file(name: &str, path: &str) -> bool {
 pub(crate) fn cfg_test_line_spans(content: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let lines: Vec<&str> = content.lines().collect();
+    let mut in_block_comment = false;
+    let mut in_string = false;
     let mut i = 0usize;
     while i < lines.len() {
+        // Track block comments and unterminated strings even on
+        // lines we skip (a `/* ... */` or a backslash-continued
+        // `"…\"` can straddle the `#[cfg(test)]` attribute, so the
+        // brace-counting state must be current by the time we walk
+        // the mod body).
+        let (pre_delta, after_bc, after_s) = count_code_braces(lines[i], in_block_comment, in_string);
+        in_block_comment = after_bc;
+        in_string = after_s;
         let trimmed = lines[i].trim();
-        if trimmed != "#[cfg(test)]" {
+        if trimmed != "#[cfg(test)]" || pre_delta != 0 {
+            // Not a `#[cfg(test)]` attribute line — the `pre_delta != 0`
+            // guard rejects attribute lines that happen to live inside
+            // a brace-bearing string/comment fragment of the *outer*
+            // block (the reproducer corpus has none, but a corrupted
+            // source could); they would otherwise look like the
+            // module-closing brace line.
             i += 1;
             continue;
         }
@@ -229,13 +271,20 @@ pub(crate) fn cfg_test_line_spans(content: &str) -> Vec<(usize, usize)> {
             i = j + 1;
             continue;
         }
-        // Walk from the `mod` line forward, tracking braces until depth returns to 0.
+        // Walk from the `mod` line forward, tracking braces until
+        // depth returns to 0. The scanner only tallies braces
+        // outside strings and comments (see [`count_code_braces`]),
+        // so the `}` that closes the mod body is the brace that
+        // triggers `break`.
         let mut depth: i32 = 0i32;
         let mut k = j;
+        let mut ic = in_block_comment;
+        let mut is_ = in_string;
         loop {
-            let line = lines[k];
-            depth += line.matches('{').count() as i32;
-            depth -= line.matches('}').count() as i32;
+            let (delta, after_bc, after_s) = count_code_braces(lines[k], ic, is_);
+            ic = after_bc;
+            is_ = after_s;
+            depth += delta;
             if depth <= 0 {
                 break;
             }
@@ -244,6 +293,8 @@ pub(crate) fn cfg_test_line_spans(content: &str) -> Vec<(usize, usize)> {
                 break;
             }
         }
+        in_block_comment = ic;
+        in_string = is_;
         // Convert to 1-based inclusive coordinates.
         let start_line = i + 1;
         let end_line = k + 1;
@@ -252,6 +303,210 @@ pub(crate) fn cfg_test_line_spans(content: &str) -> Vec<(usize, usize)> {
         i = k + 1;
     }
     spans
+}
+
+/// Count the `{` and `}` characters in `line` that appear outside
+/// string literals (`"…"`), char literals (`'…'`), line comments
+/// (`// …`) and block comments (`/* … */`); return the net depth
+/// delta for the line together with the updated
+/// `(in_block_comment, in_string)` state for the next call. Both
+/// states are threaded across line boundaries — a `/* … */` or a
+/// backslash-continued `"…\"` that crosses a newline stays open
+/// until the matching closer (`*/` or `"`).
+///
+/// Special cases (documented so a future reproducer that hits them
+/// can extend the helper):
+/// - Multi-line strings are handled via the `in_string` state
+///   threaded across lines: a `"…\"` at the end of one line keeps
+///   the string open on the next line until the matching closing
+///   `"`. (Rust's backslash-newline continuation is what makes
+///   this necessary; the reproducer in `src/publisher/mod.rs` uses
+///   the pattern at lines 1518–1519.)
+/// - Raw string literals `r"…"` / `r#"…"#` and the byte / c-string
+///   prefixes are recognised: the `#`s after the prefix are
+///   consumed and the matching `"<#×N>` is found. Inside a raw
+///   string the backslash is a literal character (Rust does not
+///   interpret escapes in raw strings), so a `\"` inside
+///   `r#"…"#` is two characters and must not close the literal.
+///   The reproducer in `src/publisher/mod.rs` line 1171 has exactly
+///   this shape.
+fn count_code_braces(line: &str, mut in_block_comment: bool, mut in_string: bool) -> (i32, bool, bool) {
+    let mut depth_delta: i32 = 0;
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_block_comment {
+            // Inside a /* ... */: look for the matching */.
+            if c == b'*' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                in_block_comment = false;
+                i += 2;
+                continue;
+            }
+            i += 1;
+            continue;
+        }
+        if in_string {
+            // Continue scanning inside the still-open string. The
+            // only thing we care about is the closing `"`, which
+            // is reached when a backslash escape (`\<X>` pair,
+            // consumed as two bytes) is not in effect.
+            match bytes[i] {
+                b'\\' if i + 1 < bytes.len() => {
+                    i += 2;
+                }
+                b'"' => {
+                    in_string = false;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+            continue;
+        }
+        match c {
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'/' => {
+                // Line comment: ignore the rest of this line.
+                break;
+            }
+            b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'*' => {
+                // Block comment opens; ignore braces until the matching */.
+                in_block_comment = true;
+                i += 2;
+            }
+            b'"' => {
+                // String literal opens. The scanner is now inside
+                // a string: set the flag so any brace-like byte
+                // until the matching close is not counted, and the
+                // state is correctly threaded if the close is
+                // past the line's end (`\<newline>` continuation).
+                // Scan to the unescaped closing `"`, honouring
+                // `\<X>` escape pairs.
+                in_string = true;
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' if i + 1 < bytes.len() => {
+                            i += 2;
+                        }
+                        b'"' => {
+                            i += 1;
+                            in_string = false;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+                if i >= bytes.len() && in_string {
+                    // Unterminated at EOL — the next call must
+                    // continue scanning inside the string.
+                    return (depth_delta, in_block_comment, in_string);
+                }
+            }
+            b'\'' => {
+                // Char literal: same rules as the string literal,
+                // with `'`. Char literals never cross a newline
+                // (Rust syntax error otherwise), so no per-line
+                // state is needed.
+                i += 1;
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b'\\' if i + 1 < bytes.len() => {
+                            i += 2;
+                        }
+                        b'\'' => {
+                            i += 1;
+                            break;
+                        }
+                        _ => i += 1,
+                    }
+                }
+            }
+            b'r' | b'b' | b'c' => {
+                // Raw / byte / C-string prefix: `r"…"`, `b"…"`,
+                // `c"…"`, and the multi-hash forms `r#"…"#` /
+                // `r##"…"##` / `br#"…"#` etc. The `#`s are not
+                // brace or quote delimiters, so the prefix
+                // detection walks them; once the opening `"` is
+                // reached the scanner enters a raw-string state
+                // where `\` is a literal character (Rust's raw
+                // strings do not interpret escapes — the
+                // reproducer in `src/publisher/mod.rs` has
+                // `r#"{\"message\":...}"#`, and the in-string `\"`
+                // must not consume the following `"` as a 2-byte
+                // escape).
+                let prefix_start = i;
+                let mut p = i + 1;
+                if p < bytes.len() && (bytes[p] == b'b' || bytes[p] == b'c') {
+                    p += 1;
+                } else if p < bytes.len() && bytes[p] == b'r' {
+                    p += 1;
+                }
+                if p < bytes.len() && bytes[p] == b'r' {
+                    p += 1;
+                }
+                while p < bytes.len() && bytes[p] == b'#' {
+                    p += 1;
+                }
+                if p >= bytes.len() || bytes[p] != b'"' {
+                    // Bare `r` / `b` / `c` / `br` / `rb` token —
+                    // method name, ident, etc. — not a string
+                    // prefix; continue the main scan.
+                    i = prefix_start + 1;
+                    continue;
+                }
+                let mut hash_count = 0usize;
+                let mut q = prefix_start + 1;
+                if q < bytes.len() && (bytes[q] == b'b' || bytes[q] == b'c') {
+                    q += 1;
+                } else if q < bytes.len() && bytes[q] == b'r' {
+                    q += 1;
+                }
+                if q < bytes.len() && bytes[q] == b'r' {
+                    q += 1;
+                }
+                while q < bytes.len() && bytes[q] == b'#' {
+                    hash_count += 1;
+                    q += 1;
+                }
+                let body_start = q + 1;
+                let mut k = body_start;
+                let mut needle = Vec::with_capacity(1 + hash_count);
+                needle.push(b'"');
+                for _ in 0..hash_count {
+                    needle.push(b'#');
+                }
+                let mut found = false;
+                while k + needle.len() <= bytes.len() {
+                    if &bytes[k..k + needle.len()] == needle.as_slice() {
+                        i = k + needle.len();
+                        found = true;
+                        break;
+                    }
+                    k += 1;
+                }
+                if !found {
+                    // Unterminated raw string at EOL — the next
+                    // call must continue scanning inside the raw
+                    // string. (The reproducer corpus does not
+                    // have multi-line raw strings; documented in
+                    // case a future reproducer needs the
+                    // behaviour.)
+                    in_string = true;
+                    return (depth_delta, in_block_comment, in_string);
+                }
+            }
+            b'{' => {
+                depth_delta += 1;
+                i += 1;
+            }
+            b'}' => {
+                depth_delta -= 1;
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    (depth_delta, in_block_comment, in_string)
 }
 
 /// Whether `path` is a well-known CI configuration file.
@@ -770,5 +1025,237 @@ mod tests {\n\
         let src = "#[cfg(test)]\nmod unit {\n    fn a() {}\n}\n#[cfg(test)]\nmod integration {\n    fn b() {}\n}\n";
         let spans = cfg_test_line_spans(src);
         assert_eq!(spans, vec![(1, 4), (5, 8)], "two blocks: {spans:?}");
+    }
+
+    /// RENG-114 follow-up (M19 r2, reviewer-facts P2-2): a `{` inside
+    /// a string literal must NOT extend the cfg-test span past the
+    /// module's real closing brace. The reviewer-facts r1 reproducer:
+    ///
+    /// ```text
+    /// fn prod_before() {}                         // L 1
+    /// #[cfg(test)]                                // L 2
+    /// mod tests {                                 // L 3
+    ///     #[test]                                // L 4
+    ///     fn brace_literal() {                   // L 5
+    ///         assert_eq!(brace("{"), 1);         // L 6  — '{' inside a string
+    ///     }                                      // L 7
+    /// }                                          // L 8
+    /// fn prod_after() {                           // L 9
+    ///     let api_key = "abcdefghijklmnop";      // L10
+    /// }                                          // L11
+    /// ```
+    ///
+    /// The pre-r2 algorithm counted every `{` / `}` byte and reported
+    /// span (2, 12), swallowing the production `api_key` line at L10
+    /// — a false negative in the security sweep (a real leak would
+    /// never reach the report). The r2 scanner only tallies braces
+    /// outside string/char literals and outside comments, so the
+    /// `{` inside `brace("{")` is ignored and the span ends at L8.
+    #[test]
+    fn cfg_test_line_spans_ignores_braces_inside_string_literal() {
+        let src = "fn prod_before() {}\n\
+                   #[cfg(test)]\n\
+                   mod tests {\n\
+                       #[test]\n\
+                       fn brace_literal() {\n\
+                           assert_eq!(brace(\"{\"), 1);\n\
+                       }\n\
+                   }\n\
+                   fn prod_after() {\n\
+                       let api_key = \"abcdefghijklmnop\";\n\
+                   }\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(2, 8)],
+            "a `{{` inside a string must not over-extend the span: {spans:?}"
+        );
+        // And the production `api_key` line (L10) is OUTSIDE the
+        // span — the security sweep must see it.
+        assert!(
+            !spans.iter().any(|&(s, e)| s <= 10 && 10 <= e),
+            "production line 10 must be outside the span: {spans:?}"
+        );
+    }
+
+    /// RENG-114 follow-up (M19 r2): a `}` inside a string must NOT
+    /// prematurely close the cfg-test span. The mirror of the
+    /// `{`-in-string pin; without the string-aware counter, the
+    /// inner `}` ends the outer block at line 4 and leaves the real
+    /// `mod tests { ... }` body un-skipped.
+    #[test]
+    fn cfg_test_line_spans_ignores_closing_brace_inside_string_literal() {
+        let src = "#[cfg(test)]\nmod tests {\n    fn t() {\n        let s = \"}\";\n    }\n}\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 6)],
+            "a `}}` inside a string must not prematurely close the span: {spans:?}"
+        );
+    }
+
+    /// RENG-114 follow-up (M19 r2): a `{` or `}` inside a line
+    /// comment (`// …`) must be ignored. Without the comment-aware
+    /// counter, the depth after the `}` on line 4 is 0 and the
+    /// span ends at the line-comment, leaving the real test body
+    /// unscanned.
+    #[test]
+    fn cfg_test_line_spans_ignores_braces_inside_line_comment() {
+        let src = "#[cfg(test)]\nmod tests {\n    fn t() {\n        // }\n        let x = 1;\n    }\n}\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 7)],
+            "a `}}` inside a line comment must not close the span: {spans:?}"
+        );
+    }
+
+    /// RENG-114 follow-up (M19 r2): a `/* … */` block comment that
+    /// crosses a newline must stay open across the line boundary.
+    /// The `in_block_comment` state threads through the scanner;
+    /// without it, the `*/` on line 4 would be misread as
+    /// `*` (no-op) followed by `/` (no-op) and a stray `}` two lines
+    /// later would not have a paired `{` to subtract from.
+    #[test]
+    fn cfg_test_line_spans_handles_multi_line_block_comment() {
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n\
+                   /* block\n\
+                      comment with } brace */\n\
+                   fn t() {\n\
+                       let x = 1;\n\
+                   }\n\
+                   }\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 8)],
+            "multi-line block comment must stay open across the newline: {spans:?}"
+        );
+    }
+
+    /// RENG-114 follow-up (M19 r2): the string / char literal
+    /// escape rule — `\"` / `\'` must not close the literal.
+    /// `"{ \"a\" }"` parses as a single string with embedded
+    /// braces; under the new scanner the `{` and `}` inside the
+    /// string are not counted.
+    #[test]
+    fn cfg_test_line_spans_handles_escaped_quotes_in_string_literal() {
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n\
+                       fn t() {\n\
+                           let s = \"\\\"{\\\"\";\n\
+                       }\n\
+                   }\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 6)],
+            "escaped quotes must not close the string early: {spans:?}"
+        );
+    }
+
+    /// RENG-114 follow-up (M19 r2): a `\` at the end of a line in
+    /// a string is Rust's line-continuation marker — the string
+    /// continues on the next line. The reproducer in
+    /// `src/publisher/mod.rs` (lines 1315–1322 etc.) uses the
+    /// pattern. Without the per-line `in_string` state threading,
+    /// the algorithm closes the string at the EOL and the next
+    /// line's `{` (inside `{\"message\":…}`) is counted as code,
+    /// pushing the end of the cfg-test span past the real close.
+    #[test]
+    fn cfg_test_line_spans_handles_line_continuation_string() {
+        // The string spans L2 and L3; the `{` on L3 must be
+        // inside the string, not a code brace.
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n\
+                       fn t() {\n\
+                           let _ = \"part 1 \\\n\
+                                    {part 2} \\\n\
+                                    part 3\";\n\
+                       }\n\
+                   }\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 8)],
+            "the multi-line string must keep `{{part 2}}` inside the string and not over-extend: {spans:?}"
+        );
+    }
+
+    /// RENG-114 follow-up (M19 r2): a raw string `r#"…"#` must
+    /// not interpret escape sequences — `\"` inside the raw
+    /// string is two characters, and the `"` that follows is
+    /// the closing `"`, NOT the end of a `\"` escape pair. The
+    /// reproducer in `src/publisher/mod.rs` line 1171 has exactly
+    /// this shape.
+    #[test]
+    fn cfg_test_line_spans_handles_raw_string_with_escape_chars() {
+        // The raw string content is `{"message":"…\"…"}` — a
+        // real JSON payload with `\"` inside. Under the scanner's
+        // raw-string handling, the closing `"` is the one
+        // followed by `#`, not the one that comes after `\"`.
+        let src = "#[cfg(test)]\n\
+                   mod tests {\n\
+                       fn t() {\n\
+                           let _ = r#\"{\\\"k\\\" : \\\"v\\\"}\"#;\n\
+                       }\n\
+                   }\n";
+        let spans = cfg_test_line_spans(src);
+        assert_eq!(
+            spans,
+            vec![(1, 6)],
+            "a raw string with `\\\"` inside must not close the literal early: {spans:?}"
+        );
+    }
+
+    /// RENG-114 follow-up (M19 r2, reviewer-facts counterexample):
+    /// the r1 byte-counting algorithm over-ran past the real
+    /// closing brace on at least one file in this repo
+    /// (the reviewer-facts audit: `src/feedback.rs`,
+    /// `src/publisher/mod.rs`, `src/team/adjudicator.rs`,
+    /// `src/server/dispatcher.rs` — all four carry a `{` or `}`
+    /// inside a string literal in their `#[cfg(test)] mod tests`
+    /// body, and r1 returned spans with end-line *past* the real
+    /// closing brace). The r2 string-aware counter must close the
+    /// span at the module's real closing brace, not at the first
+    /// unmatched `}` byte it sees.
+    ///
+    /// The audit: the r2 end-line must point at a line whose only
+    /// non-whitespace content is `}` — the module's real closing
+    /// brace. Concretely: every file in the audit has its test
+    /// module at the file tail (no production line after the mod),
+    /// so the end-line is the file's last line, and the audit
+    /// verifies the end-line content. The r1 algorithm returned an
+    /// end-line one past the real brace in every case (547 instead
+    /// of 546, 1910 instead of 1909, etc.); the r2 algorithm must
+    /// hit the brace exactly.
+
+    #[test]
+    fn cfg_test_line_spans_does_not_overrun_on_real_source_files() {
+        let workspace = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo test");
+        for rel in [
+            "src/feedback.rs",
+            "src/publisher/mod.rs",
+            "src/team/adjudicator.rs",
+            "src/server/dispatcher.rs",
+        ] {
+            let path = std::path::Path::new(&workspace).join(rel);
+            let src = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {rel}: {e}"));
+            let spans = cfg_test_line_spans(&src);
+            assert!(!spans.is_empty(), "{rel}: must find at least one cfg-test span");
+            // The last span's end-line must be the line whose only
+            // non-whitespace content is `}` — the module's real
+            // closing brace. (The r1 algorithm returned an
+            // end-line one past this brace on all four files, so
+            // a check that the end-line content is exactly `}`
+            // is the tightest possible audit of the over-run fix.)
+            let (_, e) = spans.last().unwrap();
+            let end_line = src.lines().nth(*e - 1).unwrap_or("");
+            assert!(
+                end_line.trim() == "}",
+                "{rel}: last span ends at line {e} ({end_line:?}); r2 must close at the module's `}}` brace: spans={spans:?}"
+            );
+        }
     }
 }

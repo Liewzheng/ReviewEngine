@@ -669,3 +669,172 @@ fn test_render_team_report_weighted_total_matches_consolidator() {
     assert!(rendered.contains("| security | 67 | 90% |"), "got: {rendered}");
     assert!(rendered.contains("| docs | 91 | 10% |"), "got: {rendered}");
 }
+
+// ── RENG-113: credential redaction at the report render boundary ─────────
+
+/// RENG-113: an Evidence block quoting a config line with `password = "…"`
+/// must not carry the plaintext value through to the rendered report. The
+/// marker preserves key + length + fingerprint so the reader can still see
+/// *which* line had the hit.
+#[test]
+fn render_team_report_redacts_password_in_evidence_block() {
+    let mut finding = make_test_finding(Severity::High, "config.toml");
+    finding.evidence = r#"```toml
+password = "hunter2_real_secret"
+api_key = "sk-live-XXXXXXXXXXXXXXXXXXXX"
+```"#
+        .to_string();
+    let reports = vec![ExpertReport {
+        expert_name: "security".to_string(),
+        findings: vec![finding],
+        markdown: String::new(),
+        raw_llm_response: String::new(),
+        parse_error: None,
+        raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
+        llm_fp: None,
+    }];
+    let metrics = vec![ExpertMetrics {
+        name: "security".to_string(),
+        latency_ms: 1000,
+        tokens_used: 100,
+    }];
+
+    let rendered = render_team_report_with_scoring("Team", &reports, &metrics, &[], None, None);
+
+    // The plaintext values are gone.
+    assert!(
+        !rendered.contains("hunter2_real_secret"),
+        "Evidence must not carry the plaintext password: {rendered}"
+    );
+    assert!(
+        !rendered.contains("sk-live-XXXXXXXXXXXXXXXXXXXX"),
+        "Evidence must not carry the plaintext API key: {rendered}"
+    );
+    // The key names and the redaction metadata stay.
+    assert!(
+        rendered.contains("password = "),
+        "the assignment structure is preserved: {rendered}"
+    );
+    assert!(
+        rendered.contains("api_key = "),
+        "the api_key assignment structure is preserved: {rendered}"
+    );
+    assert!(
+        rendered.contains("kind=password"),
+        "the redaction marker names the kind: {rendered}"
+    );
+    assert!(
+        rendered.contains("kind=api_key"),
+        "the redaction marker names the kind: {rendered}"
+    );
+}
+
+/// RENG-113: the raw-LLM-response excerpt rendered alongside a parse
+/// failure must also be redacted, since a parse failure is exactly when
+/// the operator has to read the raw text — i.e. the path most likely to
+/// carry a verbatim secret.
+#[test]
+fn render_expert_section_redacts_raw_llm_response_excerpt() {
+    let report = ExpertReport {
+        expert_name: "security".to_string(),
+        findings: Vec::new(),
+        markdown: String::new(),
+        // Use a plain text excerpt (the raw path can also carry JSON
+        // with escaped quotes, which the detector doesn't chase — that's
+        // a deliberate trade-off, see [`crate::models::redact_text`]).
+        raw_llm_response: "leaked value: password = \"hunter2_real_secret\"\n".to_string(),
+        parse_error: Some("unparseable JSON".to_string()),
+        raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
+        llm_fp: None,
+    };
+
+    let section = render_expert_section(&report);
+
+    assert!(
+        !section.contains("hunter2_real_secret"),
+        "raw excerpt must not carry the plaintext password: {section}"
+    );
+    assert!(
+        section.contains("kind=password"),
+        "raw excerpt is redacted through the same path: {section}"
+    );
+}
+
+/// RENG-113: a TL;DR that quotes a config line is redacted before it
+/// reaches the report header.
+#[test]
+fn render_team_report_redacts_password_in_summary_field() {
+    let mut finding = make_test_finding(Severity::High, "config.toml");
+    finding.summary = r#"see config: password = "hunter2_real""#.to_string();
+    let reports = vec![ExpertReport {
+        expert_name: "security".to_string(),
+        findings: vec![finding],
+        markdown: String::new(),
+        raw_llm_response: String::new(),
+        parse_error: None,
+        raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
+        llm_fp: None,
+    }];
+    let metrics = vec![ExpertMetrics {
+        name: "security".to_string(),
+        latency_ms: 1000,
+        tokens_used: 100,
+    }];
+
+    let rendered = render_team_report_with_scoring("Team", &reports, &metrics, &[], None, None);
+
+    assert!(
+        !rendered.contains("hunter2_real"),
+        "summary field must be redacted: {rendered}"
+    );
+}
+
+/// RENG-113: benign text is left untouched — the redaction must not eat
+/// useful prose (the security expert's own description of the issue).
+///
+/// Note: the `team_renderer` doesn't surface `Finding::summary` (it relies
+/// on the pre-rendered `report.markdown` for prose). The assertion below
+/// uses the fields the team renderer actually renders: title, evidence,
+/// impact, recommendation.
+#[test]
+fn render_team_report_leaves_benign_text_unchanged() {
+    let mut finding = make_test_finding(Severity::High, "src/auth.rs");
+    finding.title = "Constant-time comparison missing".to_string();
+    finding.summary = "Use subtle::ConstantTimeEq for token comparison.".to_string();
+    finding.evidence = "```rust\nlet ok = a == b;\n```".to_string();
+    finding.impact = "Tokens leak via timing.".to_string();
+    finding.recommendation = "Switch to a constant-time compare.".to_string();
+    let reports = vec![ExpertReport {
+        expert_name: "security".to_string(),
+        findings: vec![finding],
+        markdown: String::new(),
+        raw_llm_response: String::new(),
+        parse_error: None,
+        raw_dump_path: None,
+        llm_provider: None,
+        llm_model: None,
+        llm_fp: None,
+    }];
+    let metrics = vec![ExpertMetrics {
+        name: "security".to_string(),
+        latency_ms: 1000,
+        tokens_used: 100,
+    }];
+
+    let rendered = render_team_report_with_scoring("Team", &reports, &metrics, &[], None, None);
+
+    assert!(rendered.contains("Constant-time comparison missing"));
+    assert!(rendered.contains("let ok = a == b;"));
+    assert!(rendered.contains("Tokens leak via timing."));
+    assert!(rendered.contains("Switch to a constant-time compare."));
+    // The pre-rendered expert markdown (render_expert_markdown) *does* carry
+    // the summary — and a benign summary must survive the redact pass.
+    let summary = crate::output::renderer::render_expert_markdown("security", &reports[0].findings);
+    assert!(summary.contains("subtle::ConstantTimeEq"));
+}

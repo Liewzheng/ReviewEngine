@@ -1181,6 +1181,57 @@ fn test_render_markdown_marks_fallback_experts() {
     assert!(md.contains(&row), "{md}");
 }
 
+// ── RENG-113: credential redaction in repo-review markdown ────────
+
+/// The static `Security` expert quotes a config line in its Evidence /
+/// message / recommendation fields. The Markdown renderer must mask any
+/// plaintext credential it carries, so the repo-review report file (and
+/// anything that copies it) doesn't leak real passwords.
+#[test]
+fn test_render_repo_review_markdown_redacts_password_in_evidence() {
+    let mut output = minimal_output();
+    let mut security = expert_output("security", 60, "see evidence", false);
+    security.details.push(ScoreItemDetail {
+        severity: "high".to_string(),
+        message: "config exposes a password".to_string(),
+        file: Some("config.toml".to_string()),
+        evidence: Some("password = \"hunter2_real_secret\"".to_string()),
+        impact: None,
+        recommendation: Some("rotate the credential".to_string()),
+        effort: None,
+    });
+    output.expert_scores.push(security);
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+
+    assert!(!md.contains("hunter2_real_secret"), "Evidence must be redacted: {md}");
+    assert!(md.contains("kind=password"), "the marker is named: {md}");
+    assert!(md.contains("password = "), "the assignment shape is preserved: {md}");
+}
+
+/// RENG-113: the action-items table — the most-skimmed section — also
+/// runs through the same redactor, so a `recommendation` column quoting
+/// a config line doesn't smuggle the plaintext into a `~/.config/...`
+/// report file.
+#[test]
+fn test_render_repo_review_markdown_redacts_password_in_action_items() {
+    let mut output = minimal_output();
+    output.action_items.push(ActionItem {
+        area: "security".to_string(),
+        severity: "high".to_string(),
+        message: "see config".to_string(),
+        file: Some("config.toml".to_string()),
+        recommendation: "rotate password = \"hunter2_real_secret\"".to_string(),
+        effort: None,
+    });
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+
+    assert!(
+        !md.contains("hunter2_real_secret"),
+        "action-items recommendation must be redacted: {md}"
+    );
+    assert!(md.contains("kind=password"), "the marker is named: {md}");
+}
+
 // ── RENG-107 r2: the repo-review site's zero-concurrency backstop ───
 
 /// The repo-review LLM-enhancement pass builds its OWN semaphore, so it needs

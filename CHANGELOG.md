@@ -1,3 +1,14 @@
+## [0.10.47] - 2026-10-09
+
+### Added
+- **Credential redaction in reports and publish path (RENG-113)**: the security expert's `Evidence` quoting a config line with a real password used to land in the report file and (with `--publish`) in the GitLab/GitHub MR discussion verbatim. Three changes close the leak:
+  - **`Evidence` blocks are redacted at the renderer** by default: every piece of LLM-derived prose the team renderer / per-expert renderer / repo-review renderer emits (Evidence, summary, recommendation, the raw-LLM-response excerpt, the lead-summary TL;DR and conflict resolutions) is passed through `crate::models::redact_text`, which replaces detected credential values with a marker that keeps the diagnostic context — `kind`, `len` and an 8-char SHA-256 fingerprint — so a reviewer still knows *which* line had the hit. The detector recognises `password = "…"`, `api_key = "…"`, `token = "…"`, `private_key = "…"`, PEM blocks, `https://user:pass@host` URLs, `Authorization: Bearer …` headers, and the value-only shapes (`glpat-…`, `ghp_…`, `AKIA…`, `sk-…`). Benign prose passes through unchanged.
+  - **Report files land at `0600`**: the timestamped copy under `output_dir` (`~/.config/review-engine/reports/review_*.md` by default) and the explicit `--output` file are both `chmod 0600`'d after writing on Unix, so even a host with a permissive `022` umask does not leave the file readable to other accounts. The override is exercised end-to-end by the report-output tests (`write_report_text_lands_the_timestamped_copy_at_0600` / `…_the_explicit_output_file_at_0600`).
+  - **`--publish` pre-scans the body and refuses on a hit**: before any provider call, both the board body and every selected inline-note body are scanned with `crate::models::scan_for_publish`. A hit returns `refusing to publish: <surface> body carries N suspected plaintext credential(s); re-redact the offending finding locally before retrying. Detected: kind=…, key=…, len=…, fp=…` — names the surface ("board body" or "inline note for `file:line`"), the credential kind and the value's fingerprint, never the value itself. Defence in depth: the renderer already redacted Evidence, so a real hit means a value slipped through a renderer path we forgot to update, or lives in a field the renderer doesn't cover (Finding.title / Finding.recommendation for inline notes). The gate refuses the whole publish — board and inline notes alike — so a partial post never lands.
+
+### Notes
+- **The redaction marker is greppable**: every replacement reads `***[redacted:kind=…,len=…,fp=…,key=…]***` (or `***[redacted:kind=…,len=…,fp=…]***` for value-only patterns). An operator can confirm the redaction fired with `grep 'redacted:' report.md`, and the same fingerprint grep matches the publish-time error message, so the path from "refusal in CI" to "offending line in the local report" is one command.
+
 ## [0.10.46] - 2026-09-20
 
 ### Added

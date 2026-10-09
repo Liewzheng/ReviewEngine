@@ -179,7 +179,37 @@ pub async fn run_review(
     Ok(output)
 }
 
-/// Publish review results back to an MR/PR discussion.
+/// Format a [`PublishRefusal`](crate::models::PublishRefusal) for the
+/// publish-time error message.
+///
+/// Each hit's `kind`, `key` (when present), length and fingerprint prefix
+/// are named — exactly the context the operator needs to find the offending
+/// line locally without the value itself being echoed. The full body is
+/// dropped from the message: surfacing the rendered text in an error path
+/// would itself be a leak vector.
+pub(crate) fn format_publish_refusal(refusal: &crate::models::PublishRefusal, surface: &str) -> String {
+    let mut msg = format!(
+        "refusing to publish: {review} body carries {n} suspected plaintext credential(s); \
+         re-redact the offending finding locally before retrying. Detected:",
+        review = surface,
+        n = refusal.hits.len(),
+    );
+    for hit in &refusal.hits {
+        let key = hit.key.as_deref().unwrap_or("(no key)");
+        // 8 hex chars is enough to identify the value in the local file
+        // (the full fingerprint is 16 chars but 8 is what the marker prints
+        // by default — a reviewer grepping for `fp=` gets the same value).
+        let fp = hit.fingerprint_short();
+        msg.push_str(&format!(
+            "\n  - kind={kind}, key={key}, len={len}, fp={fp}",
+            kind = hit.kind.label(),
+            key = key,
+            len = hit.value.chars().count(),
+            fp = fp,
+        ));
+    }
+    msg
+}
 ///
 /// Automatically selects the right Git provider based on the MR URL:
 /// - `github.com` → `GitHubProvider`
@@ -273,6 +303,27 @@ pub async fn publish_review_with_diff(
     let plan = crate::publisher::plan_inline_notes_for_output(output, diff_index.as_ref(), docs_only, &policy);
 
     let md = crate::publisher::render_board(output, &plan, &policy);
+    // RENG-113 publish-time gate: every body we are about to send to the
+    // provider (the board, every inline note) is scanned for plaintext
+    // credentials. The renderer redacts Evidence blocks and other LLM-
+    // derived prose at the source (the report file is already safe), so
+    // the gate is a defence-in-depth: a value that slipped through a
+    // renderer path we forgot to update still blocks the post instead of
+    // landing in the MR discussion history. A hit refuses the whole
+    // publish, board and inline notes alike — the operator can then
+    // re-mask the offending finding locally and retry.
+    if let Err(refusal) = crate::models::scan_for_publish(&md) {
+        return Err(anyhow::anyhow!(format_publish_refusal(&refusal, "board")));
+    }
+    for finding in &plan.selected {
+        let body = crate::publisher::format_inline_body(finding);
+        if let Err(refusal) = crate::models::scan_for_publish(&body) {
+            return Err(anyhow::anyhow!(format_publish_refusal(
+                &refusal,
+                &format!("inline note for `{}:{}`", finding.file, finding.line.unwrap_or(0)),
+            )));
+        }
+    }
     // The board's id, when it went up: the inline-note failures can only be
     // reported in the board if there is a board to update.
     let board_id = match provider.find_or_update_discussion(&md).await {
@@ -730,5 +781,130 @@ mod publish_policy_e2e_tests {
             !requests.iter().any(|(method, _, _)| method == "PUT"),
             "no failure, no addendum: {requests:?}"
         );
+    }
+
+    // ── RENG-113: the publish-time credential gate ─────────────────────────
+
+    /// An inline note body that carries a plaintext password must NOT be
+    /// posted: even when the renderer redacted Evidence (the path the team
+    /// renderer covers), `format_inline_body` interpolates the raw
+    /// `title` / `recommendation` fields. A finding whose recommendation
+    /// quotes a config line with a real password must therefore be refused
+    /// at the gate, not posted.
+    #[tokio::test]
+    async fn publish_review_refuses_an_inline_note_with_a_plaintext_credential() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let mut f = finding("src/auth.rs", 3, "Token comparison ignores timing");
+        f.recommendation = "rotate the credential: password = \"hunter2_real_secret\"".to_string();
+        let output = output_with(vec![f]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        let err = crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect_err("publishing must refuse a credential in the inline note");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to publish"),
+            "the gate's first-line reason: {msg}"
+        );
+        assert!(
+            msg.contains("inline note for `src/auth.rs:3`"),
+            "the gate names the offending surface: {msg}"
+        );
+        assert!(
+            msg.contains("kind=password"),
+            "the gate names the credential kind: {msg}"
+        );
+        assert!(
+            !msg.contains("hunter2_real_secret"),
+            "the value itself must never appear in the error: {msg}"
+        );
+
+        // Defence in depth: the gate ran before the provider saw the body,
+        // so the mock server received neither a board POST nor an inline
+        // POST.
+        let requests = received(&server).await;
+        assert!(
+            requests.is_empty(),
+            "no provider call may happen on a refused publish: {requests:?}"
+        );
+    }
+
+    /// A finding whose title (rendered verbatim into both the board and the
+    /// inline note body) carries a credential triggers the same refusal.
+    /// The board's `render_expert_markdown` uses the title as-is — this is
+    /// the test that pins the defence-in-depth contract.
+    #[tokio::test]
+    async fn publish_review_refuses_a_board_with_a_plaintext_credential() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let f = finding("src/auth.rs", 3, "leaked: password = \"hunter2_real_secret\"");
+        let output = output_with(vec![f]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        let err = crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect_err("publishing must refuse a credential in the board");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("refusing to publish"),
+            "the gate's first-line reason: {msg}"
+        );
+        assert!(
+            msg.contains("board body"),
+            "the gate names the offending surface: {msg}"
+        );
+        assert!(
+            !msg.contains("hunter2_real_secret"),
+            "the value itself must never appear in the error: {msg}"
+        );
+
+        let requests = received(&server).await;
+        assert!(
+            requests.is_empty(),
+            "no provider call may happen on a refused publish: {requests:?}"
+        );
+    }
+
+    /// A clean review still publishes: the gate must not be a false-positive
+    /// time bomb. (The existing e2e tests already cover the canonical
+    /// happy path; this one is the same shape with credentials absent.)
+    #[tokio::test]
+    async fn publish_review_passes_when_no_credentials_are_present() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        let output = output_with(vec![finding("src/auth.rs", 3, "Constant-time compare missing")]);
+        let diff = diff_with_context_line(&["src/auth.rs"]);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("clean publish must succeed");
+    }
+
+    /// `format_publish_refusal` prints hit context (kind, key, len, fp)
+    /// without echoing the value itself — the operator can grep the local
+    /// report file for the fingerprint to find the offending line, but the
+    /// error path itself stays credential-free.
+    #[test]
+    fn publish_refusal_error_names_context_without_the_value() {
+        let body = "config.toml: password = \"hunter2_real_secret\"";
+        let refusal = crate::models::scan_for_publish(body).unwrap_err();
+        let msg = crate::format_publish_refusal(&refusal, "board");
+
+        assert!(msg.contains("kind=password"));
+        assert!(msg.contains("key=password"));
+        assert!(msg.contains("len=19"), "the real length is 19 chars: {msg}");
+        assert!(!msg.contains("hunter2_real_secret"), "the value is never echoed: {msg}");
+        // The fingerprint is short (8 hex chars) and stable, so a reviewer
+        // can grep the local report file for it.
+        let fp_start = msg.find("fp=").expect("fp is in the error");
+        let fp = &msg[fp_start + 3..fp_start + 3 + 8];
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()), "fp is hex: {fp}");
     }
 }

@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use review_engine::models::*;
 use std::path::{Path, PathBuf};
 
@@ -86,6 +86,28 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
     })
 }
 
+/// Persist `text` to `path` with `0600` permissions on Unix.
+///
+/// RENG-113: the report file is the canonical local copy of the review — by
+/// default it lives at `~/.config/review-engine/reports/review_*.md` with
+/// the user's umask. A `0644` mode lets every other account on the same host
+/// read it, which means a quoted `password = "real_password"` line in
+/// Evidence (already redacted at the renderer, but still — defence in
+/// depth) becomes readable. `0600` keeps the file owner-only.
+///
+/// On non-Unix targets the function falls through to a plain `fs::write`;
+/// Windows file ACLs are not modelled here.
+fn write_report_file(path: &Path, text: &str) -> Result<()> {
+    std::fs::write(path, text)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod 0600 {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Persist `text` as a timestamped report under `output_dir` (the default
 /// reports directory) and return the file path. Shared by both `--output`
 /// branches so every run — explicit file or stdout — leaves a copy in the
@@ -108,7 +130,7 @@ fn save_timestamped_report(text: &str, format: &str, output_dir: &str) -> Result
     let now = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("review_{}.{}", now, ext);
     let filepath = dir.join(&filename);
-    std::fs::write(&filepath, text)?;
+    write_report_file(&filepath, text)?;
     Ok(filepath)
 }
 
@@ -120,6 +142,11 @@ fn save_timestamped_report(text: &str, format: &str, output_dir: &str) -> Result
 /// * no `--output`: print to stdout, plus the same timestamped copy.
 ///
 /// The timestamped copy is skipped only when `output_dir` is `None`.
+///
+/// Both the `--output` file and the timestamped copy are written with
+/// `0600` on Unix (RENG-113): the report carries evidence text and other
+/// LLM-derived prose that may quote a config line, and `0644` would let any
+/// other account on the host read it.
 pub(super) fn write_report_text(
     text: &str,
     format: &str,
@@ -136,7 +163,7 @@ pub(super) fn write_report_text(
                 }
             }
             std::fs::create_dir_all(path.parent().unwrap_or(path))?;
-            std::fs::write(path, text)?;
+            write_report_file(path, text)?;
         }
         None => {
             // No explicit output: print to stdout
@@ -478,4 +505,57 @@ mod report_output_tests {
             "timestamped copy and --output file hold identical content"
         );
     }
+
+    // ── RENG-113: report files must land with 0600 on Unix ──────────────
+
+    /// The timestamped copy under `output_dir` is the canonical local copy
+    /// of the review. RENG-113: by default it lands at
+    /// `~/.config/review-engine/reports/review_*.md` with the user's umask,
+    /// which on most distros is `0644` and lets every other account on the
+    /// host read it. The report carries Evidence blocks and other LLM prose
+    /// — even with the redaction applied at the renderer, `0600` is the
+    /// "owner only" baseline.
+    #[cfg(unix)]
+    #[test]
+    fn write_report_text_lands_the_timestamped_copy_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        let reports_str = reports.to_string_lossy().to_string();
+        write_report_text("secret", "markdown", &None, Some(&reports_str)).unwrap();
+        let saved = saved_files(&reports);
+        assert_eq!(saved.len(), 1);
+        let mode = std::fs::metadata(&saved[0]).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the timestamped report file must be owner-only, got {:o}",
+            mode
+        );
+    }
+
+    /// Same baseline for the explicit `--output` file: even when the user
+    /// pointed the report at a custom path, the file mode is `0600`.
+    #[cfg(unix)]
+    #[test]
+    fn write_report_text_lands_the_explicit_output_file_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let explicit = dir.path().join("explicit.md");
+        write_report_text(
+            "secret",
+            "markdown",
+            &Some(explicit.to_string_lossy().to_string()),
+            None,
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&explicit).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the --output file must be owner-only, got {:o}", mode);
+    }
+
+    // `0600` is independent of the user's umask: `set_permissions(0o600)`
+    // overrides whatever the umask would have produced (typically `0644` on
+    // a host with a permissive default). The two `0600` tests above both
+    // run under the test process's umask — a permissive `022` is the
+    // default on most CI — and assert `0600` anyway, so the override is
+    // already exercised end-to-end.
 }

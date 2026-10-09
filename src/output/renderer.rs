@@ -1,6 +1,15 @@
 use crate::models::*;
 use crate::output::markdown::close_unclosed_code_fences;
 
+/// RENG-113: redact suspected credential values in LLM-derived prose before
+/// it lands in the report. See [`crate::models::redact_text`] for the
+/// detector — the marker preserves the diagnostic context (key name + length
+/// + fingerprint) so a reviewer still sees *which* line had the hit, just
+/// not the value itself.
+fn redact(text: &str) -> String {
+    crate::models::redact_text(text)
+}
+
 const NO_ISSUES_FOUND: &str = "No issues found.\n";
 
 fn severity_label(severity: &Severity) -> &'static str {
@@ -32,7 +41,7 @@ pub fn render_expert_markdown(expert_name: &str, findings: &[Finding]) -> String
             "**File**: `{file}{line}`\n\n{summary}\n\n",
             file = f.file,
             line = line_info,
-            summary = close_unclosed_code_fences(&f.summary),
+            summary = close_unclosed_code_fences(&redact(&f.summary)),
         ));
     }
 

@@ -1038,4 +1038,68 @@ mod publish_policy_e2e_tests {
             "no provider call may happen on a refused publish: {requests:?}"
         );
     }
+
+    /// RENG-113 round 3: a credential in a *rolled-up* title (admitted
+    /// by the policy but withheld from inline delivery past the per-round
+    /// cap, default 2 → posts two notes inline, the rest go up the board)
+    /// used to refuse the publish on its own rendered list — fail-closed,
+    /// but a user-facing publish dead-end the operator couldn't resolve,
+    /// and confusing because the per-expert section already masked the same
+    /// title. Round 3 masks the rolled-up list in `board_section`, so the
+    /// gate passes and the board carries the marker.
+    #[tokio::test]
+    async fn publish_review_passes_through_a_rolled_up_credential_title() {
+        let server = MockServer::start().await;
+        mount_gitlab(&server).await;
+
+        // Three admitted findings, default cap is 2 → three goes to the
+        // rolled-up list. The credential lives in that title.
+        let files = ["src/f1.rs", "src/f2.rs", "src/f3.rs"];
+        let mut findings: Vec<Finding> = files
+            .iter()
+            .enumerate()
+            .map(|(i, file)| finding(file, 1, &format!("Issue {i}")))
+            .collect();
+        findings[2].title = "leaked: password = \"hunter2_real_secret\"".to_string();
+        let output = output_via_render(findings);
+        let diff = diff_for(&files);
+
+        crate::publish_review_with_diff("token", &mr_url(&server), &output, Some(&diff))
+            .await
+            .expect("a board whose rolled-up list masked the credential must publish");
+
+        // The board carries the marker, never the value.
+        let board = board_body(&server).await;
+        assert!(
+            !board.contains("hunter2_real_secret"),
+            "the rolled-up title must be masked: {board}"
+        );
+        assert!(
+            board.contains("kind=password"),
+            "the rolled-up marker is named in the board: {board}"
+        );
+        // The rolled-up list still names the anchor and the cap that
+        // pulled the finding out of inline delivery — what the reviewer
+        // expects to see.
+        assert!(board.contains("`src/f3.rs:1`"), "the anchor is named: {board}");
+        assert!(
+            board.contains("exceeded the 2-note per-round cap"),
+            "the cap explanation is named: {board}"
+        );
+
+        // Two inline notes went up (the first two), the third was the
+        // rolled-up one. The inline notes' bodies are masked at source
+        // (round-2 `format_inline_body`); the gate sees them masked too.
+        let requests = received(&server).await;
+        let posted = inline_posts(&requests);
+        assert_eq!(posted.len(), 2, "the default cap is two notes per round: {requests:?}");
+        // And the inline-note bodies are themselves masked — the
+        // plaintext does not leak through the inline path either.
+        for body in &posted {
+            assert!(
+                !body.contains("hunter2_real_secret"),
+                "inline note body carries no plaintext: {body}"
+            );
+        }
+    }
 }

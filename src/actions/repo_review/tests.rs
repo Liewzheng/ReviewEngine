@@ -1267,10 +1267,12 @@ fn test_render_repo_review_markdown_redacts_password_in_conclusion_recommendatio
     assert!(md.contains("kind=password"), "the conclusion marker is named: {md}");
 }
 
-/// RENG-113 round 2: the per-detail `message` field in `render_detail`
-/// (the summary line above each finding) is LLM prose; round 1 covered
-/// Evidence / impact / recommendation but missed message. The reviewer's
-/// prose explicitly noticed the same inconsistency.
+/// RENG-113 round 2 (added coverage): the per-detail `message` field in
+/// `render_detail` (the summary line above each finding) is LLM prose —
+/// already redacted in round 1 at `d5fc1d4` (see `render.rs:23`,
+/// `format!("#### {} — {}", …, redact(&d.message))`). The round-2 test
+/// pins the contract: the visible report carries the marker, the plaintext
+/// is gone.
 #[test]
 fn test_render_repo_review_markdown_redacts_password_in_detail_message() {
     let mut output = minimal_output();

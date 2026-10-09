@@ -1,3 +1,9 @@
+## [0.10.49] - 2026-10-09
+
+### Fixed
+- **The rolled-up board section now masks `Finding::title` (RENG-113 round 3)**: round 2 closed every unredacted channel in the report and publish path except one — `InlinePlan::board_section` (`src/publisher/policy.rs:420`) still interpolated `finding.title` verbatim for findings the policy admitted but withheld from inline delivery past the per-round cap (and the docs-only listing). The reviewer reproduced the dead-end: three admitted findings with a credential in the third title carried the plaintext into the board, the publish-time gate refused the whole publish (fail-closed, nothing leaks), and the operator had no escape — the per-expert section already masked the same title, so the visible report carried no plaintext yet the gate refused. Fix: one-line `crate::models::redact_text(&finding.title)` at the rolled-up render site (same fix family as the round-2 channels), plus two new tests: `board_section_redacts_titles_in_the_rolled_up_list` pins the marker form (`kind=password`, anchor, severity verbatim) and `board_section_redaction_lets_a_rolled_up_credential_pass_the_gate` runs the production `plan_inline_notes` → `render_board` → `scan_for_publish` path and asserts the gate passes. The end-to-end `publish_review_passes_through_a_rolled_up_credential_title` test in `lib.rs::publish_policy_e2e_tests` goes against a mock provider and pins the operator-visible contract: the board carries the marker, two inline notes still go up, and the gate never refuses on its own rolled-up output.
+- **Round-2 test doc comment corrected (RENG-113 round 3 P3 nit)**: `test_render_repo_review_markdown_redacts_password_in_detail_message` claimed round 1 "missed message" — `render_detail`'s `message` was already redacted at `d5fc1d4` (r1). The test still adds useful coverage; only the historical claim was wrong.
+
 ## [0.10.48] - 2026-10-09
 
 ### Fixed

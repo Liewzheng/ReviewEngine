@@ -130,6 +130,24 @@ impl VerificationStats {
 /// truncated bytes both exist. The consolidator's job is to carry them to
 /// the renderer. Until M31 plumbs the data through, this struct is empty and
 /// the `## Injected Context` section simply does not render.
+///
+/// **Where the section actually renders:**
+/// `review --local --diff|--repo|--path` and `review --mr-url` (CLI) plus
+/// the repo-review path — every entry point whose `mr_info.project_path`
+/// points at a real local directory.
+///
+/// **Where it does NOT:**
+/// GitLab-MR / webhook / GitHub-PR server reviews carry
+/// `mr_info.project_path = "group/project"` (a non-directory), so the
+/// `Path::is_dir` guard inside the orchestrator's
+/// `read_agents_md_meta_if_applicable` helper skips the AGENTS.md row and
+/// the changed-file `build_file_contents_section_with_meta` returns no
+/// entries (no local checkout → no files to read). The `## Injected
+/// Context` section is therefore silently absent on remote-server
+/// reviews; the renderer also suppresses the section when `entries` is
+/// empty, so the absence is "no section at all" rather than "empty
+/// section." Providers that need this surfaced can check
+/// `InjectedContext::entries.is_empty()` on the serialized report.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct InjectedContext {
     /// One row per injected source.

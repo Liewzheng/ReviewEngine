@@ -436,11 +436,27 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
     // `verification_stats` through; missing values (`None`) mean the run had
     // no review at all (e.g. an empty expert team) so we say so instead of
     // fabricating zeros.
+    //
+    // M35 r1 P3-1: the previous copy labelled every skip as a "parse
+    // failure", but `stats.skipped` is the M31 sum across three distinct
+    // failure kinds (batches_llm_failed + batches_parse_failed +
+    // batches_skipped), only one of which is actually a parser problem.
+    // A verifier that answered `verdicts: []` to every batch was
+    // attributed as "parse failures" before; that was the per-run INFO
+    // line saying "0 parse failures, 2 empty verdict list" while the
+    // report said "解析失败 2 批 / parse failures 2". The copy now says
+    // "skipped" generically, and names the three possible causes with a
+    // pointer at the INFO line — the run-level breakdown survives in
+    // `logs.ndjson`.
     if let Some(stats) = &consolidated.verification_stats {
         if stats.checked > 0 || stats.skipped > 0 || stats.dropped > 0 {
             out.push_str(&format!(
-                "**Verification pass**: ran on {}, skipped {}, dropped {} — 验证批处理：解析失败 {skipped} 批 / parse failures {skipped}, dropped {dropped}\n\n",
-                stats.checked, stats.skipped, stats.dropped, skipped = stats.skipped, dropped = stats.dropped,
+                "**Verification pass**: ran on {checked}, skipped {skipped}, dropped {dropped} — \
+                 验证批处理：跳过 {skipped} 批（可能为 parse 失败 / LLM 错误 / 空 verdict 列表；详细分项见 logs.ndjson）/ \
+                 skipped {skipped} batch(es) (parse failures / LLM errors / empty verdict list — see logs.ndjson for the breakdown), dropped {dropped}\n\n",
+                checked = stats.checked,
+                skipped = stats.skipped,
+                dropped = stats.dropped,
             ));
         }
     }

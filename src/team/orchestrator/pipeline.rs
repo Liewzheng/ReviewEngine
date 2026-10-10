@@ -523,17 +523,17 @@ pub(crate) async fn run_experts_inner(
 )> {
     let mut files = parse_and_filter_diff(diff_raw);
 
-    // M18-W5: compute the `## Injected Context` rows the lead summary surfaces
-    // before splitting work into per-expert tasks. Both producers (AGENTS.md
-    // and changed-file contents) are read here, in their canonical form, so
-    // the meta rows describe exactly what the on-disk bytes were and how the
-    // truncation note was applied — read once, shipped to the consolidated
-    // report via `with_injected_context` after `build_consolidated_report`
-    // runs. Done in `run_experts_inner` (M31 owns the orchestrator) rather
-    // than in the CLI / server `prepare_review` paths so every entry point
-    // (CLI local, CLI diff, server webhook, server REST, repo-review)
-    // surfaces the same rows.
-    let injected_context = build_injected_context_rows(&files, &mr_info.project_path, config);
+    // M18-W5 / M35 r1 P2-1: the `## Injected Context` rows are collected
+    // where the prompts are actually built (chunked branch / non-chunked
+    // branch), not from the pre-chunk file list. The M35 r0 fix used the
+    // pre-chunk list, which let chunked mode claim files that were never
+    // injected and miss files that were (default large-PR path is chunked;
+    // M32 r1's P2-2 invariant broken again through a different mechanism —
+    // reproduction A under-reported 2 of 4 injected files; reproduction B
+    // fabricated 2 rows for files the same report's coverage banner said
+    // were never assigned). AGENTS.md is still read once here because it's
+    // not chunk-bounded.
+    let agents_entry = read_agents_md_meta_if_applicable(&mr_info.project_path, config);
 
     // Assess large PR and set up chunking if needed
     let (non_aggregators, chunked_mode) = assess_and_chunk_diff(&mut files, experts, config);
@@ -610,6 +610,17 @@ pub(crate) async fn run_experts_inner(
     // dropped from the report).
     let mut tasks: Vec<Task> = Vec::new();
     let mut task_files: Vec<Vec<String>> = Vec::new();
+    // M18-W5 / M35 r1 P2-1: collect the `## Injected Context` rows at the
+    // build sites where the prompts are actually constructed. Each
+    // `_with_meta` call yields `.body` (byte-identical to the no-meta
+    // builder we used previously — so prompt payloads are unchanged) and
+    // `.entries` (the per-file rows the lead summary surfaces). The hunks
+    // chunking strategy can place the same file in several chunks; we
+    // dedupe by `source` below before attaching.
+    let mut injected_entries: Vec<InjectedContextEntry> = Vec::new();
+    if let Some(agents) = agents_entry {
+        injected_entries.push(agents);
+    }
 
     if let Some((_chunks, assignments)) = chunked_mode {
         // Root cause A: `route_chunks` already bounded each expert to
@@ -626,18 +637,22 @@ pub(crate) async fn run_experts_inner(
             let task_diff_text = processor::render_diff_text(&files_for_task);
             let task_lang = filter::detect_language(&files_for_task);
             // Chunked mode: each task injects only the contents of the
-            // files in its own chunk assignment.
-            let task_file_contents = crate::context::file_contents::build_file_contents_section(
+            // files in its own chunk assignment. `_with_meta` runs the
+            // same per-file cap + total-budget check + trim-once flow as
+            // the no-meta builder, so the body bytes are unchanged from
+            // before — only `entries` is captured here for the row table.
+            let task_contents = crate::context::file_contents::build_file_contents_section_with_meta(
                 &files_for_task,
                 &mr_info.project_path,
                 max_context_file_bytes,
             );
+            injected_entries.extend(task_contents.entries);
 
             tasks.push(create_expert_task(
                 expert,
                 mr_info.clone(),
                 task_diff_text,
-                task_file_contents,
+                task_contents.body,
                 task_lang,
                 llm_configs.to_vec(),
                 config.clone(),
@@ -655,18 +670,19 @@ pub(crate) async fn run_experts_inner(
     } else {
         // Non-chunked mode: all experts share one injection built from the
         // full changed-file list.
-        let file_contents = crate::context::file_contents::build_file_contents_section(
+        let file_contents_report = crate::context::file_contents::build_file_contents_section_with_meta(
             &files,
             &mr_info.project_path,
             max_context_file_bytes,
         );
+        injected_entries.extend(file_contents_report.entries);
         for expert in non_aggregators {
             task_files.push(files.iter().map(|f| f.path.clone()).collect());
             tasks.push(create_expert_task(
                 expert,
                 mr_info.clone(),
                 diff_text.clone(),
-                file_contents.clone(),
+                file_contents_report.body.clone(),
                 lang.clone(),
                 llm_configs.to_vec(),
                 config.clone(),
@@ -682,6 +698,16 @@ pub(crate) async fn run_experts_inner(
             ));
         }
     }
+
+    // M35 r1 P2-1: the hunks chunking strategy can place the same file in
+    // more than one chunk — the per-task entries captured above would then
+    // emit duplicate rows. Dedup by `source` (the same key the
+    // per-file `with_meta` producer uses internally), keeping the first
+    // occurrence so the per-file byte count and sha reflect the first
+    // chunk's view. The renderer prints one row per source, which is
+    // the unit of "an injection" — collapse duplicates here so the audit
+    // table stops claiming two injections of the same file.
+    dedup_injected_entries(&mut injected_entries);
 
     let results: Vec<anyhow::Result<(ExpertReport, u64, u64)>> = join_all(tasks).await;
 
@@ -867,7 +893,9 @@ pub(crate) async fn run_experts_inner(
     // `render_lead_summary` print the line at all (the renderer treats
     // `None` and all-zero identically, which is exactly the silent-pass
     // failure mode the field exists to prevent).
-    consolidated = consolidated.with_injected_context(injected_context);
+    consolidated = consolidated.with_injected_context(InjectedContext {
+        entries: injected_entries,
+    });
     if let Some(rich) = verification_stats {
         consolidated = consolidated.with_verification_stats(VerificationStats {
             checked: rich.findings_checked,
@@ -995,58 +1023,54 @@ pub(crate) async fn run_experts_inner(
     ))
 }
 
-/// Build the `## Injected Context` rows for the lead summary (M18-W5, wired
-/// in M35).
+/// Read the local `AGENTS.md` for the `## Injected Context` row when
+/// `inject_agents_md` is enabled and the project path is a real local
+/// directory (M18-W5, wired in M35, rewritten in M35 r1).
 ///
-/// Two sources, in fixed order so a reader comparing two reports sees
-/// `AGENTS.md` first and the changed files after:
+/// **When the row actually renders:** local CLI / diff / path / repo
+/// reviews with `mr_info.project_path` pointing at an existing directory.
+/// **When it does NOT:** server-side reviews (GitLab MR via webhook, GitLab
+/// REST submit, GitHub PR) carry `mr_info.project_path = "group/project"`
+/// — a non-directory string — so the row is silently absent. The server
+/// path injects a provider-fetched AGENTS.md into `mr_info.agents_md` for
+/// the prompt body, but it doesn't have an on-disk file to stat for the
+/// meta row; the table is intentionally local-only, and the renderer
+/// suppresses the section when `entries` is empty. Callers that need a
+/// "no row" guarantee can rely on `InjectedContext::entries.is_empty()`
+/// on the resulting report.
 ///
-/// 1. The local `AGENTS.md` — read via
-///    [`crate::context::agents_md::read_local_agents_md_with_meta`] so the
-///    prompt-section injection and the meta row see the same file bytes and
-///    the same cap. **Only attempted when**
-///    `config.report.inject_agents_md` **is true** — the same gate the
-///    callers' own `prepare_review`/resolve.rs use to decide whether to
-///    populate `mr_info.agents_md` — so a row exists iff the prompt path
-///    would also have one. Symlink / missing / oversized AGENTS.md produces
-///    no row, matching the prompt path's silent skip.
-/// 2. Every changed file admitted to the expert prompt body. The
-///    `with_meta` producer already implements the per-file cap, the
-///    total-budget cap, and the P2-2 "push the row only for admitted files"
-///    rule (`file_contents::FileContentsReport.entries`). Computing it once
-///    over the full file list (not per chunked-mode task) gives a single
-///    canonical "what was injected across the team" view; the
-///    per-expert chunked prompt bodies still use the body-only builder
-///    (`build_file_contents_section`) so the per-task prompt stays
-///    chunk-bounded.
-fn build_injected_context_rows(files: &[DiffFile], project_path: &str, config: &AppConfig) -> InjectedContext {
-    use crate::context::agents_md::DEFAULT_MAX_FILE_BYTES;
+/// Same cap ([`crate::context::agents_md::DEFAULT_MAX_FILE_BYTES`]) and
+/// same missing/symlink/oversized silent-skip behavior as the CLI/server
+/// callers' `prepare_review` / `resolve.rs` AGENTS.md handling, so the
+/// meta row matches the bytes the LLM saw when a row is emitted.
+pub(super) fn read_agents_md_meta_if_applicable(
+    project_path: &str,
+    config: &AppConfig,
+) -> Option<InjectedContextEntry> {
+    use crate::context::agents_md::{read_local_agents_md_with_meta, DEFAULT_MAX_FILE_BYTES};
 
-    let mut entries: Vec<InjectedContextEntry> = Vec::new();
-
-    if config.report.inject_agents_md && std::path::Path::new(project_path).is_dir() {
-        // Same cap the CLI/server callers use for `mr_info.agents_md`. A
-        // different cap would let the meta row disagree with the actual
-        // prompt body; we keep the constants aligned so the row is honest.
-        if let Some(read) =
-            crate::context::agents_md::read_local_agents_md_with_meta(project_path.as_ref(), DEFAULT_MAX_FILE_BYTES)
-        {
-            entries.push(read.meta);
-        }
+    if !config.report.inject_agents_md || !std::path::Path::new(project_path).is_dir() {
+        return None;
     }
+    read_local_agents_md_with_meta(project_path.as_ref(), DEFAULT_MAX_FILE_BYTES).map(|r| r.meta)
+}
 
-    // Body is intentionally discarded — only the meta rows ship to the
-    // consolidated report. The per-task prompts keep using
-    // `build_file_contents_section` (no meta) so the chunked-mode split
-    // doesn't double-render sections across experts.
-    let report = crate::context::file_contents::build_file_contents_section_with_meta(
-        files,
-        project_path,
-        config.diff.max_context_file_bytes,
-    );
-    entries.extend(report.entries);
-
-    InjectedContext { entries }
+/// Drop duplicate rows by `source` from a per-task accumulation.
+///
+/// M35 r1: the hunks chunking strategy can place the same changed file in
+/// more than one chunk (e.g. one chunk for its first hunk, another for a
+/// later hunk); each task's `_with_meta` build then emits the row again.
+/// The audit table renders one row per source — collapse duplicates here
+/// so the report stops claiming two injections of the same file.
+///
+/// `retain` keeps the **first** occurrence; if multiple chunks each
+/// truncated the same file differently (rare; would require the per-file
+/// cap to bind in one chunk and not the other), the first-chunk row is
+/// what the reader sees. The first row also wins over later rows in any
+/// "did an expert receive this file at all" question.
+pub(super) fn dedup_injected_entries(entries: &mut Vec<InjectedContextEntry>) {
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert(e.source.clone()));
 }
 
 #[cfg(test)]

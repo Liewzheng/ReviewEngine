@@ -16,28 +16,24 @@ use crate::models::DiffFile;
 /// truncated and the truncation is noted inline.
 pub(crate) const MAX_SINGLE_FILE_BYTES: usize = 20_000;
 
-/// Build the `## Full File Contents` body for the given diff files, plus a
-/// meta report (`FileContentsReport`) the lead summary surfaces.
+/// Build the `## Full File Contents` body for the given diff files, plus the
+/// per-file [`InjectedContextEntry`] rows the M18-W5 `## Injected Context`
+/// report section needs.
 ///
 /// Files are ordered by change size (additions + deletions, descending, path
 /// as tie-break) so the most heavily modified files win the `max_total_bytes`
 /// budget; files that no longer fit are listed under an "Omitted" heading.
-/// Returns an empty string when the budget is zero, the project path is not
-/// a readable local directory (e.g. remote reviews), or no file content
-/// could be read.
+/// Returns an empty [`FileContentsReport`] when the budget is zero, the
+/// project path is not a readable local directory (e.g. remote reviews), or
+/// no file content could be read.
 ///
-/// `meta` is built unconditionally (even when the section is empty), so the
-/// lead summary can render "no changed files were injected" honestly.
-pub(crate) fn build_file_contents_section(files: &[DiffFile], project_path: &str, max_total_bytes: usize) -> String {
-    build_file_contents_section_with_meta(files, project_path, max_total_bytes).body
-}
-
-/// Like [`build_file_contents_section`], but also returns the per-file
-/// [`InjectedContextEntry`] rows the M18-W5 `## Injected Context` section
-/// needs. M18-W5: a file whose content was injected but truncated to
-/// `[MAX_SINGLE_FILE_BYTES]` is reported with its original / injected bytes
-/// and a sha256 fingerprint, so a 200 KB file injected as the head 20 KB
-/// does not silently count as "we read the whole thing".
+/// M35 r1: the orchestrator previously had a thin `build_file_contents_section`
+/// wrapper that returned just the body. M35 wired the orchestrator to the
+/// `_with_meta` variant directly (so chunked-mode per-task builds can
+/// capture the meta rows from the same call site that produces the body —
+/// P2-1), so the body-only wrapper has no remaining caller. Removed in
+/// M35 r1; both the body and the entries now come from this single
+/// function.
 pub(crate) fn build_file_contents_section_with_meta(
     files: &[DiffFile],
     project_path: &str,
@@ -133,13 +129,13 @@ pub(crate) fn build_file_contents_section_with_meta(
 ///
 /// `entries` is consumed by the orchestrator (M35), which feeds it into
 /// `ConsolidatedReport::injected_context` for the lead-summary renderer.
-/// Splitting the two outputs (body / entries) lets the per-task prompt
-/// builders continue to use `build_file_contents_section` (body-only)
-/// without dragging the meta rows through their call sites.
+/// The body and entries are produced from a single call, so the two cannot
+/// disagree — the audit's RENG-19 "截断不可见" invariant plus the M32
+/// P2-2 "table cannot lie about injection" rule both pin to the same
+/// per-file scan.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FileContentsReport {
-    /// The actual prompt-body markdown (same shape as
-    /// [`build_file_contents_section`] returns).
+    /// The actual prompt-body markdown (the fenced `### ...` blocks).
     pub body: String,
     /// Per-changed-file `## Injected Context` rows.
     pub entries: Vec<InjectedContextEntry>,
@@ -197,7 +193,7 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
 
         let files = vec![make_diff_file("src/main.rs", 3, 1)];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("### `src/main.rs`"));
         assert!(section.contains("```rs"));
@@ -209,7 +205,7 @@ mod tests {
     fn test_remote_or_missing_project_path_yields_empty() {
         let files = vec![make_diff_file("src/main.rs", 3, 1)];
         // "owner/repo" style project path does not exist locally → no injection.
-        let section = build_file_contents_section(&files, "owner/repo-does-not-exist-xyz", 60_000);
+        let section = build_file_contents_section_with_meta(&files, "owner/repo-does-not-exist-xyz", 60_000).body;
         assert!(section.is_empty());
     }
 
@@ -218,7 +214,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         let files = vec![make_diff_file("a.rs", 1, 0)];
-        assert!(build_file_contents_section(&files, dir.path().to_str().unwrap(), 0).is_empty());
+        assert!(
+            build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 0)
+                .body
+                .is_empty()
+        );
     }
 
     #[test]
@@ -228,7 +228,7 @@ mod tests {
         std::fs::write(dir.path().join("big.rs"), &big).unwrap();
 
         let files = vec![make_diff_file("big.rs", 10, 0)];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("file truncated: exceeded 20000 bytes"));
         // Truncated content (20000 + note) fits in the section.
@@ -248,7 +248,7 @@ mod tests {
             make_diff_file("large.rs", 90, 10),
             make_diff_file("mid.rs", 40, 5),
         ];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 210);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 210).body;
 
         // Priority: large (100 changes) → mid (45) → small (1, omitted).
         assert!(section.contains("### `large.rs`"));
@@ -352,7 +352,7 @@ mod tests {
 
         let files = vec![make_diff_file("huge.rs", 100, 0), make_diff_file("tiny.rs", 1, 0)];
         // Budget fits tiny.rs but not huge.rs.
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 100);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 100).body;
 
         assert!(section.contains("### `tiny.rs`"));
         assert!(!section.contains("### `huge.rs`"));
@@ -365,7 +365,7 @@ mod tests {
         std::fs::write(dir.path().join("exists.rs"), "fn e() {}\n").unwrap();
 
         let files = vec![make_diff_file("deleted.rs", 0, 20), make_diff_file("exists.rs", 5, 0)];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("### `exists.rs`"));
         // No omitted note for files that simply could not be read.
@@ -382,7 +382,7 @@ mod tests {
             make_diff_file("/etc/passwd", 40, 0),
             make_diff_file("ok.rs", 1, 0),
         ];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("### `ok.rs`"));
         assert!(!section.contains("escape.rs"));

@@ -431,35 +431,96 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
             );
         }
     }
-    // Coverage banner: honest about how much of the diff was actually
-    // reviewed. Under-coverage is never hidden — it also caps the score.
+
+    // M18-W7: verification-pass accounting line. Populated when M31 plumbs
+    // `verification_stats` through; missing values (`None`) mean the run had
+    // no review at all (e.g. an empty expert team) so we say so instead of
+    // fabricating zeros.
+    if let Some(stats) = &consolidated.verification_stats {
+        if stats.checked > 0 || stats.skipped > 0 || stats.dropped > 0 {
+            out.push_str(&format!(
+                "**Verification pass**: ran on {}, skipped {}, dropped {} — 验证批处理：解析失败 {skipped} 批 / parse failures {skipped}, dropped {dropped}\n\n",
+                stats.checked, stats.skipped, stats.dropped, skipped = stats.skipped, dropped = stats.dropped,
+            ));
+        }
+    }
+
+    // M18-W8: parse-status summary. Every expert whose output the parser
+    // could not parse is named in a single line under the lead summary, so
+    // a silent miss is loud. The per-expert section already replaces "no
+    // issues" with the parse-error ⚠️ (`render_expert_section`).
+    if !consolidated.parse_status.is_empty() {
+        let names = consolidated
+            .parse_status
+            .iter()
+            .map(|p| format!("`{}`", p.expert_name))
+            .collect::<Vec<_>>()
+            .join(", ");
+        out.push_str(&format!(
+            "> ⚠️ **{} 位专家输出解析失败（未审）** / parse failures (未审 / un-reviewed): {}\n\n",
+            consolidated.parse_status.len(),
+            names
+        ));
+    }
+
+    // M18-W4: file routing (replaces the old "Coverage" banner). Tells the
+    // reader how many files reached a successful expert task — distinct from
+    // the hunk-level ratio in the Coverage detail section that follows.
     if consolidated.total_files > 0 {
         if consolidated.unreviewed_files.is_empty() {
             out.push_str(&format!(
-                "**Coverage**: {} of {} files reviewed\n\n",
+                "**File routing**: {}/{} files assigned to a successful expert task\n\n",
                 consolidated.reviewed_files, consolidated.total_files,
             ));
         } else {
             out.push_str(&format!(
-                "**Coverage**: {} of {} files reviewed; **{} files not covered by any expert**: {}\n\n",
+                "**File routing**: {}/{} files assigned to a successful expert task; \
+                 **{} files not assigned** / 未分配的 {} 个文件: {}\n\n",
                 consolidated.reviewed_files,
                 consolidated.total_files,
+                consolidated.unreviewed_files.len(),
                 consolidated.unreviewed_files.len(),
                 consolidated.unreviewed_files.join(", "),
             ));
         }
     }
-    // Hunk-level coverage ledger: changed ranges vs. demonstrably-touched
-    // ranges, plus the uncovered ranges (coverage debt) and the per-expert
-    // truncation accounting. Rendered whenever the consolidator was given a
-    // ledger (the full `run_experts` path).
+
+    // M18-W4: hunk-level coverage goes into its own "## Coverage detail"
+    // section so the file-routing banner above and the hunk-level ratio
+    // below never read as one optimistic "Coverage: 100%" line — the audit's
+    // 21-of-21 / 0-of-1211 regression. The detail section is omitted when
+    // the consolidator was not given a ledger (the backward-compatible
+    // `consolidate()` wrapper path).
     if let Some(coverage) = &consolidated.coverage {
+        out.push_str("## Coverage detail\n\n");
         out.push_str(&format!(
-            "**Hunk Coverage**: {}/{} changed lines demonstrably reviewed ({:.0}%)\n\n",
+            "- **Hunk coverage**: {}/{} changed lines demonstrably reviewed ({:.0}%); \
+              threshold {:.0}%\n",
             coverage.covered_changed_lines,
             coverage.total_changed_lines,
             coverage.ratio * 100.0,
+            crate::coverage::COVERAGE_THRESHOLD * 100.0,
         ));
+        if coverage.is_sufficient() {
+            out.push_str("- **Status**: ✅ Sufficient\n");
+        } else {
+            // The number of uncovered lines first (the reader's question),
+            // then the threshold-gate phrasing — "below threshold" is what
+            // RENG-19's user read as a silently swallowed review.
+            out.push_str(&format!(
+                "- **Status**: ⚠️ **Insufficient** — {} of {} changed lines were not \
+                 demonstrably examined ({} uncovered span(s)); below the {:.0}% threshold — \
+                 this run's verdict is not trustworthy. / 覆盖不足（阈值 {:.0}%）：\
+                 {} 行未覆盖，分布在 {} 处区间，结果不可信。\n",
+                coverage.uncovered_changed_lines(),
+                coverage.total_changed_lines,
+                coverage.debt.len(),
+                crate::coverage::COVERAGE_THRESHOLD * 100.0,
+                crate::coverage::COVERAGE_THRESHOLD * 100.0,
+                coverage.uncovered_changed_lines(),
+                coverage.debt.len(),
+            ));
+        }
         if !coverage.debt.is_empty() {
             // `debt` holds every uncovered span, which on a large sparse diff
             // is hundreds of entries; the report names a bounded preview and
@@ -476,13 +537,46 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                 String::new()
             };
             out.push_str(&format!(
-                "**未覆盖区域 / uncovered** ({} lines): {}{}\n\n",
+                "- **未覆盖区域 / uncovered** ({} lines): {}{}\n",
                 coverage.uncovered_changed_lines(),
                 debt.join(", "),
                 tail,
             ));
         }
-        out.push_str(&render_truncation_warning(&coverage.findings_truncation));
+        // Per-expert truncation accounting (RENG-79): marks surfaces in the detail
+        // block instead of the lead-summary banner so the file-routing and
+        // hunk-coverage lines stay the two primary signals.
+        let truncation = render_truncation_warning(&coverage.findings_truncation);
+        if !truncation.is_empty() {
+            out.push('\n');
+            out.push_str(&truncation);
+        }
+        out.push('\n');
+    }
+
+    // M18-W5: ## Injected Context — one row per truncated or partial context
+    // source (AGENTS.md / changed files). Suppressed entirely when the
+    // orchestrator has no data; until M31 populates the field it stays empty
+    // by default and the section is hidden. The table distinguishes
+    // "truncated" from "missing" so a reviewer can tell whether the rest of
+    // the file was *unused* or *unavailable*.
+    if !consolidated.injected_context.entries.is_empty() {
+        out.push_str("## Injected Context\n\n");
+        out.push_str(
+            "Each row is one source that was injected into expert prompts (AGENTS.md, \
+             changed files). `original_bytes` is the on-disk size; `injected_bytes` is what \
+             actually reached the LLM after truncation. The SHA-256 fingerprint is over the \
+             *injected* slice so two reports can be compared. / 每行代表一处被注入到专家 prompt \
+             的上下文源（AGENTS.md / 变更文件）；`original_bytes` 是磁盘上的大小，`injected_bytes` \
+             是经截断后实际进入 LLM 的字节数，SHA-256 是对 *实际注入* 片段取指纹，便于跨报告比对。\n\n",
+        );
+        out.push_str("| Source | Size (injected / original) | Status | SHA-256 (16 chars) |\n");
+        out.push_str("|--------|----------------------------|--------|--------------------|\n");
+        for entry in &consolidated.injected_context.entries {
+            out.push_str(&entry.render_row());
+            out.push('\n');
+        }
+        out.push('\n');
     }
     out.push_str(&format!(
         "### TL;DR\n{}\n\n",

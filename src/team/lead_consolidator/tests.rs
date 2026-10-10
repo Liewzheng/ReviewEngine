@@ -151,6 +151,15 @@ fn test_filter_low_confidence_downgrades() {
     let result = config.consolidate(&reports, None);
     // Low confidence finding should be downgraded (not removed by default)
     assert_eq!(result.low_confidence_removed, 0);
+    // M18-W6: the same run counts how many findings the filter re-routed,
+    // so a later user setting `adjudicate_min_severity = "low"` can see
+    // exactly which findings the confidence filter quietly moved to Note.
+    assert_eq!(result.confidence_downgraded, 1);
+    assert!(
+        result.assessment.tl_dr.contains("Confidence filter downgraded"),
+        "TL;DR must surface the downgraded count when adjudication will see it: {}",
+        result.assessment.tl_dr
+    );
     // The downgraded finding severity changed from High → Medium
     let downgraded = result.findings.iter().find(|f| f.file == "b.rs");
     assert!(downgraded.is_some());
@@ -173,6 +182,11 @@ fn test_filter_low_confidence_drops() {
     let reports = vec![make_report("tester", findings)];
     let result = config.consolidate(&reports, None);
     assert_eq!(result.low_confidence_removed, 1);
+    // M18-W6: drop_low_confidence = true → the filter removes findings
+    // outright rather than downgrading them; the `confidence_downgraded`
+    // count must stay 0 (it counts *downgrades*, not removals).
+    assert_eq!(result.confidence_downgraded, 0);
+    assert!(!result.assessment.tl_dr.contains("Confidence filter downgraded"));
     assert_eq!(result.findings.len(), 1);
 }
 

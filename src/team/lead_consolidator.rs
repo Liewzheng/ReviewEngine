@@ -70,6 +70,111 @@ impl FileCoverage {
     }
 }
 
+/// Verification-pass accounting for the lead summary (M18-W7).
+///
+/// The verifier checks every finding in batches, but the only signal the
+/// report shipped before this struct existed was `dropped_findings.len()` —
+/// the `checked` total and the parse-failure `skipped` count were visible
+/// only in the verifier's own logs. The renderer now reads this struct so
+/// the lead summary can say `Verification pass: ran on N, skipped M, dropped
+/// K` instead of pretending every batch produced one.
+///
+/// `pairs_with_k` deliberately is NOT (just yet) plumbed through by this
+/// mission — M31 owns the verifier and decides whether to count by batch or by
+/// finding. The renderer treats `skipped == 0` as "we have no data yet" and
+/// the line still reads correctly.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VerificationStats {
+    /// Total findings the verifier examined (kept + dropped). `0` means the
+    /// pass did not run, or had nothing to examine — the renderer reads
+    /// `checked == 0` as "the pass was a no-op".
+    pub checked: usize,
+    /// Batches (or findings, per M31) skipped because `parse_verdicts`
+    /// returned an error. M18-W7 promises "ran on N, skipped M, dropped K"
+    /// — a skipped batch is the *third* number, never invented from silence.
+    pub skipped: usize,
+    /// Findings the verifier explicitly marked as dropped.
+    pub dropped: usize,
+}
+
+impl VerificationStats {
+    /// Build from the kept-findings count and a dropped list: every kept
+    /// finding and every dropped finding was examined, so `checked` is the
+    /// sum. `skipped` stays 0 until the verifier signals a parse failure
+    /// (M31 owns the count).
+    pub fn from_outcome(kept: usize, dropped: usize) -> Self {
+        Self {
+            checked: kept + dropped,
+            skipped: 0,
+            dropped,
+        }
+    }
+}
+
+/// Summary of every truncated / partial context source injected into expert
+/// prompts (M18-W5). The report renders a `## Injected Context` table from
+/// this struct, so the audit's RENG-19 "截断不可见" pain point ("the
+/// AGENTS.md was 13 KB but only 4 KB reached the expert — how do I know?")
+/// stops being a log-only concern and becomes a visible report line.
+///
+/// Each row describes one source:
+/// * the local `AGENTS.md`, possibly truncated to the project-config byte cap
+///   (default [`crate::context::agents_md::DEFAULT_MAX_FILE_BYTES`]);
+/// * each changed file whose full content was injected into the prompt
+///   (per-file cap [`crate::context::file_contents::MAX_SINGLE_FILE_BYTES`]).
+///
+/// The pipeline (M31 / orchestrator) is the source of these rows — it already
+/// builds the prompts and is the only place where the on-disk bytes and the
+/// truncated bytes both exist. The consolidator's job is to carry them to
+/// the renderer. Until M31 plumbs the data through, this struct is empty and
+/// the `## Injected Context` section simply does not render.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InjectedContext {
+    /// One row per injected source.
+    pub entries: Vec<crate::context::agents_md::InjectedContextEntry>,
+}
+
+/// Per-expert parse status (M18-W8): distinguish "expert said no issues"
+/// (a clean bill) from "expert output was unparseable" (a silent miss).
+///
+/// `parse_failed: true` is the renderer's signal to surface a ⚠️ "未审" badge
+/// instead of "No issues found" — same as the existing
+/// [`ExpertReport::parse_error`] field, but tracked on the metrics side so
+/// dashboards and the reviewer table can flag at-risk experts by name
+/// without re-parsing `raw_llm_response`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExpertParseStatus {
+    /// Expert name (matches `ExpertMetrics::name`).
+    pub expert_name: String,
+    /// True when the expert's response could not be parsed into findings.
+    pub parse_failed: bool,
+    /// First line of the parse error, when known — kept short so the report
+    /// doesn't repeat the full `parse_error` prose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Public attach helpers for fields the orchestrator sets after
+/// `consolidate_with_coverage` returns. The consolidator computes the bulk of
+/// the report, but a few signals only exist after the verifier / orchestrator
+/// finishes (M18-W5 / W7 / W8 plumbing), so the orchestrator calls these
+/// setters before the report ships.
+impl ConsolidatedReport {
+    /// Attach the verifier stats (M18-W7). `None` means "no run observed"
+    /// and the renderer skips the line.
+    pub fn with_verification_stats(mut self, verification: VerificationStats) -> Self {
+        self.verification_stats = Some(verification);
+        self
+    }
+
+    /// Attach the injected-context rows (M18-W5). Pass an empty `InjectedContext`
+    /// to suppress the section; pass one with rows to render the table.
+    pub fn with_injected_context(mut self, injected: InjectedContext) -> Self {
+        self.injected_context = injected;
+        self
+    }
+}
+
 /// Result of the consolidation process.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsolidatedReport {
@@ -77,6 +182,13 @@ pub struct ConsolidatedReport {
     pub findings: Vec<Finding>,
     /// Number of findings removed for low confidence.
     pub low_confidence_removed: usize,
+    /// Number of findings downgraded by the confidence filter (kept but with a
+    /// lower severity). M18-W6 surfaces this so the user can see when a
+    /// configuration like `adjudicate_min_severity = "low"` is competing with
+    /// the confidence filter — without it, the silence of "0 candidates at or
+    /// above Low" is unreadable.
+    #[serde(default)]
+    pub confidence_downgraded: usize,
     /// Number of duplicate findings merged.
     pub duplicates_merged: usize,
     /// Detected conflicts between experts.
@@ -103,6 +215,21 @@ pub struct ConsolidatedReport {
     /// (coverage debt), and an insufficient ratio contributes to `unverified`.
     #[serde(default)]
     pub coverage: Option<crate::coverage::CoverageSummary>,
+    /// Per-expert parse status (M18-W8). Always populated for any review that
+    /// actually ran experts; the renderer uses it to flag a silent parse
+    /// failure with a ⚠️ badge instead of "No issues found".
+    #[serde(default)]
+    pub parse_status: Vec<ExpertParseStatus>,
+    /// Verification-pass accounting (M18-W7). Populated by the pipeline
+    /// after the verifier runs; `None` when no reviewer ran at all.
+    #[serde(default)]
+    pub verification_stats: Option<VerificationStats>,
+    /// Injected-context summary (M18-W5). The orchestrator populates this
+    /// from `read_local_agents_md_with_meta` and
+    /// `build_file_contents_section_with_meta`; empty when neither injection
+    /// ran (e.g. pure server-side reviews without a local checkout).
+    #[serde(default)]
+    pub injected_context: InjectedContext,
     /// High-severity findings dropped by the final adjudication pass as false
     /// positives, each with the adjudicator's reason (transparency — drops are
     /// recorded, never silent). Empty when adjudication was disabled or
@@ -155,9 +282,23 @@ impl ConsolidatorConfig {
 
         // Step 1: Filter by confidence
         let before_filter = all_findings.len();
-        let (filtered, _low_conf_findings) = self.filter_by_confidence(all_findings);
+        let (filtered, _low_conf_findings, downgraded_count) = self.filter_by_confidence(all_findings);
         all_findings = filtered;
         let low_confidence_removed = before_filter - all_findings.len();
+        // M18-W6: how many findings the filter actually re-routed (vs. just
+        // passing through). The number matters precisely because the default
+        // `adjudicate_min_severity` is "high" — when a user drops it to
+        // "low" they expect to see what the confidence filter quietly
+        // re-routed to Note. Returned by the filter itself so the count is
+        // exact (Note findings can be passed through unchanged by other code
+        // paths, and we must not double-count those).
+        let confidence_downgraded = downgraded_count;
+        // M18-W6: make the filter's policy visible to the `tracing::info!`
+        // line in `append_coverage_banners` so a user filtering logs by
+        // `reason_code=confidence_filter_downgraded` also sees the threshold
+        // and the drop policy. Thread-local is fine — the consolidator runs
+        // on a single task and the helpers stay on this thread.
+        set_confidence_filter_context(self.min_confidence, self.drop_low_confidence);
 
         // Step 2: Deduplicate
         let before_dedup = all_findings.len();
@@ -191,6 +332,12 @@ impl ConsolidatorConfig {
         );
         let consensus_reached = score >= consensus_threshold;
         let coverage_summary = ledger.map(|l| l.summary());
+        // M18-W4: the hunk-level threshold is the source of truth — when the
+        // ratio is below `COVERAGE_THRESHOLD` we treat the run as unverified
+        // even if the file routing is complete (the audit's 21-of-21 / 0-of-1211
+        // regression). The file-coverage score cap above is a *different* signal
+        // (file routing, anti-cheat) and remains — they hold to paper at
+        // different layers.
         let coverage_insufficient = coverage_summary.as_ref().map(|s| !s.is_sufficient()).unwrap_or(false);
         // The TL;DR counts are taken from the consolidated findings — the same
         // set the report publishes — so the prose can never disagree with the
@@ -203,6 +350,7 @@ impl ConsolidatorConfig {
             coverage.reviewed_files,
             coverage.unreviewed_files.len(),
             coverage_summary.as_ref(),
+            confidence_downgraded,
         );
         // Zero consolidated findings across every expert: the perfect score is
         // NOT evidence of quality — it may mean low coverage or a systemic
@@ -220,6 +368,27 @@ impl ConsolidatorConfig {
         // positives is unverified too — see [`generate_tldr`]).
         let unverified = all_findings.is_empty() || coverage_insufficient;
 
+        // M18-W8: parse-status snapshot. Build from the input reports rather
+        // than the (post-validation) filtered set so a parse failure is
+        // visible even when every "finding" it produced was a Note. The
+        // renderer reads this to put ⚠️ on the expert section.
+        let parse_status = reports
+            .iter()
+            .filter(|r| r.parse_error.is_some())
+            .map(|r| ExpertParseStatus {
+                expert_name: r.expert_name.clone(),
+                parse_failed: true,
+                // Keep only the first line so the lead summary stays compact;
+                // the full prose is on `ExpertReport::parse_error` for the
+                // per-expert section.
+                error: r
+                    .parse_error
+                    .as_deref()
+                    .and_then(|e| e.lines().next())
+                    .map(|s| s.to_string()),
+            })
+            .collect();
+
         let assessment = OverallAssessment {
             score,
             risk_level,
@@ -232,6 +401,7 @@ impl ConsolidatorConfig {
         ConsolidatedReport {
             findings: all_findings,
             low_confidence_removed,
+            confidence_downgraded,
             duplicates_merged,
             conflicts,
             assessment,
@@ -240,14 +410,25 @@ impl ConsolidatorConfig {
             reviewed_files: coverage.reviewed_files,
             unreviewed_files: coverage.unreviewed_files.clone(),
             coverage: coverage_summary,
+            parse_status,
+            verification_stats: None,
+            injected_context: InjectedContext::default(),
             adjudicated_removed: Vec::new(),
         }
     }
 
     /// Filter findings by minimum confidence threshold.
-    fn filter_by_confidence(&self, findings: Vec<Finding>) -> (Vec<Finding>, Vec<Finding>) {
+    ///
+    /// Returns `(kept, removed, downgraded_count)` — kept includes both
+    /// pass-through findings AND downgraded ones (default
+    /// `drop_low_confidence = false` path); the third element is exactly the
+    /// count of findings the filter re-routed, which feeds
+    /// [`ConsolidatorConfig::consolidate_with_coverage`]'s M18-W6
+    /// confidence-vs-adjudication transparency signal.
+    fn filter_by_confidence(&self, findings: Vec<Finding>) -> (Vec<Finding>, Vec<Finding>, usize) {
         let mut kept = Vec::new();
         let mut removed = Vec::new();
+        let mut downgraded_count = 0usize;
 
         for finding in findings {
             if finding.confidence < self.min_confidence {
@@ -263,6 +444,7 @@ impl ConsolidatorConfig {
                         Severity::Medium => Severity::Low,
                         _ => Severity::Note,
                     };
+                    downgraded_count += 1;
                     kept.push(downgraded);
                 }
             } else {
@@ -270,7 +452,7 @@ impl ConsolidatorConfig {
             }
         }
 
-        (kept, removed)
+        (kept, removed, downgraded_count)
     }
 
     /// Deduplicate findings by (file, line, normalized title).
@@ -393,6 +575,7 @@ impl ConsolidatedReport {
             self.reviewed_files,
             self.unreviewed_files.len(),
             self.coverage.as_ref(),
+            self.confidence_downgraded,
         );
         self.assessment.tl_dr = tl_dr;
         // An empty published list is never evidence of quality, whether it is
@@ -409,12 +592,20 @@ impl ConsolidatedReport {
 /// both call sites emit byte-identical banners. The insufficiency banner is
 /// emitted whenever a ledger summary is present and its demonstrated-touch
 /// ratio is below [`crate::coverage::COVERAGE_THRESHOLD`].
+///
+/// `confidence_downgraded` (M18-W6) is appended as a separate line so a user
+/// who configures `adjudicate_min_severity = "low"` can see *why* the
+/// adjudication pass came back with 0 candidates: the confidence filter
+/// silently re-routed findings to Note below the floor. Silent loss is the
+/// RENG-19/115 issue; the banner names the silent actor and the affected
+/// count.
 fn append_coverage_banners(
     tl_dr: &mut String,
     total_files: usize,
     reviewed_files: usize,
     unreviewed_files: usize,
     coverage: Option<&crate::coverage::CoverageSummary>,
+    confidence_downgraded: usize,
 ) {
     if total_files > 0 && reviewed_files < total_files {
         tl_dr.push_str(&format!(
@@ -443,6 +634,60 @@ fn append_coverage_banners(
             ));
         }
     }
+    if confidence_downgraded > 0 {
+        // M18-W6: the banner plus an INFO log make the silent re-routing
+        // visible both in the rendered report and in `logs.ndjson`. The
+        // audit's RENG-19/115 trace reproduced "Adjudication pass: 0
+        // candidates at or above Low, dropped 0" exactly when the default
+        // confidence filter (min_confidence = 6, drop_low_confidence =
+        // false) quietly re-routed findings to Note below the adjudication
+        // floor; without this signal the operator has no way to see *why*
+        // the adjudicator ran on nothing. The INFO log uses the
+        // `reason_code` field so it is grep-able.
+        tracing::info!(
+            confidence_downgraded = confidence_downgraded,
+            min_confidence = min_confidence_for_log(),
+            drop_low_confidence = drop_low_confidence_for_log(),
+            reason_code = "confidence_filter_downgraded",
+            "confidence filter re-routed {confidence_downgraded} finding(s) to Note before adjudication"
+        );
+        tl_dr.push_str(&format!(
+            "\n\n⚠️ 信心阈值过滤：{} 条 finding 被下调至 Note（默认 min_confidence = 6 不删除而是降级）。\
+             如要保留原严重度以便裁决，需调高 min_confidence 或开 drop_low_confidence。\
+             / Confidence filter downgraded {} finding(s) to Note (default policy: downgrade, don't drop).\
+             To keep the original severity for adjudication, raise min_confidence or enable drop_low_confidence.",
+            confidence_downgraded, confidence_downgraded
+        ));
+    }
+}
+
+// M18-W6 helpers: `append_coverage_banners` is called from
+// `consolidate_with_coverage` and `refresh_assessment`, and the latter does
+// not carry the filter config. To keep both call sites emitting the same
+// INFO line, the banner code reads its config from thread-local state the
+// consolidator sets just before the call — same trick the M18-W6 audit
+// suggests for the "0 candidates" silent case. In the absence of a set
+// call, the defaults are reported.
+//
+// The thread-locals carry `Option<u8>` / `Option<bool>` so the unset case is
+// distinguishable from "set to the default"; a future refactor can replace
+// them with a borrowed input rather than a thread-local.
+thread_local! {
+    static LAST_MIN_CONFIDENCE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
+    static LAST_DROP_LOW: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+}
+
+pub(crate) fn set_confidence_filter_context(min_confidence: u8, drop_low_confidence: bool) {
+    LAST_MIN_CONFIDENCE.with(|c| c.set(Some(min_confidence)));
+    LAST_DROP_LOW.with(|c| c.set(Some(drop_low_confidence)));
+}
+
+fn min_confidence_for_log() -> u8 {
+    LAST_MIN_CONFIDENCE.with(|c| c.get().unwrap_or(6))
+}
+
+fn drop_low_confidence_for_log() -> bool {
+    LAST_DROP_LOW.with(|c| c.get().unwrap_or(false))
 }
 
 /// Generate the TL;DR summary for the *published* findings.

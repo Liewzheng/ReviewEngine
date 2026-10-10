@@ -67,6 +67,34 @@ review:
     );
 }
 
+/// M18-W8: the parse-error string must read "未审 / un-reviewed" instead of
+/// "no issues found" — the audit's RENG-19/115 pain point is that an
+/// expert whose output is unparseable reads as a clean bill when only the
+/// finding count is checked. The string is bilingual so the lead-summary
+/// ⚠️ reads correctly in either language.
+#[test]
+fn test_parse_failure_message_marks_unreviewed_not_no_issues() {
+    // Genuinely broken YAML — unclosed bracket sequence. Both the strict
+    // parser and the fenced-block fallback fail, so the report falls through
+    // to `fallback_report` which carries the new bilingual wording.
+    let yaml = "findings:\n  - file: [unclosed string\n";
+    let report = parse_llm_response("security", yaml);
+    let err = report.parse_error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("未审") || err.contains("un-reviewed"),
+        "parse failure must NOT read as 'no issues', got: {err}"
+    );
+    // The phrasing reads "treated as ... (NOT 'no issues found')" — the old
+    // wording appears once, inside a parenthetical, so the renderer sees both
+    // the warning ("NOT 'no issues found'") and the bilingual substitution.
+    // Stripping the parenthetical leaves only the new wording.
+    let without_paren = err.split('(').next().unwrap_or("").trim();
+    assert!(
+        !without_paren.contains("no issues found"),
+        "the headline wording must replace 'no issues found', got: {without_paren}"
+    );
+}
+
 #[test]
 fn test_extract_findings_detail_fallback() {
     let yaml = r#"

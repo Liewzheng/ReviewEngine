@@ -46,6 +46,15 @@ pub fn render_board(output: &ReviewOutput, plan: &InlinePlan<'_>, policy: &Publi
             md.push_str("\n\n---\n\n");
         }
     }
+    // M40 / RENG ticket compliance check section: rendered alongside the
+    // per-expert sections, before the verification appendix.
+    if let Some(compliance) = &output.compliance {
+        let section = crate::compliance::render::render_compliance_section(compliance);
+        if !section.is_empty() {
+            md.push_str(&section);
+            md.push_str("\n\n---\n\n");
+        }
+    }
     let inline_section = plan.board_section(policy);
     if !inline_section.is_empty() {
         md.push_str(&inline_section);

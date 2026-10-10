@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use review_engine::compliance::render::render_compliance_section;
 use review_engine::models::*;
 use std::path::{Path, PathBuf};
 
@@ -65,6 +66,19 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
                 }
                 text.push_str("\n---\n\n");
                 text.push_str(&appendix);
+            }
+            // M40 / RENG ticket compliance section: rendered after the
+            // lead summary and before the verification appendix so it sits
+            // alongside the per-expert sections, not in the footer.
+            if let Some(compliance) = &result.compliance {
+                let section = render_compliance_section(compliance);
+                if !section.is_empty() {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str("\n---\n\n");
+                    text.push_str(&section);
+                }
             }
             text
         }
@@ -305,6 +319,7 @@ mod tests {
             dropped_findings: vec![],
             consolidated,
             errors: vec![],
+            compliance: None,
         }
     }
 
@@ -326,6 +341,7 @@ mod tests {
             diff: Default::default(),
             rate_limit: Default::default(),
             languages: Default::default(),
+            compliance: Default::default(),
         };
         let (_, mr_info) = prepare_review(&config, "/real/repo", "local", "main");
         assert_eq!(mr_info.project_path, "/real/repo");
@@ -383,6 +399,47 @@ mod tests {
         assert!(out.contains("\"score\": 72"));
         assert!(out.contains("\"risk_level\": \"Medium\""));
     }
+
+    /// M40 / RENG: when `compliance = None` the section is absent.
+    #[test]
+    fn test_format_output_markdown_without_compliance_omits_section() {
+        let out = render(&sample_output(None), "markdown", false);
+        assert!(
+            !out.contains("## Ticket compliance check"),
+            "compliance = None → section absent"
+        );
+    }
+
+    /// M40 / RENG: when `compliance = Some(_)` the section appears alongside
+    /// the per-expert sections (before the verification appendix).
+    #[test]
+    fn test_format_output_markdown_with_compliance_renders_section() {
+        let mut output = sample_output(Some(make_consolidated()));
+        let mut compliance = review_engine::compliance::ComplianceOutput::empty();
+        compliance
+            .notes
+            .push("description references 4 tickets, capped at 3".to_string());
+        compliance
+            .fetch_failures
+            .push(review_engine::compliance::FetchedTicket {
+                ticket_ref: review_engine::compliance::TicketRef {
+                    provider: review_engine::compliance::TicketProvider::GitLab,
+                    project: Some("g/p".into()),
+                    iid: 99,
+                    url: "https://gitlab.example.com/g/p/-/work_items/99".into(),
+                    source: "!99".into(),
+                },
+                title: String::new(),
+                body: String::new(),
+                web_url: None,
+                error: Some("HTTP 404".into()),
+            });
+        output.compliance = Some(compliance);
+        let out = render(&output, "markdown", false);
+        assert!(out.contains("## Ticket compliance check"), "section heading is emitted");
+        assert!(out.contains("fetch failed"), "fetch failure is rendered");
+        assert!(out.contains("capped at 3"), "notes are rendered");
+    }
 }
 
 #[cfg(test)]
@@ -406,6 +463,7 @@ mod report_output_tests {
             diff: Default::default(),
             rate_limit: Default::default(),
             languages: Default::default(),
+            compliance: Default::default(),
         }
     }
 

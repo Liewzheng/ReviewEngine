@@ -485,6 +485,113 @@ impl Client {
 
         Ok(resp.json().await?)
     }
+
+    /// Fetch a single GitHub issue by number, optionally under a different
+    /// `owner/repo` than the one this client is bound to (M40 / RENG ticket
+    /// compliance: cross-repo ticket refs like `isletspace/sirena#42`
+    /// resolve to a repo other than the PR's).
+    ///
+    /// Returns a [`crate::compliance::FetchedTicket`]. On any non-2xx
+    /// response the ticket is returned with `error` set so the compliance
+    /// orchestrator can surface a section note rather than failing the
+    /// review.
+    pub async fn fetch_issue(&self, owner_repo: Option<&str>, number: u32) -> Result<crate::compliance::FetchedTicket> {
+        use crate::compliance::fetch::{github_issue_url, TICKET_BODY_BUDGET};
+        use crate::compliance::{FetchedTicket, TicketProvider, TicketRef};
+
+        let (owner, repo) = match owner_repo {
+            Some(o_r) => {
+                let mut parts = o_r.splitn(2, '/');
+                let o = parts.next().unwrap_or("").to_string();
+                let r = parts.next().unwrap_or("").to_string();
+                if o.is_empty() || r.is_empty() {
+                    return Ok(FetchedTicket {
+                        ticket_ref: TicketRef {
+                            provider: TicketProvider::GitHub,
+                            project: Some(o_r.to_string()),
+                            iid: number,
+                            url: String::new(),
+                            source: format!("#{number}"),
+                        },
+                        title: String::new(),
+                        body: String::new(),
+                        web_url: None,
+                        error: Some("missing owner/repo".to_string()),
+                    });
+                }
+                (o, r)
+            }
+            None => (self.owner.clone(), self.repo.clone()),
+        };
+        let url = github_issue_url(&self.api_base, &owner, &repo, number);
+        let ticket_ref = TicketRef {
+            provider: TicketProvider::GitHub,
+            project: Some(format!("{owner}/{repo}")),
+            iid: number,
+            url: url.clone(),
+            source: format!("#{number}"),
+        };
+        let resp = self.http.get(&url).headers(self.headers()).send().await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(FetchedTicket {
+                    ticket_ref,
+                    title: String::new(),
+                    body: String::new(),
+                    web_url: None,
+                    error: Some(format!("transport: {e}")),
+                });
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Ok(FetchedTicket {
+                ticket_ref,
+                title: String::new(),
+                body: String::new(),
+                web_url: None,
+                error: Some(format!(
+                    "HTTP {status}: {}",
+                    crate::llm::sampling::truncate_error(&body)
+                )),
+            });
+        }
+        #[derive(serde::Deserialize)]
+        struct GitHubIssue {
+            title: Option<String>,
+            body: Option<String>,
+            html_url: Option<String>,
+        }
+        let issue: GitHubIssue = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(FetchedTicket {
+                    ticket_ref,
+                    title: String::new(),
+                    body: String::new(),
+                    web_url: None,
+                    error: Some(format!("parse: {e}")),
+                });
+            }
+        };
+        let body = issue.body.unwrap_or_default();
+        let body = if body.chars().count() > TICKET_BODY_BUDGET {
+            let mut out: String = body.chars().take(TICKET_BODY_BUDGET).collect();
+            out.push_str("\n\n[…truncated]");
+            out
+        } else {
+            body
+        };
+        Ok(FetchedTicket {
+            ticket_ref,
+            title: issue.title.unwrap_or_default(),
+            body,
+            web_url: issue.html_url,
+            error: None,
+        })
+    }
 }
 
 /// RENG-43: map a GitHub user onto an aggregation record. `login` doubles as

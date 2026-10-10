@@ -174,7 +174,8 @@ pub fn all_comment_prefixes(profile: &LanguageProfile) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::models::{
-        AppConfig, DiffConfig, LanguageProfile, LanguagesConfig, RateLimitConfig, ReportConfig, ScoringConfig,
+        AppConfig, ComplianceConfig, DiffConfig, LanguageProfile, LanguagesConfig, RateLimitConfig, ReportConfig,
+        ScoringConfig,
     };
 
     /// Minimal `AppConfig` with no language overrides (mirrors the
@@ -193,6 +194,7 @@ mod tests {
             diff: DiffConfig::default(),
             rate_limit: RateLimitConfig::default(),
             languages: LanguagesConfig::default(),
+            compliance: ComplianceConfig::default(),
         }
     }
 

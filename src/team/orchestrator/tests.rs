@@ -53,6 +53,7 @@ fn test_config() -> AppConfig {
         diff: DiffConfig::default(),
         rate_limit: RateLimitConfig::default(),
         languages: LanguagesConfig::default(),
+        compliance: ComplianceConfig::default(),
     }
 }
 

@@ -197,6 +197,13 @@ pub struct ReviewOutput {
     /// detail endpoint exposes it (`ReviewDetail::errors`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+    /// M40 / RENG ticket compliance check (M39 §7 Option A): the `## Ticket
+    /// compliance check` section when the gate is enabled and the MR
+    /// description references a ticket; `None` for every other review.
+    /// `skip_serializing_if = "Option::is_none"` keeps pre-M40 reports
+    /// byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compliance: Option<crate::compliance::ComplianceOutput>,
 }
 
 /// A consolidated report produced by the aggregator expert.
@@ -240,6 +247,7 @@ impl ReviewOutput {
             dropped_findings: Vec::new(),
             consolidated: None,
             errors: Vec::new(),
+            compliance: None,
         }
     }
 
@@ -251,6 +259,7 @@ impl ReviewOutput {
             dropped_findings: Vec::new(),
             consolidated: None,
             errors: Vec::new(),
+            compliance: None,
         }
     }
 
@@ -270,6 +279,12 @@ impl ReviewOutput {
     /// no report at all, each with the reason it did not.
     pub fn with_errors(mut self, errors: Vec<String>) -> Self {
         self.errors = errors;
+        self
+    }
+
+    /// Attach the M40 ticket-compliance output.
+    pub fn with_compliance(mut self, compliance: crate::compliance::ComplianceOutput) -> Self {
+        self.compliance = Some(compliance);
         self
     }
 

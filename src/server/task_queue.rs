@@ -1270,6 +1270,7 @@ mod tests {
             dropped_findings: vec![],
             consolidated: None,
             errors: vec![],
+            compliance: None,
         }
     }
 

@@ -112,13 +112,17 @@ pub fn assess_large_pr(files: &[DiffFile], thresholds: &LargePrThresholds) -> La
 
 /// Apply compression to files based on the compression level.
 pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) -> Vec<String> {
+    let before = files.len();
     let mut actions = Vec::new();
 
     match level {
         CompressionLevel::None => {}
         CompressionLevel::Light => {
-            // Light: filter generated/vendor files, apply token budget
-            let before = files.len();
+            // Light (auto path): filter generated/vendor files only.
+            // Token-budget enforcement lives in the `Aggressive` branch —
+            // see the doc comment on `apply_configured_compression` for
+            // the configured `"light"` (deletion-only) path and how the
+            // two diverge.
             files.retain(|f| !processor::should_ignore_file(f));
             let removed = before - files.len();
             if removed > 0 {
@@ -152,6 +156,16 @@ pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) ->
         }
     }
 
+    let compressed_chunks = before - files.len();
+    tracing::info!(
+        compression_level = ?level,
+        files_before = before,
+        files_after = files.len(),
+        compressed_chunks,
+        actions_count = actions.len(),
+        "apply_compression: completed"
+    );
+
     actions
 }
 
@@ -162,7 +176,24 @@ pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) ->
 /// Configured semantics:
 /// - `"none"`: skip compression entirely.
 /// - `"light"`: compress deletion-only files only.
-/// - `"medium"` / `"aggressive"`: the corresponding [`apply_compression`] behaviour.
+/// - `"medium"`: `"light"` plus generated/vendor filtering, priority sort, and
+///   a 200-char line-truncate (the generated/vendor filter is the delta over
+///   `"light"`, since deletion-only compression is already in `"light"`).
+/// - `"aggressive"`: `"medium"` plus a 120-char line-truncate and a 40K token
+///   budget (`apply_token_budget`).
+///
+/// **Compression level never changes chunking strategy.** The chunker
+/// (`chunk_by_files` / `chunk_by_hunks` / `adaptive_chunk` / `semantic_chunk`)
+/// and `max_tokens_per_chunk` (the per-chunk token budget handed to every
+/// chunker in `src/team/orchestrator/pipeline.rs`) are the knobs that resize
+/// the slices; `max_chunks_per_expert` is a routing quota (chunks per
+/// expert), not a slicing knob. If you want a tighter prompt budget on a
+/// large PR, raise the level to `medium` / `aggressive`; if you want to
+/// *protect* the chunking strategy while trimming only the deletion-only
+/// files, `"light"` is the right knob. When the diff has no deletion-only
+/// files, `apply_deletion_only_compression` returns `0 actions` and emits a
+/// `tracing::info!` event with `compressed_chunks = 0` so the no-op is still
+/// observable in the logs.
 ///
 /// Returns the effective level and the actions taken.
 pub fn apply_configured_compression(
@@ -170,7 +201,8 @@ pub fn apply_configured_compression(
     configured: &str,
     assessed: &CompressionLevel,
 ) -> (CompressionLevel, Vec<String>) {
-    match configured.trim().to_lowercase().as_str() {
+    let before = files.len();
+    let (level, actions) = match configured.trim().to_lowercase().as_str() {
         "none" => (CompressionLevel::None, Vec::new()),
         "light" => (CompressionLevel::Light, apply_deletion_only_compression(files)),
         "medium" => (
@@ -182,7 +214,21 @@ pub fn apply_configured_compression(
             apply_compression(files, &CompressionLevel::Aggressive),
         ),
         _ => (assessed.clone(), apply_compression(files, assessed)),
-    }
+    };
+
+    let compressed_chunks = before - files.len();
+    tracing::info!(
+        configured = %configured,
+        assessed = ?assessed,
+        effective_level = ?level,
+        files_before = before,
+        files_after = files.len(),
+        compressed_chunks,
+        actions_count = actions.len(),
+        "apply_configured_compression: completed"
+    );
+
+    (level, actions)
 }
 
 /// Compress only deletion-only files (files whose hunks contain nothing but

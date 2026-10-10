@@ -59,6 +59,95 @@ fn test_apply_light_compression() {
     assert_eq!(files.len(), 1); // Cargo.lock removed
 }
 
+#[test]
+fn test_apply_light_compression_no_removed_files_emits_zero_compressed_chunks() {
+    // Light on a diff with no generated/vendor files: `compressed_chunks = 0`
+    // in the tracing event, `actions` is empty (the reng-workflow-audit §3.3
+    // "0 actions" symptom). The function still emits a structured tracing
+    // event so the no-op is observable in the logs.
+    let mut files = vec![
+        make_file("src/main.rs", 10, 5),
+        make_file("src/lib.rs", 20, 3),
+        make_file("src/util.rs", 5, 1),
+    ];
+    let before = files.len();
+    let actions = apply_compression(&mut files, &CompressionLevel::Light);
+    assert!(actions.is_empty(), "no generated/vendor files → no action");
+    assert_eq!(files.len(), before, "no files removed");
+}
+
+#[test]
+fn test_apply_compression_none_emits_zero_compressed_chunks() {
+    // None level is the trivial no-op; tracing still fires with all-zero
+    // counters so the dispatcher-side counts stay consistent.
+    let mut files = vec![make_file("src/main.rs", 10, 5), make_file("Cargo.lock", 10, 5)];
+    let before = files.len();
+    let actions = apply_compression(&mut files, &CompressionLevel::None);
+    assert!(actions.is_empty());
+    assert_eq!(files.len(), before);
+}
+
+#[test]
+fn test_apply_configured_compression_light_no_deletion_only_emits_zero_actions() {
+    // Explicit `compression_level = "light"` with no deletion-only files:
+    // mirrors the audit's "0 actions" symptom for the auto-Light path,
+    // confirming the structured tracing event carries compressed_chunks = 0.
+    let mut files = vec![make_file("src/main.rs", 10, 5), make_file("src/lib.rs", 20, 3)];
+    let (level, actions) = apply_configured_compression(&mut files, "light", &CompressionLevel::None);
+    assert_eq!(level, CompressionLevel::Light);
+    assert!(actions.is_empty());
+    assert_eq!(files.len(), 2);
+}
+
+#[test]
+fn test_apply_configured_compression_none_emits_zero_compressed_chunks() {
+    // Explicit `compression_level = "none"`: no compression, but the tracing
+    // event still fires so the call is observable.
+    let mut files = vec![
+        make_file("src/main.rs", 10, 5),
+        make_file("Cargo.lock", 10, 5),
+        make_file_with_lines("src/deleted.rs", vec!["-gone"]),
+    ];
+    let before = files.len();
+    let (level, actions) = apply_configured_compression(&mut files, "none", &CompressionLevel::Aggressive);
+    assert_eq!(level, CompressionLevel::None);
+    assert!(actions.is_empty());
+    assert_eq!(files.len(), before);
+}
+
+#[test]
+fn test_apply_configured_compression_medium_reports_compressed_chunks_count() {
+    // Medium removes generated/vendor + deletion-only files. The two together
+    // are the `compressed_chunks` count that the tracing event reports.
+    let mut files = vec![
+        make_file("src/main.rs", 10, 5),
+        make_file("Cargo.lock", 10, 5),
+        make_file_with_lines("src/deleted.rs", vec!["-gone"]),
+    ];
+    let before = files.len();
+    let (level, actions) = apply_configured_compression(&mut files, "medium", &CompressionLevel::None);
+    assert_eq!(level, CompressionLevel::Medium);
+    assert!(!actions.is_empty());
+    let removed = before - files.len();
+    assert_eq!(removed, 2, "Cargo.lock + deletion-only src/deleted.rs both removed");
+}
+
+#[test]
+fn test_apply_configured_compression_auto_with_light_assessment_emits_zero_when_clean() {
+    // "auto" defers to the assessed level. With a 30-file, low-token diff the
+    // assessed level is `Light` and the trace event still emits compressed_chunks
+    // even when 0 files are removed.
+    let files: Vec<DiffFile> = (0..30)
+        .map(|i| make_file(&format!("src/file{:02}.rs", i), 50, 20))
+        .collect();
+    let mut owned = files.clone();
+    let (level, actions) = apply_configured_compression(&mut owned, "auto", &CompressionLevel::Light);
+    assert_eq!(level, CompressionLevel::Light);
+    // Light on plain source files → 0 generated/vendor removals.
+    assert_eq!(owned.len(), files.len());
+    assert!(actions.is_empty());
+}
+
 // ─── helpers for routing / compression tests ───
 
 fn make_chunk(files: Vec<DiffFile>) -> DiffChunk {

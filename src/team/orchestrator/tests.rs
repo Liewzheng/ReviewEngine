@@ -714,6 +714,207 @@ fn capped_report(expert: &str, listed: usize, declared_omitted: Option<usize>) -
     report
 }
 
+// ─── M35: end-to-end wiring proof for injected_context + verification_stats ────
+
+/// M35 wiring proof: a `run_experts` call with `verification_pass = true` and a
+/// real `AGENTS.md` plus a changed file both populated must land those rows on
+/// `ConsolidatedReport`. Previously the orchestrator logged the verifier stats
+/// but discarded the rich `VerificationStats`; the changed-file meta path was
+/// never invoked. The renderer-side tests
+/// (`test_render_lead_summary_injected_context_surfaces_truncation` and
+/// `test_render_lead_summary_verification_stats_skipped_nonzero`) already
+/// prove that `Some(_)` on these fields makes the lead summary print the
+/// lines — this test is the orchestrator-side companion that proves the
+/// fields actually reach `consolidated`.
+#[tokio::test]
+async fn run_experts_wires_verification_stats_and_injected_context_into_report() {
+    use crate::context::agents_md::{read_local_agents_md_with_meta, DEFAULT_MAX_FILE_BYTES};
+    use crate::models::{ExpertDef, ExpertTomlDef, LLMConfig, MRInfo};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    // Local checkout with an AGENTS.md and a changed file — the two
+    // `injected_context` producer paths in the orchestrator's
+    // `build_injected_context_rows` helper.
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("AGENTS.md"), "# Agent Guidelines\n").unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), "fn a() {}\n").unwrap();
+
+    // The orchestrator calls the LLM in three roles. They share the same
+    // chat-completions endpoint, so the mock body has to discriminate by
+    // inspecting the request. The roles differ in their system-prompt
+    // keywords — "verifier" identifies the verifier call; the lead
+    // overview share a system prompt shape closer to the expert's. We
+    // dispatch:
+    //   * verifier: `verdicts: []` → no drops, kept verbatim
+    //     → `findings_checked > 0, skipped = 0, dropped = 0`.
+    //   * everything else (overview + expert): parseable expert YAML
+    //     with one finding in the diff, so the verifier has something
+    //     to look at.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(|req: &Request| {
+            let body = String::from_utf8_lossy(req.body.as_slice());
+            let is_verifier = body.contains("verifier") || body.contains("verdicts");
+            let body_json = if is_verifier {
+                serde_json::json!({
+                    "model": "mock-model",
+                    "choices": [{
+                        "message": {"content": "verdicts: []"}
+                    }],
+                    "usage": {"total_tokens": 1}
+                })
+                .to_string()
+            } else {
+                serde_json::json!({
+                    "model": "mock-model",
+                    "choices": [{
+                        "message": {"content":
+                            "```yaml\n\
+                             review:\n  findings:\n  \
+                             \n    - file: \"src/a.rs\"\n      \
+                             line: 1\n      severity: \"medium\"\n      \
+                             confidence: 8\n      category: \"correctness\"\n      \
+                             title: \"wiring proof finding\"\n      \
+                             summary: \"s\"\n      evidence: \"e\"\n      \
+                             impact: \"i\"\n      recommendation: \"r\"\n      \
+                             effort: \"small\"\n\
+                             ```\n"
+                        }
+                    }],
+                    "usage": {"total_tokens": 5}
+                })
+                .to_string()
+            };
+            ResponseTemplate::new(200).set_body_string(body_json)
+        })
+        .mount(&server)
+        .await;
+
+    let mut config = test_config();
+    config.report.verification_pass = true;
+    // Disable adjudication so the test focuses on the verifier + injected
+    // context wiring (adjudication is a separate pass and its failures
+    // would muddy the verification-stats projection assertion).
+    config.report.adjudicate = false;
+    let llm_configs = vec![LLMConfig {
+        provider: "openai".to_string(),
+        model: "mock-model".to_string(),
+        api_key: "test".to_string(),
+        api_base: server.uri(),
+        max_tokens: 4096,
+        temperature: 0.0,
+        disable_thinking: None,
+        disabled: false,
+    }];
+    let experts: Vec<ExpertDef> = vec![ExpertDef {
+        name: "security".to_string(),
+        trigger: crate::models::ExpertTrigger::Always,
+        prompt: "You review for this test.".to_string(),
+        config: ExpertTomlDef {
+            enabled: true,
+            role: "reviewer".to_string(),
+            ..Default::default()
+        },
+    }];
+    let diff =
+        "diff --git a/src/a.rs b/src/a.rs\nindex 0000000..1111111 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,1 +1,1 @@\n-fn a() {}\n+fn a() { changed }\n";
+    let mr = MRInfo::new(
+        dir.path().to_string_lossy().to_string(),
+        "Wiring proof".to_string(),
+        "feat/x".to_string(),
+        "main".to_string(),
+    );
+
+    let (_reports, _global, _dropped, consolidated, _failures) = run_experts(
+        &experts,
+        &mr,
+        diff,
+        &llm_configs,
+        &config,
+        None,
+        "test-wiring-proof",
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the orchestrator must complete against a mock LLM");
+
+    // 1. Injected-context wiring: two rows — AGENTS.md and the changed file.
+    let sources: Vec<&str> = consolidated
+        .injected_context
+        .entries
+        .iter()
+        .map(|e| e.source.as_str())
+        .collect();
+    assert!(
+        sources.contains(&"AGENTS.md"),
+        "AGENTS.md meta row must be present; got sources {sources:?}"
+    );
+    assert!(
+        sources.iter().any(|s| s.contains("changed file src/a.rs")),
+        "changed-file meta row must be present; got sources {sources:?}"
+    );
+    // Truncation against the on-disk bytes is honest: the file is 12 bytes
+    // (no truncation) and AGENTS.md is 22 bytes (also no truncation at
+    // the default 4000-byte cap).
+    let agents_entry = consolidated
+        .injected_context
+        .entries
+        .iter()
+        .find(|e| e.source == "AGENTS.md")
+        .expect("AGENTS.md row");
+    assert_eq!(agents_entry.original_bytes, "# Agent Guidelines\n".len());
+    assert!(
+        !agents_entry.truncated,
+        "tiny AGENTS.md is not truncated at the default cap"
+    );
+    // And the row's hash matches the *actual* AGENTS.md content the
+    // orchestrator read (not a stale value), asserting end-to-end that
+    // the producer and the row agree.
+    let direct = read_local_agents_md_with_meta(dir.path(), DEFAULT_MAX_FILE_BYTES).unwrap();
+    assert_eq!(agents_entry.sha256, direct.meta.sha256);
+    assert_eq!(agents_entry.injected_bytes, direct.meta.injected_bytes);
+
+    // 2. Verification-stats wiring: the orchestrator's M31→M32 projection
+    // mapped `findings_checked → checked` and `skipped → skipped`. The
+    // mock LLM returned un-parseable garbage on every batch, so `skipped`
+    // must be > 0 (parse failures counted).
+    let stats = consolidated
+        .verification_stats
+        .clone()
+        .expect("verification_stats must be Some after verification_pass = true ran");
+    assert!(
+        stats.checked > 0,
+        "at least one finding was seen by the verifier; got {stats:?}"
+    );
+    assert!(
+        stats.skipped > 0,
+        "the unparseable mock LLM response should have produced parse-failure skips; got {stats:?}"
+    );
+    assert_eq!(
+        stats.dropped, 0,
+        "no findings were marked drop in the mock; got {stats:?}"
+    );
+
+    // 3. Lead summary uses both — the renderer-side tests already cover the
+    // exact format, but pinning it here closes the loop on the orchestrator
+    // surface so a future regression that unsets the fields fails this test
+    // rather than only the renderer tests.
+    let md = crate::output::team_renderer::render_lead_summary(&consolidated);
+    assert!(
+        md.contains("**Verification pass**: ran on"),
+        "lead summary must surface the verifier stats line; got {md}"
+    );
+    assert!(
+        md.contains("## Injected Context"),
+        "lead summary must surface the injected-context table; got {md}"
+    );
+}
+
 // ─── RENG-92: [review_experts] weights flow into the consolidated score ───
 /// End-to-end wiring through the orchestrator's validation path: the `weight`
 /// field of the `[review_experts]` defs must reach `build_consolidated_report`

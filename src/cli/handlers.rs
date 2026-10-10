@@ -3,7 +3,8 @@
 //! This facade declares the submodules, re-exports the `pub` entry points so
 //! `cli::mod` keeps calling `handlers::run_*` unchanged, and carries the
 //! `pub(super)` helpers shared by the non-review command modules
-//! (`single_expert_review_output` and `log_output_targets`, M34). The
+//! (`single_expert_review_output` and `log_output_targets`, M34) and the
+//! `review` command's local / MR / stdin / repo-review handlers (M35). The
 //! output/LLM plumbing for the review flow still lives in `review` / `output`
 //! (their `pub(super)` items feed the sibling command modules).
 
@@ -71,9 +72,12 @@ pub(super) fn single_expert_review_output(expert_name: &str, markdown: String) -
 /// Both targets are written, and both are logged here so the priority is
 /// visible in `logs.ndjson` and the Web UI Logs page — a silent dual-write
 /// surprises users who expect the explicit `--output` to be the only file
-/// on disk. Called by every `ask` / `describe` / `improve` handler right
-/// before `write_output`; the dispatch layer in `app.rs` emits the same
-/// trace at the Review arms so the priority reads identically there.
+/// on disk. Called by every `ask` / `describe` / `improve` / `update_changelog`
+/// handler right before `write_output`, by every `review` local / MR / stdin
+/// / repo-review handler (the M35 follow-up that closed the M34 r2 audit
+/// gap), and paired with the dispatch layer in `app.rs` (which already
+/// emits the same `--output` trace) so the priority reads identically at
+/// both layers.
 pub(super) fn log_output_targets(command: &str, output: &Option<String>, output_dir: &str) {
     if let Some(path) = output {
         tracing::info!(

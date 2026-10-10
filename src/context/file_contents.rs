@@ -72,47 +72,47 @@ pub(crate) fn build_file_contents_section_with_meta(
             .unwrap_or(0);
         let per_file_truncated = injected_content.len() < original_bytes || original_bytes > MAX_SINGLE_FILE_BYTES;
 
-        // P2-2 (review r1): the meta row used to be pushed *before* the
-        // total-budget check, so a file that was then skipped by the
-        // budget (`omitted.push(...); continue`) still got a row whose
-        // `injected_bytes = content.len()` and `truncated = false`,
-        // rendering as `8192 / 8192 bytes (100%) | ok` while the prompt
-        // body listed it under "Omitted". Two fixes here:
-        //   1. push the row *only* for files admitted to the body;
-        //   2. when pushed, hash the *exact* slice the prompt embeds so
-        //      the fingerprint matches what the LLM saw.
-        // Files rejected by the budget show up under "Omitted (context
-        // budget exhausted)" in the prompt body; their row is intentionally
+        // M35 (M32 review r2 P3-2): the displayed slice the LLM sees is
+        // `injected_content.trim_end()` — the body uses the trimmed slice.
+        // Trim once, up front, and feed that single `displayed` value to
+        // every sink (budget check, `injected_bytes`, SHA-256 hash, body)
+        // so they cannot disagree. Previously the body embedded
+        // `injected_content.trim_end()` while the meta row hashed and
+        // counted the un-trimmed `injected_content` — the embedded slice
+        // and the fingerprint were off by a few trailing-newline bytes.
+        //
+        // P2-2 (review r1): the meta row was pushed *before* the
+        // total-budget check before this fix, so a file that was then
+        // skipped by the budget (`omitted.push(...); continue`) still got
+        // a row whose `injected_bytes = content.len()` and
+        // `truncated = false`, rendering as `8192 / 8192 bytes (100%) |
+        // ok` while the prompt body listed it under "Omitted". The
+        // budget check now runs *before* the row is pushed; files
+        // rejected by the budget show up under "Omitted (context budget
+        // exhausted)" in the prompt body, and their row is intentionally
         // absent from `## Injected Context` so the audit cannot disagree
         // with the body.
-        if used + injected_content.len() > max_total_bytes {
+        let displayed = injected_content.trim_end();
+
+        if used + displayed.len() > max_total_bytes {
             omitted.push(&file.path);
             continue;
         }
-        used += injected_content.len();
+        used += displayed.len();
 
         meta.push(InjectedContextEntry {
             source: format!("changed file {}", file.path),
             original_bytes,
-            injected_bytes: injected_content.len(),
+            injected_bytes: displayed.len(),
             truncated: per_file_truncated,
-            // Hash the slice we are *actually* embedding into the body
-            // (post per-file truncation, identical to what `read_changed_file`
-            // returned — but pinning here guards against a future refactor
-            // that drops or reflows the slice before insertion).
-            sha256: crate::context::agents_md::sha256_hex(&injected_content),
+            sha256: crate::context::agents_md::sha256_hex(displayed),
         });
 
         let ext = std::path::Path::new(&file.path)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
-        body.push_str(&format!(
-            "### `{}`\n```{}\n{}\n```\n\n",
-            file.path,
-            ext,
-            injected_content.trim_end()
-        ));
+        body.push_str(&format!("### `{}`\n```{}\n{}\n```\n\n", file.path, ext, displayed,));
     }
 
     if !omitted.is_empty() {
@@ -131,12 +131,12 @@ pub(crate) fn build_file_contents_section_with_meta(
 /// What [`build_file_contents_section_with_meta`] returns: the prompt section
 /// plus the meta rows the M18-W5 `## Injected Context` block surfaces.
 ///
-/// `entries` is populated but unused by M32 itself — the M18-W5 lead-summary
-/// render path lives in the orchestrator (M31 owns `pipeline.rs`); the
-/// `#[allow(dead_code)]` is here so the dead-code lint does not fire before
-/// M31 wires the field through `ConsolidatedReport::injected_context`.
+/// `entries` is consumed by the orchestrator (M35), which feeds it into
+/// `ConsolidatedReport::injected_context` for the lead-summary renderer.
+/// Splitting the two outputs (body / entries) lets the per-task prompt
+/// builders continue to use `build_file_contents_section` (body-only)
+/// without dragging the meta rows through their call sites.
 #[derive(Debug, Clone, Default)]
-#[allow(dead_code)]
 pub(crate) struct FileContentsReport {
     /// The actual prompt-body markdown (same shape as
     /// [`build_file_contents_section`] returns).
@@ -260,6 +260,88 @@ mod tests {
         let large_pos = section.find("### `large.rs`").unwrap();
         let mid_pos = section.find("### `mid.rs`").unwrap();
         assert!(large_pos < mid_pos);
+    }
+
+    /// M35 (M32 review r2 P3-3): the `_with_meta` producer's omitted-file
+    /// behavior — a file rejected by the budget check must NOT receive a
+    /// row in `entries`. The audit's P2-2 worry was that an admitted row
+    /// could render "8192 / 8192 bytes (100%) | ok" while the prompt body
+    /// listed the file under "Omitted"; that's the bug surface this test
+    /// pins so the orchestrator (M35) wiring can rely on the invariant.
+    #[test]
+    fn test_omitted_file_has_no_meta_row() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fits.rs"), "fn fits() {}\n".repeat(50)).unwrap(); // ~700 bytes
+        std::fs::write(dir.path().join("huge.rs"), "h".repeat(5000)).unwrap();
+
+        let files = vec![
+            make_diff_file("huge.rs", 100, 0), // huge.rs beats fits.rs to the budget
+            make_diff_file("fits.rs", 1, 0),
+        ];
+        // Budget that admits huge.rs (5000 bytes) but rejects fits.rs.
+        let report = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 5_000);
+
+        assert!(report.body.contains("### `huge.rs`"));
+        assert!(!report.body.contains("### `fits.rs`"));
+        assert!(report.body.contains("### Omitted (context budget exhausted)"));
+        assert!(report.body.contains("- `fits.rs`"));
+
+        // huge.rs has a row; fits.rs deliberately does not.
+        let sources: Vec<&str> = report.entries.iter().map(|e| e.source.as_str()).collect();
+        assert!(
+            sources.iter().any(|s| s.contains("huge.rs")),
+            "huge.rs is admitted and must carry a meta row; got {sources:?}"
+        );
+        assert!(
+            !sources.iter().any(|s| s.contains("fits.rs")),
+            "fits.rs is omitted and must NOT carry a meta row; got {sources:?}"
+        );
+    }
+
+    /// M35 (M32 review r2 P3-2): the body, `injected_bytes`, and
+    /// `sha256` all reference the *trimmed* slice the LLM actually sees,
+    /// not the post-truncation `read_changed_file` return value (which
+    /// retains trailing whitespace from `read_to_string`). Pin the
+    /// invariant so a future refactor that diverges again is caught.
+    #[test]
+    fn test_meta_row_hash_and_bytes_match_trimmed_body() {
+        let dir = tempfile::tempdir().unwrap();
+        // File ends with newline + trailing whitespace; trim_end must
+        // strip them from the meta row, hash, and body simultaneously.
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n\n\n").unwrap();
+
+        let files = vec![make_diff_file("a.rs", 1, 0)];
+        let report = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000);
+
+        assert_eq!(report.entries.len(), 1);
+        let entry = &report.entries[0];
+        // Original on-disk bytes include the trailing newlines; trimmed
+        // displayed bytes do not. The row's `injected_bytes` matches the
+        // body the LLM actually saw (the trimmed one).
+        assert_eq!(entry.original_bytes, "fn a() {}\n\n\n".len());
+        assert!(
+            entry.injected_bytes < entry.original_bytes,
+            "trim_end should shorten the injected byte count"
+        );
+
+        // The body fences `displayed` in ```<ext>\n{displayed}\n```,
+        // so the displayed slice appears between the language tag and
+        // the closing fence. Pin the substring that includes the
+        // ext tag so a regression that re-introduces the trailing
+        // newlines is caught.
+        let displayed = "fn a() {}";
+        let expected_segment = format!("```rs\n{displayed}\n```");
+        assert!(
+            report.body.contains(&expected_segment),
+            "the body must contain `{expected_segment}`; body was: {report_body}",
+            report_body = report.body
+        );
+        // Body length is strictly the displayed bytes, not the
+        // un-trimmed `injected_content`. (The body has additional
+        // "### `a.rs`" header + final `trim_end()` so we don't check an
+        // exact match — only the substring.)
+        let expected_hash = crate::context::agents_md::sha256_hex(displayed);
+        assert_eq!(entry.sha256, expected_hash);
     }
 
     #[test]

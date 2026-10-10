@@ -44,15 +44,30 @@ pub fn render_agents_md(content: &str) -> Option<String> {
 ///
 /// * `source`: where the bytes came from — `"AGENTS.md"`, `"changed file
 ///   src/foo.rs"`, etc.
-/// * `original_bytes`: total bytes on disk before any truncation. Always
-///   `≥ injected_bytes` — a row with `original_bytes == 0` is unreachable
-///   in practice (the producer paths read the file before pushing the
-///   row), but the renderer treats it defensively as a "stat failed"
-///   signal so a future bug never renders "0 / 0 bytes (—)".
-/// * `injected_bytes`: bytes actually sent to the LLM (post-truncation).
+/// * `original_bytes`: total bytes on disk before any truncation. Almost
+///   always `≥ injected_bytes`. Two narrow cases can break that invariant:
+///   a changed file whose on-disk size falls in the
+///   `[MAX_SINGLE_FILE_BYTES, MAX_SINGLE_FILE_BYTES + note_len)` band —
+///   `read_changed_file` re-appends the truncation note after cutting to
+///   `MAX_SINGLE_FILE_BYTES` and the slice the LLM saw is therefore
+///   `original_bytes + note_len` larger; and an AGENTS.md containing
+///   invalid UTF-8, which `from_utf8_lossy` inflates 1 byte → 3 bytes via
+///   the U+FFFD replacement. The table reads "OK" or "truncated" off the
+///   `truncated` field, which is set independently — `truncated` is `true`
+///   whenever any truncation happened, regardless of the byte comparison.
+///   A row with `original_bytes == 0` is unreachable in practice (the
+///   producer paths read the file before pushing the row), but the
+///   renderer treats it defensively as a "stat failed" signal so a future
+///   bug never renders "0 / 0 bytes (—)".
+/// * `injected_bytes`: bytes actually sent to the LLM (post-truncation,
+///   with the U+FFFD expansion already applied for invalid-UTF-8 files).
 ///   Identical to the slice that was hashed into `sha256` and is embedded
-///   into the prompt body.
-/// * `truncated`: `true` when `injected_bytes < original_bytes`.
+///   into the prompt body — `file_contents::build_file_contents_section_with_meta`
+///   trims the slice once and feeds the trimmed version to the body, the
+///   byte count, and the hash so the three never disagree.
+/// * `truncated`: `true` when any truncation happened (per-file cap, lossy
+///   UTF-8 expansion, etc.). Not a strict function of
+///   `injected_bytes < original_bytes` because of the two edge cases above.
 /// * `sha256`: hex fingerprint of the *injected* bytes, so the reader can
 ///   confirm two reports covered the same surface.
 ///
@@ -64,15 +79,37 @@ pub fn render_agents_md(content: &str) -> Option<String> {
 pub struct InjectedContextEntry {
     /// Human-readable label (matches what the prompt called this source).
     pub source: String,
-    /// Bytes on disk before any truncation (≥ `injected_bytes`).
+    /// Bytes on disk before any truncation. Almost always `≥
+    /// injected_bytes`; the two narrow cases documented above where the
+    /// invariant breaks — a changed file whose on-disk size falls in the
+    /// `[MAX_SINGLE_FILE_BYTES, MAX_SINGLE_FILE_BYTES + note_len)` band,
+    /// and an AGENTS.md containing invalid UTF-8 (which `from_utf8_lossy`
+    /// inflates 1 byte → 3 bytes via U+FFFD) — are surfaced via the
+    /// `truncated` field instead. Use `truncated` for status decisions;
+    /// compare against this field only when the documented edge cases
+    /// don't apply (the common path).
     pub original_bytes: usize,
-    /// Bytes actually shipped to the LLM (post-truncation, when any).
+    /// Bytes actually shipped to the LLM (post-truncation, when any;
+    /// post-U+FFFD-expansion for invalid-UTF-8 AGENTS.md). Identical
+    /// to the slice that was hashed into `sha256` and is embedded into
+    /// the prompt body — `file_contents::build_file_contents_section_with_meta`
+    /// trims the slice once and feeds the trimmed version to the body,
+    /// the byte count, and the hash so the three never disagree.
     pub injected_bytes: usize,
-    /// `true` when `injected_bytes < original_bytes`.
+    /// `true` whenever any truncation happened (per-file cap, lossy
+    /// UTF-8 expansion, etc.). Not a strict function of
+    /// `injected_bytes < original_bytes` because of the two edge cases
+    /// above; treat it as the authoritative "was this row truncated"
+    /// signal.
     pub truncated: bool,
-    /// Hex SHA-256 of the *injected* bytes (the same slice whose length is
-    /// `injected_bytes`). `""` is reserved for a future "no bytes embedded"
-    /// state; today's producer paths always populate it.
+    /// Hex SHA-256 of the *injected* bytes, so the reader can
+    /// confirm two reports covered the same surface.
+    /// Identical-by-construction to the slice whose length is
+    /// `injected_bytes` — `file_contents::build_file_contents_section_with_meta`
+    /// pins the hash at the same call site that decides the byte count
+    /// and writes the body, so the three cannot drift. `""` is reserved
+    /// for a future "no bytes embedded" state; today's producer paths
+    /// always populate it.
     pub sha256: String,
 }
 
@@ -86,6 +123,14 @@ impl InjectedContextEntry {
         // through gets "stat failed" instead of "missing" — accurate, and
         // it can't be mistaken for the AGENTS.md-missing case (which is
         // an absent row, not a sentinel row).
+        //
+        // The percentage column can read slightly above 100 % in two
+        // narrow corner cases documented on [`InjectedContextEntry`]:
+        // on-the-edge truncation notes and lossy-UTF-8 expansion. The
+        // numeric cell still reports the literal `injected_bytes /
+        // original_bytes` counts so a reader can see the real numbers;
+        // the floor at 100 % was the obvious lie to avoid, not the right
+        // answer.
         let pct = if self.original_bytes == 0 {
             "—".to_string()
         } else {
@@ -301,6 +346,40 @@ mod tests {
         assert!(
             row.contains("0123456789abcdef"),
             "the row carries the 16-char fingerprint prefix, got: {row}"
+        );
+    }
+
+    /// M32 r2 review residual (a, doc fix): when the on-disk size lands in
+    /// the [MAX_SINGLE_FILE_BYTES, MAX_SINGLE_FILE_BYTES + note_len) band,
+    /// `read_changed_file` re-appends the truncation note and the slice
+    /// the LLM sees is `original_bytes + note_len` larger. The percentage
+    /// cell should still print the literal ratio (so a reader can see the
+    /// truth) rather than clamping to 100 % (which would be the obvious
+    /// lie). The status cell reads the `truncated` flag instead and stays
+    /// accurate regardless of the byte ratio.
+    #[test]
+    fn injected_entry_render_row_handles_injected_greater_than_original() {
+        let entry = InjectedContextEntry {
+            source: "changed file big.rs".to_string(),
+            original_bytes: 20_030,
+            // Re-appending the ~47-byte truncation note after a 20 000-byte
+            // cut produces an "injected > original" row in this band.
+            injected_bytes: 20_047,
+            truncated: true,
+            sha256: "abc".repeat(22),
+        };
+        let row = entry.render_row();
+        // Numbers are stated literally — no clamp to 100 % that would
+        // hide the off-by-Note-bytes artifact.
+        assert!(row.contains("20047 / 20030 bytes"));
+        assert!(
+            row.contains("(100%)"),
+            "ratio above 100 % renders as 100% when rounded: got {row}"
+        );
+        // Status is driven by `truncated`, not by the byte ratio.
+        assert!(
+            row.contains("⚠ truncated"),
+            "the truncated flag is the authoritative status, got {row}"
         );
     }
 

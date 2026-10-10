@@ -170,6 +170,26 @@ pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
                                             }
                                         }
                                     }
+                                    // M40 / RENG: [compliance] enabled = true (gate on).
+                                    // Wholesale replacement — the same rule as [report],
+                                    // because the config struct has only `enabled` today and
+                                    // omitting it would silently fall back to the serde default
+                                    // `false`, which is exactly what the user is trying to
+                                    // override. P1-4: previously dropped here.
+                                    if let Some(compliance) = obj.get("compliance") {
+                                        match ComplianceConfig::deserialize(compliance.clone()) {
+                                            Ok(parsed) => {
+                                                config.compliance = parsed;
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    path = default_path,
+                                                    error = %e,
+                                                    "Failed to parse project-level [compliance] section; ignoring"
+                                                );
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {

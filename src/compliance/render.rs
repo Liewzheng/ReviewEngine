@@ -21,17 +21,34 @@ pub const SECTION_HEADING: &str = "## Ticket compliance check";
 /// nothing to render — never prints a heading without a body, so the
 /// downstream renderers can decide whether to skip the section.
 pub fn render_compliance_section(output: &ComplianceOutput) -> String {
-    if output.checks.is_empty() && output.fetch_failures.is_empty() && output.notes.is_empty() {
+    if output.checks.is_empty()
+        && output.fetch_failures.is_empty()
+        && output.unanalysed_tickets.is_empty()
+        && output.notes.is_empty()
+    {
         return String::new();
     }
     let mut out = String::from(SECTION_HEADING);
     out.push_str("\n\n");
 
     // Per-ticket: failed fetches first (the section promises per-ticket
-    // status), then successful checks.
+    // status), then fetched-but-unanalysed tickets, then successful checks.
+    // P2-2: the middle bucket exists so the reader can tell "fetch
+    // failed" from "fetched but the LLM never ran".
     for failed in &output.fetch_failures {
         out.push_str(&render_failed_fetch(failed));
         out.push_str("\n");
+    }
+
+    if !output.unanalysed_tickets.is_empty() {
+        out.push_str(&format!(
+            "_{} ticket(s) fetched but not analysed (no LLM verdict — see Notes)._\n\n",
+            output.unanalysed_tickets.len()
+        ));
+        for t in &output.unanalysed_tickets {
+            out.push_str(&render_unanalysed(t));
+            out.push_str("\n");
+        }
     }
 
     if !output.checks.is_empty() {
@@ -56,11 +73,12 @@ pub fn render_compliance_section(output: &ComplianceOutput) -> String {
 
     if let (Some(provider), Some(model)) = (&output.llm_provider, &output.llm_model) {
         out.push_str(&format!(
-            "\n_compliance LLM: {}/{} · {} check(s) · {} fetch failure(s)_\n",
+            "\n_compliance LLM: {}/{} · {} check(s) · {} fetch failure(s) · {} unanalysed_\n",
             provider,
             model,
             output.checks.len(),
             output.fetch_failures.len(),
+            output.unanalysed_tickets.len(),
         ));
     }
 
@@ -82,6 +100,27 @@ fn render_failed_fetch(failed: &FetchedTicket) -> String {
         r.iid,
         r.url,
         redact_text(reason),
+    )
+}
+
+/// Render a ticket that was fetched successfully but never reached an LLM
+/// verdict (no usable LLM, LLM error). Distinct from
+/// `render_failed_fetch` so the reader does not see "fetch failed" when
+/// the fetch actually succeeded (P2-2).
+fn render_unanalysed(ticket: &FetchedTicket) -> String {
+    let r = &ticket.ticket_ref;
+    let provider_label = match r.provider {
+        TicketProvider::GitLab => "GitLab",
+        TicketProvider::GitHub => "GitHub",
+    };
+    let title = if ticket.title.is_empty() {
+        format!("Ticket #{}", r.iid)
+    } else {
+        ticket.title.clone()
+    };
+    format!(
+        "### {} {} — fetched, no analysis\n\n- URL: {}\n- Title: {}\n",
+        provider_label, r.source, r.url, title,
     )
 }
 
@@ -237,6 +276,35 @@ mod tests {
     fn empty_output_renders_nothing() {
         let out = ComplianceOutput::empty();
         assert!(render_compliance_section(&out).is_empty());
+    }
+
+    #[test]
+    fn unanalysed_ticket_renders_separately_from_failed() {
+        let mut out = ComplianceOutput::empty();
+        out.notes.push("no usable LLM".into());
+        out.unanalysed_tickets.push(FetchedTicket {
+            ticket_ref: TicketRef {
+                provider: TicketProvider::GitLab,
+                project: Some("g/p".into()),
+                iid: 73,
+                url: "https://gitlab.example.com/g/p/-/work_items/73".into(),
+                source: "#73".into(),
+            },
+            title: "SIRENA-84".into(),
+            body: String::new(),
+            web_url: None,
+            error: None,
+        });
+        let rendered = render_compliance_section(&out);
+        assert!(rendered.contains("fetched but not analysed"));
+        assert!(rendered.contains("SIRENA-84"));
+        // The unanalysed ticket must NOT be rendered as "fetch failed".
+        let unanalysed_pos = rendered.find("fetched but not analysed").expect("header");
+        let failed_pos = rendered.find("fetch failed").unwrap_or(usize::MAX);
+        assert!(
+            unanalysed_pos < failed_pos || failed_pos == usize::MAX,
+            "unanalysed ticket must not be reported as fetch failed"
+        );
     }
 
     #[test]

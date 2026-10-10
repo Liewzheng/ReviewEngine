@@ -118,10 +118,15 @@ pub struct TicketCheck {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComplianceOutput {
     pub checks: Vec<TicketCheck>,
-    /// Ticket references we could not fetch, kept here so the section can
-    /// surface "X referenced, fetch failed: HTTP 404" instead of silently
-    /// dropping them.
+    /// Ticket references we could not fetch (HTTP error, transport,
+    /// missing project, etc.). The renderer labels these "fetch failed"
+    /// so the reader does not mistake them for the no-LLM case (P2-2).
     pub fetch_failures: Vec<FetchedTicket>,
+    /// Tickets fetched successfully but never analysed — either no usable
+    /// LLM was configured or the LLM call itself errored. The renderer
+    /// surfaces them as "fetched, no analysis" so the reader can tell
+    /// them apart from genuine fetch failures (P2-2).
+    pub unanalysed_tickets: Vec<FetchedTicket>,
     /// Free-form notes about the run — e.g. "the LLM call failed: …", or
     /// "description references 4 tickets, capped at 3".
     pub notes: Vec<String>,
@@ -142,6 +147,7 @@ impl ComplianceOutput {
         Self {
             checks: Vec::new(),
             fetch_failures: Vec::new(),
+            unanalysed_tickets: Vec::new(),
             notes: Vec::new(),
             llm_provider: None,
             llm_model: None,
@@ -242,21 +248,12 @@ fn dedupe_refs(refs: Vec<TicketRef>) -> Vec<TicketRef> {
     out
 }
 
-/// Information for deciding whether a usable LLM is configured.
-///
-/// Centralised here so the run_review wiring does not need to know about
-/// [`crate::llm`] internals — it just checks for an entry with a non-empty
-/// `api_base` (a local provider needs no key).
-pub fn has_usable_llm(configs: &[LLMConfig]) -> bool {
-    configs.iter().any(|c| !c.api_base.trim().is_empty())
-}
-
 /// Decide the LLM config the compliance call should use.
 ///
 /// Mirrors the orchestrator's "head of the chain" rule: the first config
 /// with a non-empty `api_base`. When none is usable the caller must treat
 /// the run as "gate on but no LLM" and skip the call.
-pub fn select_llm_config(configs: &[LLMConfig]) -> Option<&LLMConfig> {
+fn select_llm_config(configs: &[LLMConfig]) -> Option<&LLMConfig> {
     configs.iter().find(|c| !c.api_base.trim().is_empty())
 }
 
@@ -275,48 +272,34 @@ pub fn select_llm_config(configs: &[LLMConfig]) -> Option<&LLMConfig> {
 /// fail-soft: a provider-API error becomes a fetch-failure entry, an LLM
 /// error becomes a section note, and a JSON parse failure marks each
 /// affected ticket with `parse_error` — none of these abort the review.
+///
+/// `token` is the platform PAT the caller already holds for the MR/PR
+/// fetch — the function does NOT read from `GITLAB_TOKEN` /
+/// `GITHUB_TOKEN` env vars (P2-1).
 pub async fn run_for_review(
     config: &ComplianceConfig,
     mr_info: &MRInfo,
     mr_url: &str,
     diff: &str,
     llm_configs: &[LLMConfig],
-    _token: &str,
+    token: &str,
 ) -> Option<ComplianceOutput> {
     let mut output = ComplianceOutput::empty();
     let plan = plan_from_mr(config, mr_info, mr_url);
     // The gate: `enabled = false` is a no-op, as is "enabled but no refs".
     if !plan.should_run {
-        // Even when the gate is off, surface the pre-notes (currently
-        // empty unless the cap fired) for consistency.
         output.notes.extend(plan.pre_notes);
-        if !output.notes.is_empty() || !plan.ticket_refs.is_empty() {
-            // Carry the cap-note into the report only when at least one
-            // pre-note was produced (the cap firing case). Otherwise the
-            // gate-off no-op keeps the section absent (returns None).
+        if !output.notes.is_empty() {
             return Some(output);
         }
         return None;
     }
     output.notes.extend(plan.pre_notes);
 
-    // Resolve the provider client. We construct a fresh client from the
-    // MR URL because the orchestrator owns its own provider clients; the
-    // token is the same token `run_review` was given.
-    //
-    // GitLab: the existing GitLabClient is parameterised by MR URL, but
-    // we want a free-standing client (no MR binding) so we can call
-    // fetch_issue with arbitrary project paths.
-    //
-    // GitHub: similar — the GitHubClient is parameterised by PR URL.
-    //
-    // We forward the `token` to fetch.rs and reuse its HTTP plumbing to
-    // avoid a duplicate provider client per call.
-
-    // Fetch each ticket via the compliance::fetch module.
+    // Fetch each ticket via the provider client.
     let mut fetched: Vec<FetchedTicket> = Vec::new();
     for r in &plan.ticket_refs {
-        let ticket = fetch::fetch_ticket_via_provider(mr_url, r).await;
+        let ticket = fetch::fetch_ticket_via_provider(token, mr_url, r).await;
         if ticket.error.is_some() {
             output.fetch_failures.push(ticket);
         } else {
@@ -324,25 +307,21 @@ pub async fn run_for_review(
         }
     }
     if fetched.is_empty() {
-        // Every fetch failed AND no LLM call is useful — keep the section
-        // so the operator sees the fetch failures.
+        // Every fetch failed — keep the section so the operator sees the
+        // fetch failures. No LLM call is useful when nothing fetched.
         return Some(output);
     }
 
     // Gate the LLM call on having a usable LLM.
     let Some(llm_cfg) = select_llm_config(llm_configs) else {
-        output.notes.push(
-            "compliance gate is on but no usable LLM is configured; the \
-             ## Ticket compliance check section lists the fetched tickets \
-             only."
-                .to_string(),
-        );
-        // We still emit the section with the fetched-ticket list, so the
-        // operator can see that the gate fired; push the tickets into
-        // fetch_failures so the renderer surfaces them.
-        for f in fetched {
-            output.fetch_failures.push(f);
-        }
+        // P2-2: the tickets WERE fetched, so render them as fetched
+        // (not as fetch failures). The renderer distinguishes the two
+        // statuses, and the reader sees the real picture: the section
+        // is gated on the LLM, the fetch itself succeeded.
+        output
+            .notes
+            .push("compliance gate is on but no usable LLM is configured; the ## Ticket compliance check section lists the fetched tickets only.".to_string());
+        output.unanalysed_tickets = std::mem::take(&mut fetched);
         return Some(output);
     };
 
@@ -351,9 +330,7 @@ pub async fn run_for_review(
         Ok(p) => p,
         Err(e) => {
             output.notes.push(format!("compliance prompt build failed: {e}"));
-            for f in fetched {
-                output.fetch_failures.push(f);
-            }
+            output.unanalysed_tickets = std::mem::take(&mut fetched);
             return Some(output);
         }
     };
@@ -378,10 +355,11 @@ pub async fn run_for_review(
             Some(output)
         }
         Err(e) => {
+            // P2-2: distinguish "LLM call failed" from "fetch failed":
+            // the fetch succeeded, the LLM didn't — keep the tickets on a
+            // separate field so the renderer can label them correctly.
             output.notes.push(format!("compliance LLM call failed: {e}"));
-            for f in fetched {
-                output.fetch_failures.push(f);
-            }
+            output.unanalysed_tickets = std::mem::take(&mut fetched);
             Some(output)
         }
     }
@@ -389,10 +367,24 @@ pub async fn run_for_review(
 
 /// Convenience: build the [`TicketProvider`] from an MR URL.
 ///
-/// `mr_url` is the URL the user passed to `review`. `gitlab` and `github`
-/// token env names are the CLI's existing routing signal — same heuristic
-/// the CLI uses to pick `GitHubProvider` vs `GitLabProvider`.
+/// `mr_url` is the URL the user passed to `review`. Detection follows
+/// pr-agent's GitHub/GitLab routing, which the CLI itself mirrors
+/// (`src/lib.rs:94`):
+/// 1. `…/pull/<number>` is the GitHub PR-shape → GitHub.
+/// 2. `…/-/merge_requests/<number>` is the GitLab MR-shape → GitLab.
+/// 3. Otherwise: hostname heuristic (`github.com` / `.github.`).
+///
+/// The path-shape check comes first because self-hosted GitHub
+/// Enterprise instances (`https://github.example.com/...`) and wiremock
+/// fixtures (`http://127.0.0.1:port/...`) both fail the hostname check
+/// but the path shape disambiguates them.
 pub fn provider_from_mr_url(mr_url: &str) -> TicketProvider {
+    if mr_url.contains("/pull/") {
+        return TicketProvider::GitHub;
+    }
+    if mr_url.contains("/-/merge_requests/") {
+        return TicketProvider::GitLab;
+    }
     if mr_url.contains("github.com") || mr_url.contains(".github.") {
         TicketProvider::GitHub
     } else {
@@ -508,8 +500,15 @@ mod tests {
             provider_from_mr_url("https://github.com/owner/repo/pull/1"),
             TicketProvider::GitHub
         );
+        // `.github.` hostname: still GitHub.
         assert_eq!(
             provider_from_mr_url("https://x.github.example/o/r/pull/1"),
+            TicketProvider::GitHub
+        );
+        // `/pull/` path with a self-hosted GitHub Enterprise host (no
+        // `github.com` substring): path shape wins.
+        assert_eq!(
+            provider_from_mr_url("https://github.example.com/o/r/pull/1"),
             TicketProvider::GitHub
         );
     }
@@ -520,6 +519,9 @@ mod tests {
             provider_from_mr_url("https://gitlab.example.com/g/p/-/merge_requests/1"),
             TicketProvider::GitLab
         );
+        // Plain host with no signal defaults to GitLab (the production
+        // routing default at `src/lib.rs:94`).
+        assert_eq!(provider_from_mr_url("https://example.com/o/r"), TicketProvider::GitLab);
     }
 
     #[test]
@@ -567,23 +569,6 @@ mod tests {
     #[test]
     fn select_llm_config_returns_none_for_empty() {
         assert!(select_llm_config(&[]).is_none());
-    }
-
-    #[test]
-    fn has_usable_llm_requires_non_empty_api_base() {
-        let mut cfg = LLMConfig {
-            provider: "x".into(),
-            model: "m".into(),
-            api_key: String::new(),
-            api_base: String::new(),
-            max_tokens: 0,
-            temperature: 0.0,
-            disable_thinking: None,
-            disabled: false,
-        };
-        assert!(!has_usable_llm(&[cfg.clone()]));
-        cfg.api_base = "https://api".into();
-        assert!(has_usable_llm(&[cfg]));
     }
 
     #[test]

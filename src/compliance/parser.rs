@@ -6,30 +6,44 @@
 //! translating the Python line-for-line — the patterns and host gate are
 //! the load-bearing parts; everything else is data shaping.
 //!
-//! Recognised forms:
+//! Recognised forms (parity with pr-agent's
+//! `ticket_pr_compliance_check.py::GITLAB_TICKET_PATTERN` / `GITHUB_TICKET_PATTERN`):
 //!
 //! GitLab:
-//! * `!N` (local iid — same project as the MR)
-//! * `#N` (cross-project shorthand — only matched when `mr_project` is set
-//!   and the description does not look like a hash-tag fragment)
-//! * `org/repo!N`
+//! * `#N` (local — same project as the MR; bounded to ≤ `MAX_SHORTHAND_ISSUE_DIGITS` digits)
+//! * `org/repo#N` (cross-project)
 //! * `<https://gitlab.example.com/group/project/-/work_items/N>`
 //! * `<https://gitlab.example.com/group/project/-/issues/N>`
 //!
+//! GitLab MR sigil `!N` is **deliberately ignored**: pr-agent's GitLab pattern
+//! also matches `!N`, but `!` is the MR-reference syntax on GitLab —
+//! fetching "issue #N" via the issues endpoint when the description refers
+//! to a merge request gives an unrelated object (or a 404). When the
+//! description names an MR with `!N`, the reviewer wants the MR's
+//! description, not an issue's; supporting that requires the merge-requests
+//! endpoint, which is out of scope for M40. The renderer's notes path
+//! documents the choice.
+//!
 //! GitHub:
+//! * `#N` (local — same repo as the PR; ≤ `MAX_SHORTHAND_ISSUE_DIGITS` digits)
 //! * `org/repo#N`
-//! * `#N` (local — same repo as the PR)
 //! * `<https://github.com/org/repo/issues/N>`
 
 use regex::Regex;
 
 use super::{TicketProvider, TicketRef};
 
+/// pr-agent's bound on bare `#N` / `!N` shorthand
+/// (`ticket_pr_compliance_check.py:25-29`): a 7-digit "#1234567" is as
+/// likely an error code as an issue, so the shorthand only fires when
+/// the digit run fits this width.
+pub const MAX_SHORTHAND_ISSUE_DIGITS: usize = 6;
+
 /// Three compiled patterns per provider, each guarded separately so a
 /// false positive on one form does not bleed into another. The look-behind
-/// `(?<![A-Za-z0-9_])` we want for the local shorthand is not available in
-/// the `regex` crate; instead we post-check the byte immediately preceding
-/// each local-shorthand match.
+/// `(?<![A-Za-z0-9_])` we want for the local shorthand is not available
+/// in the `regex` crate; instead we post-check the byte immediately
+/// preceding each local-shorthand match.
 struct Patterns {
     url: Regex,
     project: Regex,
@@ -41,8 +55,8 @@ fn gitlab_patterns() -> &'static Patterns {
     static RE: std::sync::OnceLock<Patterns> = std::sync::OnceLock::new();
     RE.get_or_init(|| Patterns {
         url: Regex::new(r"https?://[^\s<>)]+?/-/(?:work_items|issues)/\d+").expect("gitlab url regex"),
-        project: Regex::new(r"[\w./-]+?!(\d+)\b").expect("gitlab project regex"),
-        local: Regex::new(r"!(\d+)\b").expect("gitlab local regex"),
+        project: Regex::new(r"[\w./-]+?#(\d+)\b").expect("gitlab project regex"),
+        local: Regex::new(r"#(\d+)\b").expect("gitlab local regex"),
     })
 }
 
@@ -134,9 +148,12 @@ pub fn extract_ticket_refs(
             source: full.to_string(),
         });
     }
-    // (3) Local shorthand: `!N` (GitLab) or `#N` (GitHub). Require that
-    // the byte immediately before the match is NOT a word char — the same
-    // guard a look-behind would give us.
+    // (3) Local shorthand: `#N` for both GitLab and GitHub (pr-agent
+    // parity — `!N` is GitLab's MR sigil and is intentionally NOT
+    // matched here; see the module docs). Require that the byte
+    // immediately before the match is NOT a word char — the same guard a
+    // look-behind would give us — and that the digit run fits the
+    // shorthand budget.
     for m in patterns.local.find_iter(description) {
         let start = m.start();
         if start > 0
@@ -146,16 +163,21 @@ pub fn extract_ticket_refs(
             && bytes[start - 1] != b'\r'
             && bytes[start - 1] != b'>'
             && bytes[start - 1] != b'<'
+            && (bytes[start - 1] as char).is_alphanumeric()
         {
-            // The character before is not a word delimiter — skip.
+            // The character before is alphanumeric — likely a hex fragment
+            // (`abc#12345`) or an identifier continuation — skip.
             continue;
         }
-        let iid: u32 = match &description[m.start() + 1..m.end()] {
-            s if !s.is_empty() => match s.parse() {
-                Ok(v) => v,
-                Err(_) => continue,
-            },
-            _ => continue,
+        let digits = &description[m.start() + 1..m.end()];
+        if digits.len() > MAX_SHORTHAND_ISSUE_DIGITS {
+            // pr-agent: a bare #1234567 is as likely an error code as an
+            // issue, so shorthand is bounded to ≤ 6 digits.
+            continue;
+        }
+        let iid: u32 = match digits.parse() {
+            Ok(v) => v,
+            Err(_) => continue,
         };
         let url = build_short_url(provider, provider_host, mr_project, iid);
         out.push(TicketRef {
@@ -276,14 +298,16 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_local_bang_extracts_iid() {
+    fn gitlab_local_hash_extracts_iid() {
+        // P1-2 / M39 §7: the form the user's own MR descriptions use
+        // (`Closes #N`) is the GitLab local sigil. pr-agent parity.
         let out = refs(
-            "Implements !73 — SIRENA-84",
+            "Implements #73 — SIRENA-84",
             TicketProvider::GitLab,
             "isletspace/sirena",
             "gitlab.islet.space:8443",
         );
-        assert_eq!(out.len(), 1, "single local !N reference: {out:?}");
+        assert_eq!(out.len(), 1, "single local #N reference: {out:?}");
         assert_eq!(out[0].iid, 73);
         assert_eq!(out[0].project.as_deref(), Some("isletspace/sirena"));
         assert!(out[0].url.contains("gitlab.islet.space:8443"));
@@ -291,9 +315,10 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_cross_project_with_bang() {
+    fn gitlab_cross_project_with_hash() {
+        // P1-2: GitLab cross-project — pr-agent uses `#N` here too.
         let out = refs(
-            "Closes isletspace/sirena!73",
+            "Closes isletspace/sirena#73",
             TicketProvider::GitLab,
             "other/group",
             "gitlab.islet.space:8443",
@@ -301,6 +326,24 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].iid, 73);
         assert_eq!(out[0].project.as_deref(), Some("isletspace/sirena"));
+    }
+
+    #[test]
+    fn gitlab_bang_sigil_is_ignored() {
+        // P1-2: GitLab `!N` is the MR sigil. Fetching it via the issues
+        // endpoint returns an unrelated object (or 404); pr-agent also
+        // ignores it. The compliance sub-step therefore matches only the
+        // `#N` form on GitLab.
+        let out = refs(
+            "Closes !73",
+            TicketProvider::GitLab,
+            "isletspace/sirena",
+            "gitlab.islet.space:8443",
+        );
+        assert!(
+            out.is_empty(),
+            "GitLab !N is the MR sigil and is intentionally not matched: {out:?}"
+        );
     }
 
     #[test]
@@ -329,16 +372,18 @@ mod tests {
 
     #[test]
     fn gitlab_multiple_refs_dedup_and_order_preserved() {
+        // P1-2: `!N` is intentionally NOT a GitLab shorthand here (the MR
+        // sigil); `#N` and the cross-project form are.
         let out = refs(
-            "Closes #75, !76, !77",
+            "Closes #75, isletspace/sirena#76, #77",
             TicketProvider::GitLab,
             "isletspace/sirena",
             "gitlab.islet.space:8443",
         );
-        // #75 is not GitLab-local shorthand (only !N is); parse_ticket_refs
-        // does not match it. !76 and !77 should be present.
-        assert!(out.iter().any(|r| r.iid == 76));
-        assert!(out.iter().any(|r| r.iid == 77));
+        assert_eq!(out.len(), 3, "three refs matched: {out:?}");
+        let mut iids: Vec<u32> = out.iter().map(|r| r.iid).collect();
+        iids.sort();
+        assert_eq!(iids, vec![75, 76, 77]);
     }
 
     #[test]
@@ -389,15 +434,32 @@ mod tests {
     }
 
     #[test]
-    fn github_hash_does_not_match_hex_fragment_in_commit_message() {
-        // pr-agent calls out this exact pitfall: a bare #12345 is as likely
-        // an error code as an issue, so the shorthand budget caps the digit
-        // count. We do not encode that budget today (the parser still
-        // matches any `#N`); the cap-on-results in `plan()` keeps the cost
-        // bounded, which is the same end.
+    fn github_hash_within_digit_budget_is_matched() {
+        // P2-4: pr-agent's MAX_SHORTHAND_ISSUE_DIGITS = 6 caps bare `#N`.
+        let out = refs("fixes #123456", TicketProvider::GitHub, "owner/repo", "github.com");
+        assert_eq!(out.len(), 1, "6 digits still fits the budget");
+        assert_eq!(out[0].iid, 123_456);
+    }
+
+    #[test]
+    fn github_hash_over_digit_budget_is_rejected() {
+        // P2-4: 7-digit `#N` is treated as an error code, not an issue
+        // reference — pr-agent parity.
         let out = refs("fixes #1234567", TicketProvider::GitHub, "owner/repo", "github.com");
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].iid, 1_234_567);
+        assert!(out.is_empty(), "7+ digit shorthand is rejected: {out:?}");
+    }
+
+    #[test]
+    fn github_hash_following_alphanumeric_is_rejected() {
+        // Hex fragment in a commit message: `abc#123` is not a ticket ref
+        // even though `#123` is a 3-digit shorthand.
+        let out = refs(
+            "commit abc#123 landed",
+            TicketProvider::GitHub,
+            "owner/repo",
+            "github.com",
+        );
+        assert!(out.is_empty(), "alphanumeric before #N skips the shorthand: {out:?}");
     }
 
     #[test]
@@ -420,7 +482,7 @@ mod tests {
     #[test]
     fn multiple_refs_are_deduplicated() {
         let out = refs(
-            "Closes #42, fixes #42, and !42 again",
+            "Closes #42, fixes #42, and #42 again",
             TicketProvider::GitHub,
             "owner/repo",
             "github.com",
@@ -470,11 +532,10 @@ mod tests {
     }
 
     #[test]
-    fn gitlab_local_bang_works_when_mr_project_empty() {
-        // When `mr_project` is empty, local !N refs still resolve but with
-        // an empty project — the gating layer (plan() / dedup) treats them
-        // as "no project" but the URL still carries the host.
-        let out = refs("!9", TicketProvider::GitLab, "", "gitlab.example.com");
+    fn gitlab_local_hash_works_when_mr_project_empty() {
+        // P1-2: same as the old !N variant, but for the #N form which the
+        // parser now matches.
+        let out = refs("#9", TicketProvider::GitLab, "", "gitlab.example.com");
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].iid, 9);
         // Empty mr_project leaves the URL's project segment empty; the

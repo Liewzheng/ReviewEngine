@@ -1,24 +1,19 @@
 //! Ticket body fetch via the existing GitLab / GitHub provider clients.
 //!
-//! The provider clients live in `src/git_provider/{gitlab,github}/client.rs`
-//! and each gets a [`crate::compliance::fetch::fetch_ticket_via_provider`]
-//! entry point. The compliance sub-step asks the provider to fetch the
-//! ticket's title + description; the response is normalised into a
-//! [`super::FetchedTicket`] and returned to the caller.
+//! The provider clients live in `src/git_provider/{gitlab,github}/client.rs`;
+//! `fetch_ticket_via_provider` is the only entry point the compliance
+//! orchestrator uses. It delegates to the provider's `fetch_issue` method
+//! rather than re-implementing URL shaping, request framing or shape
+//! parsing — the provider clients own those concerns and the compliance
+//! step should not become a second client implementation.
 //!
 //! Failures are recorded on the [`super::FetchedTicket`] itself
 //! (HTTP error, missing auth, transport). The compliance orchestrator
 //! renders them as notes in the section — never as review-blocking errors.
 
-use anyhow::Result;
-use reqwest::Client as HttpClient;
-use serde::Deserialize;
 use tracing::warn;
 
-use crate::git_provider::github::client::Client as GitHubClient;
-use crate::git_provider::gitlab::client::Client as GitLabClient;
-
-use super::{FetchedTicket, TicketProvider, TicketRef};
+use super::{FetchedTicket, TicketRef};
 
 /// Maximum characters of a ticket body we keep for the prompt. Mirrors
 /// pr-agent's `MAX_TICKET_CHARACTERS = 10000` — a ticket past that is
@@ -26,7 +21,8 @@ use super::{FetchedTicket, TicketProvider, TicketRef};
 pub const TICKET_BODY_BUDGET: usize = 10_000;
 
 /// Build the URL the GitHub client would send for an issue. Public so the
-/// compliance tests can assert URL shape without spinning up a client.
+/// provider client's `fetch_issue` can use the same path shape and the
+/// integration tests can assert the URL the mock receives.
 pub fn github_issue_url(api_base: &str, owner: &str, repo: &str, number: u32) -> String {
     format!(
         "{}/repos/{}/{}/issues/{}",
@@ -37,8 +33,8 @@ pub fn github_issue_url(api_base: &str, owner: &str, repo: &str, number: u32) ->
     )
 }
 
-/// Build the URL the GitLab client would send for an issue. Public so the
-/// compliance tests can assert URL shape without spinning up a client.
+/// Build the URL the GitLab client would send for an issue. Same
+/// rationale as `github_issue_url`.
 pub fn gitlab_issue_url(base_url: &str, project_path: &str, iid: u32) -> String {
     let encoded = encode_project_path(project_path);
     format!("{}/projects/{}/issues/{}", base_url.trim_end_matches('/'), encoded, iid)
@@ -61,99 +57,98 @@ fn encode_project_path(path: &str) -> String {
         .join("%2F")
 }
 
-/// Fetch one ticket body from GitLab or GitHub.
+/// Extract `(scheme, host)` from an MR URL. Used to build the provider
+/// API base so the compliance sub-step targets the same instance the
+/// user passed to `review` — including plain-HTTP self-hosted GitLab
+/// (whose scheme `build_short_url` flattens to `https://`) and the
+/// wiremock fixtures used by the integration tests.
+fn mr_url_scheme_host(mr_url: &str) -> (&'static str, String) {
+    if let Some(rest) = mr_url.strip_prefix("https://") {
+        let host = rest.split('/').next().unwrap_or("").to_string();
+        ("https", host)
+    } else if let Some(rest) = mr_url.strip_prefix("http://") {
+        let host = rest.split('/').next().unwrap_or("").to_string();
+        ("http", host)
+    } else {
+        ("https", String::new())
+    }
+}
+
+/// Resolve the API base URL the provider client should target.
+fn api_base_from_mr_url(mr_url: &str) -> String {
+    let (scheme, host) = mr_url_scheme_host(mr_url);
+    if host.is_empty() {
+        // No host: caller passed something we cannot route. The provider
+        // client will fail to construct; the orchestrator records the
+        // failure on the FetchedTicket.
+        return format!("{scheme}://invalid.invalid");
+    }
+    format!("{scheme}://{host}")
+}
+
+/// Fetch one ticket via the provider client that owns the API surface.
 ///
-/// `token` is the GitLab PAT / GitHub PAT — the same token `run_review`
-/// already has for the MR/PR fetch.
+/// `token` is the platform PAT the caller already holds for the MR/PR
+/// fetch — the function does NOT read from `GITLAB_TOKEN` / `GITHUB_TOKEN`
+/// env vars (P2-1: env-only token resolution broke the CLI
+/// `--gitlab-token` path, the server-side resolver, and Python callers).
 ///
-/// On any non-2xx response the function returns a [`super::FetchedTicket`]
-/// with `error` set and the caller's flow continues. The orchestrator
+/// On any non-2xx response the function returns a [`FetchedTicket`] with
+/// `error` set and the caller's flow continues — the orchestrator
 /// surfaces the error as a section note.
-#[allow(clippy::expect_used)] // reqwest::Client::builder() with a timeout is infallible in practice
-pub async fn fetch_ticket(
-    provider: TicketProvider,
-    api_base: &str,
-    token: &str,
-    ticket: &TicketRef,
-) -> Result<FetchedTicket> {
-    let http = HttpClient::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .expect("reqwest client build is infallible (timeout)");
+pub async fn fetch_ticket_via_provider(token: &str, mr_url: &str, ticket: &TicketRef) -> FetchedTicket {
+    let api_base = api_base_from_mr_url(mr_url);
+    match ticket.provider {
+        super::TicketProvider::GitHub => fetch_github(token, &api_base, ticket).await,
+        super::TicketProvider::GitLab => fetch_gitlab(token, &api_base, ticket).await,
+    }
+}
+
+async fn fetch_github(token: &str, api_base: &str, ticket: &TicketRef) -> FetchedTicket {
     let project = ticket.project.clone().unwrap_or_default();
-    let resp = match provider {
-        TicketProvider::GitHub => {
-            // `project` is `owner/repo`.
-            let mut parts = project.splitn(2, '/');
-            let owner = parts.next().unwrap_or("");
-            let repo = parts.next().unwrap_or("");
-            if owner.is_empty() || repo.is_empty() {
-                return Ok(fetch_failure(ticket, "missing owner/repo"));
-            }
-            let url = github_issue_url(api_base, owner, repo, ticket.iid);
-            http.get(&url)
-                .header("Authorization", format!("Bearer {token}"))
-                .header("Accept", "application/vnd.github.v3+json")
-                .header("User-Agent", "review-engine/0.10")
-                .send()
-                .await
-        }
-        TicketProvider::GitLab => {
-            if project.is_empty() {
-                return Ok(fetch_failure(ticket, "missing project path"));
-            }
-            let url = gitlab_issue_url(api_base, &project, ticket.iid);
-            http.get(&url).header("PRIVATE-TOKEN", token).send().await
+    let (_owner, _repo) = match project.split_once('/') {
+        Some((o, r)) => (o, r),
+        None => {
+            return failure(ticket, "GitHub ticket ref is missing the owner/repo/ component");
         }
     };
-    let resp = match resp {
-        Ok(r) => r,
+    let client = match crate::git_provider::github::client::Client::for_issue(token, &project, api_base, ticket.iid) {
+        Ok(c) => c,
+        Err(e) => return failure(ticket, &format!("GitHub client init: {e}")),
+    };
+    match client.fetch_issue(Some(&project), ticket.iid).await {
+        Ok(t) => t,
         Err(e) => {
             warn!(
                 url = %ticket.url,
                 error = %e,
-                "compliance ticket fetch transport failure"
+                "compliance ticket fetch (GitHub) failed"
             );
-            return Ok(fetch_failure(ticket, &format!("transport error: {e}")));
+            failure(ticket, &format!("GitHub fetch error: {e}"))
         }
-    };
-    let status = resp.status();
-    if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
-        let msg = format!("HTTP {status}: {}", truncate(&body, 200));
-        warn!(
-            url = %ticket.url,
-            status = status.as_u16(),
-            "compliance ticket fetch non-2xx"
-        );
-        return Ok(fetch_failure(ticket, &msg));
     }
-    let json: serde_json::Value = match resp.json().await {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(url = %ticket.url, error = %e, "compliance ticket parse failure");
-            return Ok(fetch_failure(ticket, &format!("parse error: {e}")));
-        }
-    };
-    let parsed = match provider {
-        TicketProvider::GitHub => parse_github(&json),
-        TicketProvider::GitLab => parse_gitlab(&json),
-    };
-    let parsed = match parsed {
-        Ok(p) => p,
-        Err(e) => return Ok(fetch_failure(ticket, &format!("shape: {e}"))),
-    };
-    let body = truncate(&parsed.body, TICKET_BODY_BUDGET);
-    Ok(FetchedTicket {
-        ticket_ref: ticket.clone(),
-        title: parsed.title,
-        body,
-        web_url: parsed.web_url,
-        error: None,
-    })
 }
 
-fn fetch_failure(ticket: &TicketRef, reason: &str) -> FetchedTicket {
+async fn fetch_gitlab(token: &str, api_base: &str, ticket: &TicketRef) -> FetchedTicket {
+    let project = ticket.project.clone().unwrap_or_default();
+    if project.is_empty() {
+        return failure(ticket, "GitLab ticket ref is missing the project path");
+    }
+    let client = crate::git_provider::gitlab::client::Client::for_instance(token, api_base);
+    match client.fetch_issue(Some(&project), ticket.iid).await {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(
+                url = %ticket.url,
+                error = %e,
+                "compliance ticket fetch (GitLab) failed"
+            );
+            failure(ticket, &format!("GitLab fetch error: {e}"))
+        }
+    }
+}
+
+fn failure(ticket: &TicketRef, reason: &str) -> FetchedTicket {
     FetchedTicket {
         ticket_ref: ticket.clone(),
         title: String::new(),
@@ -163,151 +158,19 @@ fn fetch_failure(ticket: &TicketRef, reason: &str) -> FetchedTicket {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct GitHubIssue {
-    title: Option<String>,
-    body: Option<String>,
-    html_url: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct GitLabIssue {
-    title: Option<String>,
-    description: Option<String>,
-    web_url: Option<String>,
-}
-
-struct Parsed {
-    title: String,
-    body: String,
-    web_url: Option<String>,
-}
-
-fn parse_github(value: &serde_json::Value) -> anyhow::Result<Parsed> {
-    let issue: GitHubIssue =
-        serde_json::from_value(value.clone()).map_err(|e| anyhow::anyhow!("github issue shape: {e}"))?;
-    Ok(Parsed {
-        title: issue.title.unwrap_or_default(),
-        body: issue.body.unwrap_or_default(),
-        web_url: issue.html_url,
-    })
-}
-
-fn parse_gitlab(value: &serde_json::Value) -> anyhow::Result<Parsed> {
-    let issue: GitLabIssue =
-        serde_json::from_value(value.clone()).map_err(|e| anyhow::anyhow!("gitlab issue shape: {e}"))?;
-    Ok(Parsed {
-        title: issue.title.unwrap_or_default(),
-        body: issue.description.unwrap_or_default(),
-        web_url: issue.web_url,
-    })
-}
-
-fn truncate(body: &str, max_chars: usize) -> String {
-    let count = body.chars().count();
-    if count <= max_chars {
-        return body.to_string();
-    }
-    let mut out: String = body.chars().take(max_chars).collect();
-    out.push_str("\n\n[…truncated]");
-    out
-}
-
-/// Route a ticket fetch to the right provider. The provider's own
-/// `fetch_issue` method knows about the MR/PR-bound project; we let the
-/// provider client do its own URL shaping rather than re-implementing it
-/// here.
-///
-/// `mr_url` carries the original MR/PR URL whose scheme and host the
-/// provider API base inherits. Without it the API base extraction would
-/// guess `https` (matching the parser's `build_short_url`), which breaks
-/// plain-HTTP self-hosted instances and wiremock-based tests.
-///
-/// Called from [`crate::compliance::run_for_review`].
-pub async fn fetch_ticket_via_provider(mr_url: &str, ticket: &TicketRef) -> FetchedTicket {
-    match ticket.provider {
-        TicketProvider::GitLab => {
-            // The provider client is project-scoped; we use the
-            // `for_instance` unbound form (which returns a Client without
-            // a project binding) so `fetch_issue` can carry the
-            // ticket's own project path for cross-project refs.
-            let token = std::env::var("GITLAB_TOKEN").unwrap_or_default();
-            let instance_base = gitlab_api_base(mr_url);
-            let client = GitLabClient::for_instance(&token, &instance_base);
-            match client.fetch_issue(ticket.project.as_deref(), ticket.iid).await {
-                Ok(t) => t,
-                Err(e) => fetch_failure(ticket, &format!("provider fetch error: {e}")),
-            }
-        }
-        TicketProvider::GitHub => {
-            // The GitHub client parses owner/repo/number out of the URL;
-            // we hand it a synthetic PR URL so the parser succeeds, then
-            // pass the ticket's owner/repo to `fetch_issue` for the
-            // actual API call.
-            let token = std::env::var("GITHUB_TOKEN").unwrap_or_default();
-            let url = github_pr_url_for_ticket(mr_url, ticket);
-            match GitHubClient::new(&token, &url) {
-                Ok(client) => {
-                    let owner_repo = ticket.project.clone();
-                    match client.fetch_issue(owner_repo.as_deref(), ticket.iid).await {
-                        Ok(t) => t,
-                        Err(e) => fetch_failure(ticket, &format!("provider fetch error: {e}")),
-                    }
-                }
-                Err(e) => fetch_failure(ticket, &format!("provider client init: {e}")),
-            }
-        }
-    }
-}
-
-/// Extract `scheme` (http | https) and `host` from an MR URL.
-fn mr_url_scheme_host(mr_url: &str) -> (&str, &str) {
-    if let Some(rest) = mr_url.strip_prefix("https://") {
-        let host = rest.split('/').next().unwrap_or("");
-        ("https", host)
-    } else if let Some(rest) = mr_url.strip_prefix("http://") {
-        let host = rest.split('/').next().unwrap_or("");
-        ("http", host)
-    } else {
-        ("https", "")
-    }
-}
-
-/// Build the GitLab API base from an MR URL.
-fn gitlab_api_base(mr_url: &str) -> String {
-    let (scheme, host) = mr_url_scheme_host(mr_url);
-    if host.is_empty() {
-        return "https://gitlab.example.com".to_string();
-    }
-    format!("{}://{}", scheme, host)
-}
-
-/// Best-effort PR-URL synthesis for the GitHub client: the GitHub client
-/// parses owner/repo/number out of `…/owner/repo/pull/N`, but we want to
-/// fetch an issue. We use the original MR URL's host/scheme so the
-/// GitHub client targets the same instance the user passed in
-/// (mock-friendly for self-hosted GitHub Enterprise).
-fn github_pr_url_for_ticket(mr_url: &str, ticket: &TicketRef) -> String {
-    let (scheme, host) = mr_url_scheme_host(mr_url);
-    let project = ticket.project.clone().unwrap_or_default();
-    let (owner, repo) = match project.split_once('/') {
-        Some((o, r)) => (o, r),
-        None => return mr_url.to_string(),
-    };
-    format!("{}://{}/{}/{}/pull/N", scheme, host, owner, repo)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compliance::{TicketProvider, TicketRef};
 
+    #[allow(dead_code)]
     fn ref_gitlab(iid: u32, project: &str) -> TicketRef {
         TicketRef {
             provider: TicketProvider::GitLab,
             project: Some(project.to_string()),
             iid,
-            url: format!("https://gitlab.example.com/{project}/-/work_items/{iid}"),
-            source: format!("!{iid}"),
+            url: format!("https://gitlab.example.com/{}/-/work_items/{}", project, iid),
+            source: format!("#{}", iid),
         }
     }
 
@@ -316,13 +179,99 @@ mod tests {
             provider: TicketProvider::GitHub,
             project: Some(project.to_string()),
             iid,
-            url: format!("https://github.com/{project}/issues/{iid}"),
-            source: format!("#{iid}"),
+            url: format!("https://github.com/{}/issues/{}", project, iid),
+            source: format!("#{}", iid),
         }
     }
 
     #[test]
-    fn github_issue_url_encodes_owner_repo() {
+    fn mr_url_scheme_host_extracts_https_default() {
+        assert_eq!(
+            mr_url_scheme_host("https://gitlab.example.com/g/p/-/merge_requests/1"),
+            ("https", "gitlab.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn mr_url_scheme_host_keeps_plain_http_for_self_hosted() {
+        assert_eq!(
+            mr_url_scheme_host("http://gitlab.local:8080/g/p/-/merge_requests/1"),
+            ("http", "gitlab.local:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn mr_url_scheme_host_falls_back_when_no_scheme() {
+        assert_eq!(mr_url_scheme_host("garbage.invalid/x/y"), ("https", String::new()));
+    }
+
+    #[test]
+    fn api_base_from_mr_url_preserves_http() {
+        assert_eq!(
+            api_base_from_mr_url("http://gitlab.local:8080/g/p/-/merge_requests/1"),
+            "http://gitlab.local:8080"
+        );
+    }
+
+    #[test]
+    fn api_base_from_mr_url_returns_invalid_when_no_scheme() {
+        assert_eq!(api_base_from_mr_url("garbage.invalid/x/y"), "https://invalid.invalid");
+    }
+
+    #[test]
+    fn fetch_github_returns_failure_for_malformed_owner_repo() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // Owner-repo without a slash: caught by the pre-check in
+        // `fetch_github` so the caller never sees a confusing provider
+        // error about "Invalid GitHub owner" / "Invalid GitHub repo".
+        let ticket = ref_github(1, "only-owner");
+        let result = rt.block_on(fetch_github("token", "https://api.github.com", &ticket));
+        assert!(!result.is_fetched());
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or("")
+                .contains("missing the owner/repo/"),
+            "expected pre-check failure, got: {:?}",
+            result.error
+        );
+    }
+
+    #[test]
+    fn fetch_gitlab_returns_failure_for_missing_project() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let ticket = TicketRef {
+            provider: TicketProvider::GitLab,
+            project: None,
+            iid: 1,
+            url: "https://gitlab.example.com/-/work_items/1".into(),
+            source: "#1".into(),
+        };
+        let result = rt.block_on(fetch_gitlab("token", "https://gitlab.example.com", &ticket));
+        assert!(!result.is_fetched());
+        assert!(result
+            .error
+            .as_deref()
+            .unwrap_or("")
+            .contains("missing the project path"));
+    }
+
+    // The wiremock-backed GitHub and GitLab integration coverage lives
+    // in tests/compliance/main.rs; the URL builders and the
+    // immediate-failure paths (no network round-trip) are the only
+    // things covered here.
+
+    #[test]
+    fn github_issue_url_matches_api_shape() {
+        // The provider's wiremock sees this path; the compliance
+        // integration test asserts the same shape via request recording.
         assert_eq!(
             github_issue_url("https://api.github.com", "owner", "repo", 7),
             "https://api.github.com/repos/owner/repo/issues/7"
@@ -338,124 +287,9 @@ mod tests {
     }
 
     #[test]
-    fn fetch_ticket_returns_failure_when_project_missing() {
-        // We must call into the async fn synchronously here — `block_on`
-        // would need a tokio setup, so use `tokio::runtime::Runtime::new()`.
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let ticket = TicketRef {
-            provider: TicketProvider::GitLab,
-            project: None,
-            iid: 1,
-            url: "https://gitlab.example.com/-/work_items/1".into(),
-            source: "!1".into(),
-        };
-        let result = rt.block_on(fetch_ticket(
-            TicketProvider::GitLab,
-            "https://gitlab.example.com/api/v4",
-            "token",
-            &ticket,
-        ));
-        let f = result.unwrap();
-        assert!(!f.is_fetched());
-        assert!(f.error.as_deref().unwrap_or("").contains("missing"));
-    }
-
-    #[test]
-    fn fetch_ticket_github_returns_failure_when_owner_repo_malformed() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let ticket = ref_github(1, "only-owner");
-        let result = rt.block_on(fetch_ticket(
-            TicketProvider::GitHub,
-            "https://api.github.com",
-            "token",
-            &ticket,
-        ));
-        let f = result.unwrap();
-        assert!(!f.is_fetched());
-        assert!(f.error.as_deref().unwrap_or("").contains("missing"));
-    }
-
-    // Mock-server coverage is in `tests/compliance_fetch.rs` (network
-    // round-trip) — unit tests here cover only the URL builders and the
-    // immediate-failure paths that do not need HTTP.
-
-    #[test]
     fn encode_project_path_preserves_safe_chars() {
         assert_eq!(encode_project_path("g/p"), "g%2Fp");
         assert_eq!(encode_project_path("a-b_c.d~e/f"), "a-b_c.d~e%2Ff");
-    }
-
-    #[test]
-    fn encode_project_path_handles_three_levels() {
         assert_eq!(encode_project_path("g/s/p"), "g%2Fs%2Fp");
-    }
-
-    // Use the unused-import lint to verify the symbol is exported.
-    #[allow(dead_code)]
-    fn _check_export(_t: FetchedTicket) {}
-
-    // Quick parse-shape smoke tests: serde round-trips a known-good payload.
-    #[test]
-    fn parse_github_reads_title_and_body() {
-        let json = serde_json::json!({
-            "title": "t",
-            "body": "b",
-            "html_url": "u"
-        });
-        let p = parse_github(&json).unwrap();
-        assert_eq!(p.title, "t");
-        assert_eq!(p.body, "b");
-        assert_eq!(p.web_url.as_deref(), Some("u"));
-    }
-
-    #[test]
-    fn parse_gitlab_reads_title_and_description() {
-        let json = serde_json::json!({
-            "title": "t",
-            "description": "b",
-            "web_url": "u"
-        });
-        let p = parse_gitlab(&json).unwrap();
-        assert_eq!(p.title, "t");
-        assert_eq!(p.body, "b");
-        assert_eq!(p.web_url.as_deref(), Some("u"));
-    }
-
-    #[test]
-    fn parse_github_returns_error_on_missing_fields() {
-        // An object that is not a map shape (e.g. a string) fails the serde
-        // deserialise. Empty-object inputs are valid (every field is Option,
-        // so they default to None); the parser fills the title/body with
-        // empty strings and the section renders them.
-        let json = serde_json::json!("not an object");
-        assert!(parse_github(&json).is_err());
-    }
-
-    #[test]
-    fn truncate_appends_marker_when_long() {
-        let body = "x".repeat(100);
-        let out = truncate(&body, 10);
-        assert!(out.starts_with("xxxxxxxxxx"));
-        assert!(out.contains("truncated"));
-    }
-
-    #[test]
-    fn truncate_returns_input_when_short() {
-        assert_eq!(truncate("short", 100), "short");
-    }
-
-    // Ensure the sample builder symbols stay referenced so clippy does not
-    // flag the test helpers as dead — the lib path uses them indirectly via
-    // `ref_gitlab` / `ref_github`.
-    #[allow(dead_code)]
-    fn _ref_builders_used(_t: TicketRef) {
-        let _g = ref_gitlab(1, "g/p");
-        let _h = ref_github(1, "o/r");
     }
 }

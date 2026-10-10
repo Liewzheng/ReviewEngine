@@ -56,13 +56,7 @@ impl Client {
             .parse()
             .with_context(|| format!("Failed to parse PR number from URL: {pr_url}"))?;
 
-        // Validate owner and repo to prevent path traversal / command injection
-        if owner.is_empty() || owner.contains("..") || owner.contains('/') || owner.contains(':') {
-            anyhow::bail!("Invalid GitHub owner in PR URL: {pr_url}");
-        }
-        if repo.is_empty() || repo.contains("..") || repo.contains('/') || repo.contains(':') {
-            anyhow::bail!("Invalid GitHub repo in PR URL: {pr_url}");
-        }
+        Self::validate_owner_repo(owner, repo, pr_url)?;
 
         Ok(Self {
             http: HttpClient::builder()
@@ -76,6 +70,45 @@ impl Client {
             token: token.to_string(),
             commit_sha: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Construct a client targeted at a specific owner/repo (M40 / RENG
+    /// ticket compliance: the PR URL shape is not what the compliance
+    /// sub-step fetches, and synthesizing a fake PR URL with a literal
+    /// `N` is what was breaking the GitHub leg in the previous revision).
+    ///
+    /// The PR number is still required so the client has the same
+    /// invariants the URL-based constructor enforces (a non-zero
+    /// PR-shaped client), but `fetch_issue` ignores it and talks to
+    /// `/repos/{owner}/{repo}/issues/{number}` directly.
+    pub fn for_issue(token: &str, owner_repo: &str, api_base: &str, pr_number: u32) -> Result<Self> {
+        let mut parts = owner_repo.splitn(2, '/');
+        let owner = parts.next().unwrap_or("").to_string();
+        let repo = parts.next().unwrap_or("").to_string();
+        Self::validate_owner_repo(&owner, &repo, owner_repo)?;
+        Ok(Self {
+            http: HttpClient::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .with_context(|| "Failed to create HTTP client")?,
+            api_base: api_base.to_string(),
+            owner,
+            repo,
+            pr_number,
+            token: token.to_string(),
+            commit_sha: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    fn validate_owner_repo(owner: &str, repo: &str, src: &str) -> Result<()> {
+        // Validate owner and repo to prevent path traversal / command injection
+        if owner.is_empty() || owner.contains("..") || owner.contains('/') || owner.contains(':') {
+            anyhow::bail!("Invalid GitHub owner in {src}");
+        }
+        if repo.is_empty() || repo.contains("..") || repo.contains('/') || repo.contains(':') {
+            anyhow::bail!("Invalid GitHub repo in {src}");
+        }
+        Ok(())
     }
 
     /// Build a GitHub API URL for the given path.

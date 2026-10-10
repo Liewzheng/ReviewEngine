@@ -55,6 +55,20 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
                 text.push_str("\n---\n\n");
                 text.push_str(&review_engine::output::team_renderer::render_lead_summary(consolidated));
             }
+            // M40 / RENG ticket compliance section: rendered after the
+            // lead summary and BEFORE the verification appendix so it sits
+            // alongside the per-expert sections, not in the footer (the
+            // P2-5 review caught a comment-vs-code drift on the order).
+            if let Some(compliance) = &result.compliance {
+                let section = render_compliance_section(compliance);
+                if !section.is_empty() {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str("\n---\n\n");
+                    text.push_str(&section);
+                }
+            }
             let appendix = review_engine::output::renderer::render_dropped_findings_appendix(
                 &result.dropped_findings,
                 verification_enabled,
@@ -66,19 +80,6 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
                 }
                 text.push_str("\n---\n\n");
                 text.push_str(&appendix);
-            }
-            // M40 / RENG ticket compliance section: rendered after the
-            // lead summary and before the verification appendix so it sits
-            // alongside the per-expert sections, not in the footer.
-            if let Some(compliance) = &result.compliance {
-                let section = render_compliance_section(compliance);
-                if !section.is_empty() {
-                    if !text.ends_with('\n') {
-                        text.push('\n');
-                    }
-                    text.push_str("\n---\n\n");
-                    text.push_str(&section);
-                }
             }
             text
         }
@@ -439,6 +440,44 @@ mod tests {
         assert!(out.contains("## Ticket compliance check"), "section heading is emitted");
         assert!(out.contains("fetch failed"), "fetch failure is rendered");
         assert!(out.contains("capped at 3"), "notes are rendered");
+    }
+
+    /// P2-2: fetched-but-unanalysed tickets are rendered on their own
+    /// block, not under the "fetch failed" heading. The reader must not
+    /// see "fetch failed" when the fetch actually succeeded.
+    #[test]
+    fn test_format_output_markdown_unanalysed_renders_separately_from_failed() {
+        let mut output = sample_output(Some(make_consolidated()));
+        let mut compliance = review_engine::compliance::ComplianceOutput::empty();
+        compliance
+            .unanalysed_tickets
+            .push(review_engine::compliance::FetchedTicket {
+                ticket_ref: review_engine::compliance::TicketRef {
+                    provider: review_engine::compliance::TicketProvider::GitLab,
+                    project: Some("g/p".into()),
+                    iid: 73,
+                    url: "https://gitlab.example.com/g/p/-/work_items/73".into(),
+                    source: "#73".into(),
+                },
+                title: "SIRENA-84".into(),
+                body: "...".into(),
+                web_url: Some("https://gitlab.example.com/g/p/-/work_items/73".into()),
+                error: None,
+            });
+        compliance
+            .notes
+            .push("compliance gate is on but no usable LLM is configured".to_string());
+        output.compliance = Some(compliance);
+        let out = render(&output, "markdown", false);
+        assert!(out.contains("fetched but not analysed"), "unanalysed bucket header");
+        assert!(out.contains("SIRENA-84"), "fetched title is rendered");
+        // The fetched ticket must NOT be labelled "fetch failed".
+        let unanalysed_pos = out.find("fetched but not analysed").expect("header is present");
+        let failed_pos = out.find("fetch failed").unwrap_or(usize::MAX);
+        assert!(
+            unanalysed_pos < failed_pos || failed_pos == usize::MAX,
+            "unanalysed header must not be replaced by a 'fetch failed' header for the same ticket"
+        );
     }
 }
 

@@ -17,7 +17,7 @@ use anyhow::Result;
 use minijinja::Environment;
 use serde::Serialize;
 
-use super::{FetchedTicket, TicketProvider, TicketRef};
+use super::{FetchedTicket, TicketRef};
 use crate::models::MRInfo;
 
 /// The system prompt: direct the LLM to focus only on the ticket ↔ diff
@@ -262,11 +262,9 @@ fn extract_json_object(text: &str) -> Result<serde_json::Value, String> {
     Err("no JSON object found in response".to_string())
 }
 
-#[allow(dead_code)]
-pub(crate) const _PROVIDER_DOC: TicketProvider = TicketProvider::GitLab;
-
 #[cfg(test)]
 mod tests {
+    use super::super::TicketProvider;
     use super::*;
 
     fn ref_gitlab(iid: u32) -> TicketRef {
@@ -275,7 +273,7 @@ mod tests {
             project: Some("g/p".into()),
             iid,
             url: format!("https://gitlab.example.com/g/p/-/work_items/{iid}"),
-            source: format!("!{iid}"),
+            source: format!("#{iid}"),
         }
     }
 

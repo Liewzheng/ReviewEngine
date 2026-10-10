@@ -144,6 +144,35 @@ fn test_apply_env_overrides_empty_commands() {
 }
 
 #[test]
+fn test_apply_env_overrides_compliance_enabled_true() {
+    let _guard = fs_lock();
+    let env_guard = EnvGuard::new("CODE_AUDIT_COMPLIANCE_ENABLED");
+    env_guard.set("true");
+
+    let config = default_config().unwrap();
+    assert!(!config.compliance.enabled, "gate defaults off");
+    let overridden = apply_env_overrides(config);
+    assert!(overridden.compliance.enabled, "env true turns the gate on");
+}
+
+#[test]
+fn test_apply_env_overrides_compliance_enabled_other_is_false() {
+    let _guard = fs_lock();
+    let env_guard = EnvGuard::new("CODE_AUDIT_COMPLIANCE_ENABLED");
+    env_guard.set("anything-but-true");
+
+    let config = AppConfig {
+        compliance: ComplianceConfig { enabled: true },
+        ..default_config().unwrap()
+    };
+    let overridden = apply_env_overrides(config);
+    assert!(
+        !overridden.compliance.enabled,
+        "non-true env value disables the gate even when the config had it on"
+    );
+}
+
+#[test]
 fn test_validate_experts_weight_sum_not_100() {
     let _guard = fs_lock();
     let user_toml = r#"
@@ -286,6 +315,35 @@ async fn test_resolve_config_default_path() {
     let _cwd_guard = CwdGuard::set(&project_dir);
     let cfg = resolve_config(None).await.unwrap();
     assert!(cfg.review_experts.contains_key("lead"));
+}
+
+/// M40 / RENG P1-4: `[compliance] enabled = true` in the auto-detected
+/// project-level `.code-audit-config.toml` must reach the resolved
+/// `AppConfig`. Before this, the auto-detect branch (resolve.rs:91-178)
+/// dropped `[compliance]` silently.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_resolve_config_lifts_compliance_from_project_toml() {
+    let _guard = fs_lock();
+    let _env = clear_code_audit_env();
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(
+        project_dir.join(".code-audit-config.toml"),
+        "[compliance]\nenabled = true\n",
+    )
+    .unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    let _cwd_guard = CwdGuard::set(&project_dir);
+    let cfg = resolve_config(None).await.unwrap();
+    assert!(
+        cfg.compliance.enabled,
+        "[compliance] enabled = true must reach the resolved config; got {:?}",
+        cfg.compliance
+    );
 }
 
 #[tokio::test]

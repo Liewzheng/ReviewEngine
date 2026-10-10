@@ -50,12 +50,14 @@ pub struct SecurityFinding {
 
 /// Scan files for common security patterns (API keys, passwords, etc).
 ///
-/// Mechanical hits in test files and on placeholder values are suppressed
-/// before reporting — they would otherwise flood the report with fixture
-/// noise (test inputs, formatting examples, illustrative values wrapped
-/// in `〈…〉`) and drown the semantic security signal users actually care
-/// about. The cap on mechanical contribution to the security score lives
-/// in `static_experts::security`.
+/// Mechanical hits in test files, on placeholder values, and in
+/// documentation/comment lines are suppressed before reporting — they
+/// would otherwise flood the report with fixture noise (test inputs,
+/// formatting examples, illustrative values wrapped in `〈…〉`, and
+/// prose that describes the regex itself) and drown the semantic
+/// security signal users actually care about. The cap on mechanical
+/// contribution to the security score lives in
+/// `static_experts::security`.
 pub fn scan_security_patterns(entries: &[FileEntry]) -> Vec<SecurityFinding> {
     let mut findings = Vec::new();
 
@@ -68,12 +70,43 @@ pub fn scan_security_patterns(entries: &[FileEntry]) -> Vec<SecurityFinding> {
             // a careful regex sweep would report them all as "secrets".
             continue;
         }
+        if is_markdown_path(&entry.path) {
+            // Markdown documents are prose: CHANGELOG / README bullets
+            // routinely describe the regex itself in plain text
+            // ("`password = \"real_password\"` is exactly the …") and
+            // those lines would otherwise fire as `[mechanical]`. The
+            // scan is for source code, not for documentation; real
+            // secrets embedded in markdown are a doc hygiene issue
+            // (M28 RENG-114 follow-up).
+            continue;
+        }
         if let Ok(content) = std::fs::read_to_string(&entry.path) {
             findings.extend(scan_security_patterns_in_text(&entry.path, &content));
         }
     }
 
     findings
+}
+
+/// Markdown document path: the `.md` / `.markdown` extension (case
+/// insensitive). Cheap extension check; no MIME sniffing — the scan is
+/// for source code, and the only place these extensions show up in a
+/// source tree is documentation files.
+fn is_markdown_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".md") || lower.ends_with(".markdown")
+}
+
+/// Vue single-file component path: the `.vue` extension. The Vue
+/// `<template>` block uses prop bindings like `:show-password="fn()"`
+/// where the matched "value" is a Vue expression (often a function
+/// call), not a string literal credential — these need a hyphen-aware
+/// discriminator (see [`scan_security_patterns_in_text`]).
+fn is_vue_path(path: &str) -> bool {
+    Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("vue"))
 }
 
 /// Wrapper around [`super::experts::facts::is_test_file`] using the path's
@@ -125,16 +158,54 @@ fn is_placeholder_bracket(line: &str, match_start: usize, match_end: usize) -> b
 
 /// Scan a single text block for security patterns. Exposed for unit testing.
 ///
-/// Every hit is tagged [`FindingKind::Mechanical`]. Lines whose file path
-/// looks like a test file, whose matched portion is a placeholder
-/// (`〈…〉`, `<…>`, or all-`x`/`*` token after a structural prefix), or
-/// whose line falls inside a `#[cfg(test)] mod … { … }` block (an
-/// inline test module inside a regular source file — RENG-114
-/// follow-up, sirena reproducer) are suppressed rather than reported.
+/// Every hit is tagged [`FindingKind::Mechanical`]. The following
+/// categories are suppressed before they reach the report:
+///
+/// - **Test files** — paths recognised by [`super::experts::facts::is_test_file`]
+///   (`tests/*`, `*_test.rs`, `*.spec.ts`, `__tests__/*`, …). Fixtures
+///   are full of mock credentials; a regex sweep would flag them all.
+///   Belt-and-braces with the entry-level skip in
+///   [`scan_security_patterns`].
+/// - **Markdown documents** — paths ending in `.md` / `.markdown`.
+///   CHANGELOG / README bullets routinely describe the regex itself
+///   in plain text, e.g. `password = "real_password"` in a CHANGELOG
+///   bullet; those lines would otherwise fire as `[mechanical]`. The
+///   scan is for source code (M28 RENG-114 follow-up).
+/// - **Rust line comments** — lines that, trimmed, start with `//`.
+///   Covers regular `//`, doc `///`, and module-level `//!` comments.
+///   Docstrings commonly embed examples like `password = "real_password"`
+///   to illustrate the redaction format or the regex shape; those
+///   examples are not real credentials (M28).
+/// - **`#[cfg(test)] mod … { … }` blocks** inside regular `.rs` files —
+///   inline test modules that the path-based test-file rule cannot see
+///   (RENG-114 follow-up, sirena reproducer).
+/// - **Placeholder tokens** — values composed of `x`/`X`/`*`/`-`/`_`
+///   after any structural prefix (`sk-…`), or values wrapped in
+///   angle brackets (`〈…〉`, `<…>`). Dummy/example values, not real
+///   secrets.
+/// - **Vue template prop bindings** — `.vue` files where the
+///   immediately-preceding character (one byte before the matched
+///   keyword) is a hyphen. That is the shape of `:show-password="…"`
+///   / `:api-key="…"` / `v-bind:webhook-secret="…"` — the LHS is a
+///   hyphenated Vue prop name and the bound value is a Vue expression
+///   (often a function call), not a string literal credential (M28).
+/// - **Identifier-only `api.?key` matches** — when the regex consumed
+///   no opening quote, the matched value is an identifier reference
+///   (`api_key = someVariable` or `api_key: function_call(…)`), not a
+///   hardcoded literal. Quoted literals (`api_key = "secret"`) still
+///   report (M28).
+///
+/// All seven layers compose: a production `api_key = "secret"` line
+/// inside a regular `.rs` file outside any `#[cfg(test)]` block still
+/// surfaces, while every reproducer from the M25 self-audit (CHANGELOG
+/// prose / docstring examples / Vue prop bindings / struct-field
+/// function calls) is suppressed.
 pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<SecurityFinding> {
     let re_list = build_security_regexes();
     let mut findings = Vec::new();
     let skip_test = is_test_file_path(file);
+    let skip_markdown = is_markdown_path(file);
+    let is_vue = is_vue_path(file);
     // Inline `#[cfg(test)] mod … { … }` blocks live inside regular
     // source files, so `is_test_file_path` cannot see them. The span
     // list is computed once per file (a brace-counting pass) and
@@ -145,17 +216,26 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
     let cfg_test_spans = cfg_test_line_spans(content);
 
     for (i, line) in content.lines().enumerate() {
-        if skip_test {
-            // Test files are skipped wholesale: every line of a path
-            // recognised by `is_test_file` is exempt, regardless of
-            // what it carries. The fixture may well live next to a
-            // `README.md` or a sample `.env`, but a config-shaped
-            // value on a "test-blessed" path is still a fixture by
-            // our rule of thumb and not a real secret. The same
-            // exclusion is enforced at the entry level by
+        if skip_test || skip_markdown {
+            // Test files and Markdown documents are skipped wholesale:
+            // every line is exempt, regardless of what it carries.
+            // Test fixtures are mock credentials; markdown is prose.
+            // The same exclusions are enforced at the entry level by
             // `scan_security_patterns`, so a file the regex never
             // reaches is also never inspected line by line — the two
             // layers are belt-and-braces for the same reason.
+            continue;
+        }
+        if is_rust_line_comment(line) {
+            // Rust line comments (`//`, `///`, `//!`) describe code or
+            // carry examples, not real credentials. The 13 M28
+            // reproducer sites in `src/models/secrets.rs` /
+            // `src/cli/handlers/output.rs` /
+            // `src/output/renderer.rs` /
+            // `src/output/team_renderer.rs` /
+            // `src/repo/experts/facts.rs` are all line comments
+            // embedded in the source tree as documentation of the
+            // redaction / fixture shapes.
             continue;
         }
         let line_no = i + 1;
@@ -168,6 +248,7 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
             // security score drops by 16 points (4 × MECHANICAL_PER_HIT).
             continue;
         }
+        let line_bytes = line.as_bytes();
         for (re, desc) in &re_list {
             for mat in re.find_iter(line) {
                 if is_placeholder_token(mat.as_str()) {
@@ -175,6 +256,33 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
                 }
                 if is_placeholder_bracket(line, mat.start(), mat.end()) {
                     continue; // `password=〈写账号密码〉` style placeholder
+                }
+                if is_vue && mat.start() > 0 && line_bytes[mat.start() - 1] == b'-' {
+                    // Vue prop binding with a hyphenated LHS:
+                    // `:show-password="…"` / `:api-key="…"` /
+                    // `v-bind:webhook-secret="…"`. The matched
+                    // keyword (`password`, `api`, `token` …) sits
+                    // immediately after a `-`, so the LHS is a
+                    // hyphenated Vue prop name and the bound value
+                    // is a Vue expression (often a function call),
+                    // not a string literal credential. A literal
+                    // `:password="hunter2_real"` keeps reporting
+                    // because the char before `password` is `:`.
+                    continue;
+                }
+                if *desc == "Possible API key" && first_separator_is_colon(&mat) && !consumed_opening_quote(&mat) {
+                    // `api.?key` pattern, struct-field shape: separator
+                    // is `:` (Rust struct literal / JS object shorthand
+                    // / Python class attr) AND no opening quote was
+                    // consumed. The matched value is an identifier
+                    // reference, e.g. `api_key: encrypt_non_empty(…)` in
+                    // `src/store/rows.rs:143` (the M28 reproducer) — not
+                    // a hardcoded literal. Quoted struct literals
+                    // (`api_key: "secret"`) keep reporting because the
+                    // regex consumed an opening quote; `api_key = "…"`
+                    // / `api_key = someVar` keep reporting because the
+                    // separator is `=` (real assignment form).
+                    continue;
                 }
                 findings.push(SecurityFinding {
                     file: file.to_string(),
@@ -189,6 +297,68 @@ pub(crate) fn scan_security_patterns_in_text(file: &str, content: &str) -> Vec<S
     }
 
     findings
+}
+
+/// A line is a Rust line comment when its trimmed text begins with
+/// `//`. That covers regular `//`, doc `///`, and module-level `//!`
+/// comments — the three shapes that the M28 reproducer corpus uses
+/// (`src/models/secrets.rs`, `src/output/renderer.rs`,
+/// `src/output/team_renderer.rs`, `src/repo/experts/facts.rs`,
+/// `src/cli/handlers/output.rs`).
+fn is_rust_line_comment(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("//")
+}
+
+/// For the `api.?key` pattern, returns the separator character
+/// (`:` or `=`) consumed by the regex. The regex is
+/// `api.?key\s*[:=]\s*['"]?[A-Za-z0-9_]{16,}` — the keyword is at
+/// the start, optional whitespace, then `:` or `=`. Walking forward
+/// from the start of the match, the first `:` / `=` byte is the
+/// separator (the regex's `\s*` consumes any leading whitespace,
+/// and `:` / `=` are not valid Rust identifier chars so a `:` / `=`
+/// inside the LHS keyword is impossible).
+///
+/// Used to distinguish struct-field syntax (`api_key: …`) from a
+/// real assignment (`api_key = …`) without touching quoted vs.
+/// unquoted value shapes.
+fn first_separator_is_colon(mat: &regex::Match) -> bool {
+    for &b in mat.as_str().as_bytes() {
+        if b == b':' {
+            return true;
+        }
+        if b == b'=' {
+            return false;
+        }
+    }
+    false
+}
+
+/// For the `api.?key` pattern, returns whether the regex consumed an
+/// opening quote (`'` or `"`) before the value. The regex is
+/// `api.?key\s*[:=]\s*['"]?[A-Za-z0-9_]{16,}` — after the LHS
+/// keyword + separator there is optional whitespace and an optional
+/// quote. The value (`[A-Za-z0-9_]{16,}`) is contiguous identifier
+/// chars at the end of the match, so walking back from the end
+/// skipping identifier chars lands on either:
+///
+/// - the opening quote (`"` / `'`), if one was consumed — the value
+///   is a string literal credential;
+/// - whitespace (or the separator itself), if no quote was consumed
+///   — the value is an identifier reference (e.g.
+///   `encrypt_non_empty(…)`) and must not be reported as a hardcoded
+///   API key.
+fn consumed_opening_quote(mat: &regex::Match) -> bool {
+    let bytes = mat.as_str().as_bytes();
+    let mut i = bytes.len();
+    while i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+        i -= 1;
+    }
+    if i == 0 {
+        return false;
+    }
+    let prev = bytes[i - 1];
+    prev == b'\'' || prev == b'"'
 }
 
 #[cfg(test)]
@@ -457,5 +627,373 @@ mod tests {
         );
         assert_eq!(findings[0].line, 1, "the surviving hit is the production line");
         assert_eq!(findings[0].pattern, "Possible API key");
+    }
+
+    // -----------------------------------------------------------------
+    // M28 RENG-114 follow-up: 20 mechanical security FPs from the M25
+    // self-audit (`reports/reng-self-audit/raw-report.md` security
+    // section + `findings-summary.json` §spot_checks.S5). The five
+    // tests below pin the new skip rules (markdown prose, Vue prop
+    // bindings, Rust line comments, identifier-only `api.?key`) and
+    // the comprehensive corpus test asserts every one of the 20
+    // reproducer sites returns zero findings. Real positives (a
+    // production-line `api_key = "…"` quoted literal, a literal
+    // `:password="…"` Vue prop, a Rust non-comment line with a real
+    // password) must still flag — pinned by
+    // `…_keeps_real_positives_after_m28_skips`.
+    // -----------------------------------------------------------------
+
+    /// Markdown prose: CHANGELOG.md lines 4 / 13 / 41 are bullets
+    /// describing the regex itself in plain text. The scan is for
+    /// source code, not documentation.
+    #[test]
+    fn scan_security_patterns_in_text_skips_markdown_prose() {
+        let cases: &[&str] = &[
+            // CHANGELOG.md:4 — "Inline #[cfg(test)] mod … { … }" bullet
+            r#"- **Inline `#[cfg(test)] mod … { … }` blocks … `password = "real_password"` is exactly the**"#,
+            // CHANGELOG.md:13 — "The security expert separates mechanical …" bullet
+            r#"- **The security expert separates … `password = "…"` …**"#,
+            // CHANGELOG.md:41 — "`Evidence` blocks are redacted …" bullet
+            r#"- **`Evidence` blocks are redacted … `password = "…"` …**"#,
+        ];
+        for line in cases {
+            let findings = scan_security_patterns_in_text("CHANGELOG.md", line);
+            assert!(
+                findings.is_empty(),
+                "markdown prose must be skipped wholesale: {line} → {findings:?}"
+            );
+        }
+    }
+
+    /// Vue template prop binding: `.vue` files with a hyphenated LHS
+    /// like `:show-password="…"` carry a Vue expression as the bound
+    /// value (often a function call), not a string literal credential.
+    /// The reproducer is `frontend/src/components/Config/GitPlatformForm.vue`
+    /// lines 54 / 84 / 112.
+    #[test]
+    fn scan_security_patterns_in_text_skips_vue_hyphenated_prop_bindings() {
+        let cases: &[&str] = &[
+            r#"              :show-password="showPasswordFor(draft.token)""#,
+            r#"              :show-password="showPasswordFor(draft.webhookSigningSecret)""#,
+            r#"              :show-password="showPasswordFor(draft.webhookSecret)""#,
+        ];
+        for line in cases {
+            let findings = scan_security_patterns_in_text("frontend/src/components/Config/GitPlatformForm.vue", line);
+            assert!(
+                findings.is_empty(),
+                "Vue :show-password prop binding must be skipped: {line} → {findings:?}"
+            );
+        }
+    }
+
+    /// Rust line comments (`//`, `///`, `//!`) carry documentation
+    /// examples of the regex shape, not real credentials. The
+    /// reproducer corpus is 13 lines spread across
+    /// `src/models/secrets.rs` (×9), `src/output/renderer.rs`,
+    /// `src/output/team_renderer.rs`, `src/repo/experts/facts.rs`,
+    /// and `src/cli/handlers/output.rs`.
+    #[test]
+    fn scan_security_patterns_in_text_skips_rust_line_comments() {
+        let cases: &[&str] = &[
+            // src/models/secrets.rs:5 (module-level doc comment)
+            r#"//! line of `config.toml` with `password = "real_password"` is exactly the"#,
+            // src/models/secrets.rs:46
+            r#"//! password = "***[redacted:kind=password,len=12,fp=abcdef0123456789,key=password]***""#,
+            // src/models/secrets.rs:79
+            r#"    /// `password = "…"`, `db_password: …`, etc."#,
+            // src/models/secrets.rs:128
+            r#"/// assignment patterns (so the marker can echo `password = "…"` instead of"#,
+            // src/models/secrets.rs:184
+            r#"/// The order matters: structured assignments (`password = "…"`) are scanned"#,
+            // src/models/secrets.rs:318
+            r#"/// placeholder (`password = "x"`) than a real secret, and redacting it makes"#,
+            // src/models/secrets.rs:360
+            r#"/// `password = "glpat-…"` line is reported as `password`, not also as a"#,
+            // src/models/secrets.rs:447
+            r#"/// `key = value` lines stay syntactically intact: `password = "abc123"` is"#,
+            // src/models/secrets.rs:448
+            r#"/// rewritten to `password = "***[redacted:kind=password,len=6,fp=…,key=password]***"`,"#,
+            // src/output/renderer.rs:156
+            r#"            // password = 'hunter2_real' claim is wrong, the actual value"#,
+            // src/output/team_renderer.rs:238
+            r#"                // like `leaked: password = "hunter2_real_secret"` reaching"#,
+            // src/repo/experts/facts.rs:178
+            r#"/// / 994 — four `password: "sk"` assignments inside the file's"#,
+            // src/cli/handlers/output.rs:94
+            r#"/// read it, which means a quoted `password = "real_password"` line in"#,
+        ];
+        for line in cases {
+            let findings = scan_security_patterns_in_text("src/lib.rs", line);
+            assert!(
+                findings.is_empty(),
+                "Rust line comment must be skipped: {line} → {findings:?}"
+            );
+        }
+    }
+
+    /// Identifier-only `api.?key` match: `api_key: encrypt_non_empty(…)`
+    /// in a struct literal is the M28 reproducer at
+    /// `src/store/rows.rs:143` — the value is a function call, not a
+    /// hardcoded literal. The skip is gated by `:` separator AND no
+    /// quote consumed, so an indirect assignment
+    /// `api_key = someLongVariableName123` (separator `=`) keeps
+    /// reporting — that's the existing `finds_api_key` /
+    /// `…_reports_correct_line_numbers` shape and must not regress.
+    /// A quoted literal `api_key = "…"` must still report (pinned by
+    /// `_keeps_real_positives_after_m28_skips`).
+    #[test]
+    fn scan_security_patterns_in_text_skips_identifier_only_api_key() {
+        // Struct field with function-call RHS: separator is `:` and
+        // no quote consumed — both gate conditions met, skip fires.
+        let line = r#"        api_key: encrypt_non_empty(&config.api_key, key)?,"#;
+        let findings = scan_security_patterns_in_text("src/store/rows.rs", line);
+        assert!(
+            findings.is_empty(),
+            "identifier-only api_key match must be skipped: {line} → {findings:?}"
+        );
+
+        // Same shape, no space around `:` — the separator search still
+        // finds `:` and the quote check still fails.
+        let line = r#"        api_key:encrypt_non_empty(&config.api_key,key)?,"#;
+        let findings = scan_security_patterns_in_text("src/store/rows.rs", line);
+        assert!(
+            findings.is_empty(),
+            "tight-spaced struct-field api_key must be skipped: {line} → {findings:?}"
+        );
+
+        // Quoted struct literal — separator is `:` but a quote WAS
+        // consumed, so the skip does NOT fire. This is the
+        // "preserve true positives" case: a struct literal with a
+        // literal credential IS a real leak.
+        let real = "a".repeat(16);
+        let line = format!(r#"        api_key: "{real}","#);
+        let findings = scan_security_patterns_in_text("src/store/rows.rs", &line);
+        assert!(
+            findings.iter().any(|f| f.pattern == "Possible API key"),
+            "quoted struct-literal api_key must still report: {findings:?}"
+        );
+
+        // Indirect assignment — separator is `=`, not `:`, so the
+        // skip does NOT fire even though no quote was consumed.
+        // This is the existing M19 / RENG-19 behaviour: the unquoted
+        // 16-char token after `api_key=` is treated as a real
+        // assignment shape.
+        let line = r#"        api_key = someLongVariableName123;"#;
+        let findings = scan_security_patterns_in_text("src/store.rs", line);
+        assert!(
+            !findings.is_empty(),
+            "unquoted api_key assignment (sep `=`) must still report: {findings:?}"
+        );
+    }
+
+    /// Real positives must keep firing after the M28 skip layers:
+    /// - production `api_key = "literal"` in a non-test file (quote
+    ///   consumed → Possible API key),
+    /// - literal `:password="hunter2_real"` in a `.vue` file (the
+    ///   char before `password` is `:`, not `-`, so the Vue skip does
+    ///   not fire),
+    /// - `let password = "real_value"` in a non-test `.rs` file
+    ///   (line is not a comment, file is not markdown, no Vue prop
+    ///   binding, no api_key, no placeholder).
+    #[test]
+    fn scan_security_patterns_in_text_keeps_real_positives_after_m28_skips() {
+        let real = "a".repeat(16);
+
+        // Production-line quoted api_key literal — must fire.
+        let line = format!(r#"let config = Config {{ api_key: "{real}" }};"#);
+        let findings = scan_security_patterns_in_text("src/lib.rs", &line);
+        assert!(
+            findings.iter().any(|f| f.pattern == "Possible API key"),
+            "quoted api_key literal must still report: {findings:?}"
+        );
+
+        // Literal Vue prop binding (no hyphen in LHS) — char before
+        // `password` is `:`, not `-`, so the Vue skip does not fire.
+        // A literal `:password="hunter2_real"` is a real credential
+        // leak and must report.
+        let line = r#"<my-component :password="hunter2_real" />"#;
+        let findings = scan_security_patterns_in_text("frontend/src/components/MyComponent.vue", line);
+        assert!(
+            findings.iter().any(|f| f.pattern == "Hardcoded password"),
+            "literal Vue :password prop must still report: {findings:?}"
+        );
+
+        // Production-line `let password = "real"` in a regular `.rs`
+        // file (not a comment line) — must fire.
+        let line = r#"    let password = "real_secret_123";"#;
+        let findings = scan_security_patterns_in_text("src/lib.rs", line);
+        assert!(
+            findings.iter().any(|f| f.pattern == "Hardcoded password"),
+            "real password assignment must still report: {findings:?}"
+        );
+
+        // Production-line `token = "long_lit"` (20+ chars) — must fire.
+        let token_value = "a".repeat(20);
+        let line = format!(r#"    let token = "{token_value}";"#);
+        let findings = scan_security_patterns_in_text("src/lib.rs", &line);
+        assert!(
+            findings.iter().any(|f| f.pattern == "Possible token"),
+            "real token literal must still report: {findings:?}"
+        );
+    }
+
+    /// Comprehensive regression corpus: every one of the 20
+    /// mechanical false positives from the M25 self-audit
+    /// (`reports/reng-self-audit/raw-report.md` security section,
+    /// 20 lines all marked `[mechanical]`) must now return zero
+    /// findings. A single failing row is a regression — the
+    /// security score would jump back to 68/100 on the same audit
+    /// and the per-finding noise would return.
+    ///
+    /// The corpus is parameterised by `(file, line)` so a future
+    /// review can extend the list without touching the assertion
+    /// shape; the assert message quotes both pieces so a failure
+    /// points at the offending reproducer directly.
+    #[test]
+    fn scan_security_patterns_in_text_skips_m28_regression_corpus() {
+        let corpus: &[(&str, &str)] = &[
+            // (a) Markdown prose — CHANGELOG.md ×3
+            (
+                "CHANGELOG.md",
+                r#"- **Inline `#[cfg(test)] mod … { … }` blocks … `password = "real_password"` is exactly the**"#,
+            ),
+            (
+                "CHANGELOG.md",
+                r#"- **The security expert separates … `password = "…"` …**"#,
+            ),
+            (
+                "CHANGELOG.md",
+                r#"- **`Evidence` blocks are redacted … `password = "…"` …**"#,
+            ),
+            // (b) Vue prop bindings — GitPlatformForm.vue ×3
+            (
+                "frontend/src/components/Config/GitPlatformForm.vue",
+                r#"              :show-password="showPasswordFor(draft.token)""#,
+            ),
+            (
+                "frontend/src/components/Config/GitPlatformForm.vue",
+                r#"              :show-password="showPasswordFor(draft.webhookSigningSecret)""#,
+            ),
+            (
+                "frontend/src/components/Config/GitPlatformForm.vue",
+                r#"              :show-password="showPasswordFor(draft.webhookSecret)""#,
+            ),
+            // (c) Rust line comments — secrets.rs ×9
+            (
+                "src/models/secrets.rs",
+                r#"//! line of `config.toml` with `password = "real_password"` is exactly the"#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"//! password = "***[redacted:kind=password,len=12,fp=abcdef0123456789,key=password]***""#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"    /// `password = "…"`, `db_password: …`, etc."#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"/// assignment patterns (so the marker can echo `password = "…"` instead of"#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"/// The order matters: structured assignments (`password = "…"`) are scanned"#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"/// placeholder (`password = "x"`) than a real secret, and redacting it makes"#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"/// `password = "glpat-…"` line is reported as `password`, not also as a"#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"/// `key = value` lines stay syntactically intact: `password = "abc123"` is"#,
+            ),
+            (
+                "src/models/secrets.rs",
+                r#"/// rewritten to `password = "***[redacted:kind=password,len=6,fp=…,key=password]***"`,"#,
+            ),
+            // (c) Rust line comments — output / renderer / team_renderer / facts / handlers ×5
+            (
+                "src/output/renderer.rs",
+                r#"            // password = 'hunter2_real' claim is wrong, the actual value"#,
+            ),
+            (
+                "src/output/team_renderer.rs",
+                r#"                // like `leaked: password = "hunter2_real_secret"` reaching"#,
+            ),
+            (
+                "src/repo/experts/facts.rs",
+                r#"/// / 994 — four `password: "sk"` assignments inside the file's"#,
+            ),
+            (
+                "src/cli/handlers/output.rs",
+                r#"/// read it, which means a quoted `password = "real_password"` line in"#,
+            ),
+            // (c) Identifier-only api_key — store/rows.rs ×1
+            (
+                "src/store/rows.rs",
+                r#"        api_key: encrypt_non_empty(&config.api_key, key)?,"#,
+            ),
+        ];
+        assert_eq!(
+            corpus.len(),
+            20,
+            "M28 regression corpus must list every M25 self-audit FP"
+        );
+        for (idx, (path, line)) in corpus.iter().enumerate() {
+            let findings = scan_security_patterns_in_text(path, line);
+            assert!(
+                findings.is_empty(),
+                "M28 FP #{idx} regressed at {path}: {line} → {findings:?}"
+            );
+        }
+    }
+
+    /// Belt-and-braces: the aggregated `scan_security_patterns` entry
+    /// skips markdown paths before reading the file, so a CHANGELOG
+    /// with the three prose bullets never even reaches the in-text
+    /// scan. The two layers (entry-level + in-text) agree.
+    #[test]
+    fn scan_security_patterns_skips_markdown_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = r#"- **Real-looking bullet** with `password = "real_password"` to ensure the regex fires"#;
+
+        let md_path = dir.path().join("CHANGELOG.md");
+        let rs_path = dir.path().join("src").join("lib.rs");
+        std::fs::create_dir_all(rs_path.parent().unwrap()).unwrap();
+        std::fs::write(&md_path, body).unwrap();
+        std::fs::write(&rs_path, body).unwrap();
+
+        let entries = vec![
+            FileEntry {
+                path: md_path.to_string_lossy().into_owned(),
+                language: "Documentation".to_string(),
+                loc: 1,
+                is_binary: false,
+                is_generated: false,
+            },
+            FileEntry {
+                path: rs_path.to_string_lossy().into_owned(),
+                language: "Rust".to_string(),
+                loc: 1,
+                is_binary: false,
+                is_generated: false,
+            },
+        ];
+
+        let findings = scan_security_patterns(&entries);
+        assert_eq!(
+            findings.len(),
+            1,
+            "only the .rs entry should produce a finding, got {findings:?}"
+        );
+        assert!(
+            findings[0].file.ends_with("lib.rs"),
+            "the surviving hit must be the non-markdown file: {:?}",
+            findings[0]
+        );
     }
 }

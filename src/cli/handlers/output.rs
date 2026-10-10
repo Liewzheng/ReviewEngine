@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use review_engine::compliance::render::render_compliance_section;
 use review_engine::models::*;
 use std::path::{Path, PathBuf};
 
@@ -53,6 +54,20 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
                 }
                 text.push_str("\n---\n\n");
                 text.push_str(&review_engine::output::team_renderer::render_lead_summary(consolidated));
+            }
+            // M40 / RENG ticket compliance section: rendered after the
+            // lead summary and BEFORE the verification appendix so it sits
+            // alongside the per-expert sections, not in the footer (the
+            // P2-5 review caught a comment-vs-code drift on the order).
+            if let Some(compliance) = &result.compliance {
+                let section = render_compliance_section(compliance);
+                if !section.is_empty() {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str("\n---\n\n");
+                    text.push_str(&section);
+                }
             }
             let appendix = review_engine::output::renderer::render_dropped_findings_appendix(
                 &result.dropped_findings,
@@ -305,6 +320,7 @@ mod tests {
             dropped_findings: vec![],
             consolidated,
             errors: vec![],
+            compliance: None,
         }
     }
 
@@ -326,6 +342,7 @@ mod tests {
             diff: Default::default(),
             rate_limit: Default::default(),
             languages: Default::default(),
+            compliance: Default::default(),
         };
         let (_, mr_info) = prepare_review(&config, "/real/repo", "local", "main");
         assert_eq!(mr_info.project_path, "/real/repo");
@@ -383,6 +400,85 @@ mod tests {
         assert!(out.contains("\"score\": 72"));
         assert!(out.contains("\"risk_level\": \"Medium\""));
     }
+
+    /// M40 / RENG: when `compliance = None` the section is absent.
+    #[test]
+    fn test_format_output_markdown_without_compliance_omits_section() {
+        let out = render(&sample_output(None), "markdown", false);
+        assert!(
+            !out.contains("## Ticket compliance check"),
+            "compliance = None → section absent"
+        );
+    }
+
+    /// M40 / RENG: when `compliance = Some(_)` the section appears alongside
+    /// the per-expert sections (before the verification appendix).
+    #[test]
+    fn test_format_output_markdown_with_compliance_renders_section() {
+        let mut output = sample_output(Some(make_consolidated()));
+        let mut compliance = review_engine::compliance::ComplianceOutput::empty();
+        compliance
+            .notes
+            .push("description references 4 tickets, capped at 3".to_string());
+        compliance
+            .fetch_failures
+            .push(review_engine::compliance::FetchedTicket {
+                ticket_ref: review_engine::compliance::TicketRef {
+                    provider: review_engine::compliance::TicketProvider::GitLab,
+                    project: Some("g/p".into()),
+                    iid: 99,
+                    url: "https://gitlab.example.com/g/p/-/work_items/99".into(),
+                    source: "!99".into(),
+                },
+                title: String::new(),
+                body: String::new(),
+                web_url: None,
+                error: Some("HTTP 404".into()),
+            });
+        output.compliance = Some(compliance);
+        let out = render(&output, "markdown", false);
+        assert!(out.contains("## Ticket compliance check"), "section heading is emitted");
+        assert!(out.contains("fetch failed"), "fetch failure is rendered");
+        assert!(out.contains("capped at 3"), "notes are rendered");
+    }
+
+    /// P2-2: fetched-but-unanalysed tickets are rendered on their own
+    /// block, not under the "fetch failed" heading. The reader must not
+    /// see "fetch failed" when the fetch actually succeeded.
+    #[test]
+    fn test_format_output_markdown_unanalysed_renders_separately_from_failed() {
+        let mut output = sample_output(Some(make_consolidated()));
+        let mut compliance = review_engine::compliance::ComplianceOutput::empty();
+        compliance
+            .unanalysed_tickets
+            .push(review_engine::compliance::FetchedTicket {
+                ticket_ref: review_engine::compliance::TicketRef {
+                    provider: review_engine::compliance::TicketProvider::GitLab,
+                    project: Some("g/p".into()),
+                    iid: 73,
+                    url: "https://gitlab.example.com/g/p/-/work_items/73".into(),
+                    source: "#73".into(),
+                },
+                title: "SIRENA-84".into(),
+                body: "...".into(),
+                web_url: Some("https://gitlab.example.com/g/p/-/work_items/73".into()),
+                error: None,
+            });
+        compliance
+            .notes
+            .push("compliance gate is on but no usable LLM is configured".to_string());
+        output.compliance = Some(compliance);
+        let out = render(&output, "markdown", false);
+        assert!(out.contains("fetched but not analysed"), "unanalysed bucket header");
+        assert!(out.contains("SIRENA-84"), "fetched title is rendered");
+        // The fetched ticket must NOT be labelled "fetch failed".
+        let unanalysed_pos = out.find("fetched but not analysed").expect("header is present");
+        let failed_pos = out.find("fetch failed").unwrap_or(usize::MAX);
+        assert!(
+            unanalysed_pos < failed_pos || failed_pos == usize::MAX,
+            "unanalysed header must not be replaced by a 'fetch failed' header for the same ticket"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -406,6 +502,7 @@ mod report_output_tests {
             diff: Default::default(),
             rate_limit: Default::default(),
             languages: Default::default(),
+            compliance: Default::default(),
         }
     }
 

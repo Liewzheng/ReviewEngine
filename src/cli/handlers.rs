@@ -58,6 +58,7 @@ pub(super) fn single_expert_review_output(expert_name: &str, markdown: String) -
         dropped_findings: vec![],
         consolidated: None,
         errors: vec![],
+        compliance: None,
     }
 }
 

@@ -23,6 +23,15 @@ pub(super) fn apply_env_overrides(mut config: AppConfig) -> AppConfig {
     if let Ok(val) = std::env::var("CODE_AUDIT_SCORING_ENABLED") {
         config.scoring.enabled = val == "true" || val == "1";
     }
+    // M40 / RENG: `CODE_AUDIT_COMPLIANCE_ENABLED=true` turns on the
+    // ticket-compliance sub-step (same shape as `CODE_AUDIT_SCORING_ENABLED`).
+    // Env vars override the discovered file(s) on every path (the
+    // auto-detect branch runs this last; the `--config` branch runs it
+    // last via `load_and_apply`), so a non-true / non-1 value disables
+    // the gate even if a config file turned it on — env vars win.
+    if let Ok(val) = std::env::var("CODE_AUDIT_COMPLIANCE_ENABLED") {
+        config.compliance.enabled = val == "true" || val == "1";
+    }
     config
 }
 

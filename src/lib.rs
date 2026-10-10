@@ -15,6 +15,7 @@
 
 pub mod actions;
 pub mod catalog;
+pub mod compliance;
 pub mod config;
 pub mod context;
 pub mod coverage;
@@ -172,6 +173,17 @@ pub async fn run_review(
         .with_consolidated(consolidated)
         // RENG-77 §4: experts that produced no report, with the reason each saw.
         .with_errors(expert_failures);
+
+    // M40 / RENG ticket compliance check (M39 §7 Option A): gated by
+    // `[compliance] enabled` in the resolved AppConfig. Fail-soft: a
+    // compliance failure never aborts the review.
+    let output =
+        match crate::compliance::run_for_review(&app_config.compliance, &mr_info, mr_url, &diff, &llm_configs, token)
+            .await
+        {
+            Some(compliance) => output.with_compliance(compliance),
+            None => output,
+        };
 
     // Mark progress complete
     crate::progress::complete_progress(Some(&progress_map), &review_id);

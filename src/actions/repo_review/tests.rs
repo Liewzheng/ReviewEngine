@@ -1749,6 +1749,7 @@ async fn test_run_local_repo_review_metadata_non_git_and_score_samples() {
         diff: Default::default(),
         rate_limit: Default::default(),
         languages: Default::default(),
+        compliance: ComplianceConfig::default(),
     };
     let output = run_local_repo_review(
         dir.path().to_str().unwrap(),

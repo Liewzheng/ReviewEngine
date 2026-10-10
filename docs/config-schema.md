@@ -21,7 +21,7 @@ Whether these two top-level scalars are honoured depends on how the file is read
 | How the file is read | Are the keys honoured? |
 |---|---|
 | `--config <file>` (and the library's `ConfigSource::Path` / `Inline`) | Yes — the whole `AppConfig` is deserialized, so `max_concurrent_llm_calls` bounds the review's LLM concurrency. `max_team_size` reaches the config but is not enforced by any review path (see above) |
-| The auto-detected `.code-audit-config.toml` (user-level `~/.config/review-engine/` or project-level, i.e. what `reng review` reads without `--config`) | **No** — the resolver lifts only `llm`, `report`, `commands` and `review_experts` out of the file, so both scalars are ignored there |
+| The auto-detected `.code-audit-config.toml` (user-level `~/.config/review-engine/` or project-level, i.e. what `reng review` reads without `--config`) | **No** — the resolver lifts only `llm`, `report`, `commands`, `review_experts` and `compliance` out of the file, so both scalars are ignored there |
 | The Web UI / database (`serve`) | The Configuration page's `advanced.maxConcurrentReviews` is stored in `review.db` and written to both `AppConfig` fields; `max_concurrent_llm_calls` is the one that actually limits concurrency |
 
 A value of **`0` is treated as "not decided", never as a limit**: a concurrency semaphore with zero permits would leave every expert task waiting forever — a silent hang with no error, no timeout and no last log line — so the built-in default `6` applies instead. `reng` prints one warning naming the key it ignored, and the review and repo-review pipelines carry their own backstop for callers that never go through the CLI (they warn if a `0` reaches a semaphore at all).
@@ -50,6 +50,16 @@ A value of **`0` is treated as "not decided", never as a limit**: a concurrency 
 | `adjudicate` | boolean | `true` | Final false-positive pass after lead consolidation: each finding at or above `adjudicate_min_severity` is re-examined by the lead model against the **full** content of the cited file (bypassing the context byte caps), and findings the code disproves are dropped with a recorded reason in `adjudicated_removed`. Server-side (webhook/API) reviews fetch that file through the provider API at the reviewed SHA — GitLab `GET /projects/:id/repository/files/:path/raw`, GitHub contents API — because they never clone; local reviews read the checkout. Fail-open: an unfetchable file (404, transport failure, or a token without repository read access) keeps the affected findings unchanged and logs why. The summary is recomputed over the surviving findings when the pass finishes (RENG-73), so the prose never counts a severity the published list lost; **downgrades** are only logged (`adjudicate_min_severity` candidates downgraded in place), never recorded in the payload |
 | `adjudicate_min_severity` | string | `"high"` | Minimum severity that reaches the adjudication pass: `critical`, `high`, `medium`, `low` or `note`. Unrecognized values fall back to `high` with a warning |
 | `feedback_filtering` | boolean | `true` | When `true`, findings previously marked as false positives via the feedback API (matched by stable fingerprint) are filtered out of subsequent reviews and listed in `dropped_findings`; fail-open when the feedback file is missing or unreadable |
+
+## `[compliance]`
+
+M40 / RENG ticket compliance check: when the MR/PR description references a recognised ticket (`Closes #N`, `<work_item_URL>`, `org/repo#N`), fetch each ticket body and run a single LLM judgement comparing the diff to the ticket's requirements. The result is rendered as a `## Ticket compliance check` section alongside the per-expert findings. Off by default. (GitLab's `!N` MR sigil is intentionally NOT matched — it refers to a merge request, not an issue.)
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | boolean | `false` | Master toggle. When `false`, the compliance sub-step is skipped (no LLM calls, no HTTP calls). |
+
+Environment override: `CODE_AUDIT_COMPLIANCE_ENABLED=true` turns the gate on (overrides the file value).
 
 ## `[scoring]`
 
@@ -291,4 +301,4 @@ Later sources override earlier ones:
 
 `--config` selects the project-level file in step 4 and `--llm-config` replaces the resolved `[[llm]]` list for one run; neither is a further layer. `LLM_CONFIG` is the one surface that does not follow the order above on the CLI — there it outranks both the file and the database (see the priority note in [`[[llm]]`](#llm)). See [Configuration resolution order](configuration.md#config-resolution-order) for the full rules and how to point the CLI at a server's config directory with `--config-dir`.
 
-When no `--config` is given, the user-level file contributes `[[llm]]` (as a fallback) and `[report]` (as global defaults); the project-level file then overrides `commands`/`review_experts` (extended) and `[report]` (replaced wholesale — fields omitted in the project file fall back to serde defaults, not user-level values).
+When no `--config` is given, the user-level file contributes `[[llm]]` (as a fallback) and `[report]` (as global defaults); the project-level file then overrides `commands`/`review_experts`/`[compliance]` (extended) and `[report]` (replaced wholesale — fields omitted in the project file fall back to serde defaults, not user-level values).

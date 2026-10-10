@@ -49,6 +49,14 @@ pub struct AppConfig {
     /// Language-specific profiles for multi-language project support.
     #[serde(default)]
     pub languages: LanguagesConfig,
+    /// M40 / RENG ticket compliance check (M39 §7 Option A): when the MR/PR
+    /// description references a ticket (`#N`, `<work_item_URL>`,
+    /// `org/repo#N`), fetch it and run a single LLM judgement comparing the
+    /// diff against the ticket's requirements. Off by default — every
+    /// disabled run pays zero extra calls (see [`ComplianceConfig`]).
+    /// GitLab `!N` is the MR sigil and is intentionally NOT matched.
+    #[serde(default)]
+    pub compliance: ComplianceConfig,
 }
 
 /// Optional project metadata block from the config file.
@@ -292,6 +300,51 @@ impl Default for RiskThresholdConfig {
             medium_max: 80,
             low_max: 95,
             healthy_min: 90,
+        }
+    }
+}
+
+/// Ticket-compliance-check configuration (M40 / RENG).
+///
+/// The compliance check is the M39 §7 Option A gated sub-step: when an MR
+/// description contains a recognised ticket reference (`Closes #N`,
+/// `<work_item_URL>`, `owner/repo#N`, etc.), the review fetches each
+/// referenced ticket and runs a single LLM call that compares the diff to
+/// the ticket's requirements, rendering a `## Ticket compliance check`
+/// section alongside the per-expert findings. GitLab's `!N` MR sigil is
+/// intentionally NOT matched — it refers to a merge request, not an issue.
+///
+/// Gating (verified end-to-end by the M40 tests):
+/// * `enabled = false` → zero extra LLM calls, zero extra HTTP calls;
+///   the section is absent from the report.
+/// * `enabled = true` and the MR has no ticket refs → still zero extra
+///   calls (the regex parser finds nothing); the section is absent.
+/// * `enabled = true` and the MR has refs → exactly **one** LLM call
+///   (regardless of the number of refs, up to [`MAX_TICKETS_PER_REVIEW`])
+///   and one HTTP fetch per reference (failures are surfaced as a note in
+///   the section, not as a review-blocking error).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ComplianceConfig {
+    /// Master toggle. When `false` (the default) the compliance check is
+    /// skipped entirely; the review runs unchanged and the report carries
+    /// no `## Ticket compliance check` section.
+    #[serde(default = "default_compliance_disabled")]
+    pub enabled: bool,
+}
+
+fn default_compliance_disabled() -> bool {
+    false
+}
+
+/// Maximum number of ticket references analysed per MR/PR. Mirrors
+/// pr-agent's `MAX_GITLAB_TICKETS` / `MAX_GITHUB_TICKETS` so the
+/// single-LLM-call cost stays bounded on multi-ticket descriptions.
+pub const MAX_TICKETS_PER_REVIEW: usize = 3;
+
+impl Default for ComplianceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_compliance_disabled(),
         }
     }
 }
@@ -627,6 +680,7 @@ mod tests {
             diff: DiffConfig::default(),
             rate_limit: RateLimitConfig::default(),
             languages: LanguagesConfig::default(),
+            compliance: ComplianceConfig::default(),
         };
 
         let defs = config.build_expert_defs();

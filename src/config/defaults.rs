@@ -67,6 +67,7 @@ pub fn merge_default(user: AppConfig) -> Result<AppConfig> {
         diff: user.diff,
         rate_limit: user.rate_limit,
         languages: user.languages,
+        compliance: user.compliance,
     })
 }
 

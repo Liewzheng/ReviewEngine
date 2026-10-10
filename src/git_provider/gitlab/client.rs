@@ -611,6 +611,95 @@ impl Client {
         Ok(parse_blob_search_paths(&value, limit))
     }
 
+    /// Fetch a single GitLab issue by iid, optionally under a different
+    /// project than the one this client is bound to (M40 / RENG ticket
+    /// compliance: cross-project ticket refs like `isletspace/sirena!73`
+    /// resolve to a project other than the MR's).
+    ///
+    /// Returns a [`crate::compliance::FetchedTicket`]. On any non-2xx
+    /// response the ticket is returned with `error` set so the compliance
+    /// orchestrator can surface a section note rather than failing the
+    /// review.
+    pub async fn fetch_issue(&self, project_path: Option<&str>, iid: u32) -> Result<crate::compliance::FetchedTicket> {
+        use crate::compliance::fetch::{gitlab_issue_url, TICKET_BODY_BUDGET};
+        use crate::compliance::FetchedTicket;
+
+        let project = project_path.unwrap_or(&self.project_path);
+        let url = gitlab_issue_url(&self.base_url, project, iid);
+        let ticket_ref = crate::compliance::TicketRef {
+            provider: crate::compliance::TicketProvider::GitLab,
+            project: Some(project.to_string()),
+            iid,
+            url: url.clone(),
+            source: format!("!{iid}"),
+        };
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", self.auth_header())
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(FetchedTicket {
+                    ticket_ref,
+                    title: String::new(),
+                    body: String::new(),
+                    web_url: None,
+                    error: Some(format!("transport: {e}")),
+                });
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Ok(FetchedTicket {
+                ticket_ref,
+                title: String::new(),
+                body: String::new(),
+                web_url: None,
+                error: Some(format!(
+                    "HTTP {status}: {}",
+                    crate::llm::sampling::truncate_error(&body)
+                )),
+            });
+        }
+        #[derive(serde::Deserialize)]
+        struct GitLabIssue {
+            title: Option<String>,
+            description: Option<String>,
+            web_url: Option<String>,
+        }
+        let issue: GitLabIssue = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(FetchedTicket {
+                    ticket_ref,
+                    title: String::new(),
+                    body: String::new(),
+                    web_url: None,
+                    error: Some(format!("parse: {e}")),
+                });
+            }
+        };
+        let body = issue.description.unwrap_or_default();
+        let body = if body.chars().count() > TICKET_BODY_BUDGET {
+            let mut out: String = body.chars().take(TICKET_BODY_BUDGET).collect();
+            out.push_str("\n\n[…truncated]");
+            out
+        } else {
+            body
+        };
+        Ok(FetchedTicket {
+            ticket_ref,
+            title: issue.title.unwrap_or_default(),
+            body,
+            web_url: issue.web_url,
+            error: None,
+        })
+    }
+
     pub async fn post_comment(&self, body: &str) -> Result<()> {
         let project = self.encoded_project_path();
         let url = format!(

@@ -81,6 +81,13 @@ pub(crate) fn convert_scores(scores: &[ExpertScore]) -> ConvertedScores {
             samples: s.samples.clone(),
             sample_min,
             sample_max,
+            // M18-W2: surface the by-expert sample-fallback rate on the
+            // serialized report so dashboards can aggregate over time.
+            // Both fields are `None` on the single-shot path
+            // (`score_samples = 1`), and the renderer skips the row when
+            // `samples` is absent — so absent == no sampling == no rate.
+            samples_attempted: s.samples_attempted,
+            samples_failed: s.samples_failed,
         });
     }
     ConvertedScores {
@@ -239,26 +246,89 @@ pub(crate) fn pick_top_risks(risk_categories: &[RiskCategory]) -> Vec<(String, u
     top
 }
 
+/// Marker prefix in a fallback `ExpertScore::summary` so the renderer and
+/// any consumer reading the JSON contract can tell at a glance that the
+/// chunk was not reviewed by the model — a stronger signal than the
+/// `fallback: true` flag (which the LLM_FALLBACK_SCORE placeholder also
+/// carries for unrelated expert failures). The chunk-failed surface MUST
+/// stay readable: M26 added the `disable_thinking` retry for the empty-
+/// completion path, but a chunk whose LLM call hits a credential / 4xx /
+/// non-empty error still lands here, and the reader needs the word
+/// "not reviewed" in the prose to know that the chunk's real code was
+/// never assessed by the model.
+pub(crate) const CHUNK_NOT_REVIEWED_PREFIX: &str = "chunk not reviewed";
+
 /// Build the explicit fallback score for a failed CodeQuality chunk.
 ///
 /// The score lands in the report (flagged `fallback`) instead of vanishing,
 /// so the aggregate keeps the code_quality weight and consumers can see
 /// that this chunk was not genuinely assessed. `evaluated_loc` uses the
 /// chunk's true LOC so the LOC-weighted merge still weights it correctly.
+///
+/// The summary carries the `chunk not reviewed` prefix
+/// ([`CHUNK_NOT_REVIEWED_PREFIX`]) so the renderer's "Detailed Findings"
+/// surface can detect this specific failure class — the report
+/// assembler's `Chunks Reviewed` appendix (M26) keys off it to enumerate
+/// the chunks that never reached a real model assessment.
 pub(crate) fn chunk_fallback_score(chunk: &crate::repo::experts::chunk::CodeChunk, reason: String) -> ExpertScore {
     ExpertScore {
         expert_name: "code_quality".to_string(),
         weight: llm_experts::CodeQuality.weight(),
         score: experts::LLM_FALLBACK_SCORE,
-        summary: format!("Module {}: {reason}", chunk.module),
+        summary: format!("{CHUNK_NOT_REVIEWED_PREFIX} — module {}: {reason}", chunk.module),
         details: Vec::new(),
         fallback: true,
         evaluated_loc: Some(chunk.total_loc as u64),
         samples: None,
+        // M26 / M18-W2: chunk-fallback scores carry no per-sample-rate signal
+        // — the chunk task does one expert call, not N — so leave the
+        // sampling counters at their `Default::default()` (None).
+        ..Default::default()
     }
 }
 
-/// Remove verification-dropped findings from the code_quality chunk scores.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo::experts::chunk::CodeChunk;
+
+    fn fixture_chunk(module: &str, loc: usize) -> CodeChunk {
+        CodeChunk {
+            module: module.to_string(),
+            files: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+            total_loc: loc,
+            code: String::new(),
+        }
+    }
+
+    /// M26 visibility: every chunk-level fallback score carries the
+    /// `chunk not reviewed` prefix AND a module-specific summary line so
+    /// a reader can grep the report (or the JSON) for any chunk the model
+    /// didn't assess. The prefix is the contract the renderer keys off to
+    /// build the `Chunks Reviewed` appendix.
+    #[test]
+    fn chunk_fallback_score_carries_not_reviewed_prefix_and_module() {
+        let score = chunk_fallback_score(&fixture_chunk("src/llm", 123), "boom".to_string());
+        assert!(score.fallback, "fallback flag must be set");
+        assert_eq!(score.expert_name, "code_quality");
+        assert_eq!(score.evaluated_loc, Some(123), "real LOC survives");
+        assert!(
+            score.summary.starts_with(CHUNK_NOT_REVIEWED_PREFIX),
+            "summary must lead with the chunk-not-reviewed prefix: {}",
+            score.summary
+        );
+        assert!(
+            score.summary.contains("src/llm"),
+            "the summary must name the module so the report's reader can grep for it: {}",
+            score.summary
+        );
+        assert!(
+            score.summary.contains("boom"),
+            "the reason must reach the rendered summary line: {}",
+            score.summary
+        );
+    }
+}
 ///
 /// `kept` holds the surviving standard findings, matched against the chunk
 /// `ScoreItem`s by (file, title, severity, category), where `title`

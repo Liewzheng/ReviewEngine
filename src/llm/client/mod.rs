@@ -557,6 +557,22 @@ impl LLMClient {
         );
 
         for (i, config) in configs.iter().enumerate() {
+            // RENG-77 §4 hardening (M26): a single empty completion against a
+            // reasoning model is the most common real-world failure mode
+            // (mimo-v2.5-pro / deepseek-v4-flash family burn the whole
+            // max_tokens budget on reasoning_tokens and answer empty). The
+            // original loop gave up on the provider immediately, dropped the
+            // chunk to a 70-fallback, and never tried the cheapest fix the
+            // config already supports: re-send the SAME request once with
+            // `disable_thinking = true`. Done BEFORE the normal backoff
+            // retries so a single retryable 5xx storm isn't masked, and
+            // bounded to ONE extra attempt per provider — a reasoning model
+            // that ignores `thinking: disabled` will answer empty again, and
+            // we want the chain to advance rather than burn the call budget.
+            // The provider-level `for attempt in 0..max_retries` loop still
+            // wraps everything, so the inner `break` on a failed retry lands
+            // here and the chain advances to the next entry.
+
             for attempt in 0..max_retries {
                 let _attempt_start = std::time::Instant::now();
                 // RENG-57: the sample this attempt produces must name where in
@@ -599,6 +615,88 @@ impl LLMClient {
                         let verdict = Self::retry_verdict(&e);
                         let is_retriable = matches!(verdict, RetryVerdict::Retryable { .. } | RetryVerdict::Unknown);
 
+                        // RENG-77 §4 hardening (M26): empty completion against a
+                        // provider that hasn't already opted in to
+                        // `disable_thinking` → re-send the SAME request once
+                        // with `thinking: disabled`. This is the documented
+                        // mitigation for the `mimo-v2.5-pro` /
+                        // `deepseek-v4-flash` failure mode (the request was
+                        // accepted, so a normal 5xx retry would just repeat
+                        // it) and is the cheapest way to convert an empty
+                        // answer into a real one. Bounded to ONE extra
+                        // attempt per provider.
+                        if let RetryVerdict::Empty = verdict {
+                            // The retry is only meaningful if the config
+                            // hasn't already opted in to `disable_thinking`;
+                            // otherwise re-sending the same request is a
+                            // guaranteed repeat. The retry is also bounded to
+                            // ONE attempt — the `attempt` counter for the
+                            // recording sample uses the original index (a retry
+                            // of attempt N is not a fresh attempt N+1), and
+                            // we `break` to the chain either on success
+                            // (return) or on still-empty (no further recovery
+                            // exists for this provider).
+                            if config.disable_thinking != Some(true) {
+                                let mut retry_config = config.clone();
+                                retry_config.disable_thinking = Some(true);
+                                tracing::warn!(
+                                    provider = %config.provider,
+                                    model = %config.model,
+                                    chain_position = i + 1,
+                                    attempt = attempt + 1,
+                                    took = ?attempt_dur,
+                                    "LLM provider returned an empty completion; \
+                                     retrying the SAME provider once with disable_thinking=true \
+                                     (RENG-77 §4 hardening / M26)"
+                                );
+                                let retry_start = std::time::Instant::now();
+                                let retry_result = self
+                                    .complete_attempt(
+                                        &retry_config,
+                                        system_prompt,
+                                        user_prompt,
+                                        i as u32 + 1,
+                                        attempt + 1,
+                                    )
+                                    .await;
+                                let retry_dur = retry_start.elapsed();
+                                match retry_result {
+                                    Ok(r) => {
+                                        tracing::info!(
+                                            provider = %retry_config.provider,
+                                            model = %retry_config.model,
+                                            chain_position = i + 1,
+                                            attempt = attempt + 1,
+                                            took = ?retry_dur,
+                                            "disable_thinking retry recovered the empty completion (M26)"
+                                        );
+                                        let fallback = i > 0;
+                                        return Ok(Self::attribute_provider(r, &retry_config, fallback));
+                                    }
+                                    Err(retry_err) => {
+                                        let retry_verdict = Self::retry_verdict(&retry_err);
+                                        tracing::warn!(
+                                            provider = %retry_config.provider,
+                                            model = %retry_config.model,
+                                            chain_position = i + 1,
+                                            attempt = attempt + 1,
+                                            took = ?retry_dur,
+                                            retry_verdict = ?retry_verdict,
+                                            error = %retry_err,
+                                            "disable_thinking retry still failed; advancing chain (M26)"
+                                        );
+                                        last_error = retry_err;
+                                        // Skip the backoff retry path: the
+                                        // `disable_thinking` retry is the
+                                        // empty-specific recovery and there is
+                                        // nothing more the same provider can
+                                        // do for an empty answer.
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
                         if is_retriable && attempt + 1 < max_retries {
                             let delay = Self::retry_delay(attempt);
                             tracing::warn!(
@@ -634,6 +732,8 @@ impl LLMClient {
                         // RENG-77 §4: the provider answered with nothing. The
                         // request itself was accepted, so a retry would repeat
                         // it — the config is given up and the chain advances.
+                        // (The M26 `disable_thinking` retry above already
+                        // ran; this branch is the no-recovery path.)
                         if let RetryVerdict::Empty = verdict {
                             tracing::warn!(
                                 provider = %config.provider,

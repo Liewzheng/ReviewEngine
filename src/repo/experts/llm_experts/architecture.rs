@@ -106,6 +106,8 @@ impl RepoExpert for ArchitectureLead {
             fallback,
             evaluated_loc: Some(ctx.stats.total_loc as u64),
             samples: call.samples,
+            samples_attempted: Some(call.samples_attempted),
+            samples_failed: Some(call.samples_failed),
         })
     }
 }

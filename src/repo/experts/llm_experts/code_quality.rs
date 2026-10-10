@@ -125,6 +125,8 @@ impl RepoExpert for CodeQuality {
             fallback,
             evaluated_loc: Some(ctx.entries.iter().map(|e| e.loc as u64).sum()),
             samples: call.samples,
+            samples_attempted: Some(call.samples_attempted),
+            samples_failed: Some(call.samples_failed),
         })
     }
 }

@@ -62,6 +62,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
             conclusion,
             dropped_findings: vec![],
             verification_ran: false,
+            chunk_summary: Default::default(),
             metadata: ReviewMetadata::default(),
         });
     }
@@ -88,6 +89,7 @@ fn parse_repo_review_response(response: &str) -> Result<RepoReviewOutput> {
         },
         dropped_findings: vec![],
         verification_ran: false,
+        chunk_summary: Default::default(),
         metadata: ReviewMetadata::default(),
     })
 }
@@ -112,6 +114,7 @@ fn test_convert_scores_architecture_extracts_lead_summary() {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     }];
     let conv = convert_scores(&scores);
     assert_eq!(conv.expert_scores.len(), 1);
@@ -131,6 +134,7 @@ fn test_convert_scores_non_architecture_lead_summary_none() {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     }];
     let conv = convert_scores(&scores);
     assert!(conv.lead_summary.is_none());
@@ -158,6 +162,7 @@ fn test_convert_scores_preserves_details() {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     }];
     let conv = convert_scores(&scores);
     assert_eq!(conv.expert_scores[0].details.len(), 1);
@@ -183,6 +188,7 @@ fn test_convert_scores_multiple_experts() {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         },
         ExpertScore {
             expert_name: "code_quality".to_string(),
@@ -193,6 +199,7 @@ fn test_convert_scores_multiple_experts() {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         },
     ];
     let conv = convert_scores(&scores);
@@ -365,6 +372,7 @@ fn test_convert_scores_optional_fields_none() {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     }];
     let conv = convert_scores(&scores);
     let d = &conv.expert_scores[0].details[0];
@@ -433,6 +441,8 @@ fn test_build_action_items_filters_by_severity() {
         samples: None,
         sample_min: None,
         sample_max: None,
+        samples_attempted: None,
+        samples_failed: None,
     };
     let items = build_action_items(&[expert]);
     assert_eq!(items.len(), 2);
@@ -472,6 +482,8 @@ fn score_output(name: &str, score: u8, weight: u8) -> ExpertScoreOutput {
         samples: None,
         sample_min: None,
         sample_max: None,
+        samples_attempted: None,
+        samples_failed: None,
     }
 }
 
@@ -846,6 +858,7 @@ fn full_path_top_risks_drop_hygiene_and_fallback_experts() {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     };
     // Silence the unused-mut warning without changing behaviour.
     let _ = &mut code_style;
@@ -865,6 +878,7 @@ fn full_path_top_risks_drop_hygiene_and_fallback_experts() {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     };
 
     // Documentation: 30/100, two real medium findings + a note that
@@ -891,6 +905,7 @@ fn full_path_top_risks_drop_hygiene_and_fallback_experts() {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     };
 
     // Two LLM-driven experts with explicit fallbacks (`fallback=true`,
@@ -907,6 +922,7 @@ fn full_path_top_risks_drop_hygiene_and_fallback_experts() {
         fallback: true,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     };
     let code_quality_fallback = ExpertScore {
         expert_name: "code_quality".to_string(),
@@ -917,6 +933,7 @@ fn full_path_top_risks_drop_hygiene_and_fallback_experts() {
         fallback: true,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     };
 
     let scores = vec![
@@ -951,7 +968,7 @@ fn full_path_top_risks_drop_hygiene_and_fallback_experts() {
     let stats = RepoStats::default();
     let metadata = build_metadata("/tmp/probe", &[], &[], None);
 
-    let output = build_output_from_aggregated(&aggregated, &stats, vec![], false, metadata);
+    let output = build_output_from_aggregated(&aggregated, &stats, vec![], false, metadata, Default::default());
 
     // Top Risks must agree with the Risk Map. The areas present in
     // `risk_categories` (drives the Risk Map) and in `top_risks`
@@ -1096,6 +1113,7 @@ fn minimal_output() -> RepoReviewOutput {
         },
         dropped_findings: vec![],
         verification_ran: false,
+        chunk_summary: ChunkSummary::default(),
         metadata: ReviewMetadata::default(),
     }
 }
@@ -1207,6 +1225,7 @@ fn chunk_score(details: Vec<ScoreItem>) -> ExpertScore {
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     }
 }
 
@@ -1233,6 +1252,7 @@ fn test_strip_dropped_from_scores_removes_only_dropped() {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         },
     ];
     let kept: Vec<Finding> = vec![
@@ -1332,6 +1352,7 @@ fn test_convert_scores_propagates_fallback_flag() {
         fallback: true,
         evaluated_loc: Some(1234),
         samples: None,
+        ..Default::default()
     }];
     let conv = convert_scores(&scores);
     assert!(conv.expert_scores[0].fallback);
@@ -1352,6 +1373,7 @@ fn test_convert_scores_propagates_samples_min_max() {
         fallback: false,
         evaluated_loc: Some(500),
         samples: Some(vec![70, 90, 80]),
+        ..Default::default()
     }];
     let conv = convert_scores(&scores);
     assert_eq!(conv.expert_scores[0].samples, Some(vec![70, 90, 80]));
@@ -1707,6 +1729,8 @@ fn expert_output(name: &str, score: u8, summary: &str, fallback: bool) -> Expert
         samples: None,
         sample_min: None,
         sample_max: None,
+        samples_attempted: None,
+        samples_failed: None,
     }
 }
 
@@ -1896,5 +1920,241 @@ fn llm_enhance_concurrency_never_yields_a_zero() {
         super::llm_enhance_concurrency(Some(&config(Some(2)))),
         2,
         "a real limit still reaches the semaphore"
+    );
+}
+
+// ── M18-W3: note-only / hygiene-only filtering in Top Risks / Risk Map ──
+//
+// The repo-review report carries two parallel risk surfaces — the Risk Map
+// (per-area findings list) and the Top Risks (the conclusion's worst 5
+// areas). Both must agree. The current contract:
+//
+// * An expert emits details only with the [hygiene] tag → its area is
+//   *excluded* from both surfaces (the producer's explicit opt-in).
+// * An expert emits a mix of [hygiene] and non-[hygiene] details → its
+//   area is *kept* (it's not a hygiene-only expert any more).
+// * An expert emits a mix of severities (note/low/...) but none tagged
+//   [hygiene] → kept, even if the prose reads as "no CI test step"
+//   (the broadened predicate that swallowed test_coverage on sirena —
+//   RENG-115 round 3 — was the reason the [hygiene]-tag-only filter is
+//   the contract).
+//
+// This test pins the three shapes above so a future "filter by severity"
+// broadening has to break a pinned assertion rather than silently regress.
+
+#[test]
+fn hygiene_only_expert_is_excluded_from_risk_surfaces() {
+    use super::scoring::{build_risk_categories, is_hygiene_finding, pick_top_risks};
+    use crate::actions::repo_review::types::{RiskCategory, ScoreItemDetail};
+
+    fn hygiene_detail(message: &str) -> ScoreItemDetail {
+        ScoreItemDetail {
+            severity: "note".to_string(),
+            message: format!("[hygiene] {message}"),
+            file: None,
+            evidence: None,
+            impact: None,
+            recommendation: None,
+            effort: None,
+        }
+    }
+
+    fn genuine_detail(message: &str) -> ScoreItemDetail {
+        ScoreItemDetail {
+            severity: "medium".to_string(),
+            message: message.to_string(),
+            file: Some("src/main.rs".to_string()),
+            evidence: None,
+            impact: None,
+            recommendation: None,
+            effort: None,
+        }
+    }
+
+    fn note_detail(message: &str) -> ScoreItemDetail {
+        ScoreItemDetail {
+            severity: "note".to_string(),
+            message: message.to_string(),
+            file: None,
+            evidence: None,
+            impact: None,
+            recommendation: None,
+            effort: None,
+        }
+    }
+
+    // ── Shape 1: hygiene-only expert → excluded from both surfaces ──
+    let hygiene_only = expert_output("code_style", 100, "hygiene", false);
+    let mut hygiene_expert_output = hygiene_only;
+    hygiene_expert_output.details = vec![
+        hygiene_detail("Missing .editorconfig"),
+        hygiene_detail("Missing style config for Rust: rustfmt"),
+        hygiene_detail("Missing style config for TS: prettier"),
+    ];
+    let filtered = build_risk_categories(&[hygiene_expert_output]);
+    assert!(
+        filtered.is_empty(),
+        "a hygiene-only expert must not reach Risk Map; got {filtered:?}"
+    );
+    // pick_top_risks applies the same hygiene filter as defence-in-depth.
+    // The function takes RiskCategory; build one matching the hygiene-only
+    // shape and confirm it is filtered.
+    let risk_categories = vec![RiskCategory {
+        area: "code_style".to_string(),
+        score: 100,
+        risk_level: RiskLevel::Healthy,
+        finding_count: 3,
+        findings: vec![
+            hygiene_detail("Missing .editorconfig"),
+            hygiene_detail("Missing style config for Rust: rustfmt"),
+            hygiene_detail("Missing style config for TS: prettier"),
+        ],
+    }];
+    assert!(
+        pick_top_risks(&risk_categories).is_empty(),
+        "a hygiene-only category is excluded from Top Risks by defence-in-depth"
+    );
+
+    // ── Shape 2: mixed [hygiene] + genuine → kept ──
+    let mut mixed = expert_output("test_coverage", 50, "mixed", false);
+    mixed.details = vec![
+        hygiene_detail("No CI test step detected"),
+        genuine_detail("Test ratio 12%"),
+    ];
+    let filtered = build_risk_categories(&[mixed]);
+    assert_eq!(
+        filtered.len(),
+        1,
+        "an expert with at least one non-hygiene detail stays in the Risk Map; got {filtered:?}"
+    );
+    assert_eq!(filtered[0].area, "test_coverage");
+
+    // ── Shape 3: note-severity findings without [hygiene] → kept ──
+    // The broadened predicate that RENG-115 round 3 explicitly rejected:
+    // test_coverage's "No CI test step detected" is `severity: note` with
+    // no [hygiene] tag, and the report must still surface it. Filtering by
+    // severity alone would swallow this and the user's review of
+    // test_coverage would silently drop.
+    let mut note_only = expert_output("test_coverage", 70, "note only", false);
+    note_only.details = vec![note_detail("No CI test step detected")];
+    let filtered = build_risk_categories(&[note_only]);
+    assert_eq!(
+        filtered.len(),
+        1,
+        "note-severity findings without the [hygiene] tag stay in the Risk Map (RENG-115 r3 contract)"
+    );
+    assert_eq!(filtered[0].area, "test_coverage");
+
+    // The `is_hygiene_finding` predicate's contract: ONLY the [hygiene]
+    // tag prefix qualifies. Bare severity has no role.
+    assert!(is_hygiene_finding(&hygiene_detail("anything")));
+    assert!(!is_hygiene_finding(&note_detail("no tag, note severity only")));
+    assert!(!is_hygiene_finding(&ScoreItemDetail {
+        severity: "low".to_string(),
+        message: "[hygieneX] typo".to_string(),
+        file: None,
+        evidence: None,
+        impact: None,
+        recommendation: None,
+        effort: None,
+    }));
+}
+
+// ── M26: chunk-summary visibility in the rendered report ───
+//
+// The chunk loop records one `ExpertScore` per chunk (success or fallback),
+// all sharing the `expert_name = "code_quality"` slot. Without a
+// dedicated appendix, a reader has to grep the per-expert fallback rows
+// to learn which modules the model never assessed. `chunk_summary` is
+// the orchestrator-level signal the renderer exposes — both totals and
+// the per-failure detail — so a JSON / Markdown consumer sees the
+// coverage gap at a glance.
+
+#[test]
+fn chunk_summary_total_below_one_suppresses_the_appendix() {
+    let mut output = minimal_output();
+    // Empty summary: local-only path. The renderer's gate (`total > 0`)
+    // means the `Chunks Reviewed` heading never appears.
+    output.chunk_summary = ChunkSummary::default();
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    assert!(
+        !md.contains("## Chunks Reviewed"),
+        "an empty chunk_summary must not render the appendix; md had:\n{md}"
+    );
+}
+
+#[test]
+fn chunk_summary_with_failures_renders_total_and_per_failure_rows() {
+    let mut output = minimal_output();
+    output.chunk_summary = ChunkSummary {
+        total: 4,
+        reviewed: 2,
+        not_reviewed: 2,
+        failures: vec![
+            ChunkFailure {
+                module: "src/llm".to_string(),
+                loc: 480,
+                reason: "LLM assessment unavailable: provider 'mimo' returned 500".to_string(),
+            },
+            ChunkFailure {
+                module: "src/cli".to_string(),
+                loc: 230,
+                reason: "scheduler unavailable: semaphore closed".to_string(),
+            },
+        ],
+    };
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    // Heading + totals.
+    assert!(md.contains("## Chunks Reviewed"), "md was:\n{md}");
+    assert!(md.contains("**Total chunks**: 4"));
+    assert!(md.contains("**Reviewed**: 2"));
+    assert!(md.contains("**Not reviewed**: 2"));
+    // Per-failure rows: module key + LOC + verbatim reason.
+    assert!(
+        md.contains("`src/llm`"),
+        "the chunk module key must reach the rendered table: {md}"
+    );
+    assert!(md.contains("480"), "the chunk LOC must reach the rendered table: {md}");
+    assert!(md.contains("`src/cli`"), "the second chunk must also render: {md}");
+    assert!(
+        md.contains("returned 500"),
+        "the failure reason must reach the rendered table: {md}"
+    );
+    // Round-trip through JSON: the same fields exist with the same shape
+    // the renderer consumed, so downstream consumers can build the same
+    // table without re-parsing the Markdown.
+    let json = render_repo_review_output(&output, "json", false).unwrap();
+    assert!(
+        json.contains("\"chunk_summary\""),
+        "JSON must carry chunk_summary: {json}"
+    );
+    assert!(json.contains("\"total\": 4"));
+    assert!(json.contains("\"not_reviewed\": 2"));
+    assert!(json.contains("\"module\": \"src/llm\""));
+    assert!(json.contains("\"loc\": 480"));
+}
+
+#[test]
+fn chunk_summary_zero_failures_with_some_reviewed_omits_table_but_keeps_totals() {
+    // A partial-failure case where some chunks succeeded: the totals
+    // still render, the table is empty (no rows), and no per-failure
+    // shape leaks into the report. The heading is the signal; readers
+    // know by the `Reviewed / Total` ratio that nothing was lost.
+    let mut output = minimal_output();
+    output.chunk_summary = ChunkSummary {
+        total: 3,
+        reviewed: 3,
+        not_reviewed: 0,
+        failures: Vec::new(),
+    };
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    assert!(md.contains("## Chunks Reviewed"));
+    assert!(md.contains("**Total chunks**: 3"));
+    assert!(md.contains("**Reviewed**: 3"));
+    assert!(md.contains("**Not reviewed**: 0"));
+    // No failure table rows when `failures` is empty.
+    assert!(
+        !md.contains("| Module | LOC | Reason |"),
+        "an empty failures vec must not render the per-failure table header"
     );
 }

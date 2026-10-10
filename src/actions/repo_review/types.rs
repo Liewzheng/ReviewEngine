@@ -18,6 +18,14 @@ pub struct RepoReviewOutput {
     /// "ran / skipped" wording in the Markdown appendix.
     #[serde(default)]
     pub verification_ran: bool,
+    /// Coverage of the per-chunk code-quality pass: how many chunks were
+    /// reviewed, how many fell back, and the per-failure breakdown (M26).
+    /// `chunk_summary.total == 0` for the local-only path — the static
+    /// experts don't chunk. Consumers that never chunk can ignore the
+    /// field; reports render a `Chunks Reviewed` appendix only when at
+    /// least one chunk was scheduled.
+    #[serde(default)]
+    pub chunk_summary: ChunkSummary,
     /// Provenance of the run that produced this report: what was scanned
     /// (git SHA / tree hash / source), when, and with which model. Lets a
     /// consumer trace a report back to the exact snapshot it describes and
@@ -26,6 +34,48 @@ pub struct RepoReviewOutput {
     /// deserializable.
     #[serde(default)]
     pub metadata: ReviewMetadata,
+}
+
+/// Per-chunk coverage of the code-quality pass (M26).
+///
+/// The chunk loop runs once per `CodeChunk` and records an
+/// `ExpertScore` per chunk, but the JSON shape — one row per `ExpertScore`
+/// with the SAME `expert_name = "code_quality"` — hides the per-chunk
+/// signal behind an area-level aggregate. This summary captures the
+/// module + LOC for every chunk and the reason it wasn't reviewed when
+/// applicable, so a report can say "X of Y chunks were not assessed by
+/// the model" instead of forcing the reader to grep the per-expert
+/// `fallback: true` rows.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ChunkSummary {
+    /// Total chunks scheduled for code-quality review (the Pass 2 input
+    /// size). Zero on the local-only path.
+    pub total: usize,
+    /// Number of chunks that produced a real, non-fallback assessment.
+    pub reviewed: usize,
+    /// Number of chunks that landed on `chunk_fallback_score`: the LLM
+    /// call failed or returned an empty completion that even the M26
+    /// `disable_thinking` retry could not recover.
+    pub not_reviewed: usize,
+    /// Per-chunk detail for the not-reviewed set, in the order the loop
+    /// scheduled them. `module` is the chunk's two-level directory key
+    /// (e.g. `src/llm`); `loc` is the chunk's real evaluated LOC; `reason`
+    /// is the verbatim error message recorded on the fallback score.
+    pub failures: Vec<ChunkFailure>,
+}
+
+/// One chunk that did not reach a genuine assessment.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ChunkFailure {
+    /// Module key the chunk scanner assigned (e.g. `src/llm`).
+    pub module: String,
+    /// Real LOC of the chunk — the same number
+    /// [`crate::repo::experts::ExpertScore::evaluated_loc`] carries, so the
+    /// report can quantify the LOC the model never saw.
+    pub loc: u64,
+    /// Verbatim error recorded on the fallback score (e.g.
+    /// `"provider 'mimo-v2.5-pro' (model 'mimo-v2.5-pro') returned an empty completion ..."`).
+    pub reason: String,
 }
 
 /// Provenance metadata for a repo-review report.
@@ -159,4 +209,14 @@ pub struct ExpertScoreOutput {
     /// Largest sample score; present exactly when `samples` is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sample_max: Option<u8>,
+    /// M18-W2: how many scoring samples were attempted for this expert
+    /// (including failures). Present exactly when `samples` is — the
+    /// by-expert fallback rate is `samples_failed / samples_attempted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples_attempted: Option<usize>,
+    /// M18-W2: how many of the attempted scoring samples failed (call
+    /// error, unparseable YAML, or schema-conforming YAML with no `score`).
+    /// Present exactly when `samples` is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub samples_failed: Option<usize>,
 }

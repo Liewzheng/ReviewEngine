@@ -187,6 +187,7 @@ impl RepoExpert for TestCoverage {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         })
     }
 }

@@ -19,9 +19,10 @@ use crate::progress::ProgressMap;
 use crate::prompt::PromptEngine;
 use anyhow::Context as _;
 
+use crate::context::agents_md::InjectedContextEntry;
 use crate::output::parser::validate_findings;
 use crate::team::adjudicator;
-use crate::team::lead_consolidator::{ConsolidatedReport, FileCoverage};
+use crate::team::lead_consolidator::{ConsolidatedReport, FileCoverage, InjectedContext, VerificationStats};
 use crate::team::verifier::{self, DroppedFinding};
 
 use super::validation::{
@@ -522,6 +523,18 @@ pub(crate) async fn run_experts_inner(
 )> {
     let mut files = parse_and_filter_diff(diff_raw);
 
+    // M18-W5 / M35 r1 P2-1: the `## Injected Context` rows are collected
+    // where the prompts are actually built (chunked branch / non-chunked
+    // branch), not from the pre-chunk file list. The M35 r0 fix used the
+    // pre-chunk list, which let chunked mode claim files that were never
+    // injected and miss files that were (default large-PR path is chunked;
+    // M32 r1's P2-2 invariant broken again through a different mechanism —
+    // reproduction A under-reported 2 of 4 injected files; reproduction B
+    // fabricated 2 rows for files the same report's coverage banner said
+    // were never assigned). AGENTS.md is still read once here because it's
+    // not chunk-bounded.
+    let agents_entry = read_agents_md_meta_if_applicable(&mr_info.project_path, config);
+
     // Assess large PR and set up chunking if needed
     let (non_aggregators, chunked_mode) = assess_and_chunk_diff(&mut files, experts, config);
 
@@ -597,6 +610,17 @@ pub(crate) async fn run_experts_inner(
     // dropped from the report).
     let mut tasks: Vec<Task> = Vec::new();
     let mut task_files: Vec<Vec<String>> = Vec::new();
+    // M18-W5 / M35 r1 P2-1: collect the `## Injected Context` rows at the
+    // build sites where the prompts are actually constructed. Each
+    // `_with_meta` call yields `.body` (byte-identical to the no-meta
+    // builder we used previously — so prompt payloads are unchanged) and
+    // `.entries` (the per-file rows the lead summary surfaces). The hunks
+    // chunking strategy can place the same file in several chunks; we
+    // dedupe by `source` below before attaching.
+    let mut injected_entries: Vec<InjectedContextEntry> = Vec::new();
+    if let Some(agents) = agents_entry {
+        injected_entries.push(agents);
+    }
 
     if let Some((_chunks, assignments)) = chunked_mode {
         // Root cause A: `route_chunks` already bounded each expert to
@@ -613,18 +637,22 @@ pub(crate) async fn run_experts_inner(
             let task_diff_text = processor::render_diff_text(&files_for_task);
             let task_lang = filter::detect_language(&files_for_task);
             // Chunked mode: each task injects only the contents of the
-            // files in its own chunk assignment.
-            let task_file_contents = crate::context::file_contents::build_file_contents_section(
+            // files in its own chunk assignment. `_with_meta` runs the
+            // same per-file cap + total-budget check + trim-once flow as
+            // the no-meta builder, so the body bytes are unchanged from
+            // before — only `entries` is captured here for the row table.
+            let task_contents = crate::context::file_contents::build_file_contents_section_with_meta(
                 &files_for_task,
                 &mr_info.project_path,
                 max_context_file_bytes,
             );
+            injected_entries.extend(task_contents.entries);
 
             tasks.push(create_expert_task(
                 expert,
                 mr_info.clone(),
                 task_diff_text,
-                task_file_contents,
+                task_contents.body,
                 task_lang,
                 llm_configs.to_vec(),
                 config.clone(),
@@ -642,18 +670,19 @@ pub(crate) async fn run_experts_inner(
     } else {
         // Non-chunked mode: all experts share one injection built from the
         // full changed-file list.
-        let file_contents = crate::context::file_contents::build_file_contents_section(
+        let file_contents_report = crate::context::file_contents::build_file_contents_section_with_meta(
             &files,
             &mr_info.project_path,
             max_context_file_bytes,
         );
+        injected_entries.extend(file_contents_report.entries);
         for expert in non_aggregators {
             task_files.push(files.iter().map(|f| f.path.clone()).collect());
             tasks.push(create_expert_task(
                 expert,
                 mr_info.clone(),
                 diff_text.clone(),
-                file_contents.clone(),
+                file_contents_report.body.clone(),
                 lang.clone(),
                 llm_configs.to_vec(),
                 config.clone(),
@@ -669,6 +698,16 @@ pub(crate) async fn run_experts_inner(
             ));
         }
     }
+
+    // M35 r1 P2-1: the hunks chunking strategy can place the same file in
+    // more than one chunk — the per-task entries captured above would then
+    // emit duplicate rows. Dedup by `source` (the same key the
+    // per-file `with_meta` producer uses internally), keeping the first
+    // occurrence so the per-file byte count and sha reflect the first
+    // chunk's view. The renderer prints one row per source, which is
+    // the unit of "an injection" — collapse duplicates here so the audit
+    // table stops claiming two injections of the same file.
+    dedup_injected_entries(&mut injected_entries);
 
     let results: Vec<anyhow::Result<(ExpertReport, u64, u64)>> = join_all(tasks).await;
 
@@ -694,12 +733,12 @@ pub(crate) async fn run_experts_inner(
     };
     if coverage.unreviewed_files.is_empty() {
         info!(
-            "Coverage: {} of {} files reviewed (complete)",
+            "File routing: {} of {} files assigned to a successful expert task (complete)",
             coverage.reviewed_files, coverage.total_files
         );
     } else {
         tracing::warn!(
-            "Coverage: {} of {} files reviewed; {} files not covered by any expert: {}",
+            "File routing: {} of {} files assigned to a successful expert task; {} file(s) not assigned to any expert: {}",
             coverage.reviewed_files,
             coverage.total_files,
             coverage.unreviewed_files.len(),
@@ -747,7 +786,22 @@ pub(crate) async fn run_experts_inner(
     // Optional LLM verification pass: re-check findings against the diff
     // hunks, the referenced files' full content, and the changed-file list.
     // Fail-open by construction — `verify_findings` never returns an error.
-    let mut dropped_findings = if config.report.verification_pass {
+    //
+    // The M31 rich `VerificationStats` (findings_checked / batches_total /
+    // batches_llm_failed / batches_parse_failed / batches_skipped / skipped /
+    // dropped) is captured here so we can both log the full breakdown and
+    // project it onto the M32 simple `{checked, skipped, dropped}` shape
+    // that lives on `ConsolidatedReport` and feeds the lead summary's
+    // `Verification pass: ran on N, skipped M, dropped K` line. Mapping
+    // rationale: `checked` counts *findings* the verifier saw (the "ran on
+    // N" number is per-finding — "every kept finding was examined" is what
+    // readers ask for); `skipped` sums the three failure kinds
+    // (`batches_llm_failed + batches_parse_failed + batches_skipped`, which
+    // M31 already exposes as the aggregate `skipped`); `dropped` is the
+    // count of findings the verifier explicitly marked for removal.
+    let mut dropped_findings = Vec::new();
+    let mut verification_stats: Option<verifier::VerificationStats> = None;
+    if config.report.verification_pass {
         let outcome = verifier::verify_findings_outcome(
             &mut reports,
             &files,
@@ -757,40 +811,33 @@ pub(crate) async fn run_experts_inner(
             llm_sink.clone(),
         )
         .await;
-        let verification_stats = outcome.stats;
+        let rich = outcome.stats;
         let dropped = outcome.dropped;
         // Log unconditionally so a run that dropped nothing is still visible.
         // The M32 renderer rewrites this line into
-        // `Verification pass: ran on N batches, M skipped (… breakdown …), dropped K`
+        // `Verification pass: ran on N, skipped M, dropped K`
         // — the INFO line keeps the same fields so log scrapers can match.
-        if verification_stats.skipped > 0 {
+        if rich.skipped > 0 {
             info!(
                 "Verification pass: checked {} findings across {} batch(es); skipped {} batch(es) ({} parse failures, {} LLM errors, {} empty verdict list), dropped {}",
-                verification_stats.findings_checked,
-                verification_stats.batches_total,
-                verification_stats.skipped,
-                verification_stats.batches_parse_failed,
-                verification_stats.batches_llm_failed,
-                verification_stats.batches_skipped,
+                rich.findings_checked,
+                rich.batches_total,
+                rich.skipped,
+                rich.batches_parse_failed,
+                rich.batches_llm_failed,
+                rich.batches_skipped,
                 dropped.len()
             );
         } else {
             info!(
                 "Verification pass: checked {} findings, dropped {}",
-                verification_stats.findings_checked,
+                rich.findings_checked,
                 dropped.len()
             );
         }
-        // Log-only: the stats are a block-local here and not threaded onto
-        // `dropped_findings` or the orchestrator's return tuple. M32 owns
-        // the renderer copy; the deferred design (per the M31↔M32 ruling)
-        // adds `verification_stats` onto `ConsolidatedReport` so the
-        // renderer can read it. Until that lands, the data is visible in
-        // the "Verification pass:" INFO line above.
-        dropped
-    } else {
-        Vec::new()
-    };
+        verification_stats = Some(rich);
+        dropped_findings = dropped;
+    }
 
     // Feedback-driven filtering (A9): drop findings the user previously
     // marked as false positives, matched by stable fingerprint. Runs after
@@ -829,6 +876,32 @@ pub(crate) async fn run_experts_inner(
             findings_truncation.cap,
             findings_truncation.declared_omitted_total,
         );
+    }
+
+    // M18-W5 + M18-W7 wiring (M35): attach the post-processing signals the
+    // lead summary renders from `ConsolidatedReport`. Set BEFORE adjudication
+    // and `refresh_assessment` so a refresh-cycle pass also sees them on the
+    // report — neither set mutates `consolidated.findings` and both fields
+    // survive the round-trip.
+    //
+    // `verification_stats`: the verifier ran (skip → `None`), so we project
+    // the M31 rich stats onto the M32 simple {checked, skipped, dropped}
+    // shape. The full per-kind breakdown still lands in the INFO line above
+    // and in the per-task `logs.ndjson` entries; the report-side copy
+    // deliberately stays at "ran on N findings, M skipped, K dropped" so the
+    // lead summary fits on one line. `Some(_)` here is what makes
+    // `render_lead_summary` print the line at all (the renderer treats
+    // `None` and all-zero identically, which is exactly the silent-pass
+    // failure mode the field exists to prevent).
+    consolidated = consolidated.with_injected_context(InjectedContext {
+        entries: injected_entries,
+    });
+    if let Some(rich) = verification_stats {
+        consolidated = consolidated.with_verification_stats(VerificationStats {
+            checked: rich.findings_checked,
+            skipped: rich.skipped,
+            dropped: rich.dropped,
+        });
     }
 
     // Final adjudication pass (false-positive reduction, phase 3): the
@@ -948,6 +1021,56 @@ pub(crate) async fn run_experts_inner(
         dropped_findings,
         consolidated,
     ))
+}
+
+/// Read the local `AGENTS.md` for the `## Injected Context` row when
+/// `inject_agents_md` is enabled and the project path is a real local
+/// directory (M18-W5, wired in M35, rewritten in M35 r1).
+///
+/// **When the row actually renders:** local CLI / diff / path / repo
+/// reviews with `mr_info.project_path` pointing at an existing directory.
+/// **When it does NOT:** server-side reviews (GitLab MR via webhook, GitLab
+/// REST submit, GitHub PR) carry `mr_info.project_path = "group/project"`
+/// — a non-directory string — so the row is silently absent. The server
+/// path injects a provider-fetched AGENTS.md into `mr_info.agents_md` for
+/// the prompt body, but it doesn't have an on-disk file to stat for the
+/// meta row; the table is intentionally local-only, and the renderer
+/// suppresses the section when `entries` is empty. Callers that need a
+/// "no row" guarantee can rely on `InjectedContext::entries.is_empty()`
+/// on the resulting report.
+///
+/// Same cap ([`crate::context::agents_md::DEFAULT_MAX_FILE_BYTES`]) and
+/// same missing/symlink/oversized silent-skip behavior as the CLI/server
+/// callers' `prepare_review` / `resolve.rs` AGENTS.md handling, so the
+/// meta row matches the bytes the LLM saw when a row is emitted.
+pub(super) fn read_agents_md_meta_if_applicable(
+    project_path: &str,
+    config: &AppConfig,
+) -> Option<InjectedContextEntry> {
+    use crate::context::agents_md::{read_local_agents_md_with_meta, DEFAULT_MAX_FILE_BYTES};
+
+    if !config.report.inject_agents_md || !std::path::Path::new(project_path).is_dir() {
+        return None;
+    }
+    read_local_agents_md_with_meta(project_path.as_ref(), DEFAULT_MAX_FILE_BYTES).map(|r| r.meta)
+}
+
+/// Drop duplicate rows by `source` from a per-task accumulation.
+///
+/// M35 r1: the hunks chunking strategy can place the same changed file in
+/// more than one chunk (e.g. one chunk for its first hunk, another for a
+/// later hunk); each task's `_with_meta` build then emits the row again.
+/// The audit table renders one row per source — collapse duplicates here
+/// so the report stops claiming two injections of the same file.
+///
+/// `retain` keeps the **first** occurrence; if multiple chunks each
+/// truncated the same file differently (rare; would require the per-file
+/// cap to bind in one chunk and not the other), the first-chunk row is
+/// what the reader sees. The first row also wins over later rows in any
+/// "did an expert receive this file at all" question.
+pub(super) fn dedup_injected_entries(entries: &mut Vec<InjectedContextEntry>) {
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert(e.source.clone()));
 }
 
 #[cfg(test)]

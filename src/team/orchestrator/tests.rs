@@ -714,6 +714,373 @@ fn capped_report(expert: &str, listed: usize, declared_omitted: Option<usize>) -
     report
 }
 
+// ─── M35: end-to-end wiring proof for injected_context + verification_stats ────
+
+/// M35 wiring proof: a `run_experts` call with `verification_pass = true` and a
+/// real `AGENTS.md` plus a changed file both populated must land those rows on
+/// `ConsolidatedReport`. Previously the orchestrator logged the verifier stats
+/// but discarded the rich `VerificationStats`; the changed-file meta path was
+/// never invoked. The renderer-side tests
+/// (`test_render_lead_summary_injected_context_surfaces_truncation` and
+/// `test_render_lead_summary_verification_stats_skipped_nonzero`) already
+/// prove that `Some(_)` on these fields makes the lead summary print the
+/// lines — this test is the orchestrator-side companion that proves the
+/// fields actually reach `consolidated`.
+#[tokio::test]
+async fn run_experts_wires_verification_stats_and_injected_context_into_report() {
+    use crate::context::agents_md::{read_local_agents_md_with_meta, DEFAULT_MAX_FILE_BYTES};
+    use crate::models::{ExpertDef, ExpertTomlDef, LLMConfig, MRInfo};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    // Local checkout with an AGENTS.md and a changed file — the two
+    // `injected_context` producer paths in the orchestrator.
+    //
+    // Sizes (verified by `.len()` on the literal):
+    //   AGENTS.md = "# Agent Guidelines\n"             → 19 bytes
+    //   src/a.rs   = "fn a() {}\n"                       → 10 bytes
+    // Both well under `MAX_SINGLE_FILE_BYTES` (20 000), so neither row
+    // reports `truncated = true`; the byte-count assertions below pin
+    // those values exactly so a future edit to the fixture (which would
+    // change the row contents but not the file size) is caught here
+    // rather than silently shifting the assertion.
+    const AGENTS_CONTENT: &str = "# Agent Guidelines\n";
+    const A_RS_CONTENT: &str = "fn a() {}\n";
+    assert_eq!(AGENTS_CONTENT.len(), 19, "fixture size 1");
+    assert_eq!(A_RS_CONTENT.len(), 10, "fixture size 2");
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("src")).unwrap();
+    std::fs::write(dir.path().join("AGENTS.md"), AGENTS_CONTENT).unwrap();
+    std::fs::write(dir.path().join("src/a.rs"), A_RS_CONTENT).unwrap();
+
+    // The orchestrator calls the LLM in three roles. They share the same
+    // chat-completions endpoint, so the mock body has to discriminate by
+    // inspecting the request. The roles differ in their system-prompt
+    // keywords — "verifier" identifies the verifier call; the lead
+    // overview share a system prompt shape closer to the expert's. We
+    // dispatch:
+    //   * verifier: `verdicts: []` → empty-verdict-list skip
+    //     (note: NOT a parse failure; the YAML parses fine but yields
+    //     zero decisions, which `verify_with_llm` classifies as
+    //     `batches_skipped += 1` rather than `batches_parse_failed`)
+    //     → M31's `skipped` aggregates as 1 (from
+    //     `batches_llm_failed + batches_parse_failed + batches_skipped`,
+    //     see `verifier.rs` aggregate line); M32 simple shape carries
+    //     this `skipped` count unchanged.
+    //     → outcome stats: `findings_checked = 1, skipped = 1, dropped = 0`.
+    //   * everything else (overview + expert): parseable expert YAML
+    //     with one finding in the diff, so the verifier has something
+    //     to look at.
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(|req: &Request| {
+            let body = String::from_utf8_lossy(req.body.as_slice());
+            let is_verifier = body.contains("verifier") || body.contains("verdicts");
+            let body_json = if is_verifier {
+                serde_json::json!({
+                    "model": "mock-model",
+                    "choices": [{
+                        "message": {"content": "verdicts: []"}
+                    }],
+                    "usage": {"total_tokens": 1}
+                })
+                .to_string()
+            } else {
+                serde_json::json!({
+                    "model": "mock-model",
+                    "choices": [{
+                        "message": {"content":
+                            "```yaml\n\
+                             review:\n  findings:\n  \
+                             \n    - file: \"src/a.rs\"\n      \
+                             line: 1\n      severity: \"medium\"\n      \
+                             confidence: 8\n      category: \"correctness\"\n      \
+                             title: \"wiring proof finding\"\n      \
+                             summary: \"s\"\n      evidence: \"e\"\n      \
+                             impact: \"i\"\n      recommendation: \"r\"\n      \
+                             effort: \"small\"\n\
+                             ```\n"
+                        }
+                    }],
+                    "usage": {"total_tokens": 5}
+                })
+                .to_string()
+            };
+            ResponseTemplate::new(200).set_body_string(body_json)
+        })
+        .mount(&server)
+        .await;
+
+    let mut config = test_config();
+    config.report.verification_pass = true;
+    // Disable adjudication so the test focuses on the verifier + injected
+    // context wiring (adjudication is a separate pass and its removals
+    // would muddy the verification-stats projection assertion).
+    config.report.adjudicate = false;
+    let llm_configs = vec![LLMConfig {
+        provider: "openai".to_string(),
+        model: "mock-model".to_string(),
+        api_key: "test".to_string(),
+        api_base: server.uri(),
+        max_tokens: 4096,
+        temperature: 0.0,
+        disable_thinking: None,
+        disabled: false,
+    }];
+    let experts: Vec<ExpertDef> = vec![ExpertDef {
+        name: "security".to_string(),
+        trigger: crate::models::ExpertTrigger::Always,
+        prompt: "You review for this test.".to_string(),
+        config: ExpertTomlDef {
+            enabled: true,
+            role: "reviewer".to_string(),
+            ..Default::default()
+        },
+    }];
+    let diff =
+        "diff --git a/src/a.rs b/src/a.rs\nindex 0000000..1111111 100644\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1,1 +1,1 @@\n-fn a() {}\n+fn a() { changed }\n";
+    let mr = MRInfo::new(
+        dir.path().to_string_lossy().to_string(),
+        "Wiring proof".to_string(),
+        "feat/x".to_string(),
+        "main".to_string(),
+    );
+
+    let (_reports, _global, _dropped, consolidated, _failures) = run_experts(
+        &experts,
+        &mr,
+        diff,
+        &llm_configs,
+        &config,
+        None,
+        "test-wiring-proof",
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("the orchestrator must complete against a mock LLM");
+
+    // 1. Injected-context wiring: two rows — AGENTS.md and the changed file.
+    let sources: Vec<&str> = consolidated
+        .injected_context
+        .entries
+        .iter()
+        .map(|e| e.source.as_str())
+        .collect();
+    assert!(
+        sources.contains(&"AGENTS.md"),
+        "AGENTS.md meta row must be present; got sources {sources:?}"
+    );
+    assert!(
+        sources.iter().any(|s| s.contains("changed file src/a.rs")),
+        "changed-file meta row must be present; got sources {sources:?}"
+    );
+    // Truncation against the on-disk bytes is honest: src/a.rs is 10
+    // bytes (no truncation) and AGENTS.md is 19 bytes (no truncation at
+    // the default 4000-byte cap). Numbers come from `str::len()` of the
+    // literal — pinned at the top so a future fixture edit that changes
+    // the size surfaces here.
+    let agents_entry = consolidated
+        .injected_context
+        .entries
+        .iter()
+        .find(|e| e.source == "AGENTS.md")
+        .expect("AGENTS.md row");
+    assert_eq!(agents_entry.original_bytes, AGENTS_CONTENT.len());
+    assert!(
+        !agents_entry.truncated,
+        "tiny AGENTS.md is not truncated at the default cap"
+    );
+    // And the row's hash matches the *actual* AGENTS.md content the
+    // orchestrator read (not a stale value), asserting end-to-end that
+    // the producer and the row agree.
+    let direct = read_local_agents_md_with_meta(dir.path(), DEFAULT_MAX_FILE_BYTES).unwrap();
+    assert_eq!(agents_entry.sha256, direct.meta.sha256);
+    assert_eq!(agents_entry.injected_bytes, direct.meta.injected_bytes);
+
+    // 2. Verification-stats wiring: the orchestrator's M31 → M32
+    // projection maps `findings_checked → checked` and
+    // `skipped → skipped`. The verifier's mock response is `verdicts: []`,
+    // which `verify_with_llm` records as a single
+    // `batches_skipped += 1` (an empty-verdict-list skip — NOT a parse
+    // failure), so `stats.skipped > 0` is the count of empty-verdict
+    // batches. `dropped` is 0 because no verdict asked to drop anything.
+    let stats = consolidated
+        .verification_stats
+        .clone()
+        .expect("verification_stats must be Some after verification_pass = true ran");
+    assert!(
+        stats.checked > 0,
+        "the expert's parsed finding must reach the verifier; got {stats:?}"
+    );
+    assert!(
+        stats.skipped > 0,
+        "the empty-verdict-list mock response should have produced at least one skip batch; got {stats:?}"
+    );
+    assert_eq!(
+        stats.dropped, 0,
+        "no findings were marked drop in the mock (no `verdict: drop` entries); got {stats:?}"
+    );
+
+    // 3. Lead summary uses both — the renderer-side tests already cover the
+    // exact format, but pinning it here closes the loop on the orchestrator
+    // surface so a future regression that unsets the fields fails this test
+    // rather than only the renderer tests.
+    let md = crate::output::team_renderer::render_lead_summary(&consolidated);
+    assert!(
+        md.contains("**Verification pass**: ran on"),
+        "lead summary must surface the verifier stats line; got {md}"
+    );
+    assert!(
+        md.contains("## Injected Context"),
+        "lead summary must surface the injected-context table; got {md}"
+    );
+}
+
+// ─── M35 r1 P2-1: chunked-mode `## Injected Context` accuracy ────────────
+
+/// M35 r1 P2-1 (reproducer B shape, but unit-level): `dedup_injected_entries`
+/// must collapse the case where the hunks chunking strategy emits the same
+/// source in more than one chunk — its per-task `_with_meta` builds each
+/// emit a row for that file, and the audit table has to show one row, not N.
+///
+/// The M35 r0 e2e test `run_experts_wires_verification_stats_and_injected_context_into_report`
+/// covers the happy-path wiring; this test pins the dedupe helper so a
+/// future refactor that re-introduces duplicates (rebroking the same
+/// invariant M32 r1 P2-2 fixed) is caught here without needing the
+/// chunked-mode end-to-end reproduction, which is hard to pin with
+/// small-file fixtures (the chunker coalesces tiny test files into a
+/// single chunk, hiding the quota-shortfall shape that triggered the
+/// original r0 failure).
+#[test]
+fn dedup_injected_entries_collapses_repeated_source_into_single_row() {
+    use crate::context::agents_md::InjectedContextEntry;
+
+    let mut entries: Vec<InjectedContextEntry> = vec![
+        // AGENTS.md from the helper.
+        InjectedContextEntry {
+            source: "AGENTS.md".to_string(),
+            original_bytes: 100,
+            injected_bytes: 100,
+            truncated: false,
+            sha256: "a".repeat(64),
+        },
+        // Task 1 emitted a row for src/a.rs.
+        InjectedContextEntry {
+            source: "changed file src/a.rs".to_string(),
+            original_bytes: 1_000,
+            injected_bytes: 1_000,
+            truncated: false,
+            sha256: "b".repeat(64),
+        },
+        // The hunks strategy would emit another row for the same file
+        // from Task 2 (different chunks each covering different
+        // hunks of the same file); the dedupe keeps the FIRST one so
+        // the per-file byte count and sha reflect the first-chunk view.
+        InjectedContextEntry {
+            source: "changed file src/a.rs".to_string(),
+            original_bytes: 1_000,
+            injected_bytes: 800,
+            truncated: true,
+            sha256: "c".repeat(64),
+        },
+        // Task 3 emitted a row for src/b.rs.
+        InjectedContextEntry {
+            source: "changed file src/b.rs".to_string(),
+            original_bytes: 2_000,
+            injected_bytes: 2_000,
+            truncated: false,
+            sha256: "d".repeat(64),
+        },
+    ];
+
+    let sources_before: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
+    assert_eq!(
+        sources_before,
+        vec![
+            "AGENTS.md",
+            "changed file src/a.rs",
+            "changed file src/a.rs",
+            "changed file src/b.rs"
+        ],
+        "fixture must show the duplicate before dedupe runs"
+    );
+
+    pipeline::dedup_injected_entries(&mut entries);
+
+    let sources_after: Vec<&str> = entries.iter().map(|e| e.source.as_str()).collect();
+    assert_eq!(
+        sources_after,
+        vec!["AGENTS.md", "changed file src/a.rs", "changed file src/b.rs"],
+        "duplicate rows for src/a.rs must collapse to one; the first occurrence (injected_bytes=1000, truncated=false, hash=b...) must be the one kept"
+    );
+    // The kept row's bytes/hash reflect the first task's view, not the
+    // second — pin that so a future refactor that re-sorts (e.g. by
+    // length, or by hash) and accidentally swaps the kept row with
+    // the second is caught here.
+    let a_row = entries
+        .iter()
+        .find(|e| e.source == "changed file src/a.rs")
+        .expect("src/a.rs row still present after dedupe");
+    assert_eq!(a_row.injected_bytes, 1_000, "first-occurrence wins");
+    assert!(!a_row.truncated, "first-occurrence wins (its truncated flag is false)");
+    assert_eq!(
+        a_row.sha256,
+        "b".repeat(64),
+        "first-occurrence sha256 wins, not the second task's"
+    );
+}
+
+/// M35 r1 P3-4: AGENTS.md gating on a remote-style path (a slug the
+/// orchestrator treats as not-a-directory, the way server-side webhook
+/// reviews carry `mr_info.project_path = "group/project"`) must produce
+/// no row. Server-side reviews inject a provider-fetched AGENTS.md into
+/// `mr_info.agents_md`, but the meta row needs an on-disk file to stat;
+/// the absence is silent and intentional.
+#[test]
+fn read_agents_md_meta_if_applicable_skips_remote_slug_paths() {
+    // A remote-style project path: never a directory, so `is_dir()` is
+    // false. The helper must return `None` even with `inject_agents_md`
+    // at its default (true) — the gate is the `is_dir()` check, not
+    // the config flag, so a future `inject_agents_md = true` flip on
+    // remote paths cannot accidentally start producing rows.
+    let remote_path = "review-lab/review-engine-reng25-nonexistent";
+    let cfg = test_config(); // test_config() sets `inject_agents_md` to its default
+    assert!(
+        pipeline::read_agents_md_meta_if_applicable(remote_path, &cfg).is_none(),
+        "remote slug paths must not produce an AGENTS.md row"
+    );
+}
+
+/// M35 r1 P3-4: AGENTS.md gating with `inject_agents_md = false` must skip
+/// even on a real local directory. Mirrors the `prepare_review` callers'
+/// gate for populating `mr_info.agents_md` so the prompt body and the
+/// meta row share the same off-switch.
+#[test]
+fn read_agents_md_meta_if_applicable_respects_inject_agents_md_off() {
+    const AGENTS_CONTENT: &str = "# Agent Guidelines\n";
+
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("AGENTS.md"), AGENTS_CONTENT).unwrap();
+
+    let mut cfg = test_config();
+    cfg.report.inject_agents_md = false;
+    assert!(
+        pipeline::read_agents_md_meta_if_applicable(dir.path().to_str().unwrap(), &cfg).is_none(),
+        "inject_agents_md=false must skip the row, mirroring the mr_info.agents_md gate"
+    );
+
+    // And toggling back on produces a row — same gate, same path.
+    cfg.report.inject_agents_md = true;
+    let entry = pipeline::read_agents_md_meta_if_applicable(dir.path().to_str().unwrap(), &cfg)
+        .expect("AGENTS.md row when both is_dir() and the gate are true");
+    assert_eq!(entry.source, "AGENTS.md");
+    assert_eq!(entry.original_bytes, AGENTS_CONTENT.len());
+}
+
 // ─── RENG-92: [review_experts] weights flow into the consolidated score ───
 /// End-to-end wiring through the orchestrator's validation path: the `weight`
 /// field of the `[review_experts]` defs must reach `build_consolidated_report`

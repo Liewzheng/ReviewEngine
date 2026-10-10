@@ -124,7 +124,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     // `config.output_dir` is non-empty, a timestamped copy of the same
     // content is also written there by `handlers::output::write_report_text`.
     //
-    // Logging coverage as of M34 r2, layer by layer:
+    // Logging coverage as of M35:
     //   * CLI dispatch (the arms below): every Review arm that destructures
     //     `output` traces `--output = <path>` so the override is visible
     //     at the dispatch layer. The `review --stdin` arm carries the same
@@ -135,11 +135,12 @@ pub async fn run(cli: Cli) -> Result<()> {
     //     `handlers::log_output_targets`, which traces BOTH `--output` (when
     //     set) and `config.output_dir` (when non-empty), so `logs.ndjson`
     //     carries both lines for these four commands.
-    //   * `review` command's four local/MR handlers in `handlers/review.rs`
-    //     do NOT yet call `log_output_targets`; the timestamped copy is
-    //     written silently (the dual write itself works, only the trace is
-    //     missing). Wiring that up needs `handlers/review.rs`, which is
-    //     M31's file — recorded as a post-merge follow-up, not done here.
+    //   * `review` command's local / MR / stdin / repo-review handlers
+    //     (`run_stdin`, `run_mr`, `run_local`, `run_local_repo`,
+    //     `run_local_path`, `run_repo_review_local_or_enhanced`) now
+    //     also call `log_output_targets` — every dual-write path the
+    //     reviewer audit catalogued is now traced identically, closing
+    //     the M34 r2 "missing output_dir trace on `review`" gap.
     // `write_report_text` also prints a one-line `Report saved to …` notice
     // to stderr for the timestamped copy, which the audit tools that read
     // `logs.ndjson` will not see.

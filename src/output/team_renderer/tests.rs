@@ -641,7 +641,51 @@ fn test_render_lead_summary_verification_stats_skipped_nonzero() {
         md.contains("**Verification pass**: ran on 11, skipped 2, dropped 0"),
         "M18-W7 line must surface ran/skipped/dropped, got: {md}"
     );
-    assert!(md.contains("解析失败 2 批"));
+    assert!(
+        md.contains("跳过 2 批"),
+        "the new copy names skip generically (not 'parse failures'): got: {md}"
+    );
+}
+
+#[test]
+fn test_render_lead_summary_verification_stats_mislabels_skip_causes() {
+    // M35 r1 P3-1: the previous "解析失败 N 批 / parse failures N" copy
+    // was wrong for empty-verdict-list skips (where the verifier says
+    // `verdicts: []`, no parse problem occurred) and LLM errors (where
+    // the LLM itself failed). The copy now lists the three possible
+    // causes explicitly: parse failures / LLM errors / empty verdict list.
+    // Pin both halves so a regression that reverts the wording
+    // (or omits the cause list) fails this test.
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.verification_stats = Some(crate::team::lead_consolidator::VerificationStats {
+        checked: 5,
+        skipped: 1,
+        dropped: 0,
+    });
+    let md = render_lead_summary(&consolidated);
+    assert!(
+        md.contains("跳过 1 批"),
+        "skip count must surface (skipped, not 'parse failures'): got {md}"
+    );
+    // Both halves of the bilingual copy must list the three causes.
+    assert!(
+        md.contains("parse failures / LLM errors / empty verdict list"),
+        "the English half must list all three possible skip causes (so the audit can tell whether the failures were 'real' parse problems): got {md}"
+    );
+    assert!(
+        md.contains("parse 失败 / LLM 错误 / 空 verdict 列表"),
+        "the Chinese half must list all three possible skip causes: got {md}"
+    );
+    // And the previous wrong wording must be gone — re-introducing it
+    // would mean a future change slipped the cause list back out.
+    assert!(
+        !md.contains("解析失败 1 批"),
+        "the old 'parse failures N batches' copy must not return; a future regression to that wording should land in the wording fix and say '跳 过 N 批' generically: got {md}"
+    );
+    assert!(
+        !md.contains("parse failures 1, dropped"),
+        "the English 'parse failures N' line must also be gone: got {md}"
+    );
 }
 
 #[test]

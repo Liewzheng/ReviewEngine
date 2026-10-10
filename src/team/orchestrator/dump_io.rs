@@ -13,9 +13,12 @@
 //! RENG-113: directory at `0700`, files at `0600`, response text passed
 //! through [`crate::models::secrets::redact_text`] before it hits disk.
 //!
-//! Both helpers are no-ops on non-Unix targets — `OpenOptions::mode` is a
-//! Unix-only OpenOptionsExt method, and a permissive Windows ACL is a
-//! separate problem.
+//! On non-Unix targets both helpers still create the directory and write
+//! the file — the only thing skipped is the `mode(0o600)` /
+//! `set_permissions(0o600)` / `set_permissions(0o700)` enforcement, since
+//! `OpenOptions::mode` is a Unix-only `OpenOptionsExt` method. A permissive
+//! Windows ACL is a separate problem and is left for the non-Unix
+//! `write_report_file` fallback it mirrors.
 
 use std::path::{Path, PathBuf};
 

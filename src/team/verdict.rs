@@ -3,18 +3,20 @@
 //! M18-自审 #5: the verifier (`verifier.rs`) and the adjudicator
 //! (`adjudicator.rs`) used to carry near-identical copies of the same
 //! "clean the YAML → strict → fenced fallback → pull the `verdicts:`
-//! list" routine, with two differences baked in:
+//! list" routine. The only caller-side difference is the decision shape
+//! (verifier maps to `{index, drop, reason}`; the adjudicator maps to
+//! `{index, verdict, new_severity, reason, cited_lines}`). The error
+//! message used to differ too — the verifier said "verdict YAML parse
+//! failed", the adjudicator said "adjudication YAML parse failed" — but
+//! after the dedup both pass through this module and share the verifier's
+//! wording. No caller-side render pin depends on the old adjudicator
+//! string (`test_parse_verdicts_malformed_errors` asserts only `is_err()`),
+//! so the wording change is observable in the WARN text but not pinned by
+//! a test; it is a logging nit, not a behaviour break.
 //!
-//! 1. The error message ("verdict YAML parse failed" vs "adjudication
-//!    YAML parse failed").
-//! 2. The decision shape (verifier wants `{index, drop, reason}`; the
-//!    adjudicator wants `{index, verdict, new_severity, reason,
-//!    cited_lines}`).
-//!
-//! Both differences are caller-side; the routine itself is the same. This
-//! module is the one place that decides "is there a verdict list here at
-//! all, and what fields does each entry carry?" — callers translate the
-//! shared [`RawVerdictEntry`] into their own decision type.
+//! This module is the one place that decides "is there a verdict list
+//! here at all, and what fields does each entry carry?" — callers
+//! translate the shared [`RawVerdictEntry`] into their own decision type.
 
 /// One entry extracted from the LLM's `verdicts: [...]` list.
 ///

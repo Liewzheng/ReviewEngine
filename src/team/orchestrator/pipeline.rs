@@ -131,13 +131,18 @@ fn assess_and_chunk_diff(
 /// appended to every expert's prompt, regardless of PR size.
 ///
 /// Acquires a permit from the shared concurrency semaphore (M18-W11): the
-/// lead overview is just another LLM call competing for the same
-/// provider-side / rate budget as the expert pass, and before RENG-118 it
-/// ran on its own serial slot, so an 11-expert × 6-slot pipeline paid an
-/// extra one-overview latency on top of `ceil(11/6)` expert batches. The
-/// semaphore caps `max_concurrent_llm_calls` regardless of where the call
-/// came from, so the overview simply joins the pool. No permit, no
-/// overview.
+/// lead overview counts against `max_concurrent_llm_calls` exactly like an
+/// expert task. The audit expected a wall-clock win (an 11-expert × 6-slot
+/// pipeline parallelising the overview with the first expert batch) but
+/// that overlap is not real here — the overview result is `clone()`d into
+/// every expert task before [`run_experts_inner`] creates them (`:623`),
+/// so the overview is a strict serial prerequisite of the expert pass and
+/// the permit always has zero contenders when it is acquired. The change
+/// is therefore consistency / future-proofing: when the orchestration is
+/// later reshaped so the overview and the experts can overlap (the
+/// `global_context` would have to stop being an expert-prompt input),
+/// the semaphore accounting is already in place and the per-call cap
+/// stays honest. No permit, no overview.
 async fn build_lead_overview(
     mr_info: &MRInfo,
     files: &[DiffFile],
@@ -218,9 +223,16 @@ async fn build_lead_overview(
 /// days showed 94 such `WARN`s, 100% of the WARN budget for the team
 /// pipeline, drowning the genuinely-informative errors. The log is now at
 /// `INFO` with a `reason_code` field so a log pipeline can filter
-/// `reason_code=schema_mismatch` / `reason_code=fence_fallback_failed` /
-/// `reason_code=tab_indent_fallback_failed` cleanly; only the prompt-build
-/// and LLM-call failures keep their `WARN` level.
+/// cleanly. The three values actually emitted are:
+///
+/// - `tab_indent_fallback_succeeded` — the sanitized (tab → 2-space) YAML
+///   parsed after the strict attempt failed.
+/// - `fence_fallback_succeeded` — the first fenced YAML block parsed
+///   after both the strict and sanitized attempts failed.
+/// - `schema_mismatch` — every attempt failed; the function returns
+///   `None` and the expert pass runs without a global context.
+///
+/// Only the prompt-build and LLM-call failures keep their `WARN` level.
 fn parse_global_review_context(raw: &str) -> Option<GlobalReviewContext> {
     let strict_err = match serde_yaml_ng::from_str::<GlobalReviewContext>(raw) {
         Ok(ctx) => return Some(ctx),
@@ -525,11 +537,14 @@ pub(crate) async fn run_experts_inner(
     let project_context = gather_lead_project_context(mr_info, &files, base_ref, head_ref);
 
     // Concurrency cap is set up here (M18-W11) — before the lead overview
-    // call — so the overview can share the same semaphore as the expert
-    // pass. With N experts and a 6-permit semaphore, the overview used to
-    // pay an extra serial round-trip; with the shared pool it is just the
-    // (N+1)-th LLM call and the wall-clock latency drops by one overview
-    // call (~0.5–1 s on small reviews).
+    // call — so the overview joins the same semaphore accounting as the
+    // expert pass. There is no wall-clock saving today: the overview
+    // result is `clone()`d into every expert task, so the overview is a
+    // strict serial prerequisite and the permit it acquires has zero
+    // contenders (the experts are not yet spawned). The split exists so
+    // a future restructure that does parallelise overview + experts
+    // (e.g. by letting experts run with an empty `global_context` first
+    // and re-prompting once it lands) gets the cap right automatically.
     let semaphore = build_concurrency_semaphore(config);
 
     // Pass 1: Lead Overview (now runs for all PR sizes)
@@ -766,10 +781,12 @@ pub(crate) async fn run_experts_inner(
                 dropped.len()
             );
         }
-        // Stats ride on `dropped_findings` for now — the M32 renderer reads
-        // them off the dropped-findings tuple alongside the findings. When
-        // the renderer upgrades are in, this is the place to thread
-        // `verification_stats` onto the consolidated report.
+        // Log-only: the stats are a block-local here and not threaded onto
+        // `dropped_findings` or the orchestrator's return tuple. M32 owns
+        // the renderer copy; the deferred design (per the M31↔M32 ruling)
+        // adds `verification_stats` onto `ConsolidatedReport` so the
+        // renderer can read it. Until that lands, the data is visible in
+        // the "Verification pass:" INFO line above.
         dropped
     } else {
         Vec::new()
@@ -1127,13 +1144,54 @@ mod global_context_parse_tests {
     /// previous code logged the `None` at WARN — same level as real LLM
     /// failures, drowning the genuinely-informative errors (NAS 24 days:
     /// 100 % of the WARN budget was this benign degradation).
+    ///
+    /// Pins the regression by capturing the emitted event and asserting both
+    /// the level split (`WARN` absent, `INFO` present) and the structured
+    /// `reason_code = "schema_mismatch"` field. The capture is wired with
+    /// [`tracing::subscriber::with_default`] so this test does not depend
+    /// on the process-global subscriber (which other test modules — notably
+    /// `team::adjudicator::tests` — install first via RENG-70; a global
+    /// install here would silently fail and the events would land in
+    /// another module's sink, making this assertion empty). A revert of
+    /// the level / reason_code change surfaces here immediately (WARN
+    /// present or `schema_mismatch` missing both fail).
     #[test]
     fn parse_global_review_context_logs_reason_codes_not_warnings() {
-        // Garbage in, every attempt fails → schema_mismatch at INFO.
-        assert!(parse_global_review_context("not yaml at all: [unclosed").is_none());
-        // A typed log assertion would need a capture; the unit-level guard
-        // here is that the function does not panic and returns None, which
-        // the INFO downgrade is allowed to do (the call site has its own
-        // failure mode; this is the regression guard the audit flagged).
+        use std::sync::{Arc, Mutex};
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let buf_for_factory = buf.clone();
+        let make_writer = move || -> CaptureWriter { CaptureWriter(buf_for_factory.clone()) };
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(make_writer)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let result =
+            tracing::subscriber::with_default(subscriber, || parse_global_review_context("not yaml at all: [unclosed"));
+        assert!(result.is_none());
+        let text = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        assert!(
+            !text.contains("WARN") && !text.contains(" warn"),
+            "the `None` fallback must not log at WARN: {text}"
+        );
+        assert!(
+            text.contains("INFO") && text.contains("schema_mismatch"),
+            "the `None` fallback must log at INFO + reason_code=schema_mismatch: {text}"
+        );
+    }
+
+    /// Per-event writer used by [`parse_global_review_context_logs_reason_codes_not_warnings`].
+    /// Cheaply cloneable (the inner `Arc<Mutex<Vec<u8>>>` is shared with the
+    /// `tracing_subscriber::fmt` factory closure).
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

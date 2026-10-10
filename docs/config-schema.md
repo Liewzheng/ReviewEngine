@@ -53,7 +53,7 @@ A value of **`0` is treated as "not decided", never as a limit**: a concurrency 
 
 ## `[compliance]`
 
-M40 / RENG ticket compliance check: when the MR/PR description references a recognised ticket (`Closes #N`, `Closes !N`, `<work_item_URL>`, `org/repo#N`), fetch each ticket body and run a single LLM judgement comparing the diff to the ticket's requirements. The result is rendered as a `## Ticket compliance check` section alongside the per-expert findings. Off by default.
+M40 / RENG ticket compliance check: when the MR/PR description references a recognised ticket (`Closes #N`, `<work_item_URL>`, `org/repo#N`), fetch each ticket body and run a single LLM judgement comparing the diff to the ticket's requirements. The result is rendered as a `## Ticket compliance check` section alongside the per-expert findings. Off by default. (GitLab's `!N` MR sigil is intentionally NOT matched — it refers to a merge request, not an issue.)
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|

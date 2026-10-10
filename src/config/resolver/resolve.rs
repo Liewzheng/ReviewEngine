@@ -90,7 +90,14 @@ pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
         }
         None => {
             let default_path = ".code-audit-config.toml";
-            let mut config = apply_env_overrides(default_config()?);
+
+            // Build the built-in defaults first, then lift project / user-level
+            // TOML on top of them. The env pass runs LAST so
+            // `CODE_AUDIT_*` overrides always win over the discovered
+            // file(s) — same precedence as the `--config` path, where
+            // `load_and_apply` already calls `apply_env_overrides` last
+            // (P2-2: r3 review caught the env-then-file ordering bug).
+            let mut config = default_config()?;
 
             // User-level config provides a global LLM fallback.
             config.llm = load_user_llm_fallback();
@@ -210,6 +217,13 @@ pub async fn resolve_config(source: Option<ConfigSource>) -> Result<AppConfig> {
                     }
                 }
             }
+
+            // Env vars override the discovered file(s) so that
+            // `CODE_AUDIT_COMPLIANCE_ENABLED=true` (etc.) always wins,
+            // matching the precedence the `--config` path applies
+            // (see `load_and_apply` calling `apply_env_overrides` last).
+            // P2-2: r3 review caught the env-then-file ordering bug.
+            config = apply_env_overrides(config);
 
             Ok(config)
         }

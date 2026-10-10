@@ -1,11 +1,18 @@
 //! M40 / RENG ticket compliance check (M39 §7 Option A).
 //!
 //! When [`crate::models::ComplianceConfig::enabled`] is true and an MR/PR
-//! description references a recognised ticket (`Closes #N`, `Closes !N`,
-//! `<work_item_URL>`, `owner/repo#N`), the review fetches each referenced
-//! ticket and runs a single LLM call that compares the diff to the ticket's
-//! requirements. The result is rendered as a `## Ticket compliance check`
-//! section alongside the per-expert findings.
+//! description references a recognised ticket (`Closes #N`, `org/repo#N`,
+//! `<work_item_URL>`), the review fetches each referenced ticket and runs
+//! a single LLM call that compares the diff to the ticket's requirements.
+//! The result is rendered as a `## Ticket compliance check` section
+//! alongside the per-expert findings.
+//!
+//! GitLab's `!N` MR sigil is intentionally NOT matched here: it refers
+//! to a merge request, not an issue, and fetching "issue #N" via the
+//! issues endpoint for an MR reference yields an unrelated object (or a
+//! 404). Operators who want MR↔MR traceability should look at the MR
+//! description instead. This matches pr-agent's
+//! `GITLAB_TICKET_PATTERN` choice.
 //!
 //! Gating (verified by the M40 tests):
 //! * `enabled = false` → zero extra LLM calls, zero extra HTTP calls.
@@ -34,20 +41,22 @@ use crate::models::{LLMConfig, MRInfo};
 /// One ticket reference extracted from the MR/PR description.
 ///
 /// `project` is the GitLab project path or GitHub `owner/repo` for cross-
-/// project references; `None` for the local `#N` / `!N` shorthand that
-/// resolves to the MR's own project.
+/// project references; `None` for the local `#N` shorthand that
+/// resolves to the MR's own project. GitLab `!N` is the MR sigil and
+/// is intentionally NOT parsed by this module (see the module docs).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TicketRef {
     /// Which provider the ticket lives on.
     pub provider: TicketProvider,
-    /// Project path / owner-repo. `None` only for the local-shorthand refs
-    /// (`!N`, `#N`) which inherit the MR's own project.
+    /// Project path / owner-repo. `None` only for the local `#N`
+    /// shorthand that inherits the MR's own project. (The GitLab `!N`
+    /// MR sigil is intentionally NOT parsed — see the module docs.)
     pub project: Option<String>,
     /// Ticket internal id (iid for GitLab, number for GitHub).
     pub iid: u32,
     /// Canonical URL identifying this ticket, after host gating.
     pub url: String,
-    /// Original surface form: `!42`, `#42`, `org/repo#42`, the work-item URL,
+    /// Original surface form: `#42`, `org/repo#42`, the work-item URL,
     /// or the GitHub issue URL. Used verbatim in error messages and the
     /// rendered section so a reader can match the parser's hit against the
     /// MR description.
@@ -121,14 +130,21 @@ pub struct ComplianceOutput {
     /// Ticket references we could not fetch (HTTP error, transport,
     /// missing project, etc.). The renderer labels these "fetch failed"
     /// so the reader does not mistake them for the no-LLM case (P2-2).
+    /// `#[serde(default)]` so an r1-shaped stored JSON (without this
+    /// field) deserializes cleanly — forward-compat insurance for any
+    /// never-merged pre-M40-r2 records.
+    #[serde(default)]
     pub fetch_failures: Vec<FetchedTicket>,
     /// Tickets fetched successfully but never analysed — either no usable
     /// LLM was configured or the LLM call itself errored. The renderer
     /// surfaces them as "fetched, no analysis" so the reader can tell
-    /// them apart from genuine fetch failures (P2-2).
+    /// them apart from genuine fetch failures (P2-2). Same forward-
+    /// compat note as `fetch_failures`.
+    #[serde(default)]
     pub unanalysed_tickets: Vec<FetchedTicket>,
     /// Free-form notes about the run — e.g. "the LLM call failed: …", or
     /// "description references 4 tickets, capped at 3".
+    #[serde(default)]
     pub notes: Vec<String>,
     /// RENG-38 / RENG-75: provider + model snapshot from the call that
     /// actually produced the compliance section. `None` when no LLM call

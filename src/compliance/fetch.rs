@@ -74,13 +74,58 @@ fn mr_url_scheme_host(mr_url: &str) -> (&'static str, String) {
     }
 }
 
-/// Resolve the API base URL the provider client should target.
-fn api_base_from_mr_url(mr_url: &str) -> String {
+/// Map an MR/PR URL's host to the REST API base the provider client
+/// should target.
+///
+/// The MR URL is where a user reviews code, which is **not** the same
+/// host as the REST API for most platforms:
+///
+/// * `github.com`           → `https://api.github.com` (the well-known
+///                            REST base the provider client itself
+///                            hardcodes at `Client::new` for this
+///                            platform).
+/// * `*.github.com` (GHE-C)  → same, `https://api.github.com`.
+/// * GHE-Server (any other)  → `{scheme}://{host}/api/v3` (the
+///                            REST path the GitHub Enterprise Server
+///                            docs specify).
+/// * Anything else           → `{scheme}://{host}` unchanged — the
+///                            wiremock fixtures and the GitLab path
+///                            route here (GitLab's `Client::for_instance`
+///                            appends `/api/v4` itself).
+///
+/// P1-1 (M40 r3): the round-2 implementation was returning
+/// `{scheme}://{host}` for github.com, which built
+/// `https://github.com/repos/…` instead of
+/// `https://api.github.com/repos/…` and made every GitHub ticket fetch
+/// fail at the HTTP layer. The wiremock integration test did not catch
+/// this because the mock's origin doubles as both the web host and the
+/// API base.
+pub fn github_api_base_from_mr_url(mr_url: &str) -> String {
     let (scheme, host) = mr_url_scheme_host(mr_url);
     if host.is_empty() {
-        // No host: caller passed something we cannot route. The provider
-        // client will fail to construct; the orchestrator records the
-        // failure on the FetchedTicket.
+        return format!("{scheme}://invalid.invalid");
+    }
+    // Strip an optional `:port` suffix so the comparison is host-only.
+    let host_no_port = host.split(':').next().unwrap_or(&host).to_string();
+    if host_no_port.eq_ignore_ascii_case("github.com") || host_no_port.to_ascii_lowercase().ends_with(".github.com") {
+        // Pinned to https — the GitHub REST API does not serve plain
+        // HTTP even when the MR URL did. The PAT still travels in the
+        // Authorization header so the scheme upgrade is safe.
+        return "https://api.github.com".to_string();
+    }
+    // GHE Server and other non-github.com hosts: REST base is
+    // `{scheme}://{host}/api/v3`.
+    format!("{scheme}://{host}/api/v3")
+}
+
+/// Resolve the GitLab API base URL the provider client should target.
+///
+/// GitLab's `Client::for_instance` appends `/api/v4` to whatever base
+/// is passed in, so we hand it the instance URL and let the client
+/// shape the path.
+fn gitlab_api_base_from_mr_url(mr_url: &str) -> String {
+    let (scheme, host) = mr_url_scheme_host(mr_url);
+    if host.is_empty() {
         return format!("{scheme}://invalid.invalid");
     }
     format!("{scheme}://{host}")
@@ -97,10 +142,15 @@ fn api_base_from_mr_url(mr_url: &str) -> String {
 /// `error` set and the caller's flow continues — the orchestrator
 /// surfaces the error as a section note.
 pub async fn fetch_ticket_via_provider(token: &str, mr_url: &str, ticket: &TicketRef) -> FetchedTicket {
-    let api_base = api_base_from_mr_url(mr_url);
     match ticket.provider {
-        super::TicketProvider::GitHub => fetch_github(token, &api_base, ticket).await,
-        super::TicketProvider::GitLab => fetch_gitlab(token, &api_base, ticket).await,
+        super::TicketProvider::GitHub => {
+            let api_base = github_api_base_from_mr_url(mr_url);
+            fetch_github(token, &api_base, ticket).await
+        }
+        super::TicketProvider::GitLab => {
+            let api_base = gitlab_api_base_from_mr_url(mr_url);
+            fetch_gitlab(token, &api_base, ticket).await
+        }
     }
 }
 
@@ -206,16 +256,80 @@ mod tests {
     }
 
     #[test]
-    fn api_base_from_mr_url_preserves_http() {
+    fn gitlab_api_base_from_mr_url_preserves_http() {
         assert_eq!(
-            api_base_from_mr_url("http://gitlab.local:8080/g/p/-/merge_requests/1"),
+            gitlab_api_base_from_mr_url("http://gitlab.local:8080/g/p/-/merge_requests/1"),
             "http://gitlab.local:8080"
         );
     }
 
     #[test]
-    fn api_base_from_mr_url_returns_invalid_when_no_scheme() {
-        assert_eq!(api_base_from_mr_url("garbage.invalid/x/y"), "https://invalid.invalid");
+    fn gitlab_api_base_from_mr_url_returns_invalid_when_no_scheme() {
+        assert_eq!(
+            gitlab_api_base_from_mr_url("garbage.invalid/x/y"),
+            "https://invalid.invalid"
+        );
+    }
+
+    /// P1-1 (M40 r3): the GitHub MR URL must map to the REST API host,
+    /// not the web host. The wiremock test cannot observe this because
+    /// the mock's origin doubles as both web host and API base; the
+    /// unit test below asserts the URL the client would build.
+    #[test]
+    fn github_api_base_maps_github_com_to_api_github_com() {
+        assert_eq!(
+            github_api_base_from_mr_url("https://github.com/owner/repo/pull/1"),
+            "https://api.github.com"
+        );
+        let api_base = github_api_base_from_mr_url("https://github.com/owner/repo/pull/1");
+        assert_eq!(
+            github_issue_url(&api_base, "owner", "repo", 42),
+            "https://api.github.com/repos/owner/repo/issues/42"
+        );
+    }
+
+    /// GHE-Cloud (the `.github.com` suffix) shares the public REST base.
+    #[test]
+    fn github_api_base_maps_subdomain_github_dot_com_to_api_github_com() {
+        assert_eq!(
+            github_api_base_from_mr_url("https://acme.github.com/owner/repo/pull/1"),
+            "https://api.github.com"
+        );
+    }
+
+    /// GHE-Server (any other host) routes to `{host}/api/v3`.
+    #[test]
+    fn github_api_base_maps_ghe_server_to_api_v3() {
+        assert_eq!(
+            github_api_base_from_mr_url("https://ghe.example.com/owner/repo/pull/1"),
+            "https://ghe.example.com/api/v3"
+        );
+        // Plain-http GHE Server stays plain-http (no scheme upgrade).
+        assert_eq!(
+            github_api_base_from_mr_url("http://ghe.local/owner/repo/pull/1"),
+            "http://ghe.local/api/v3"
+        );
+    }
+
+    /// github.com with a port is rare but tolerated: the port is for the
+    /// web host (the PR UI); the REST API host has no port.
+    #[test]
+    fn github_api_base_strips_optional_port_on_github_com() {
+        assert_eq!(
+            github_api_base_from_mr_url("https://github.com:443/owner/repo/pull/1"),
+            "https://api.github.com"
+        );
+    }
+
+    /// Wiremock and other non-github.com hosts pass through unchanged
+    /// (no `/api/v3` is forced — the wiremock fixtures and the GitLab
+    /// path route through `gitlab_api_base_from_mr_url`).
+    #[test]
+    fn github_api_base_passes_through_wiremock_hosts() {
+        assert_eq!(
+            github_api_base_from_mr_url("http://127.0.0.1:8080/owner/repo/pull/1"),
+            "http://127.0.0.1:8080/api/v3"
+        );
     }
 
     #[test]

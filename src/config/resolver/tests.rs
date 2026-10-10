@@ -346,6 +346,48 @@ async fn test_resolve_config_lifts_compliance_from_project_toml() {
     );
 }
 
+/// P2-2: on the auto-detect path, the env pass runs AFTER the project
+/// file lift, so `CODE_AUDIT_COMPLIANCE_ENABLED=true` overrides a
+/// project-level `enabled = false` (and vice versa). The pre-r3 code
+/// applied env first, so the file always won — contradicting the docs
+/// that claim the env var is an override.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn test_resolve_config_env_overrides_project_toml_compliance() {
+    let _guard = fs_lock();
+    let _env = clear_code_audit_env();
+    let env_guard = EnvGuard::new("CODE_AUDIT_COMPLIANCE_ENABLED");
+    env_guard.set("true");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path().join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let project_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&project_dir).unwrap();
+    std::fs::write(
+        project_dir.join(".code-audit-config.toml"),
+        "[compliance]\nenabled = false\n",
+    )
+    .unwrap();
+    let _home_guard = HomeGuard::set(&home);
+    let _cwd_guard = CwdGuard::set(&project_dir);
+    let cfg = resolve_config(None).await.unwrap();
+    assert!(
+        cfg.compliance.enabled,
+        "env true must win over project file's enabled = false (P2-2): {:?}",
+        cfg.compliance
+    );
+
+    // And the inverse — env false must turn the gate off.
+    env_guard.set("false");
+    let cfg = resolve_config(None).await.unwrap();
+    assert!(
+        !cfg.compliance.enabled,
+        "env false must turn the gate off even when the project file has enabled = true (P2-2): {:?}",
+        cfg.compliance
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn test_resolve_config_inline() {

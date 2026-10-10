@@ -78,13 +78,17 @@ async fn mount_gitlab_issue_404(server: &MockServer, project: &str, iid: u32) {
 }
 
 /// Mount a GitHub issue endpoint that returns a title + body + html_url.
-/// Mounted at the GitHub REST API path the provider client builds
-/// (`/repos/{owner}/{repo}/issues/{number}`).
+///
+/// P1-1 (M40 r3): `github_api_base_from_mr_url` maps non-`github.com`
+/// hosts to `{scheme}://{host}/api/v3` (the GHE-Server convention),
+/// so the wiremock — whose host is `127.0.0.1` — receives the request
+/// at `/api/v3/repos/{owner}/{repo}/issues/{number}`. Mounting here
+/// asserts the integration shape, and the unit test for
+/// `github_api_base_from_mr_url` pins the production github.com →
+/// `api.github.com` mapping (which the wiremock cannot observe because
+/// its origin doubles as both web and API host).
 async fn mount_github_issue(server: &MockServer, owner: &str, repo: &str, number: u32, title: &str, body: &str) {
-    // Wiremock matches path only; the request includes the path but the
-    // mock returns 404 if the path matcher is wrong. Use `path_regex`
-    // to allow a single trailing slash variant.
-    let path = format!("/repos/{}/{}/issues/{}", owner, repo, number);
+    let path = format!("/api/v3/repos/{}/{}/issues/{}", owner, repo, number);
     let response_body = serde_json::json!({
         "title": title,
         "body": body,
@@ -162,12 +166,16 @@ async fn gate_on_with_gitlab_ticket_refs_means_exactly_one_llm_call() {
 
     mount_gitlab_issue(&gitlab, "g/p", 42, "Ticket 42", "do the thing").await;
     // P1-2: GitLab uses `#N` (the form the user's own MR descriptions
-    // use, M39 corpus's `Closes #73`). The mock-host port needs to be in
-    // the response so the parser's host gate accepts it.
+    // use, M39 corpus's `Closes #73`). The ticket URL the parser
+    // generates comes from the MR URL — `127.0.0.1:<port>` here, not
+    // the literal `gitlab.example.com` the r2 mock had — so the LLM
+    // mock body must be keyed under the same host (P2-3). The host
+    // gate is satisfied because both the MR URL and the ticket URL
+    // share the same host.
     let gl_uri = gitlab.uri();
-    let port = gl_uri.split(':').next_back().unwrap_or("0");
+    let host = gl_uri.trim_start_matches("http://").trim_start_matches("https://");
     let response_json = format!(
-        r#"{{"https://gitlab.example.com:{port}/g/p/-/work_items/42": {{
+        r#"{{"https://{host}/g/p/-/work_items/42": {{
             "requirement": "- do the thing",
             "satisfied": "- done",
             "not_satisfied": "- none",
@@ -191,8 +199,17 @@ async fn gate_on_with_gitlab_ticket_refs_means_exactly_one_llm_call() {
         .await
         .expect("the run should produce a compliance output");
 
-    // (1) The output must carry one check.
+    // (1) The output must carry one check, AND it must not be a
+    // parse_error (P2-3 — the r2 test asserted the count but the LLM
+    // mock key was under `gitlab.example.com` while the parser built
+    // a ticket URL under `127.0.0.1:<port>`, so the LLM JSON's lookup
+    // missed and the check was a parse_error instead of a real verdict).
     assert_eq!(result.checks.len(), 1, "one fetched ticket → one check");
+    assert!(
+        result.checks[0].parse_error.is_none(),
+        "the LLM response was keyed under the wrong host (P2-3): {:?}",
+        result.checks[0].parse_error
+    );
 
     // (2) Provider call count: exactly one.
     let gl_requests = gitlab.received_requests().await.unwrap_or_default();

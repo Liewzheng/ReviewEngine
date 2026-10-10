@@ -50,10 +50,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub languages: LanguagesConfig,
     /// M40 / RENG ticket compliance check (M39 §7 Option A): when the MR/PR
-    /// description references a ticket (`!N`, `#N`, `<work_item_URL>`,
+    /// description references a ticket (`#N`, `<work_item_URL>`,
     /// `org/repo#N`), fetch it and run a single LLM judgement comparing the
     /// diff against the ticket's requirements. Off by default — every
     /// disabled run pays zero extra calls (see [`ComplianceConfig`]).
+    /// GitLab `!N` is the MR sigil and is intentionally NOT matched.
     #[serde(default)]
     pub compliance: ComplianceConfig,
 }
@@ -306,11 +307,12 @@ impl Default for RiskThresholdConfig {
 /// Ticket-compliance-check configuration (M40 / RENG).
 ///
 /// The compliance check is the M39 §7 Option A gated sub-step: when an MR
-/// description contains a recognised ticket reference (`Closes !N`, `Closes #N`,
+/// description contains a recognised ticket reference (`Closes #N`,
 /// `<work_item_URL>`, `owner/repo#N`, etc.), the review fetches each
 /// referenced ticket and runs a single LLM call that compares the diff to
 /// the ticket's requirements, rendering a `## Ticket compliance check`
-/// section alongside the per-expert findings.
+/// section alongside the per-expert findings. GitLab's `!N` MR sigil is
+/// intentionally NOT matched — it refers to a merge request, not an issue.
 ///
 /// Gating (verified end-to-end by the M40 tests):
 /// * `enabled = false` → zero extra LLM calls, zero extra HTTP calls;

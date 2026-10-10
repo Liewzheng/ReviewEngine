@@ -64,9 +64,17 @@ fn fallback_report(expert_name: &str, yaml_text: &str) -> ExpertReport {
         findings,
         markdown,
         raw_llm_response: yaml_text.to_string(),
-        // Never silently present a failed parse as "no issues found": carry the
-        // failure so the report can surface a ⚠️ instead of a false clean bill.
-        parse_error: Some("LLM response could not be parsed into a valid review; treated as no findings".to_string()),
+        // M18-W8: never silently present a failed parse as "no issues found".
+        // The phrasing names the failure mode explicitly so the renderer's
+        // ⚠️ banner can read "未审" / "un-reviewed" instead of "clean bill":
+        // an expert whose output the parser could not recover from is NOT a
+        // pass, it is an absence — the report must surface that or the user
+        // will mistake "no findings" for "the code is fine".
+        parse_error: Some(
+            "LLM response could not be parsed into a valid review; treated as 未审 / \
+             un-reviewed (NOT 'no issues found')"
+                .to_string(),
+        ),
         raw_dump_path: None,
         llm_provider: None,
         llm_model: None,
@@ -91,7 +99,10 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
             findings: vec![],
             markdown: String::new(),
             raw_llm_response: yaml_text.to_string(),
-            parse_error: Some("aggregator LLM response could not be parsed; treated as empty".to_string()),
+            // M18-W8: aggregator fallback uses the same 未审 phrasing as
+            // `fallback_report` so an aggregator failure reads the same way
+            // as an expert failure in the lead summary's ⚠️ block.
+            parse_error: Some("aggregator LLM response could not be parsed; treated as 未审 / un-reviewed".to_string()),
             raw_dump_path: None,
             llm_provider: None,
             llm_model: None,
@@ -112,7 +123,9 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                     findings: vec![],
                     markdown: String::new(),
                     raw_llm_response: yaml_text.to_string(),
-                    parse_error: Some("aggregator LLM response could not be parsed; treated as empty".to_string()),
+                    parse_error: Some(
+                        "aggregator LLM response could not be parsed; treated as 未审 / un-reviewed".to_string(),
+                    ),
                     raw_dump_path: None,
                     llm_provider: None,
                     llm_model: None,
@@ -138,7 +151,8 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                             markdown: String::new(),
                             raw_llm_response: yaml_text.to_string(),
                             parse_error: Some(
-                                "aggregator LLM response could not be parsed; treated as empty".to_string(),
+                                "aggregator LLM response could not be parsed; treated as 未审 / un-reviewed"
+                                    .to_string(),
                             ),
                             raw_dump_path: None,
                             llm_provider: None,
@@ -153,7 +167,9 @@ pub fn parse_aggregator_response(yaml_text: &str) -> Result<AggregatedReport> {
                     findings: vec![],
                     markdown: String::new(),
                     raw_llm_response: yaml_text.to_string(),
-                    parse_error: Some("aggregator LLM response could not be parsed; treated as empty".to_string()),
+                    parse_error: Some(
+                        "aggregator LLM response could not be parsed; treated as 未审 / un-reviewed".to_string(),
+                    ),
                     raw_dump_path: None,
                     llm_provider: None,
                     llm_model: None,

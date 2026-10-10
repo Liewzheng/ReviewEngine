@@ -695,6 +695,7 @@ mod tests {
         ConsolidatedReport {
             findings: vec![],
             low_confidence_removed: 0,
+            confidence_downgraded: 0,
             duplicates_merged: 0,
             conflicts: vec![],
             assessment: OverallAssessment {
@@ -710,6 +711,10 @@ mod tests {
             reviewed_files: 0,
             unreviewed_files: vec![],
             coverage: None,
+            parse_status: vec![],
+            verification_stats: None,
+            injected_context: Default::default(),
+            confidence_filter_policy: Default::default(),
             adjudicated_removed: vec![],
         }
     }

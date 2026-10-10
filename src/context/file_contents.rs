@@ -9,13 +9,15 @@
 //! — remote reviews, deleted files, non-UTF-8 content, unsafe paths — are
 //! skipped silently.
 
+use crate::context::agents_md::InjectedContextEntry;
 use crate::models::DiffFile;
 
 /// Per-file byte cap for injected contents. Content beyond the cap is
 /// truncated and the truncation is noted inline.
 pub(crate) const MAX_SINGLE_FILE_BYTES: usize = 20_000;
 
-/// Build the `## Full File Contents` body for the given diff files.
+/// Build the `## Full File Contents` body for the given diff files, plus a
+/// meta report (`FileContentsReport`) the lead summary surfaces.
 ///
 /// Files are ordered by change size (additions + deletions, descending, path
 /// as tie-break) so the most heavily modified files win the `max_total_bytes`
@@ -23,13 +25,30 @@ pub(crate) const MAX_SINGLE_FILE_BYTES: usize = 20_000;
 /// Returns an empty string when the budget is zero, the project path is not
 /// a readable local directory (e.g. remote reviews), or no file content
 /// could be read.
+///
+/// `meta` is built unconditionally (even when the section is empty), so the
+/// lead summary can render "no changed files were injected" honestly.
 pub(crate) fn build_file_contents_section(files: &[DiffFile], project_path: &str, max_total_bytes: usize) -> String {
+    build_file_contents_section_with_meta(files, project_path, max_total_bytes).body
+}
+
+/// Like [`build_file_contents_section`], but also returns the per-file
+/// [`InjectedContextEntry`] rows the M18-W5 `## Injected Context` section
+/// needs. M18-W5: a file whose content was injected but truncated to
+/// `[MAX_SINGLE_FILE_BYTES]` is reported with its original / injected bytes
+/// and a sha256 fingerprint, so a 200 KB file injected as the head 20 KB
+/// does not silently count as "we read the whole thing".
+pub(crate) fn build_file_contents_section_with_meta(
+    files: &[DiffFile],
+    project_path: &str,
+    max_total_bytes: usize,
+) -> FileContentsReport {
     if max_total_bytes == 0 || files.is_empty() {
-        return String::new();
+        return FileContentsReport::default();
     }
     let root = std::path::Path::new(project_path);
     if !root.is_dir() {
-        return String::new();
+        return FileContentsReport::default();
     }
 
     let mut ordered: Vec<&DiffFile> = files.iter().collect();
@@ -39,39 +58,91 @@ pub(crate) fn build_file_contents_section(files: &[DiffFile], project_path: &str
             .then_with(|| a.path.cmp(&b.path))
     });
 
-    let mut out = String::new();
+    let mut body = String::new();
     let mut used = 0usize;
     let mut omitted: Vec<&str> = Vec::new();
+    let mut meta: Vec<InjectedContextEntry> = Vec::new();
 
     for file in ordered {
-        let Some(content) = read_changed_file(root, &file.path, MAX_SINGLE_FILE_BYTES) else {
+        let Some(injected_content) = read_changed_file(root, &file.path, MAX_SINGLE_FILE_BYTES) else {
             continue; // unsafe path, unreadable, or non-UTF-8 → skip silently
         };
-        if used + content.len() > max_total_bytes {
+        let original_bytes = std::fs::metadata(root.join(&file.path))
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let per_file_truncated = injected_content.len() < original_bytes || original_bytes > MAX_SINGLE_FILE_BYTES;
+
+        // P2-2 (review r1): the meta row used to be pushed *before* the
+        // total-budget check, so a file that was then skipped by the
+        // budget (`omitted.push(...); continue`) still got a row whose
+        // `injected_bytes = content.len()` and `truncated = false`,
+        // rendering as `8192 / 8192 bytes (100%) | ok` while the prompt
+        // body listed it under "Omitted". Two fixes here:
+        //   1. push the row *only* for files admitted to the body;
+        //   2. when pushed, hash the *exact* slice the prompt embeds so
+        //      the fingerprint matches what the LLM saw.
+        // Files rejected by the budget show up under "Omitted (context
+        // budget exhausted)" in the prompt body; their row is intentionally
+        // absent from `## Injected Context` so the audit cannot disagree
+        // with the body.
+        if used + injected_content.len() > max_total_bytes {
             omitted.push(&file.path);
             continue;
         }
-        used += content.len();
+        used += injected_content.len();
+
+        meta.push(InjectedContextEntry {
+            source: format!("changed file {}", file.path),
+            original_bytes,
+            injected_bytes: injected_content.len(),
+            truncated: per_file_truncated,
+            // Hash the slice we are *actually* embedding into the body
+            // (post per-file truncation, identical to what `read_changed_file`
+            // returned — but pinning here guards against a future refactor
+            // that drops or reflows the slice before insertion).
+            sha256: crate::context::agents_md::sha256_hex(&injected_content),
+        });
+
         let ext = std::path::Path::new(&file.path)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
-        out.push_str(&format!(
+        body.push_str(&format!(
             "### `{}`\n```{}\n{}\n```\n\n",
             file.path,
             ext,
-            content.trim_end()
+            injected_content.trim_end()
         ));
     }
 
     if !omitted.is_empty() {
-        out.push_str("### Omitted (context budget exhausted)\n");
+        body.push_str("### Omitted (context budget exhausted)\n");
         for path in omitted {
-            out.push_str(&format!("- `{}`\n", path));
+            body.push_str(&format!("- `{}`\n", path));
         }
     }
 
-    out.trim_end().to_string()
+    FileContentsReport {
+        body: body.trim_end().to_string(),
+        entries: meta,
+    }
+}
+
+/// What [`build_file_contents_section_with_meta`] returns: the prompt section
+/// plus the meta rows the M18-W5 `## Injected Context` block surfaces.
+///
+/// `entries` is populated but unused by M32 itself — the M18-W5 lead-summary
+/// render path lives in the orchestrator (M31 owns `pipeline.rs`); the
+/// `#[allow(dead_code)]` is here so the dead-code lint does not fire before
+/// M31 wires the field through `ConsolidatedReport::injected_context`.
+#[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
+pub(crate) struct FileContentsReport {
+    /// The actual prompt-body markdown (same shape as
+    /// [`build_file_contents_section`] returns).
+    pub body: String,
+    /// Per-changed-file `## Injected Context` rows.
+    pub entries: Vec<InjectedContextEntry>,
 }
 
 /// Read a changed file from the local checkout, capped at `max_bytes`.

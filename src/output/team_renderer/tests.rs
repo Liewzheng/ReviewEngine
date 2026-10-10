@@ -151,6 +151,7 @@ fn make_consolidated(score: u8, risk_level: RiskLevel, tl_dr: &str) -> Consolida
     ConsolidatedReport {
         findings: vec![],
         low_confidence_removed: 0,
+        confidence_downgraded: 0,
         duplicates_merged: 0,
         conflicts: vec![],
         assessment: OverallAssessment {
@@ -166,6 +167,10 @@ fn make_consolidated(score: u8, risk_level: RiskLevel, tl_dr: &str) -> Consolida
         reviewed_files: 0,
         unreviewed_files: vec![],
         coverage: None,
+        parse_status: vec![],
+        verification_stats: None,
+        injected_context: Default::default(),
+        confidence_filter_policy: Default::default(),
         adjudicated_removed: vec![],
     }
 }
@@ -190,8 +195,8 @@ fn test_render_lead_summary_full_coverage_banner() {
     consolidated.total_files = 29;
     consolidated.reviewed_files = 29;
     let md = render_lead_summary(&consolidated);
-    assert!(md.contains("**Coverage**: 29 of 29 files reviewed"));
-    assert!(!md.contains("not covered"));
+    assert!(md.contains("**File routing**: 29/29 files assigned to a successful expert task"));
+    assert!(!md.contains("not assigned"));
 }
 
 #[test]
@@ -201,8 +206,15 @@ fn test_render_lead_summary_under_coverage_banner() {
     consolidated.reviewed_files = 27;
     consolidated.unreviewed_files = vec!["src/skip_a.rs".to_string(), "src/skip_b.rs".to_string()];
     let md = render_lead_summary(&consolidated);
-    assert!(md.contains("**Coverage**: 27 of 29 files reviewed"));
-    assert!(md.contains("**2 files not covered by any expert**: src/skip_a.rs, src/skip_b.rs"));
+    assert!(md.contains("**File routing**: 27/29 files assigned to a successful expert task"));
+    // P3-5 (review r1): the exact-count assertion was lost in r1. Restore it
+    // so a future regression that drops a file name from the rendered list
+    // — or that loses the count — fails this test rather than hiding.
+    assert!(
+        md.contains("2 files not assigned"),
+        "the unrouted-file count must be stated, got: {md}"
+    );
+    assert!(md.contains("src/skip_a.rs") && md.contains("src/skip_b.rs"));
 }
 
 /// Build a finding positioned at a conflict location, owned by an expert.
@@ -302,7 +314,7 @@ fn test_render_lead_summary_hunk_coverage_debt() {
         findings_truncation: Default::default(),
     });
     let md = render_lead_summary(&consolidated);
-    assert!(md.contains("Hunk Coverage"), "ledger section must render");
+    assert!(md.contains("## Coverage detail"), "ledger section must render");
     assert!(md.contains("19/25 changed lines demonstrably reviewed (76%)"));
     assert!(md.contains("未覆盖区域 / uncovered"));
     assert!(md.contains("c.c:50-55"), "coverage debt must list the uncovered range");
@@ -462,8 +474,195 @@ fn test_render_lead_summary_no_ledger_skips_hunk_section() {
     let mut consolidated = make_consolidated(92, RiskLevel::Healthy, "1 high found by 3 reviewers.");
     consolidated.coverage = None;
     let md = render_lead_summary(&consolidated);
-    assert!(!md.contains("Hunk Coverage"));
+    assert!(
+        !md.contains("## Coverage detail"),
+        "no ledger → no Coverage detail section"
+    );
     assert!(md.contains("Risk Level: healthy"));
+}
+
+// ─── M18-W5: Injected Context ────────────────────────────────────────
+
+#[test]
+fn test_render_lead_summary_injected_context_surfaces_truncation() {
+    // RENG-19 pain point: AGENTS.md at 13171 bytes / cap 4000 used to log a
+    // WARN and silently ship the head 4000 bytes; the renderer must surface
+    // the original/injected bytes + truncated flag + sha256 fingerprint.
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.injected_context = crate::team::lead_consolidator::InjectedContext {
+        entries: vec![
+            crate::context::agents_md::InjectedContextEntry {
+                source: "AGENTS.md".to_string(),
+                original_bytes: 13_171,
+                injected_bytes: 4_000,
+                truncated: true,
+                sha256: "a".repeat(64),
+            },
+            crate::context::agents_md::InjectedContextEntry {
+                source: "changed file src/lib.rs".to_string(),
+                original_bytes: 8_192,
+                injected_bytes: 8_192,
+                truncated: false,
+                sha256: "b".repeat(64),
+            },
+        ],
+    };
+    let md = render_lead_summary(&consolidated);
+    assert!(md.contains("## Injected Context"), "M18-W5 section must render");
+    assert!(md.contains("`AGENTS.md`"));
+    assert!(md.contains("4000 / 13171 bytes"));
+    assert!(md.contains("⚠ truncated"), "truncated rows are visible");
+    assert!(md.contains("`changed file src/lib.rs`"));
+    // SHA-256 row prefix: 16 chars of the full fingerprint.
+    assert!(md.contains(&"a".repeat(16)));
+    // P3-5 (review r1): the previous assertion `md.matches("ok").count() >= 1`
+    // was vacuous — the fixture's TL;DR is literally "ok", so it would pass
+    // even if the un-truncated row rendered the wrong status. Pin the row
+    // exactly: the un-truncated file's row reads "| ok |" preceded by its
+    // size cell and followed by the SHA prefix. Include the backticks
+    // around `source` and the SHA fingerprint — without them a future
+    // formatter change can drop the formatting without failing the test.
+    assert!(
+        md.contains("| `changed file src/lib.rs` | 8192 / 8192 bytes (100%) | ok | `"),
+        "un-truncated row must read | `changed file src/lib.rs` | 8192 / 8192 bytes (100%) | ok | `, got: {md}"
+    );
+    // And the truncated row reads | ⚠ truncated | — same shape.
+    assert!(
+        md.contains("| `AGENTS.md` | 4000 / 13171 bytes (30%) | ⚠ truncated | `"),
+        "truncated row must read | `AGENTS.md` | 4000 / 13171 bytes (30%) | ⚠ truncated | `, got: {md}"
+    );
+}
+
+#[test]
+fn test_render_lead_summary_injected_context_section_is_hidden_when_empty() {
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.injected_context = Default::default();
+    let md = render_lead_summary(&consolidated);
+    assert!(
+        !md.contains("## Injected Context"),
+        "no rows → no section (backward compat)"
+    );
+}
+
+// ─── P2-4 (review r1): parse_status is per-report; chunked reviews dedupe ──
+
+#[test]
+fn test_render_lead_summary_parse_status_reports_count_dedupes_names() {
+    // The audit's RENG-79 lesson: one failing expert on four chunks used
+    // to print "4 位专家… security, security, security, security". The
+    // headline now counts *reports*, the names list is deduped, and a
+    // parenthetical distinguishes the two when they differ.
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.parse_status = vec![
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+    ];
+    let md = render_lead_summary(&consolidated);
+    // Headline: 4 reports from 1 distinct expert — the parenthetical
+    // disambiguates the report-level count from the expert-level count.
+    assert!(
+        md.contains("4 份专家报告（1 位不同专家）"),
+        "headline must split report vs distinct-expert counts when they differ, got: {md}"
+    );
+    assert!(
+        md.contains("4 expert report(s) from 1 distinct expert(s)"),
+        "english half must say the same thing, got: {md}"
+    );
+    // Names list dedupes — "security" appears exactly once.
+    let occurrences = md.matches("`security`").count();
+    assert_eq!(
+        occurrences, 1,
+        "the expert name must appear exactly once even with 4 failing reports, got: {md}"
+    );
+}
+
+#[test]
+fn test_render_lead_summary_parse_status_one_per_expert_omits_parenthetical() {
+    // When every failing report is from a distinct expert, the headline
+    // collapses to the simple "N expert report(s)" form (no parenthetical).
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.parse_status = vec![
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: None,
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "quality".to_string(),
+            parse_failed: true,
+            error: None,
+        },
+    ];
+    let md = render_lead_summary(&consolidated);
+    assert!(
+        md.contains("2 份专家报告 / 2 expert report(s)"),
+        "when report count == distinct expert count, no parenthetical, got: {md}"
+    );
+    assert!(
+        !md.contains("位不同专家"),
+        "the parenthetical must not appear when reports == distinct experts, got: {md}"
+    );
+}
+
+// ─── M18-W7: verification-pass stats line ────────────────────────────
+
+#[test]
+fn test_render_lead_summary_verification_stats_skipped_nonzero() {
+    // M18-W7: "Verification pass: ran on N, skipped M, dropped K" must
+    // surface whenever M31 plumbs verification_stats; the previous Reng
+    // behaviour of "ran, dropped 0" implied every finding was a true
+    // positive, which was false when parse failures silently passed through.
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.verification_stats = Some(crate::team::lead_consolidator::VerificationStats {
+        checked: 11,
+        skipped: 2,
+        dropped: 0,
+    });
+    let md = render_lead_summary(&consolidated);
+    assert!(
+        md.contains("**Verification pass**: ran on 11, skipped 2, dropped 0"),
+        "M18-W7 line must surface ran/skipped/dropped, got: {md}"
+    );
+    assert!(md.contains("解析失败 2 批"));
+}
+
+#[test]
+fn test_render_lead_summary_verification_stats_absent_is_silent() {
+    // No verification_stats means the verifier didn't run (e.g. an empty
+    // expert team); the line is suppressed to keep backward-compat noise
+    // out of the lead summary.
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.verification_stats = None;
+    let md = render_lead_summary(&consolidated);
+    assert!(!md.contains("**Verification pass**"), "no run → no line");
+}
+
+#[test]
+fn test_render_lead_summary_verification_stats_zero_total_stays_silent() {
+    // Empty / no-op verification (e.g. nothing to verify) renders nothing,
+    // so an empty-checks state doesn't claim the verifier ran.
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.verification_stats = Some(Default::default());
+    let md = render_lead_summary(&consolidated);
+    assert!(!md.contains("**Verification pass**"));
 }
 
 #[test]

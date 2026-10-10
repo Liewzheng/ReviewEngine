@@ -223,6 +223,40 @@ pub fn render_repo_review_output(
                 redact(&output.conclusion.recommendation)
             ));
 
+            // ── Chunks Reviewed (M26) ──
+            // The chunk-level coverage signal the Pass 2 loop collected —
+            // total / reviewed / not-reviewed counts plus the per-failure
+            // (module + LOC + reason) breakdown. Gated on `total > 0` so the
+            // local-only path (no chunks scheduled) and reports with no LLM
+            // configs don't render an empty section. Rendered BEFORE the
+            // verification appendix so the "this chunk was never reviewed"
+            // signal lands earlier than the verification noise.
+            if output.chunk_summary.total > 0 {
+                let cs = &output.chunk_summary;
+                md.push_str("---\n\n## Chunks Reviewed\n\n");
+                md.push_str(&format!(
+                    "- **Total chunks**: {}\n- **Reviewed**: {}\n- **Not reviewed**: {}\n\n",
+                    cs.total, cs.reviewed, cs.not_reviewed
+                ));
+                if !cs.failures.is_empty() {
+                    md.push_str(
+                        "| Module | LOC | Reason |\n\
+                         |--------|-----|--------|\n",
+                    );
+                    for f in &cs.failures {
+                        // Reasons are LLM-error / anyhow-chain prose — keep
+                        // them inside backticks so the table cell doesn't
+                        // wrap unpredictably. Redaction happens at the error
+                        // site (the LLM provider layer) — by the time the
+                        // message reaches us it carries no secrets.
+                        let reason = f.reason.replace('\n', " ");
+                        md.push_str(&format!("| `{}` | {} | `{}` |\n", f.module, f.loc, reason));
+                    }
+                    md.push('\n');
+                }
+                md.push('\n');
+            }
+
             // ── Verification appendix ──
             // checked = surviving code_quality findings + dropped ones, the
             // same "kept + dropped" accounting the review pipeline uses. The

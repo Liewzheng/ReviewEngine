@@ -139,6 +139,10 @@ pub fn aggregate(scores: Vec<ExpertScore>, app_config: Option<&AppConfig>) -> Ag
                 fallback: merged_fallback,
                 evaluated_loc: merged_loc,
                 samples: merged_samples,
+                // The aggregated score is a downstream of the chunk-level
+                // ExpertScores; the per-sample rate is the chunk loop's
+                // signal, not the aggregator's. Leave at default (None).
+                ..Default::default()
             });
         }
     }

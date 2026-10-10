@@ -116,6 +116,26 @@ impl RepoExpert for CodeQuality {
             Vec::new()
         };
 
+        // M18-W2: the by-expert sample-fallback rate (`samples_failed /
+        // samples_attempted`) only has a denominator when sampling was
+        // actually active. The single-shot path (`score_samples = 1`, the
+        // default) leaves both fields at `None` so the JSON omits them —
+        // writing `Some(1) / Some(0)` would publish a misleading 0% rate
+        // for a fallback expert (and was the P2-2 doc/code contradiction
+        // surfaced in M26 r1 review). Mirrors the `samples` field's own
+        // serialisation rule.
+        let samples = call.samples;
+        let samples_attempted = if samples.is_some() {
+            Some(call.samples_attempted)
+        } else {
+            None
+        };
+        let samples_failed = if samples.is_some() {
+            Some(call.samples_failed)
+        } else {
+            None
+        };
+
         Ok(ExpertScore {
             expert_name: self.name().to_string(),
             weight: self.weight(),
@@ -124,7 +144,9 @@ impl RepoExpert for CodeQuality {
             details,
             fallback,
             evaluated_loc: Some(ctx.entries.iter().map(|e| e.loc as u64).sum()),
-            samples: call.samples,
+            samples,
+            samples_attempted,
+            samples_failed,
         })
     }
 }

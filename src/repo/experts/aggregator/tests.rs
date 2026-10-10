@@ -19,6 +19,7 @@ fn make_score(name: &str, score: u8, weight: u8, summary: &str, details: Vec<Sco
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     }
 }
 

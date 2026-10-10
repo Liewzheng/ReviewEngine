@@ -566,3 +566,188 @@ async fn test_scoring_calls_reach_provider_at_zero_temperature() {
     // Global default untouched: the original config keeps 0.9.
     assert_eq!(configs[0].temperature, 0.9);
 }
+
+// ─── M18-W2: legacy `review.findings` schema fallback ───
+//
+// Older prompt templates wrapped the LLM payload in a top-level `review:`
+// mapping (e.g. `review: { score: ..., findings: [...] }`). The modern
+// parsers expect `score` / `summary` / `findings` at the top level. M18-W2
+// promotes the inner mapping when the modern keys are absent so legacy
+// configs don't silently degrade to a 70/0 placeholder.
+
+#[test]
+fn parse_expert_yaml_promotes_legacy_review_findings_to_top_level() {
+    let raw = "\
+review:
+  score: 92
+  summary: \"legacy payload\"
+  findings:
+    - severity: \"high\"
+      message: \"untagged legacy finding\"
+";
+    let v = parse_expert_yaml("code_quality", raw, CODE_QUALITY_KEYS);
+    // The promotion surfaces findings at the top level, exactly as if
+    // the LLM had produced them without the `review:` wrapper.
+    assert_eq!(
+        v["score"].as_u64(),
+        Some(92),
+        "the promoted score must be at the top level"
+    );
+    assert_eq!(v["summary"].as_str(), Some("legacy payload"));
+    let findings = v["findings"]
+        .as_sequence()
+        .expect("promoted findings must be a sequence");
+    assert_eq!(findings.len(), 1, "the inner findings list survives the promotion");
+    assert_eq!(findings[0]["severity"].as_str(), Some("high"));
+    assert_eq!(findings[0]["message"].as_str(), Some("untagged legacy finding"));
+}
+
+#[test]
+fn parse_expert_yaml_legacy_wrapper_without_findings_is_not_promoted() {
+    // An empty `review: {}` wrapper should NOT promote — that's the same
+    // shape as no wrapper, and the modern parsers must keep returning
+    // Null so the fallback path runs unchanged.
+    let raw = "review:\n  guidance: \"shallow\"\n";
+    let v = parse_expert_yaml("architecture_lead", raw, ARCHITECTURE_LEAD_KEYS);
+    assert!(v.is_null(), "an empty review: wrapper must not promote — got {v:?}");
+}
+
+#[test]
+fn parse_expert_yaml_modern_keys_take_precedence_over_legacy_wrapper() {
+    // When the response carries BOTH the modern top-level keys AND the
+    // legacy `review:` wrapper, the modern form wins — the legacy
+    // promotion is only a fallback for configs still pinning the old
+    // prompt template.
+    let raw = "\
+score: 88
+summary: \"modern\"
+findings: []
+review:
+  score: 12
+  findings:
+    - severity: \"high\"
+      message: \"should be ignored\"
+";
+    let v = parse_expert_yaml("code_quality", raw, CODE_QUALITY_KEYS);
+    assert_eq!(
+        v["score"].as_u64(),
+        Some(88),
+        "modern top-level score wins; legacy review.score must NOT overwrite it"
+    );
+    assert_eq!(v["summary"].as_str(), Some("modern"));
+    let findings = v["findings"].as_sequence().expect("modern findings kept");
+    assert!(
+        findings.is_empty(),
+        "the modern empty findings list must shadow the legacy one"
+    );
+}
+
+#[test]
+fn parse_reason_code_strings_are_stable() {
+    // Stable lowercase strings — the same identifiers appear in INFO logs
+    // and downstream dashboards; renaming any of them is a contract
+    // break.
+    use crate::repo::experts::llm_experts::scoring::ParseReasonCode as P;
+    assert_eq!(P::EmptyResponse.as_str(), "empty_response");
+    assert_eq!(P::MissingExpectedKeys.as_str(), "missing_expected_keys");
+    assert_eq!(P::UnparseableYaml.as_str(), "unparseable_yaml");
+    assert_eq!(P::LegacyReviewFallback.as_str(), "legacy_review_fallback");
+}
+
+// ─── M18-W2: by-expert sample-fallback rate ───
+//
+// `call_scoring` runs N samples in parallel; each may fail (call error,
+// unparseable response, schema-conform-but-no-score). The `samples_failed`
+// counter is the numerator of the by-expert fallback rate that dashboards
+// aggregate over time. The `samples_failed`/`samples_attempted` fields on
+// the internal `ScoringCall` keep a uniform 1/0 baseline on the
+// single-shot path (`n = 1`), but the two ExpertScore construction sites
+// gate the public rate fields on `samples.is_some()` so the JSON contract
+// carries no misleading "0% fallback rate" on the default
+// `score_samples = 1` configuration.
+
+#[tokio::test(start_paused = true)]
+async fn call_scoring_reports_samples_failed_count() {
+    // 4 samples: 2 good (scores 80, 70), 1 unparseable (no YAML), 1
+    // schema-conform without score. 2 of 4 succeed → fallback rate 0.5.
+    let bodies = vec![
+        "score: 80\nsummary: \"good a\"\nfindings: []".to_string(),
+        "score: 70\nsummary: \"good b\"\nfindings: []".to_string(),
+        "no yaml here at all, just prose".to_string(), // unparseable
+        "summary: \"no score here\"\nfindings: []".to_string(), // schema-no-score
+    ];
+    let (client, _peak, _temps) = mock_client(bodies);
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        4,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(call.samples, Some(vec![80, 70]));
+    assert_eq!(call.median, Some(75));
+    assert_eq!(
+        call.samples_attempted, 4,
+        "every parallel request counts as one attempt"
+    );
+    assert_eq!(
+        call.samples_failed, 2,
+        "two samples failed (unparseable + schema-no-score)"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn call_scoring_reports_zero_failures_on_clean_samples() {
+    let bodies = vec![
+        "score: 80\nsummary: \"a\"\nfindings: []".to_string(),
+        "score: 90\nsummary: \"b\"\nfindings: []".to_string(),
+        "score: 70\nsummary: \"c\"\nfindings: []".to_string(),
+    ];
+    let (client, _peak, _temps) = mock_client(bodies);
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        3,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(call.samples_attempted, 3);
+    assert_eq!(call.samples_failed, 0, "all three parsed and scored");
+}
+
+#[tokio::test(start_paused = true)]
+async fn call_scoring_single_shot_records_one_attempt_no_failures_on_success() {
+    let bodies = vec!["score: 80\nsummary: \"ok\"\nfindings: []".to_string()];
+    let (client, _peak, _temps) = mock_client(bodies);
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        1,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    // Single-shot path (`n = 1`): the `ScoringCall` itself keeps a 1/0
+    // baseline so the multi/single-shot shapes stay uniform — but the
+    // two ExpertScore construction sites (`code_quality.rs` /
+    // `architecture.rs`) gate the public `samples_attempted` /
+    // `samples_failed` fields on `call.samples.is_some()`. So the public
+    // JSON carries no rate on the single-shot path (the P2-2 contract
+    // surfaced in M26 r1 review); this test pins the internal
+    // `ScoringCall` shape, and the multi-sample test below pins the
+    // public ExpertScore rate surface.
+    assert!(call.samples.is_none());
+    assert_eq!(call.samples_attempted, 1);
+    assert_eq!(call.samples_failed, 0);
+}

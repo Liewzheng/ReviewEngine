@@ -181,6 +181,7 @@ impl RepoExpert for Security {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         })
     }
 }

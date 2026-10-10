@@ -202,6 +202,7 @@ impl RepoExpert for CodeOrganization {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         })
     }
 }

@@ -48,7 +48,7 @@ pub struct RepoContext {
 // ─── ExpertScore ─────────────────────────────
 
 /// Score produced by a single expert evaluation.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ExpertScore {
     /// Name of the expert that produced this score.
     pub expert_name: String,
@@ -74,6 +74,16 @@ pub struct ExpertScore {
     /// (`scoring.score_samples > 1`); the reported `score` is their median.
     /// `None` when sampling was disabled (the default).
     pub samples: Option<Vec<u8>>,
+    /// M18-W2: how many scoring samples were attempted for this expert
+    /// (including failures). Always set when `samples.is_some()` is set
+    /// (the two move together — a single-shot path leaves both as the
+    /// default of `None`). Lets the report surface the by-expert fallback
+    /// rate as `samples_failed / samples_attempted`.
+    pub samples_attempted: Option<usize>,
+    /// M18-W2: how many of the attempted scoring samples failed (call
+    /// error, unparseable YAML, or schema-conforming YAML with no `score`).
+    /// `None` when sampling was disabled.
+    pub samples_failed: Option<usize>,
 }
 
 /// A single finding or observation within an expert score.
@@ -294,6 +304,8 @@ mod tests {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            samples_attempted: None,
+            samples_failed: None,
         }
     }
 
@@ -373,6 +385,8 @@ mod tests {
             fallback: true,
             evaluated_loc: Some(1234),
             samples: Some(vec![40, 45]),
+            samples_attempted: Some(2),
+            samples_failed: Some(0),
         };
         let cloned = original.clone();
         assert_eq!(cloned.expert_name, "security");
@@ -381,6 +395,8 @@ mod tests {
         assert!(cloned.fallback);
         assert_eq!(cloned.evaluated_loc, Some(1234));
         assert_eq!(cloned.samples, Some(vec![40, 45]));
+        assert_eq!(cloned.samples_attempted, Some(2));
+        assert_eq!(cloned.samples_failed, Some(0));
         assert_eq!(cloned.details[0].severity, "high");
         assert_eq!(cloned.details[0].message, "missing bounds check");
     }

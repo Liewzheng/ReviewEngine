@@ -64,6 +64,7 @@ async fn run_static_experts(ctx: &RepoContext) -> Vec<ExpertScore> {
                     fallback: true,
                     evaluated_loc: None,
                     samples: None,
+                    ..Default::default()
                 });
             }
         }
@@ -109,6 +110,10 @@ fn build_output(scores: &[ExpertScore], stats: &crate::repo::RepoStats, metadata
         conclusion,
         dropped_findings: Vec::new(),
         verification_ran: false,
+        // Local-only path: no chunk scheduling, so the summary stays at
+        // its `Default::default()` (total = 0). The renderer's `Chunks
+        // Reviewed` appendix is gated on `total > 0` so this never shows.
+        chunk_summary: ChunkSummary::default(),
         metadata,
     }
 }
@@ -126,12 +131,19 @@ fn build_output(scores: &[ExpertScore], stats: &crate::repo::RepoStats, metadata
 /// for whatever other consumer wants "5 lowest experts"; only the
 /// report's conclusion switches sources so both risk surfaces stay
 /// consistent.
+///
+/// `chunk_summary` (M26) is the per-chunk coverage signal the orchestrator
+/// collected during Pass 2 — total / reviewed / not-reviewed counts plus
+/// the per-failure module + LOC + reason. Renderers expose it in a
+/// `Chunks Reviewed` appendix; consumers that ignore it (e.g. the
+/// local-only path) get a `Default::default()` empty summary.
 fn build_output_from_aggregated(
     agg: &crate::repo::experts::aggregator::AggregatedResult,
     stats: &crate::repo::RepoStats,
     dropped_findings: Vec<crate::team::verifier::DroppedFinding>,
     verification_ran: bool,
     metadata: ReviewMetadata,
+    chunk_summary: ChunkSummary,
 ) -> RepoReviewOutput {
     let (health_score, risk_level) = experts::weighted_total(&agg.scores);
     let conv = convert_scores(&agg.scores);
@@ -178,6 +190,7 @@ fn build_output_from_aggregated(
         conclusion,
         dropped_findings,
         verification_ran,
+        chunk_summary,
         metadata,
     }
 }
@@ -296,6 +309,23 @@ pub async fn run_repo_review(
 
     // ── 3-pass LLM architecture ──
     let mut dropped_findings: Vec<crate::team::verifier::DroppedFinding> = Vec::new();
+    // M26: per-chunk coverage so a report can say "X of Y chunks were not
+    // reviewed by the model" instead of forcing the reader to grep the
+    // per-expert `fallback: true` rows. Built up inside the chunk loop
+    // and handed to `build_output_from_aggregated` below.
+    let mut chunk_summary = ChunkSummary {
+        total: 0,
+        reviewed: 0,
+        not_reviewed: 0,
+        failures: Vec::new(),
+    };
+    // Counter Arcs declared here so they survive the `llm_configs.is_empty()`
+    // branch — when no LLM configs are present, no chunks are scheduled,
+    // the counters stay zero, and the orchestrator's post-loop read
+    // confirms the empty summary it started with.
+    let reviewed_chunks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let not_reviewed_chunks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let not_reviewed_reasons: Arc<std::sync::Mutex<Vec<ChunkFailure>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
     // True only when the verification pass below actually invokes
     // `verify_findings`; stays false when the pass is disabled or there were
     // no code_quality findings to hand to the verifier.
@@ -336,6 +366,7 @@ pub async fn run_repo_review(
                     fallback: true,
                     evaluated_loc: Some(ctx.stats.total_loc as u64),
                     samples: None,
+                    ..Default::default()
                 });
             }
         }
@@ -343,6 +374,10 @@ pub async fn run_repo_review(
         // ── Pass 2: Chunk-based CodeQuality ──
         let root = std::path::Path::new(local_path);
         let chunks = crate::repo::experts::chunk::chunk_by_module(entries, root);
+        // M26: the chunk-summary totals — populated by the chunk task
+        // below. Total is known synchronously; reviewed/not_reviewed and the
+        // per-failure list come back from the futures that ran each chunk.
+        chunk_summary.total = chunks.len();
 
         if let Some(ref map) = progress_map {
             if let Ok(mut p) = map.write() {
@@ -361,6 +396,11 @@ pub async fn run_repo_review(
         let completed_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let total_chunks = chunks.len();
         let scanner_ref = &scanner;
+        // M26: per-chunk counters shared by the concurrent chunk tasks so
+        // the final `chunk_summary` records the model's real coverage. The
+        // counters are declared in the enclosing scope so the post-loop
+        // read below can pull the final values even when the `if !llm_configs
+        // .is_empty()` block was bypassed (local-only path: no chunks).
 
         // Evaluate chunks concurrently (bounded by the semaphore), one future
         // per chunk. `join_all` polls them together and returns results in
@@ -378,6 +418,18 @@ pub async fn run_repo_review(
                 let llm_configs = llm_configs.to_vec();
                 let config = ctx.config.clone();
                 let facts_block = ctx.facts_block.clone();
+                let reviewed_chunks = reviewed_chunks.clone();
+                let not_reviewed_chunks = not_reviewed_chunks.clone();
+                let not_reviewed_reasons = not_reviewed_reasons.clone();
+                // M26: chunk-task closure. Mutex poisoning here means a
+                // sibling task panicked while holding it — propagate as a
+                // panic rather than as a `Result` that hides the cause
+                // chain. Mirrors the `#[allow(clippy::expect_used)]`
+                // pattern used in the metrics / HTTP layer.
+                #[allow(clippy::expect_used)]
+                fn push_chunk_failure(mutex: &std::sync::Mutex<Vec<ChunkFailure>>, failure: ChunkFailure) {
+                    mutex.lock().expect("chunk-failure mutex poisoned").push(failure);
+                }
                 async move {
                     let _permit = match semaphore.acquire_owned().await {
                         Ok(permit) => permit,
@@ -385,7 +437,17 @@ pub async fn run_repo_review(
                             // Practically unreachable (the semaphore is never
                             // closed), but the chunk must still land.
                             tracing::warn!("Chunk {} semaphore acquire failed: {:?}", chunk.module, e);
-                            return chunk_fallback_score(chunk, format!("scheduler unavailable: {e}"));
+                            let score = chunk_fallback_score(chunk, format!("scheduler unavailable: {e}"));
+                            not_reviewed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            push_chunk_failure(
+                                &not_reviewed_reasons,
+                                ChunkFailure {
+                                    module: chunk.module.clone(),
+                                    loc: chunk.total_loc as u64,
+                                    reason: format!("scheduler unavailable: {e}"),
+                                },
+                            );
+                            return score;
                         }
                     };
                     tracing::info!(
@@ -413,8 +475,39 @@ pub async fn run_repo_review(
                     };
 
                     let result = match llm_experts::CodeQuality.evaluate(&chunk_ctx, Some(llm_client)).await {
-                        Ok(s) => {
+                        Ok(mut s) => {
                             tracing::info!("Chunk {} scored {}", chunk.module, s.score);
+                            if !s.fallback {
+                                reviewed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                // The expert returned successfully but its
+                                // score is itself a placeholder (parse failure,
+                                // empty parse, etc.). Land it in the
+                                // not-reviewed bucket — the model never
+                                // produced findings for this chunk. The
+                                // `chunk not reviewed` prefix in the
+                                // `chunk_summary` table is the reader's
+                                // primary signal; mirror it into the
+                                // per-expert summary so the "Detailed
+                                // Findings" surface carries the same word
+                                // and grep -F 'chunk not reviewed' finds
+                                // every unassessed chunk in either render.
+                                not_reviewed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                let prefixed_summary = if s.summary.starts_with(CHUNK_NOT_REVIEWED_PREFIX) {
+                                    s.summary.clone()
+                                } else {
+                                    format!("{CHUNK_NOT_REVIEWED_PREFIX} — module {}: {}", chunk.module, s.summary)
+                                };
+                                push_chunk_failure(
+                                    &not_reviewed_reasons,
+                                    ChunkFailure {
+                                        module: chunk.module.clone(),
+                                        loc: chunk.total_loc as u64,
+                                        reason: format!("LLM response not actionable: {}", s.summary),
+                                    },
+                                );
+                                s.summary = prefixed_summary;
+                            }
                             s
                         }
                         Err(e) => {
@@ -426,6 +519,15 @@ pub async fn run_repo_review(
                                  recording explicit fallback score ({})",
                                 chunk.module,
                                 experts::LLM_FALLBACK_SCORE
+                            );
+                            not_reviewed_chunks.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            push_chunk_failure(
+                                &not_reviewed_reasons,
+                                ChunkFailure {
+                                    module: chunk.module.clone(),
+                                    loc: chunk.total_loc as u64,
+                                    reason: format!("LLM assessment unavailable: {e}"),
+                                },
                             );
                             chunk_fallback_score(chunk, format!("LLM assessment unavailable: {e}"))
                         }
@@ -525,7 +627,56 @@ pub async fn run_repo_review(
 
     // ── Pass 3: Aggregator ──
     let aggregated = crate::repo::experts::aggregator::aggregate(scores, ctx.config.as_deref());
-    let output = build_output_from_aggregated(&aggregated, &ctx.stats, dropped_findings, verification_ran, metadata);
+    // M26: surface the chunk-level coverage the orchestrator collected so
+    // the `Chunks Reviewed` appendix can show "X of Y chunks reviewed"
+    // rather than forcing the reader to grep the per-expert `fallback: true`
+    // rows. Counts are also published at INFO so the logs carry the same
+    // signal the JSON / Markdown do.
+    //
+    // `expect` is the right shape here: a poisoned mutex means another
+    // task panicked while holding it, and propagating that as a `?` would
+    // hide the original panic in a chain that ends at "all chunks
+    // failed". Mirror the `#[allow(clippy::expect_used)]` pattern the
+    // metrics / HTTP layer use so this site stays consistent.
+    #[allow(clippy::expect_used)]
+    let collect_failures = || {
+        Arc::try_unwrap(not_reviewed_reasons)
+            .map(|m| m.into_inner().expect("chunk-failure mutex poisoned"))
+            .unwrap_or_else(|arc| arc.lock().expect("chunk-failure mutex poisoned").clone())
+    };
+    let reviewed = reviewed_chunks.load(std::sync::atomic::Ordering::Relaxed);
+    let not_reviewed = not_reviewed_chunks.load(std::sync::atomic::Ordering::Relaxed);
+    let mut failures = collect_failures();
+    // Keep `failures` in the same order as `chunks.iter().enumerate()` so
+    // the report's table is deterministic — the orchestrator records them
+    // in completion order, but the user reads the report top-to-bottom.
+    failures.sort_by(|a, b| a.module.cmp(&b.module));
+    chunk_summary.reviewed = reviewed;
+    chunk_summary.not_reviewed = not_reviewed;
+    chunk_summary.failures = failures;
+    if chunk_summary.not_reviewed > 0 {
+        tracing::warn!(
+            reviewed = chunk_summary.reviewed,
+            not_reviewed = chunk_summary.not_reviewed,
+            total = chunk_summary.total,
+            "CodeQuality chunks: some chunks were not reviewed by the model \
+             (see report's Chunks Reviewed section for module-level reasons)"
+        );
+    } else if chunk_summary.total > 0 {
+        tracing::info!(
+            reviewed = chunk_summary.reviewed,
+            total = chunk_summary.total,
+            "CodeQuality chunks: all reviewed successfully"
+        );
+    }
+    let output = build_output_from_aggregated(
+        &aggregated,
+        &ctx.stats,
+        dropped_findings,
+        verification_ran,
+        metadata,
+        chunk_summary,
+    );
 
     // Mark progress complete
     crate::progress::complete_repo_progress(progress_map.as_ref(), review_id);

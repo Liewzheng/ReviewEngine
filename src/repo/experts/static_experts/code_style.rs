@@ -177,6 +177,7 @@ impl RepoExpert for CodeStyle {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         })
     }
 }

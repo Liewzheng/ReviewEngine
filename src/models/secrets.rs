@@ -127,12 +127,35 @@ impl SecretKind {
 /// not the whole `key = value` line. `key` is `Some` for the structured
 /// assignment patterns (so the marker can echo `password = "…"` instead of
 /// just `…`) and `None` for the value-only patterns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is implemented by hand (not derived) — a derived `Debug` would
+/// print the `value` field verbatim, and the module's docstring promises the
+/// opposite: a hit's plaintext value never leaves the redact / scan code
+/// path via `{:?}`. See [`SecretHit::fingerprint_short`] for the
+/// fingerprint the manual `Debug` surfaces as the operator's join key.
+#[derive(Clone, PartialEq, Eq)]
 pub struct SecretHit {
     pub kind: SecretKind,
     pub key: Option<String>,
     pub value: String,
     pub range: Range<usize>,
+}
+
+impl std::fmt::Debug for SecretHit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Deliberately do NOT include `self.value` — the plaintext would
+        // land in any logger / error formatter that handles `SecretHit` by
+        // its `Debug` impl (tracing, anyhow, panic payload, etc.). The
+        // operator-visible context (kind, key, length, fingerprint prefix)
+        // is enough to grep the local report file for the offending line.
+        f.debug_struct("SecretHit")
+            .field("kind", &self.kind)
+            .field("key", &self.key)
+            .field("len", &self.value.chars().count())
+            .field("fingerprint", &self.fingerprint_short())
+            .field("range", &self.range)
+            .finish()
+    }
 }
 
 impl SecretHit {
@@ -191,33 +214,43 @@ fn detectors() -> Vec<(&'static str, SecretKind, DetectorShape)> {
         // ── Structured assignments first: each captures `key` + `val`
         //    named groups so the marker can echo the key name alongside
         //    the redaction metadata.
+        //
+        //    The optional `["']?` around the key lets the same regex
+        //    cover JSON-style `"password": "…"`, TOML/YAML-style
+        //    `password = "…"` and Python-dict-style `'password': "…"`
+        //    with one pattern — the lead `["']?` matches the JSON opening
+        //    quote (if any), the trailing `["']?` matches the closing
+        //    one (if any), and the inner `\s*[:=]\s*` consumes the
+        //    surrounding whitespace + separator. Without it the JSON
+        //    form slips the gate (the `\"` quoting for the key is one of
+        //    W14's documented bypass shapes).
         (
-            r#"(?im)(?P<key>\b(?:password|passwd|pwd|db[_-]?password)\b)\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
+            r#"(?im)["']?(?P<key>\b(?:password|passwd|pwd|db[_-]?password)\b)["']?\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
             SecretKind::Password,
             DetectorShape::KeyValue,
         ),
         (
-            r#"(?im)(?P<key>\b(?:secret|client[_-]?secret|app[_-]?secret)\b)\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
+            r#"(?im)["']?(?P<key>\b(?:secret|client[_-]?secret|app[_-]?secret)\b)["']?\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
             SecretKind::Secret,
             DetectorShape::KeyValue,
         ),
         (
-            r#"(?im)(?P<key>\b(?:token|access[_-]?token|auth[_-]?token|bearer[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|csrf[_-]?token|webhook[_-]?secret|signing[_-]?secret|api[_-]?token)\b)\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
+            r#"(?im)["']?(?P<key>\b(?:token|access[_-]?token|auth[_-]?token|bearer[_-]?token|refresh[_-]?token|id[_-]?token|session[_-]?token|csrf[_-]?token|webhook[_-]?secret|signing[_-]?secret|api[_-]?token)\b)["']?\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
             SecretKind::Token,
             DetectorShape::KeyValue,
         ),
         (
-            r#"(?im)(?P<key>\b(?:api[_-]?key|apikey|api[_-]?id|access[_-]?key(?:_id)?|secret[_-]?access[_-]?key)\b)\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
+            r#"(?im)["']?(?P<key>\b(?:api[_-]?key|apikey|api[_-]?id|access[_-]?key(?:_id)?|secret[_-]?access[_-]?key)\b)["']?\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
             SecretKind::ApiKey,
             DetectorShape::KeyValue,
         ),
         (
-            r#"(?im)(?P<key>\b(?:private[_-]?key|priv[_-]?key|secret[_-]?key)\b)\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
+            r#"(?im)["']?(?P<key>\b(?:private[_-]?key|priv[_-]?key|secret[_-]?key)\b)["']?\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
             SecretKind::PrivateKey,
             DetectorShape::KeyValue,
         ),
         (
-            r#"(?im)(?P<key>\b(?:openai[_-]?api[_-]?key|anthropic[_-]?api[_-]?key|llm[_-]?api[_-]?key)\b)\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
+            r#"(?im)["']?(?P<key>\b(?:openai[_-]?api[_-]?key|anthropic[_-]?api[_-]?key|llm[_-]?api[_-]?key)\b)["']?\s*[:=]\s*["']?(?P<val>[^\s"',;}{)#]+)["']?"#,
             SecretKind::LlmApiKey,
             DetectorShape::KeyValue,
         ),
@@ -354,6 +387,51 @@ fn marker_spans(text: &str) -> Vec<Range<usize>> {
     marker_regex().find_iter(text).map(|m| m.start()..m.end()).collect()
 }
 
+/// Unescape JSON-style `\"` → `"` in `text`, returning both the
+/// normalized string and a side-product byte-offset map from each byte
+/// of the normalized string back to where it came from in the original.
+///
+/// W14 (RENG secrets scan / redaction pass): raw LLM output may carry a
+/// JSON payload with `\"` quoting the keys / values, e.g.
+///
+/// ```text
+/// {\"password\": \"hunter2_real\"}
+/// ```
+///
+/// The structured detector's value char class excludes `"`, so without
+/// pre-normalization the regex starts capturing at the `\` (a single
+/// backslash — below `MIN_VALUE_LEN`) and the key/value token fall
+/// through the gate. The value-only patterns (`glpat-…`, `AKIA…`, …) are
+/// not affected (they don't quote); this normalizer lifts the
+/// structured-detector bypass without relaxing any other rule.
+///
+/// The map has length `normalized.len() + 1`: entry `j` for `j` in
+/// `0..normalized.len()` is the byte offset in `text` that produced the
+/// `j`-th byte of the normalized string, and the trailing entry is
+/// `text.len()` (used as the "end of input" sentinel for range mapping).
+fn unescape_quotes_for_scan(text: &str) -> (String, Vec<usize>) {
+    let mut normalized = String::with_capacity(text.len());
+    let mut map: Vec<usize> = Vec::with_capacity(text.len() + 1);
+    let mut chars = text.char_indices().peekable();
+    while let Some((byte_pos, ch)) = chars.next() {
+        if ch == '\\' && matches!(chars.peek(), Some(&(_, '"'))) {
+            // \" → " (W14): two original bytes collapse to one
+            // normalized byte, mapped back to the leading `\` position.
+            chars.next();
+            normalized.push('"');
+            map.push(byte_pos);
+            continue;
+        }
+        let ch_len = ch.len_utf8();
+        for _ in 0..ch_len {
+            map.push(byte_pos);
+        }
+        normalized.push(ch);
+    }
+    map.push(text.len());
+    (normalized, map)
+}
+
 /// Scan `text` for suspected credentials. Hits do *not* overlap — a later
 /// detector never re-matches inside a value already covered by an earlier
 /// one (the structured assignment set fires before the value-only set, so a
@@ -371,12 +449,20 @@ fn marker_spans(text: &str) -> Vec<Range<usize>> {
 /// unactionable "re-redact locally" message). Treating marker spans as
 /// "already redacted, do not look inside" keeps the gate, the renderer
 /// and the redact pass composable.
+///
+/// W14 (RENG secrets scan / redaction pass): `text` is pre-normalized
+/// with `unescape_quotes_for_scan` so JSON-quoted payloads
+/// (`{\"password\":\"hunter2\"}`) hit the structured detector. All
+/// returned ranges are mapped back to the *original* text — callers
+/// slicing with `&original[hit.range]` see exactly the bytes that
+/// produced the hit.
 pub fn scan_secrets(text: &str) -> Vec<SecretHit> {
+    let (normalized, pos_map) = unescape_quotes_for_scan(text);
     // Marker spans first — cheap (a single regex pass) and load-bearing.
-    let markers = marker_spans(text);
+    let markers = marker_spans(&normalized);
     let mut hits: Vec<SecretHit> = Vec::new();
     for detector in compiled_detectors() {
-        for caps in detector.regex.captures_iter(text) {
+        for caps in detector.regex.captures_iter(&normalized) {
             // Captures always carry the whole match in group 0, so the
             // structured-assignment shape can read it as `caps.get(0)`.
             let whole = match caps.get(0) {
@@ -413,7 +499,11 @@ pub fn scan_secrets(text: &str) -> Vec<SecretHit> {
             {
                 continue;
             }
-            let value = text[value_range.clone()].to_string();
+            // The value is sliced out of the *normalized* form, but the
+            // value text itself is unchanged by the `\"` → `"` pass (only
+            // the surrounding quotes shift), so the string is the same
+            // content as the original slice.
+            let value = normalized[value_range.clone()].to_string();
             if value.chars().count() < MIN_VALUE_LEN {
                 continue;
             }
@@ -439,7 +529,19 @@ pub fn scan_secrets(text: &str) -> Vec<SecretHit> {
         last_end = hit.range.end;
         deduped.push(hit);
     }
-    deduped
+    // Map every surviving hit's normalized-byte range back into
+    // original-text coordinates. By construction the indexed entries
+    // (`pos_map[range.start]` / `pos_map[range.end]`) are in-range —
+    // `range.end` is at most `normalized.len()`, for which `pos_map`
+    // carries the `text.len()` sentinel, and `range.start` is at least 0.
+    let mapped = deduped
+        .into_iter()
+        .map(|mut h| {
+            h.range = pos_map[h.range.start]..pos_map[h.range.end];
+            h
+        })
+        .collect();
+    mapped
 }
 
 /// Replace every detected credential in `text` with its marker placeholder.
@@ -481,10 +583,28 @@ pub fn redact_text(text: &str) -> String {
 /// `Debug` impl on this type prints plaintext. The fingerprint the error
 /// names is the join key: the operator greps the local report file for
 /// the 8-hex-char prefix and lands on the offending line.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is implemented by hand (not derived): the only field is `hits`,
+/// and a derived `Debug` would delegate to [`SecretHit`]'s derived `Debug`,
+/// which would have printed the plaintext `value` field. With the manual
+/// `Debug` on `SecretHit`, the `PublishRefusal` `Debug` is safe by
+/// construction — `hits` are rendered through the redacted form (kind,
+/// key, length, fingerprint prefix, range — no value). Any logger or
+/// error formatter that handles `PublishRefusal` via `{:?}` therefore
+/// surfaces the same safe join key the explicit [`crate::format_publish_refusal`]
+/// does.
+#[derive(Clone, PartialEq, Eq)]
 pub struct PublishRefusal {
     /// Up to [`PUBLISH_REFUSAL_HITS`] hits, in source order.
     pub hits: Vec<SecretHit>,
+}
+
+impl std::fmt::Debug for PublishRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Delegate to `SecretHit`'s manual Debug — it never prints the
+        // plaintext value, only kind / key / len / fingerprint / range.
+        f.debug_struct("PublishRefusal").field("hits", &self.hits).finish()
+    }
 }
 
 /// How many hits the gate surfaces in the error message. More would bloat
@@ -782,5 +902,267 @@ mod tests {
             see https://example.com/***[redacted:kind=basic_auth_url,len=6,fp=0123456789abcdef]***@host\n";
         let spans = marker_spans(body);
         assert_eq!(spans.len(), 3, "every ***[redacted:…]*** is a marker: {body}");
+    }
+
+    // ── RENG secrets Debug + JSON-escape redaction (W14) ─────────────
+
+    /// `SecretHit`'s derived `Debug` used to print the plaintext `value`
+    /// field verbatim — any `tracing::warn!("hit={:?}", hit)` /
+    /// `anyhow!("{:?}", hit)` / panic payload that handled a hit leaked
+    /// the credential into the log path. The manual `Debug` impl
+    /// exposes kind + key + length + 8-hex fingerprint prefix + byte
+    /// range, and never the plaintext. This test pins that contract.
+    #[test]
+    fn secrethit_debug_does_not_leak_plaintext_value() {
+        let plaintext = "hunter2_real_secret_p4ssw0rd";
+        let hit = SecretHit {
+            kind: SecretKind::Password,
+            key: Some("password".to_string()),
+            value: plaintext.to_string(),
+            range: 0..plaintext.len(),
+        };
+        let dbg = format!("{hit:?}");
+        assert!(
+            !dbg.contains(plaintext),
+            "Debug must never echo the plaintext value, got: {dbg}"
+        );
+        // Operator-visible contract: every redacted-form field is in the
+        // Debug, the plaintext isn't.
+        assert!(dbg.contains("kind"), "Debug shows the kind: {dbg}");
+        assert!(dbg.contains("key"), "Debug shows the key field: {dbg}");
+        assert!(dbg.contains("password"), "Debug shows the key name: {dbg}");
+        assert!(dbg.contains("len"), "Debug shows the length field: {dbg}");
+        assert!(
+            dbg.contains(&hit.fingerprint_short()),
+            "Debug shows the 8-hex fingerprint prefix: {dbg}"
+        );
+        assert!(dbg.contains("range"), "Debug shows the byte range: {dbg}");
+        assert!(dbg.contains("SecretHit"), "Debug shows the type name: {dbg}");
+    }
+
+    /// `SecretHit::fingerprint_short` is the join key the operator greps
+    /// for — and it is, by construction, a fingerprint of the value,
+    /// not the value itself. The Debug output must include only the
+    /// fingerprint and never any substring of the value, even if the
+    /// value happens to be unique enough to look like a fingerprint.
+    #[test]
+    fn secrethit_debug_value_substring_can_not_appear() {
+        // A value that overlaps with its own fingerprint prefix in
+        // appearance: a long string of hex-ish characters whose SHA-256
+        // prefix could in principle collide with a substring.
+        let plaintext = "abcdef0123456789abcdef0123456789abcdef0123456789";
+        let hit = SecretHit {
+            kind: SecretKind::Token,
+            key: None,
+            value: plaintext.to_string(),
+            range: 0..plaintext.len(),
+        };
+        let dbg = format!("{hit:?}");
+        // Even the *first 8 chars* of the value must not appear in Debug,
+        // because that's enough to narrow a targeted attack against a
+        // given value. The fingerprint is the only thing the Debug may
+        // surface that touches the value's bytes.
+        assert!(
+            !dbg.contains(&plaintext[..8]),
+            "Debug must not echo any 8-char prefix of the value: {dbg}"
+        );
+    }
+
+    /// `PublishRefusal::Debug` was derived — and with a derived
+    /// `SecretHit::Debug`, every hit's plaintext value landed in the
+    /// publish-time error's Debug rendering. The manual `Debug` here
+    /// delegates to `SecretHit`'s safe form, so `format!("{:?}", refusal)`
+    /// is safe to put in any error / log path without leaking.
+    #[test]
+    fn publishrefusal_debug_does_not_leak_plaintext_values() {
+        let plaintext_a = "hunter2_real_secret_p4ssw0rd";
+        let plaintext_b = "sk_live_thisShouldNotLeak_AAAAAAAAA";
+        let refusal = PublishRefusal {
+            hits: vec![
+                SecretHit {
+                    kind: SecretKind::Password,
+                    key: Some("password".to_string()),
+                    value: plaintext_a.to_string(),
+                    range: 0..plaintext_a.len(),
+                },
+                SecretHit {
+                    kind: SecretKind::LlmApiKey,
+                    key: None,
+                    value: plaintext_b.to_string(),
+                    range: 0..plaintext_b.len(),
+                },
+            ],
+        };
+        let dbg = format!("{refusal:?}");
+        assert!(
+            !dbg.contains(plaintext_a),
+            "PublishRefusal Debug must not leak the password value: {dbg}"
+        );
+        assert!(
+            !dbg.contains(plaintext_b),
+            "PublishRefusal Debug must not leak the API key value: {dbg}"
+        );
+        // Operator-visible join keys survive.
+        assert!(dbg.contains("PublishRefusal"), "type name shown: {dbg}");
+        assert!(dbg.contains("kind"), "kind shown: {dbg}");
+        assert!(
+            dbg.contains(&refusal.hits[0].fingerprint_short()),
+            "first-hit fingerprint shown: {dbg}"
+        );
+        assert!(
+            dbg.contains(&refusal.hits[1].fingerprint_short()),
+            "second-hit fingerprint shown: {dbg}"
+        );
+    }
+
+    /// W14: a JSON-escaped quoted structured assignment
+    /// (`{\"password\": \"hunter2_real\"}`) used to slip the gate
+    /// because the structured detector's value char class excluded
+    /// `"` and the regex started capturing at the single `\` (below
+    /// `MIN_VALUE_LEN`). After pre-normalization of `\"` → `"` (and
+    /// the optional-quote wraparound on the structured regex), the
+    /// detector matches and the value is masked.
+    #[test]
+    fn redact_text_catches_json_escaped_value() {
+        let body = r#"{\"password\": \"hunter2_real\"}"#;
+        let redacted = redact_text(body);
+        assert!(!redacted.contains("hunter2_real"), "plaintext must be gone: {redacted}");
+        assert!(
+            redacted.contains("kind=password"),
+            "the structured detector matches after normalization: {redacted}"
+        );
+        assert!(
+            redacted.contains("key=password"),
+            "the key name is preserved across the JSON quoting: {redacted}"
+        );
+        assert!(
+            redacted.starts_with("{\\\"password\\\": \\\""),
+            "opening JSON framing is preserved verbatim: {redacted}"
+        );
+        assert!(
+            redacted.ends_with("\\\"}"),
+            "closing JSON framing is preserved verbatim: {redacted}"
+        );
+    }
+
+    /// W14 companion for the publish-time gate (`scan_for_publish`),
+    /// which shares `scan_secrets` and therefore inherits the
+    /// normalization: the gate fails closed on the JSON-escaped form.
+    #[test]
+    fn scan_for_publish_catches_json_escaped_value() {
+        let body = r#"{\"password\": \"hunter2_real\"}"#;
+        let refusal = scan_for_publish(body).expect_err("gate must refuse on a JSON-escaped hit");
+        assert_eq!(refusal.hits.len(), 1);
+        assert_eq!(refusal.hits[0].kind, SecretKind::Password);
+        assert_eq!(refusal.hits[0].key.as_deref(), Some("password"));
+        assert_eq!(refusal.hits[0].value, "hunter2_real");
+    }
+
+    /// W14: idempotence must hold on the escaped form, just as it does
+    /// on the unescaped form. The first redaction produces a marker in
+    /// the original text; re-running the pass on the result must find
+    /// zero hits and produce the same text (the marker itself has no
+    /// `\"` to normalize further, so the second pass is a no-op).
+    #[test]
+    fn redact_text_is_idempotent_on_json_escaped_input() {
+        let body = r#"{\"password\": \"hunter2_real\"}"#;
+        let once = redact_text(body);
+        assert!(!once.contains("hunter2_real"), "plaintext is gone: {once}");
+        assert!(once.contains("***[redacted:"), "marker is in place: {once}");
+        let twice = redact_text(&once);
+        assert_eq!(
+            once, twice,
+            "redact must converge on the escaped form: once={once:?} twice={twice:?}"
+        );
+    }
+
+    /// W14: ranges coming back from `scan_secrets` must point into the
+    /// *original* text (the bytes that produced the hit), not the
+    /// normalized `\"` → `"` form — otherwise `redact_text`'s `&text[..]`
+    /// slicing would substitute over the wrong bytes and corrupt the
+    /// surrounding JSON framing.
+    #[test]
+    fn scan_secrets_ranges_map_back_to_original_bytes() {
+        // Construct a value with deliberately unique characters so any
+        // byte-range misfire shows up as a substitution over the wrong
+        // bytes (would produce garbled JSON framing in the redacted
+        // output).
+        let body = r#"{\"password\": \"ZZUNIQUE_MARKER_VALUE_42\"}"#;
+        let hits = scan_secrets(body);
+        assert_eq!(hits.len(), 1, "exactly one structured hit: {hits:?}");
+        let hit = &hits[0];
+        // The reported range, sliced on the ORIGINAL text, must yield
+        // the same value the detector stored on the hit (any byte drift
+        // would leave a leftover plaintext fragment or substitute over
+        // the JSON framing).
+        let original_slice = &body[hit.range.clone()];
+        assert_eq!(
+            original_slice, "ZZUNIQUE_MARKER_VALUE_42",
+            "hit range must point at the original-text bytes of the value, got slice={original_slice:?}"
+        );
+        // And the redacted output must keep the JSON framing intact
+        // around the substituted placeholder. Use regular-string
+        // framing literals (with `\\`/`\"` escapes) — simpler than
+        // raw-string forms whose terminator interacts with the
+        // embedded `\"` sequence.
+        let redacted = redact_text(body);
+        assert!(
+            !redacted.contains("ZZUNIQUE_MARKER_VALUE_42"),
+            "the unique value is masked: {redacted}"
+        );
+        assert!(
+            redacted.starts_with("{\\\"password\\\": \\\"***["),
+            "opening framing + marker prefix preserved: {redacted}"
+        );
+        // Marker format is `***[redacted:…]***`, so the marker ends
+        // with `***` (three asterisks), not `***]`. After the marker
+        // comes the closing JSON framing `\"}`.
+        assert!(
+            redacted.ends_with("***\\\"}"),
+            "marker suffix + closing framing preserved: {redacted}"
+        );
+    }
+
+    /// W14: a value-only-shaped provider token inside a JSON-escaped
+    /// payload is masked regardless of whether a structured `key=value`
+    /// assignment surrounds it. The value-only patterns rely on byte
+    /// boundaries (`\b...\b`), not on quoted framing, so the `\"`
+    /// normalization changes nothing for them — but it must not break
+    /// them either. This test pins that the value-only path stays
+    /// correct through the normalization: a non-token-shaped key
+    /// (`description`) keeps the structured `token=` detector out of
+    /// the picture so the value-only GitLab pattern is what fires.
+    #[test]
+    fn redact_catches_value_only_inside_json_escaped_object() {
+        let body = r#"{\"description\": \"leaked glpat-AbCdEfGhIjKlMnOpQrStUv during incident\"}"#;
+        let redacted = redact_text(body);
+        assert!(
+            !redacted.contains("glpat-AbCdEfGhIjKlMnOpQrStUv"),
+            "the value-only GitLab token is masked: {redacted}"
+        );
+        assert!(
+            redacted.contains("kind=gitlab_token"),
+            "the value-only path picks up the prefix inside the JSON-escaped payload: {redacted}"
+        );
+    }
+
+    /// W14 robustness: a single trailing `\` (no follow-on `"`) is
+    /// not a JSON escape and must be preserved verbatim by the
+    /// normalization helper — only the literal two-byte sequence `\"`
+    /// unescapes to `"`.
+    #[test]
+    fn unescape_quotes_does_not_strip_lone_backslash() {
+        let (normalized, _map) = unescape_quotes_for_scan(r"end with \");
+        assert_eq!(normalized, r"end with \", "lone \\ is left alone");
+    }
+
+    /// W14 robustness: a backslash followed by a non-quote (e.g. `\n`)
+    /// is also not a JSON-escape-of-a-quote; the helper must leave it
+    /// alone (other escape sequences are out of scope for W14 — only
+    /// `\"` is normalized; see the finding's bounded instruction).
+    #[test]
+    fn unescape_quotes_does_not_strip_other_escapes() {
+        let (normalized, _map) = unescape_quotes_for_scan(r"line\nbreak");
+        assert_eq!(normalized, r"line\nbreak", "\\n is left as-is");
     }
 }

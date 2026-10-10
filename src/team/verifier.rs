@@ -31,6 +31,47 @@ pub struct DroppedFinding {
     pub reason: String,
 }
 
+/// Counts the verifier's own behaviour for one run, so the renderer can
+/// say "ran on N, M skipped, dropped K" instead of "checked N, dropped 0"
+/// (which read identically whether every batch worked or every batch
+/// failed).
+///
+/// M18-W7: the verifier was fail-open on LLM and YAML errors but said
+/// nothing about them — the report's "Verification pass" line was the
+/// only signal a reader had, and it counted zero drops whether the
+/// verifier ran clean or every batch silently passed through. The
+/// orchestrator now threads a [`VerificationStats`] alongside the
+/// dropped findings; the renderer decides how to surface it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VerificationStats {
+    /// How many findings the verifier saw across every batch.
+    pub findings_checked: usize,
+    /// How many batches the verifier attempted (one per (file, batch)).
+    pub batches_total: usize,
+    /// Batches where the LLM call itself failed (kept fail-open).
+    pub batches_llm_failed: usize,
+    /// Batches where the LLM answered but the YAML could not be parsed
+    /// into a usable verdict list (kept fail-open).
+    pub batches_parse_failed: usize,
+    /// Batches that produced a syntactically valid but empty verdict
+    /// list (`verdicts: []` or similar — kept fail-open, no drops).
+    pub batches_skipped: usize,
+    /// Sum of the three failure kinds above; the renderer copy uses this
+    /// for the headline "M skipped" number.
+    pub skipped: usize,
+    /// Findings the LLM told us to drop (sum across all verdict lists).
+    pub dropped: usize,
+}
+
+/// Aggregated result of the verification pass — the dropped findings plus
+/// the run-level breakdown that lets the renderer say "ran on N, M
+/// skipped, dropped K" (M18-W7).
+#[derive(Debug, Clone, Default)]
+pub struct VerificationOutcome {
+    pub dropped: Vec<DroppedFinding>,
+    pub stats: VerificationStats,
+}
+
 /// Re-check all findings in `reports` with an LLM verification pass.
 ///
 /// Findings are grouped by referenced file and verified in batches of at most
@@ -40,6 +81,11 @@ pub struct DroppedFinding {
 ///
 /// `llm_sink` (RENG-57) records the latency of the calls this pass makes; the
 /// repo-scan path has no store behind it and passes `None`.
+///
+/// M18-W7: callers that also want the batch breakdown (LLM / parse / empty
+/// skips) should use [`verify_findings_outcome`] instead — this entry point
+/// is the legacy single-result shape kept for the repo-review path which
+/// does not surface skip counts.
 pub(crate) async fn verify_findings(
     reports: &mut [ExpertReport],
     files: &[DiffFile],
@@ -48,9 +94,24 @@ pub(crate) async fn verify_findings(
     max_file_bytes: usize,
     llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> Vec<DroppedFinding> {
+    verify_findings_outcome(reports, files, project_path, llm_configs, max_file_bytes, llm_sink)
+        .await
+        .dropped
+}
+
+/// Same as [`verify_findings`] but also returns the [`VerificationStats`]
+/// the orchestrator threads to the renderer (M18-W7).
+pub(crate) async fn verify_findings_outcome(
+    reports: &mut [ExpertReport],
+    files: &[DiffFile],
+    project_path: &str,
+    llm_configs: &[LLMConfig],
+    max_file_bytes: usize,
+    llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
+) -> VerificationOutcome {
     if llm_configs.is_empty() {
         tracing::warn!("Verification pass enabled but no LLM configs available; skipping");
-        return Vec::new();
+        return VerificationOutcome::default();
     }
 
     let client = LLMClient::new().with_sink(llm_sink);
@@ -80,7 +141,7 @@ async fn verify_with_llm<F, Fut>(
     project_path: &str,
     max_file_bytes: usize,
     llm: F,
-) -> Vec<DroppedFinding>
+) -> VerificationOutcome
 where
     F: Fn(String, String) -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<String>> + Send,
@@ -88,8 +149,10 @@ where
     // Group (report_idx, finding_idx) pairs by referenced file, preserving
     // first-seen order.
     let mut groups: Vec<(String, Vec<(usize, usize)>)> = Vec::new();
+    let mut stats = VerificationStats::default();
     for (r, report) in reports.iter().enumerate() {
         for (f, finding) in report.findings.iter().enumerate() {
+            stats.findings_checked += 1;
             match groups.iter_mut().find(|(path, _)| *path == finding.file) {
                 Some((_, idxs)) => idxs.push((r, f)),
                 None => groups.push((finding.file.clone(), vec![(r, f)])),
@@ -123,10 +186,12 @@ where
         let content = load_file_context(project_path, file, max_file_bytes);
 
         for batch in group.chunks(MAX_FINDINGS_PER_BATCH) {
+            stats.batches_total += 1;
             let user = build_user_prompt(file, hunks.as_deref(), &content, &file_list, batch, reports);
             let response = match llm(system.clone(), user).await {
                 Ok(r) => r,
                 Err(e) => {
+                    stats.batches_llm_failed += 1;
                     tracing::warn!(
                         "Verification LLM call failed for '{}': {:?}; keeping all findings in batch",
                         file,
@@ -138,6 +203,7 @@ where
             let decisions = match parse_verdicts(&response) {
                 Ok(d) => d,
                 Err(e) => {
+                    stats.batches_parse_failed += 1;
                     tracing::warn!(
                         "Failed to parse verification verdicts for '{}': {:?}; keeping all findings in batch",
                         file,
@@ -146,6 +212,15 @@ where
                     continue;
                 }
             };
+            // A syntactically valid but empty verdict list is also a silent
+            // skip: every finding in the batch is kept, but the verifier
+            // had nothing to say. Counting it separately lets the renderer
+            // distinguish "verifier ran and explicitly approved" from
+            // "verifier was asked and answered with nothing".
+            if decisions.is_empty() {
+                stats.batches_skipped += 1;
+                continue;
+            }
             for d in decisions {
                 if d.drop {
                     if let Some(&(r, f)) = batch.get(d.index) {
@@ -156,8 +231,14 @@ where
         }
     }
 
+    stats.skipped = stats.batches_llm_failed + stats.batches_parse_failed + stats.batches_skipped;
+
     if drop_marks.is_empty() {
-        return Vec::new();
+        stats.dropped = 0;
+        return VerificationOutcome {
+            dropped: Vec::new(),
+            stats,
+        };
     }
 
     let mut dropped = Vec::new();
@@ -174,7 +255,8 @@ where
         }
         report.findings = kept;
     }
-    dropped
+    stats.dropped = dropped.len();
+    VerificationOutcome { dropped, stats }
 }
 
 /// A single keep/drop decision parsed from the verifier's YAML response.
@@ -187,36 +269,23 @@ struct VerdictDecision {
 /// Parse the verifier's YAML verdict list. Tolerates fenced code blocks and
 /// surrounding prose; entries with an unusable `index` are skipped. Returns an
 /// error when no verdict list can be extracted at all (caller keeps the batch).
+///
+/// M18 self-audit #5: the YAML → entries routine used to be a near copy
+/// of the adjudicator's; it now lives in [`crate::team::verdict`] so the
+/// "fenced fallback / no-verdicts-list error / index-skip" rules are
+/// defined once. The verifier only cares about `index` + `drop` so we
+/// ignore `new_severity` / `cited_lines`.
 fn parse_verdicts(text: &str) -> anyhow::Result<Vec<VerdictDecision>> {
-    let cleaned = crate::output::parser::clean_yaml(text);
-    let value: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&cleaned) {
-        Ok(v) => v,
-        Err(e) => {
-            let fenced = crate::output::parser::extract_first_fenced_yaml(text)
-                .ok_or_else(|| anyhow::anyhow!("verdict YAML parse failed: {}", e))?;
-            serde_yaml_ng::from_str(&fenced).map_err(|e2| anyhow::anyhow!("verdict YAML parse failed: {}", e2))?
-        }
-    };
-
-    let items = value
-        .get("verdicts")
-        .and_then(|v| v.as_sequence())
-        .ok_or_else(|| anyhow::anyhow!("verdict response has no 'verdicts' list"))?;
-
-    let mut decisions = Vec::with_capacity(items.len());
-    for item in items {
-        let Some(index) = item.get("index").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        let verdict = item.get("verdict").and_then(|v| v.as_str()).unwrap_or("keep");
-        let reason = item.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        decisions.push(VerdictDecision {
-            index: index as usize,
-            drop: verdict.eq_ignore_ascii_case("drop"),
-            reason,
-        });
-    }
-    Ok(decisions)
+    crate::team::verdict::parse_verdict_entries(text).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| VerdictDecision {
+                index: entry.index,
+                drop: entry.verdict.eq_ignore_ascii_case("drop"),
+                reason: entry.reason,
+            })
+            .collect()
+    })
 }
 
 /// Read the current content of the referenced file from the local checkout.
@@ -501,7 +570,9 @@ mod tests {
             Ok("verdicts:\n  - index: 0\n    verdict: drop\n    reason: \"Claim disproven by file content\"\n  - index: 1\n    verdict: keep\n    reason: \"\"\n".to_string())
         };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert_eq!(reports[0].findings.len(), 1);
         assert_eq!(reports[0].findings[0].title, "Real bug");
@@ -516,7 +587,9 @@ mod tests {
         let files = vec![make_diff_file("src/a.rs")];
         let llm = |_s: String, _u: String| async { anyhow::bail!("network down") };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert!(dropped.is_empty());
         assert_eq!(reports[0].findings.len(), 1);
@@ -528,7 +601,9 @@ mod tests {
         let files = vec![make_diff_file("src/a.rs")];
         let llm = |_s: String, _u: String| async { Ok("total garbage, no yaml".to_string()) };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert!(dropped.is_empty());
         assert_eq!(reports[0].findings.len(), 1);
@@ -542,7 +617,9 @@ mod tests {
             Ok("verdicts:\n  - index: 7\n    verdict: drop\n    reason: \"no such finding\"\n".to_string())
         };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert!(dropped.is_empty());
         assert_eq!(reports[0].findings.len(), 1);
@@ -563,7 +640,9 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert!(dropped.is_empty());
         assert_eq!(reports[0].findings.len(), 11);
@@ -586,7 +665,9 @@ mod tests {
         };
 
         // project_path does not exist → file content unavailable, must not abort.
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent/dir", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent/dir", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert!(dropped.is_empty());
         assert_eq!(reports[0].findings.len(), 1);
@@ -635,7 +716,9 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent/dir", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent/dir", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert!(dropped.is_empty());
         assert_eq!(reports[0].findings.len(), 1);
@@ -664,7 +747,9 @@ mod tests {
             Ok("verdicts:\n  - index: 0\n    verdict: drop\n    reason: \"Claim disproven by file content\"\n  - index: 1\n    verdict: keep\n    reason: \"\"\n".to_string())
         };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert_eq!(reports[0].findings.len(), 1);
         assert_eq!(reports[0].findings[0].title, "Real bug");
@@ -689,7 +774,9 @@ mod tests {
             async { Ok("verdicts: []".to_string()) }
         };
 
-        let dropped = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        let dropped = outcome.dropped;
+        let _stats = outcome.stats;
 
         assert!(dropped.is_empty());
         let prompts = prompts.lock().unwrap();
@@ -699,5 +786,113 @@ mod tests {
             assert!(p.contains("- src/a.rs"));
             assert!(p.contains("- src/b.rs"));
         }
+    }
+    // ─── M18-W7: verification_skipped counter ────
+
+    #[tokio::test]
+    async fn test_verify_stats_track_clean_run() {
+        let mut reports = vec![make_report(
+            "security",
+            vec![
+                make_finding("src/a.rs", "False alarm"),
+                make_finding("src/a.rs", "Real bug"),
+            ],
+        )];
+        let files = vec![make_diff_file("src/a.rs")];
+        let llm = |_s: String, _u: String| async {
+            Ok("verdicts:\n  - index: 0\n    verdict: drop\n    reason: \"x\"\n  - index: 1\n    verdict: keep\n    reason: \"\"\n".to_string())
+        };
+
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        assert_eq!(outcome.stats.findings_checked, 2);
+        assert_eq!(outcome.stats.batches_total, 1);
+        assert_eq!(outcome.stats.batches_llm_failed, 0);
+        assert_eq!(outcome.stats.batches_parse_failed, 0);
+        assert_eq!(outcome.stats.batches_skipped, 0);
+        assert_eq!(outcome.stats.skipped, 0);
+        assert_eq!(outcome.stats.dropped, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_stats_count_llm_failures() {
+        let mut reports = vec![make_report("security", vec![make_finding("src/a.rs", "Bug")])];
+        let files = vec![make_diff_file("src/a.rs")];
+        let llm = |_s: String, _u: String| async { anyhow::bail!("network down") };
+
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        assert_eq!(outcome.stats.findings_checked, 1);
+        assert_eq!(outcome.stats.batches_total, 1);
+        assert_eq!(outcome.stats.batches_llm_failed, 1);
+        assert_eq!(outcome.stats.batches_parse_failed, 0);
+        assert_eq!(outcome.stats.batches_skipped, 0);
+        assert_eq!(outcome.stats.skipped, 1);
+        assert_eq!(outcome.stats.dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn test_verify_stats_count_parse_failures() {
+        let mut reports = vec![make_report("security", vec![make_finding("src/a.rs", "Bug")])];
+        let files = vec![make_diff_file("src/a.rs")];
+        let llm = |_s: String, _u: String| async { Ok("total garbage, no yaml".to_string()) };
+
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        assert_eq!(outcome.stats.batches_total, 1);
+        assert_eq!(outcome.stats.batches_parse_failed, 1);
+        assert_eq!(outcome.stats.batches_llm_failed, 0);
+        assert_eq!(outcome.stats.batches_skipped, 0);
+        assert_eq!(outcome.stats.skipped, 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_stats_count_empty_verdict_list_as_skipped() {
+        let mut reports = vec![make_report("security", vec![make_finding("src/a.rs", "Bug")])];
+        let files = vec![make_diff_file("src/a.rs")];
+        let llm = |_s: String, _u: String| async { Ok("verdicts: []".to_string()) };
+
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        assert_eq!(outcome.stats.batches_total, 1);
+        assert_eq!(outcome.stats.batches_llm_failed, 0);
+        assert_eq!(outcome.stats.batches_parse_failed, 0);
+        assert_eq!(outcome.stats.batches_skipped, 1);
+        assert_eq!(outcome.stats.skipped, 1);
+        assert_eq!(outcome.stats.dropped, 0);
+        assert_eq!(reports[0].findings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_verify_stats_aggregate_mixed_outcomes() {
+        let findings: Vec<Finding> = (0..11).map(|i| make_finding("src/a.rs", &format!("F{}", i))).collect();
+        let mut reports = vec![make_report("security", findings)];
+        let files = vec![make_diff_file("src/a.rs")];
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let call_count2 = call_count.clone();
+        let llm = move |_s: String, _u: String| {
+            let n = call_count2.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n == 0 {
+                    Ok("verdicts:\n  - index: 0\n    verdict: drop\n    reason: \"x\"\n".to_string())
+                } else {
+                    Ok("verdicts: []".to_string())
+                }
+            }
+        };
+
+        let outcome = verify_with_llm(&mut reports, &files, "/nonexistent", 20000, llm).await;
+        assert_eq!(outcome.stats.batches_total, 2);
+        assert_eq!(outcome.stats.batches_skipped, 1);
+        assert_eq!(outcome.stats.skipped, 1);
+        assert_eq!(outcome.stats.dropped, 1);
+        assert_eq!(outcome.stats.findings_checked, 11);
+    }
+
+    #[test]
+    fn test_verification_outcome_default_is_empty() {
+        let outcome = VerificationOutcome::default();
+        assert!(outcome.dropped.is_empty());
+        assert_eq!(outcome.stats.findings_checked, 0);
+        assert_eq!(outcome.stats.batches_total, 0);
+        assert_eq!(outcome.stats.skipped, 0);
+        assert_eq!(outcome.stats.dropped, 0);
     }
 }

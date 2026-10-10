@@ -1,8 +1,10 @@
+mod dump_io;
 mod pipeline;
 #[cfg(test)]
 mod tests;
 mod validation;
 
+pub use dump_io::{create_secure_dump_dir, write_secure_dump_file};
 pub(crate) use pipeline::run_experts_inner;
 
 use async_trait::async_trait;

@@ -10,6 +10,11 @@ use super::output::{write_output, write_report_text};
 /// `--output` file is given, otherwise `<output_dir>/review-raw/`. Returns
 /// `None` when `--verbose` is off or the directory cannot be created (a
 /// warning is printed; the review still runs).
+///
+/// The directory is created with owner-only (`0700`) permissions on Unix
+/// (RENG-113 / M18-W1): the prompt + response files inside it can quote a
+/// credential-shaped fixture exactly the way the report markdown can, so
+/// the dump needs the same perms as the report.
 fn verbose_dump_dir(verbose: bool, output: &Option<String>, output_dir: &str) -> Option<PathBuf> {
     if !verbose {
         return None;
@@ -18,11 +23,7 @@ fn verbose_dump_dir(verbose: bool, output: &Option<String>, output_dir: &str) ->
         Some(path) => PathBuf::from(format!("{path}.raw")),
         None => PathBuf::from(output_dir).join("review-raw"),
     };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("warning: [verbose] failed to create dump dir {}: {e}", dir.display());
-        return None;
-    }
-    Some(dir)
+    review_engine::team::orchestrator::create_secure_dump_dir(&dir)
 }
 
 /// The tuple `review_engine::team::orchestrator::run_experts` returns: the

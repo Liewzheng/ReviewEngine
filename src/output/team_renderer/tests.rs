@@ -170,6 +170,7 @@ fn make_consolidated(score: u8, risk_level: RiskLevel, tl_dr: &str) -> Consolida
         parse_status: vec![],
         verification_stats: None,
         injected_context: Default::default(),
+        confidence_filter_policy: Default::default(),
         adjudicated_removed: vec![],
     }
 }
@@ -206,6 +207,13 @@ fn test_render_lead_summary_under_coverage_banner() {
     consolidated.unreviewed_files = vec!["src/skip_a.rs".to_string(), "src/skip_b.rs".to_string()];
     let md = render_lead_summary(&consolidated);
     assert!(md.contains("**File routing**: 27/29 files assigned to a successful expert task"));
+    // P3-5 (review r1): the exact-count assertion was lost in r1. Restore it
+    // so a future regression that drops a file name from the rendered list
+    // — or that loses the count — fails this test rather than hiding.
+    assert!(
+        md.contains("2 files not assigned"),
+        "the unrouted-file count must be stated, got: {md}"
+    );
     assert!(md.contains("src/skip_a.rs") && md.contains("src/skip_b.rs"));
 }
 
@@ -507,8 +515,22 @@ fn test_render_lead_summary_injected_context_surfaces_truncation() {
     assert!(md.contains("`changed file src/lib.rs`"));
     // SHA-256 row prefix: 16 chars of the full fingerprint.
     assert!(md.contains(&"a".repeat(16)));
-    // Make sure the un-truncated file does not falsely flag truncation.
-    assert!(md.matches("ok").count() >= 1, "an un-truncated row must read 'ok'");
+    // P3-5 (review r1): the previous assertion `md.matches("ok").count() >= 1`
+    // was vacuous — the fixture's TL;DR is literally "ok", so it would pass
+    // even if the un-truncated row rendered the wrong status. Pin the row
+    // exactly: the un-truncated file's row reads "| ok |" preceded by its
+    // size cell and followed by the SHA prefix. Include the backticks
+    // around `source` and the SHA fingerprint — without them a future
+    // formatter change can drop the formatting without failing the test.
+    assert!(
+        md.contains("| `changed file src/lib.rs` | 8192 / 8192 bytes (100%) | ok | `"),
+        "un-truncated row must read | `changed file src/lib.rs` | 8192 / 8192 bytes (100%) | ok | `, got: {md}"
+    );
+    // And the truncated row reads | ⚠ truncated | — same shape.
+    assert!(
+        md.contains("| `AGENTS.md` | 4000 / 13171 bytes (30%) | ⚠ truncated | `"),
+        "truncated row must read | `AGENTS.md` | 4000 / 13171 bytes (30%) | ⚠ truncated | `, got: {md}"
+    );
 }
 
 #[test]
@@ -519,6 +541,84 @@ fn test_render_lead_summary_injected_context_section_is_hidden_when_empty() {
     assert!(
         !md.contains("## Injected Context"),
         "no rows → no section (backward compat)"
+    );
+}
+
+// ─── P2-4 (review r1): parse_status is per-report; chunked reviews dedupe ──
+
+#[test]
+fn test_render_lead_summary_parse_status_reports_count_dedupes_names() {
+    // The audit's RENG-79 lesson: one failing expert on four chunks used
+    // to print "4 位专家… security, security, security, security". The
+    // headline now counts *reports*, the names list is deduped, and a
+    // parenthetical distinguishes the two when they differ.
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.parse_status = vec![
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: Some("yaml parse failed".to_string()),
+        },
+    ];
+    let md = render_lead_summary(&consolidated);
+    // Headline: 4 reports from 1 distinct expert — the parenthetical
+    // disambiguates the report-level count from the expert-level count.
+    assert!(
+        md.contains("4 份专家报告（1 位不同专家）"),
+        "headline must split report vs distinct-expert counts when they differ, got: {md}"
+    );
+    assert!(
+        md.contains("4 expert report(s) from 1 distinct expert(s)"),
+        "english half must say the same thing, got: {md}"
+    );
+    // Names list dedupes — "security" appears exactly once.
+    let occurrences = md.matches("`security`").count();
+    assert_eq!(
+        occurrences, 1,
+        "the expert name must appear exactly once even with 4 failing reports, got: {md}"
+    );
+}
+
+#[test]
+fn test_render_lead_summary_parse_status_one_per_expert_omits_parenthetical() {
+    // When every failing report is from a distinct expert, the headline
+    // collapses to the simple "N expert report(s)" form (no parenthetical).
+    let mut consolidated = make_consolidated(85, RiskLevel::LowMedium, "ok");
+    consolidated.parse_status = vec![
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "security".to_string(),
+            parse_failed: true,
+            error: None,
+        },
+        crate::team::lead_consolidator::ExpertParseStatus {
+            expert_name: "quality".to_string(),
+            parse_failed: true,
+            error: None,
+        },
+    ];
+    let md = render_lead_summary(&consolidated);
+    assert!(
+        md.contains("2 份专家报告 / 2 expert report(s)"),
+        "when report count == distinct expert count, no parenthetical, got: {md}"
+    );
+    assert!(
+        !md.contains("位不同专家"),
+        "the parenthetical must not appear when reports == distinct experts, got: {md}"
     );
 }
 

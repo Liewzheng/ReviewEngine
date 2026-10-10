@@ -27,52 +27,12 @@ use serde::{Deserialize, Serialize};
 /// review to be considered sufficiently covered (mirrors kodus's 0.7 gate).
 pub const COVERAGE_THRESHOLD: f64 = 0.7;
 
-/// Run-level hunk-coverage verdict (M18-W4), broken out from the diff-file
-/// `FileCoverage` so the report can label the two metrics honestly:
-///
-/// - File routing asks "did every file reach a successful reviewer?" — yes or
-///   no, per file.
-/// - Hunk coverage asks "did any finding demonstrably touch the changed
-///   lines?" — a ratio, with a `CoverageSummary` per file.
-///
-/// A run can answer yes to one and no to the other (the 21-of-21 / 0-of-1211
-/// regression): the report must say which signal it is reading, instead of
-/// stacking them and leaving the reader to choose the optimistic one.
-///
-/// Distinct from the per-file [`CoverageStatus`] below: this enum summarises
-/// the *aggregate* ratio against [`COVERAGE_THRESHOLD`]; the per-file enum
-/// tracks "pending/touched" bookkeeping for each diff file in turn.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub enum CoverageVerdict {
-    /// No data — the run had no diff or no expert reports.
-    #[default]
-    NotComputed,
-    /// Hunk-level ratio is at or above [`COVERAGE_THRESHOLD`].
-    Sufficient,
-    /// Hunk-level ratio is below [`COVERAGE_THRESHOLD`].
-    Insufficient,
-}
-
-impl CoverageVerdict {
-    /// Derive from a coverage summary. `None` (no ledger supplied) maps to
-    /// `NotComputed` rather than `Sufficient`, so the renderer can decide
-    /// whether to surface the section at all.
-    pub fn from_summary(summary: Option<&CoverageSummary>) -> Self {
-        match summary {
-            None => Self::NotComputed,
-            Some(s) if s.is_sufficient() => Self::Sufficient,
-            Some(_) => Self::Insufficient,
-        }
-    }
-}
-
-/// Per-file coverage status used by [`CoverageTarget`].
-///
-/// Distinct from the run-level [`CoverageStatus`] above: this one describes
-/// the per-file "pending/touched" bookkeeping the ledger tracks for every
-/// diff file in turn (a file that no expert has yet referenced is `Pending`;
-/// a file with at least one matching finding is `Touched`). The run-level
-/// enum summarises the *aggregate* ratio against [`COVERAGE_THRESHOLD`].
+/// Per-file coverage status used by [`CoverageTarget`]: tracks each diff
+/// file's "pending/touched" state independently of the aggregate ratio. A
+/// file no expert has yet referenced is `Pending`; a file with at least one
+/// matching finding is `Touched`. The aggregate run-level ratio lives on
+/// [`CoverageSummary::is_sufficient`] — `CoverageStatus` is bookkeeping, the
+/// summary is the verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoverageStatus {
     /// No expert has yet referenced any line in this file's changed ranges.

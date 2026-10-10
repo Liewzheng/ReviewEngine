@@ -283,6 +283,7 @@ mod tests {
             parse_status: vec![],
             verification_stats: None,
             injected_context: Default::default(),
+            confidence_filter_policy: Default::default(),
             adjudicated_removed: vec![],
         }
     }

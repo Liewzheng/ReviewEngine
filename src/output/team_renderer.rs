@@ -445,21 +445,46 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
         }
     }
 
-    // M18-W8: parse-status summary. Every expert whose output the parser
-    // could not parse is named in a single line under the lead summary, so
-    // a silent miss is loud. The per-expert section already replaces "no
+    // M18-W8: parse-status summary. Every report whose output the parser could
+    // not parse is named in a single line under the lead summary, so a
+    // silent miss is loud. The per-expert section already replaces "no
     // issues" with the parse-error ⚠️ (`render_expert_section`).
+    //
+    // P2-4 (review r1): `parse_status` is one entry per `ExpertReport`,
+    // not per expert — a chunked review asks the same expert several times
+    // and the report repeats the name. The audit's RENG-79 lesson applies
+    // here too: count *reports* in the headline ("N 份专家报告"), and
+    // dedupe the names list so one failing expert on four chunks prints
+    // "4 份 / 1 名" rather than "4 位 / security, security, security,
+    // security".
     if !consolidated.parse_status.is_empty() {
-        let names = consolidated
+        let total_reports = consolidated.parse_status.len();
+        let mut unique_names: Vec<&str> = consolidated
             .parse_status
             .iter()
-            .map(|p| format!("`{}`", p.expert_name))
+            .map(|p| p.expert_name.as_str())
+            .collect();
+        unique_names.sort_unstable();
+        unique_names.dedup();
+        let unique_count = unique_names.len();
+        let names = unique_names
+            .iter()
+            .map(|n| format!("`{}`", n))
             .collect::<Vec<_>>()
             .join(", ");
+        // Headline counts: report-level (what the data actually is) and,
+        // when it differs, the distinct-expert count as a parenthetical.
+        let headline = if total_reports == unique_count {
+            format!("{} 份专家报告 / {} expert report(s)", total_reports, total_reports)
+        } else {
+            format!(
+                "{} 份专家报告（{} 位不同专家）/ {} expert report(s) from {} distinct expert(s)",
+                total_reports, unique_count, total_reports, unique_count
+            )
+        };
         out.push_str(&format!(
-            "> ⚠️ **{} 位专家输出解析失败（未审）** / parse failures (未审 / un-reviewed): {}\n\n",
-            consolidated.parse_status.len(),
-            names
+            "> ⚠️ **{} 输出解析失败（未审）** / parse failures (未审 / un-reviewed): {}\n\n",
+            headline, names
         ));
     }
 

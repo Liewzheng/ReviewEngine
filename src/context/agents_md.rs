@@ -35,13 +35,23 @@ pub fn render_agents_md(content: &str) -> Option<String> {
     Some(out)
 }
 
-/// One row of the `## Injected Context` report section (M18-W5):
+/// One row of the `## Injected Context` report section (M18-W5).
+///
+/// Every row describes a source that was *actually embedded* in the expert
+/// prompt — the audit's P2-2 review note: a file that the total-budget
+/// check rejected no longer appears here, so the table cannot lie about
+/// injection.
 ///
 /// * `source`: where the bytes came from — `"AGENTS.md"`, `"changed file
 ///   src/foo.rs"`, etc.
-/// * `original_bytes`: total bytes on disk (or `0` when the source is
-///   missing — distinguishing "skipped" from "truncated to N").
+/// * `original_bytes`: total bytes on disk before any truncation. Always
+///   `≥ injected_bytes` — a row with `original_bytes == 0` is unreachable
+///   in practice (the producer paths read the file before pushing the
+///   row), but the renderer treats it defensively as a "stat failed"
+///   signal so a future bug never renders "0 / 0 bytes (—)".
 /// * `injected_bytes`: bytes actually sent to the LLM (post-truncation).
+///   Identical to the slice that was hashed into `sha256` and is embedded
+///   into the prompt body.
 /// * `truncated`: `true` when `injected_bytes < original_bytes`.
 /// * `sha256`: hex fingerprint of the *injected* bytes, so the reader can
 ///   confirm two reports covered the same surface.
@@ -54,19 +64,28 @@ pub fn render_agents_md(content: &str) -> Option<String> {
 pub struct InjectedContextEntry {
     /// Human-readable label (matches what the prompt called this source).
     pub source: String,
-    /// Bytes on disk before any truncation. `0` means "missing".
+    /// Bytes on disk before any truncation (≥ `injected_bytes`).
     pub original_bytes: usize,
-    /// Bytes actually shipped to the LLM (after truncation, when any).
+    /// Bytes actually shipped to the LLM (post-truncation, when any).
     pub injected_bytes: usize,
     /// `true` when `injected_bytes < original_bytes`.
     pub truncated: bool,
-    /// Hex SHA-256 of the *injected* bytes (`""` when nothing was injected).
+    /// Hex SHA-256 of the *injected* bytes (the same slice whose length is
+    /// `injected_bytes`). `""` is reserved for a future "no bytes embedded"
+    /// state; today's producer paths always populate it.
     pub sha256: String,
 }
 
 impl InjectedContextEntry {
     /// Render this entry as a one-line markdown row.
     pub fn render_row(&self) -> String {
+        // P3-4 (review r1): drop the "original_bytes == 0 ⇒ '— missing'"
+        // branch. The producer paths never push a row with
+        // `original_bytes == 0` (AGENTS.md missing → `None`; file path
+        // stat failed → not pushed either). A future bug that lets one
+        // through gets "stat failed" instead of "missing" — accurate, and
+        // it can't be mistaken for the AGENTS.md-missing case (which is
+        // an absent row, not a sentinel row).
         let pct = if self.original_bytes == 0 {
             "—".to_string()
         } else {
@@ -76,7 +95,7 @@ impl InjectedContextEntry {
             )
         };
         let status = if self.original_bytes == 0 {
-            "— missing"
+            "— stat failed"
         } else if self.truncated {
             "⚠ truncated"
         } else {

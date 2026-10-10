@@ -79,10 +79,12 @@ impl FileCoverage {
 /// the lead summary can say `Verification pass: ran on N, skipped M, dropped
 /// K` instead of pretending every batch produced one.
 ///
-/// `pairs_with_k` deliberately is NOT (just yet) plumbed through by this
-/// mission — M31 owns the verifier and decides whether to count by batch or by
-/// finding. The renderer treats `skipped == 0` as "we have no data yet" and
-/// the line still reads correctly.
+/// `skipped` is the *actual* parse-failure count the verifier reports (M31
+/// owns the verifier and decides whether to count by batch or by finding) —
+/// the renderer prints the literal value. `skipped == 0` therefore means
+/// "the verifier ran and saw no parse failures", not "no data". A run with
+/// no observations at all is represented by `VerificationStats` being
+/// `Option::None` on the report (which the renderer treats as silent).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VerificationStats {
     /// Total findings the verifier examined (kept + dropped). `0` means the
@@ -152,6 +154,21 @@ pub struct ExpertParseStatus {
     /// doesn't repeat the full `parse_error` prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+/// Confidence-filter policy as it was applied to this run, surfaced in the
+/// TL;DR banner's INFO log so an operator reading the audit field sees the
+/// *actual* config instead of the hardcoded ones (`reviewer-report r1 P2-3`:
+/// the thread-local trick failed after the LLM-await when the task resumed
+/// on a different worker).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ConfidenceFilterPolicy {
+    /// `report.min_confidence` (1-10). Findings below this are downgraded
+    /// or dropped.
+    pub min_confidence: u8,
+    /// `report.drop_low_confidence`: when true, below-threshold findings
+    /// are removed outright; when false, they survive at Note severity.
+    pub drop_low_confidence: bool,
 }
 
 /// Public attach helpers for fields the orchestrator sets after
@@ -230,6 +247,13 @@ pub struct ConsolidatedReport {
     /// ran (e.g. pure server-side reviews without a local checkout).
     #[serde(default)]
     pub injected_context: InjectedContext,
+    /// Confidence-filter policy actually applied (P2-3 review r1): replaces
+    /// the previous thread-local state so the TL;DR INFO log and the audit
+    /// field report the real `min_confidence` / `drop_low_confidence` instead
+    /// of the hardcoded defaults when `refresh_assessment` runs on a
+    /// different worker thread than `consolidate_with_coverage`.
+    #[serde(default)]
+    pub confidence_filter_policy: ConfidenceFilterPolicy,
     /// High-severity findings dropped by the final adjudication pass as false
     /// positives, each with the adjudicator's reason (transparency — drops are
     /// recorded, never silent). Empty when adjudication was disabled or
@@ -293,12 +317,16 @@ impl ConsolidatorConfig {
         // exact (Note findings can be passed through unchanged by other code
         // paths, and we must not double-count those).
         let confidence_downgraded = downgraded_count;
-        // M18-W6: make the filter's policy visible to the `tracing::info!`
-        // line in `append_coverage_banners` so a user filtering logs by
-        // `reason_code=confidence_filter_downgraded` also sees the threshold
-        // and the drop policy. Thread-local is fine — the consolidator runs
-        // on a single task and the helpers stay on this thread.
-        set_confidence_filter_context(self.min_confidence, self.drop_low_confidence);
+        // P2-3 (review r1): capture the actual filter policy on the report
+        // itself, so the post-adjudication `refresh_assessment` (which may
+        // resume on a different worker thread) reports the run's threshold
+        // and drop policy rather than the hardcoded defaults. Replaces the
+        // previous `set_confidence_filter_context` thread-local trick that
+        // went blank after the LLM-await.
+        let confidence_filter_policy = ConfidenceFilterPolicy {
+            min_confidence: self.min_confidence,
+            drop_low_confidence: self.drop_low_confidence,
+        };
 
         // Step 2: Deduplicate
         let before_dedup = all_findings.len();
@@ -351,6 +379,7 @@ impl ConsolidatorConfig {
             coverage.unreviewed_files.len(),
             coverage_summary.as_ref(),
             confidence_downgraded,
+            &confidence_filter_policy,
         );
         // Zero consolidated findings across every expert: the perfect score is
         // NOT evidence of quality — it may mean low coverage or a systemic
@@ -413,6 +442,10 @@ impl ConsolidatorConfig {
             parse_status,
             verification_stats: None,
             injected_context: InjectedContext::default(),
+            // P2-3 (review r1): attach the actual filter policy to the
+            // report now; the post-adjudication `refresh_assessment` path
+            // reads it from here instead of thread-local cells.
+            confidence_filter_policy,
             adjudicated_removed: Vec::new(),
         }
     }
@@ -569,6 +602,8 @@ impl ConsolidatedReport {
             expert_count,
             all_removed_by_adjudication,
         );
+        // P2-3 (review r1): read the policy from the report's own field so
+        // the value is correct regardless of which worker thread this runs on.
         append_coverage_banners(
             &mut tl_dr,
             self.total_files,
@@ -576,6 +611,7 @@ impl ConsolidatedReport {
             self.unreviewed_files.len(),
             self.coverage.as_ref(),
             self.confidence_downgraded,
+            &self.confidence_filter_policy,
         );
         self.assessment.tl_dr = tl_dr;
         // An empty published list is never evidence of quality, whether it is
@@ -606,10 +642,17 @@ fn append_coverage_banners(
     unreviewed_files: usize,
     coverage: Option<&crate::coverage::CoverageSummary>,
     confidence_downgraded: usize,
+    confidence_policy: &ConfidenceFilterPolicy,
 ) {
     if total_files > 0 && reviewed_files < total_files {
+        // P2-1 (review r1): the banner used to read "⚠️ Coverage: X/Y
+        // files reviewed; ..." while the renderer header now uses the
+        // "**File routing**" naming introduced by W4. Two labels for the
+        // same number in one report is exactly the "Coverage" / "File
+        // routing" conflation W4 was meant to disambiguate; rename so
+        // both call sites use the same noun.
         tl_dr.push_str(&format!(
-            "\n\n⚠️ Coverage: {}/{} files reviewed; {} file(s) not covered by any expert — score capped.",
+            "\n\n⚠️ File routing: {}/{} files assigned to a successful expert task; {} file(s) not assigned — score capped.",
             reviewed_files, total_files, unreviewed_files
         ));
     }
@@ -639,56 +682,58 @@ fn append_coverage_banners(
         // visible both in the rendered report and in `logs.ndjson`. The
         // audit's RENG-19/115 trace reproduced "Adjudication pass: 0
         // candidates at or above Low, dropped 0" exactly when the default
-        // confidence filter (min_confidence = 6, drop_low_confidence =
-        // false) quietly re-routed findings to Note below the adjudication
-        // floor; without this signal the operator has no way to see *why*
-        // the adjudicator ran on nothing. The INFO log uses the
-        // `reason_code` field so it is grep-able.
+        // confidence filter quietly re-routed findings to Note below the
+        // adjudication floor; without this signal the operator has no way
+        // to see *why* the adjudicator ran on nothing. The INFO log uses
+        // the `reason_code` field so it is grep-able. P2-3 (review r1):
+        // the policy comes from the report's `confidence_filter_policy`
+        // field (set by `consolidate_with_coverage`), not thread-local
+        // state — the multi-thread runtime can move the post-adjudication
+        // task to a worker where the thread-locals are unset.
         tracing::info!(
             confidence_downgraded = confidence_downgraded,
-            min_confidence = min_confidence_for_log(),
-            drop_low_confidence = drop_low_confidence_for_log(),
+            min_confidence = confidence_policy.min_confidence,
+            drop_low_confidence = confidence_policy.drop_low_confidence,
             reason_code = "confidence_filter_downgraded",
             "confidence filter re-routed {confidence_downgraded} finding(s) to Note before adjudication"
         );
+        // P1-1 (review r1): the remediation direction is the *opposite*
+        // of what was here. The filter downgrades when
+        // `finding.confidence < min_confidence`, so the way to keep the
+        // original severity is to **lower** `min_confidence` (or lower
+        // `adjudicate_min_severity` so the downgraded findings still hit
+        // the adjudicator's floor). The previous text said "raise
+        // min_confidence" — that only downgrades *more* findings — and
+        // "enable drop_low_confidence" — that *removes* them. Following
+        // the printed advice would silently lose findings in the very
+        // place this banner is meant to draw attention to.
+        //
+        // Also drop the hardcoded "默认 min_confidence = 6" — the user's
+        // config may differ and the run-specific text must not pretend it
+        // knows their number. The companion INFO log carries the actual
+        // `min_confidence` / `drop_low_confidence` fields below.
         tl_dr.push_str(&format!(
-            "\n\n⚠️ 信心阈值过滤：{} 条 finding 被下调至 Note（默认 min_confidence = 6 不删除而是降级）。\
-             如要保留原严重度以便裁决，需调高 min_confidence 或开 drop_low_confidence。\
-             / Confidence filter downgraded {} finding(s) to Note (default policy: downgrade, don't drop).\
-             To keep the original severity for adjudication, raise min_confidence or enable drop_low_confidence.",
+            "\n\n⚠️ 信心阈值过滤：{} 条 finding 被下调至 Note。\
+             这些 finding 的 confidence 低于本轮 min_confidence，所以严重度被原 policy 下调以便保留（默认 policy 是「下调，不删除」）。\
+             要保留原严重度以便裁决，请调低 min_confidence（或调低 adjudicate_min_severity，让降到 Note 的 finding 也能进裁决）。\
+             不要启用 drop_low_confidence —— 它会把这些 finding 直接丢弃，不是「保留」。\
+             / Confidence filter downgraded {} finding(s) to Note. These findings' confidence was below this run's min_confidence,\
+             so the filter re-routed them to Note rather than dropping them (default policy: downgrade, don't drop).\
+             To preserve their original severity for adjudication, LOWER min_confidence (or lower adjudicate_min_severity so the Note findings still hit the floor).\
+             Do NOT enable drop_low_confidence — that would discard these findings rather than preserve them.",
             confidence_downgraded, confidence_downgraded
         ));
     }
 }
 
-// M18-W6 helpers: `append_coverage_banners` is called from
-// `consolidate_with_coverage` and `refresh_assessment`, and the latter does
-// not carry the filter config. To keep both call sites emitting the same
-// INFO line, the banner code reads its config from thread-local state the
-// consolidator sets just before the call — same trick the M18-W6 audit
-// suggests for the "0 candidates" silent case. In the absence of a set
-// call, the defaults are reported.
-//
-// The thread-locals carry `Option<u8>` / `Option<bool>` so the unset case is
-// distinguishable from "set to the default"; a future refactor can replace
-// them with a borrowed input rather than a thread-local.
-thread_local! {
-    static LAST_MIN_CONFIDENCE: std::cell::Cell<Option<u8>> = const { std::cell::Cell::new(None) };
-    static LAST_DROP_LOW: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-}
-
-pub(crate) fn set_confidence_filter_context(min_confidence: u8, drop_low_confidence: bool) {
-    LAST_MIN_CONFIDENCE.with(|c| c.set(Some(min_confidence)));
-    LAST_DROP_LOW.with(|c| c.set(Some(drop_low_confidence)));
-}
-
-fn min_confidence_for_log() -> u8 {
-    LAST_MIN_CONFIDENCE.with(|c| c.get().unwrap_or(6))
-}
-
-fn drop_low_confidence_for_log() -> bool {
-    LAST_DROP_LOW.with(|c| c.get().unwrap_or(false))
-}
+// P2-3 (review r1): the audit-log fields used to come from thread-local
+// state the consolidator set inside `consolidate_with_coverage`. The
+// post-adjudication path (`refresh_assessment`) ran on a different worker
+// thread than the `await`-multi‑armed call that called
+// `adjudicate(...)`, so the thread-locals were unset and the INFO line
+// reported the hardcoded defaults — silently wrong exactly for non-default
+// configs. The fix is to carry the policy on `ConsolidatedReport` itself
+// and let both call sites read it directly.
 
 /// Generate the TL;DR summary for the *published* findings.
 ///

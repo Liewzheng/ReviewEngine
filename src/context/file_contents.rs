@@ -70,22 +70,39 @@ pub(crate) fn build_file_contents_section_with_meta(
         let original_bytes = std::fs::metadata(root.join(&file.path))
             .map(|m| m.len() as usize)
             .unwrap_or(0);
-        let truncated = injected_content.len() < original_bytes || original_bytes > MAX_SINGLE_FILE_BYTES;
-        // Track every file that was actually read, including un-truncated
-        // ones, so the report can show "we read 3 of 3 changed files" rather
-        // than just "we read 1 file that was bigger than the budget".
-        meta.push(InjectedContextEntry {
-            source: format!("changed file {}", file.path),
-            original_bytes,
-            injected_bytes: injected_content.len(),
-            truncated,
-            sha256: crate::context::agents_md::sha256_hex(&injected_content),
-        });
+        let per_file_truncated = injected_content.len() < original_bytes || original_bytes > MAX_SINGLE_FILE_BYTES;
+
+        // P2-2 (review r1): the meta row used to be pushed *before* the
+        // total-budget check, so a file that was then skipped by the
+        // budget (`omitted.push(...); continue`) still got a row whose
+        // `injected_bytes = content.len()` and `truncated = false`,
+        // rendering as `8192 / 8192 bytes (100%) | ok` while the prompt
+        // body listed it under "Omitted". Two fixes here:
+        //   1. push the row *only* for files admitted to the body;
+        //   2. when pushed, hash the *exact* slice the prompt embeds so
+        //      the fingerprint matches what the LLM saw.
+        // Files rejected by the budget show up under "Omitted (context
+        // budget exhausted)" in the prompt body; their row is intentionally
+        // absent from `## Injected Context` so the audit cannot disagree
+        // with the body.
         if used + injected_content.len() > max_total_bytes {
             omitted.push(&file.path);
             continue;
         }
         used += injected_content.len();
+
+        meta.push(InjectedContextEntry {
+            source: format!("changed file {}", file.path),
+            original_bytes,
+            injected_bytes: injected_content.len(),
+            truncated: per_file_truncated,
+            // Hash the slice we are *actually* embedding into the body
+            // (post per-file truncation, identical to what `read_changed_file`
+            // returned — but pinning here guards against a future refactor
+            // that drops or reflows the slice before insertion).
+            sha256: crate::context::agents_md::sha256_hex(&injected_content),
+        });
+
         let ext = std::path::Path::new(&file.path)
             .extension()
             .and_then(|e| e.to_str())

@@ -2218,6 +2218,7 @@ fn consolidated_with_score(score: u8) -> crate::team::lead_consolidator::Consoli
         parse_status: Vec::new(),
         verification_stats: None,
         injected_context: Default::default(),
+        confidence_filter_policy: Default::default(),
         adjudicated_removed: Vec::new(),
     }
 }

@@ -147,6 +147,13 @@ impl RepoExpert for CodeQuality {
             samples,
             samples_attempted,
             samples_failed,
+            // M38: surface the schema-broken reason code (if any) so the
+            // orchestrator can put it in the `Chunks Reviewed` appendix
+            // alongside the verbatim reason string. `None` on every
+            // recovered / non-LLM path (single-shot recovered by the
+            // clarifying retry, multi-sample run with surviving scores,
+            // legacy-wrapper promotion).
+            reason_code: call.reason_code,
         })
     }
 }

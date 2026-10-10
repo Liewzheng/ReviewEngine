@@ -128,6 +128,12 @@ impl RepoExpert for ArchitectureLead {
             samples,
             samples_attempted,
             samples_failed,
+            // M38: see the matching comment in `code_quality.rs` — same
+            // plumb for ArchitectureLead. The single-shot path is the
+            // only one that ever carries a code; multi-sample runs leave
+            // it at `None` because the per-sample drop counter is the
+            // signal that surfaces, not a clarifying retry.
+            reason_code: call.reason_code,
         })
     }
 }

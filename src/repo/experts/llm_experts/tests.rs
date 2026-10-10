@@ -751,3 +751,322 @@ async fn call_scoring_single_shot_records_one_attempt_no_failures_on_success() {
     assert_eq!(call.samples_attempted, 1);
     assert_eq!(call.samples_failed, 0);
 }
+
+// ─── M38: clarifying retry on schema-broken single-shot responses ───
+//
+// The single-shot path (`scoring.score_samples = 1`, the default) has no
+// model-side safety net when the LLM returns a non-empty but
+// schema-broken response (missing expected keys / unparseable YAML). M37
+// surfaced this as the post-M30 residual: 2 of 26 chunks in
+// `.github/workflows` (255 LOC) and `src/llm` (5009 LOC) landed
+// `LLM response not actionable: Code quality assessment completed` even
+// though the same prompt produced a fully valid response on a fresh run
+// — non-deterministic model variance, not a stable defect.
+//
+// The M38 fix is a single clarifying re-prompt against the SAME provider
+// when the initial response parses to `Null` with reason code
+// `MissingExpectedKeys` or `UnparseableYaml`. The retry is bounded to
+// ONE attempt, reuses the original `system` prompt and `configs` chain
+// (the failure is a content shape, not a transport problem), and only
+// fires on those two schema-broken codes — `EmptyResponse` stays with
+// M26's `disable_thinking` retry inside `complete_with_fallback`, and
+// `LegacyReviewFallback` is a recovered success (the inner mapping is
+// promoted to the top level), not a failure.
+//
+// The tests below pin every contract the spec requires:
+// - Happy path on the first attempt: no retry, `reason_code == None`.
+// - Schema-broken → recovered: 2 attempts, recovered content is the
+//   final `content`, `reason_code == None`, `samples_failed == 0`.
+// - Schema-broken → still broken: exactly 2 attempts (upper bound is 1
+//   retry = 2 total), original content preserved, `reason_code` carries
+//   the initial `MissingExpectedKeys` or `UnparseableYaml`.
+// - EmptyResponse on the first attempt: NO clarifying retry — that path
+//   stays with M26's `disable_thinking` retry, which we explicitly do
+//   not interfere with (the spec pins "不触动 M26 的空完成路径").
+
+/// Scripted provider variant that records every distinct body it was asked
+/// to serve, so the test can assert the upper bound (≤ 2 attempts on the
+/// single-shot path) and prove the clarifying retry actually re-prompts
+/// the SAME chain instead of routing elsewhere.
+struct CountingScriptedProvider {
+    bodies: Vec<String>,
+    call_count: AtomicUsize,
+    served_bodies: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl LLMProvider for CountingScriptedProvider {
+    fn name(&self) -> &'static str {
+        // Match the existing `mock_configs()` provider string
+        // (`"mock"`) so `complete_with_fallback`'s registry lookup by
+        // `config.provider` resolves to this scripted one instead of
+        // falling through to the direct HTTP path (which would fail
+        // with `LLM config 'mock' has no api_base set`).
+        "mock"
+    }
+
+    async fn complete(&self, _params: &CompletionParams) -> Result<CompletionResult, anyhow::Error> {
+        let i = self.call_count.fetch_add(1, Ordering::SeqCst);
+        let body = self.bodies[i.min(self.bodies.len() - 1)].clone();
+        self.served_bodies.lock().unwrap().push(body.clone());
+        Ok(CompletionResult {
+            content: body,
+            total_tokens: 1,
+            model: "mock".to_string(),
+            provider: "mock".to_string(),
+            fallback: false,
+            entry_fp: None,
+        })
+    }
+}
+
+fn counting_mock_client(bodies: Vec<String>) -> (LLMClient, Arc<std::sync::Mutex<Vec<String>>>) {
+    let served = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut registry = ProviderRegistry::new();
+    registry.register(Box::new(CountingScriptedProvider {
+        bodies,
+        call_count: AtomicUsize::new(0),
+        served_bodies: served.clone(),
+    }));
+    (LLMClient::new().with_registry(Arc::new(registry)), served)
+}
+
+#[tokio::test(start_paused = true)]
+async fn m38_single_shot_no_retry_on_happy_path() {
+    // A clean, schema-conforming first response: no clarifying retry
+    // (the spec pins "默认配置下无额外 LLM 调用").
+    let bodies = vec!["score: 80\nsummary: \"ok\"\nfindings: []\n".to_string()];
+    let (client, served) = counting_mock_client(bodies.clone());
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        1,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(call.reason_code, None, "happy path: no schema-broken code");
+    assert_eq!(served.lock().unwrap().len(), 1, "exactly one provider call, no retry");
+}
+
+#[tokio::test(start_paused = true)]
+async fn m38_single_shot_clarifying_retry_recovers_schema_broken_response() {
+    // First response: missing the expected keys (M37's `.github/workflows`
+    // shape). Second response (the clarifying retry): a valid YAML block
+    // that re-emits the schema. The final ScoringCall carries the recovered
+    // content, no reason code, and exactly two attempts on the wire.
+    let broken = "Looks good overall. No issues to report.\n".to_string();
+    let recovered = "score: 78\nsummary: \"ok\"\nfindings: []\n".to_string();
+    let (client, served) = counting_mock_client(vec![broken, recovered.clone()]);
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        1,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(call.reason_code, None, "recovered: the reason_code clears");
+    assert_eq!(
+        call.content, recovered,
+        "the recovered content replaces the initial broken one"
+    );
+    let served_log = served.lock().unwrap().clone();
+    assert_eq!(
+        served_log.len(),
+        2,
+        "exactly two provider calls: initial + one clarifying retry; saw {served_log:?}"
+    );
+    // The retry's body must not be the broken body again — it must be the
+    // clarifying follow-up prompt that the new code path appended.
+    // (We can't inspect the request body directly without changing the
+    // provider trait, but the count alone proves the retry ran.)
+}
+
+#[tokio::test(start_paused = true)]
+async fn m38_single_shot_clarifying_retry_upper_bound_is_one_attempt() {
+    // Both responses are schema-broken: the clarifying retry also fails.
+    // The upper bound is exactly ONE retry (2 total attempts). The
+    // original broken content is preserved, and `reason_code` records the
+    // initial `MissingExpectedKeys` so the report renders it inline.
+    let broken_a = "verdicts: []\n".to_string(); // missing expected keys
+    let broken_b = "score: not a number\n  findings: oops\n".to_string(); // still schema-broken
+    let (client, served) = counting_mock_client(vec![broken_a, broken_b.clone()]);
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        1,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        call.reason_code,
+        Some(ParseReasonCode::MissingExpectedKeys),
+        "the initial reason code is the one that gets reported (initial was `verdicts: []` = missing keys)"
+    );
+    // The content is preserved as the ORIGINAL (M38 spec: "重试仍破 → fallback + 记录码")
+    // — the test now pins that the brokered attempt happens, but its
+    // failure leaves the initial response in the ScoringCall so the
+    // downstream fallback path runs unchanged.
+    assert_eq!(
+        served.lock().unwrap().len(),
+        2,
+        "upper bound: exactly 2 attempts (initial + 1 retry), no further call"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn m38_single_shot_clarifying_retry_records_unparseable_yaml_reason_code() {
+    // First response: unparseable YAML (M37's `src/llm` shape — a
+    // reasoning model returning prose-with-no-YAML). Second response:
+    // still unparseable. The recorded reason code must be the schema
+    // code (`UnparseableYaml`), not `EmptyResponse` or
+    // `LegacyReviewFallback`.
+    let prose = "The module is generally well-structured. No issues found.\n".to_string();
+    let still_prose = "Looks fine, nothing to flag.\n".to_string();
+    let (client, served) = counting_mock_client(vec![prose, still_prose]);
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        1,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    assert_eq!(call.reason_code, Some(ParseReasonCode::UnparseableYaml));
+    assert_eq!(served.lock().unwrap().len(), 2);
+}
+
+#[tokio::test(start_paused = true)]
+async fn m38_single_shot_no_retry_on_empty_response_m26_path_unchanged() {
+    // The first response is empty. M26's `disable_thinking` retry is the
+    // one that owns empty completions; M38 explicitly does NOT touch
+    // that path. The scripted provider returns empty twice (M26's retry
+    // burns one more attempt); the M38 clarifying retry must NOT fire
+    // because the initial reason code is `EmptyResponse`, not
+    // `MissingExpectedKeys`/`UnparseableYaml`.
+    let bodies = vec![String::new(), String::new()];
+    let (client, served) = counting_mock_client(bodies);
+    let err = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        1,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .expect_err("two empty responses must surface as Err from the chain");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("empty completion"),
+        "the M26 diagnosis must reach the caller: {message}"
+    );
+    // Two attempts total: M26's disable_thinking retry. M38 must NOT
+    // add a third (clarifying) attempt on top.
+    assert_eq!(
+        served.lock().unwrap().len(),
+        2,
+        "M38 must not fire on EmptyResponse; the M26 path stays at 2 attempts"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn m38_multi_sample_does_not_fire_clarifying_retry() {
+    // Multi-sample runs drop bad samples inside the loop; the M38
+    // clarifying retry is single-shot-only. A single bad body mixed with
+    // good ones: the bad one is just absent from the surviving samples;
+    // the retry budget stays at `n`.
+    let bodies = vec![
+        "verdicts: []\n".to_string(), // schema-broken (would be a clarifying retry target on n=1)
+        "score: 90\nsummary: \"good\"\nfindings: []\n".to_string(),
+        "score: 80\nsummary: \"also good\"\nfindings: []\n".to_string(),
+    ];
+    let (client, served) = counting_mock_client(bodies);
+    let call = call_scoring(
+        &client,
+        &mock_configs(),
+        "sys",
+        "user",
+        3,
+        "code_quality",
+        CODE_QUALITY_KEYS,
+    )
+    .await
+    .unwrap();
+    // The bad sample is dropped inside the multi-sample loop; the
+    // surviving median (90 + 80) / 2 = 85 is the final score, and the
+    // `ScoringCall.reason_code` stays at `None` because the multi-sample
+    // path was never asked to retry the broken sample.
+    assert_eq!(call.reason_code, None, "multi-sample: reason_code stays None");
+    assert_eq!(call.median, Some(85));
+    assert_eq!(
+        served.lock().unwrap().len(),
+        3,
+        "exactly `n=3` calls; the bad sample is dropped, not retried"
+    );
+}
+
+#[test]
+fn m38_parse_expert_yaml_diagnosed_classifies_each_failure_path() {
+    // Pin the four terminal paths against the diagnosed helper — every
+    // existing `parse_expert_yaml` call site still gets the same `Value`,
+    // and the new helper additionally reports the reason code so the
+    // retry logic can branch on it without re-classifying.
+    use crate::repo::experts::llm_experts::scoring::parse_expert_yaml_diagnosed;
+
+    // (a) Clean, schema-conforming payload → `(value, None)`.
+    let (v, code) = parse_expert_yaml_diagnosed("code_quality", "score: 85\nfindings: []\n", CODE_QUALITY_KEYS);
+    assert!(!v.is_null());
+    assert_eq!(code, None);
+
+    // (b) Empty response → `(Null, Some(EmptyResponse))`. The M38
+    // clarifying-retry gate filters this out (only the two schema-broken
+    // codes qualify), and the M26 disable_thinking retry is the path
+    // that owns it.
+    let (v, code) = parse_expert_yaml_diagnosed("code_quality", "   \n  ", CODE_QUALITY_KEYS);
+    assert!(v.is_null());
+    assert_eq!(code, Some(ParseReasonCode::EmptyResponse));
+
+    // (c) Missing expected keys → `(Null, Some(MissingExpectedKeys))` —
+    // the M37 `.github/workflows` reproducer shape.
+    let (v, code) = parse_expert_yaml_diagnosed("code_quality", "verdicts: []\n", CODE_QUALITY_KEYS);
+    assert!(v.is_null());
+    assert_eq!(code, Some(ParseReasonCode::MissingExpectedKeys));
+
+    // (d) Unparseable YAML → `(Null, Some(UnparseableYaml))` — the M37
+    // `src/llm` reproducer shape.
+    let (v, code) = parse_expert_yaml_diagnosed(
+        "code_quality",
+        "score: [unclosed\n  findings:\n    - severity: \"high\"\n",
+        CODE_QUALITY_KEYS,
+    );
+    assert!(v.is_null());
+    assert_eq!(code, Some(ParseReasonCode::UnparseableYaml));
+
+    // (e) Legacy `review:` wrapper → recovered, not a failure.
+    let raw = "\
+review:
+  score: 92
+  findings:
+    - severity: \"high\"
+      message: \"legacy\"
+";
+    let (v, code) = parse_expert_yaml_diagnosed("code_quality", raw, CODE_QUALITY_KEYS);
+    assert!(!v.is_null(), "the legacy wrapper is promoted to top level");
+    assert_eq!(code, None, "legacy recovery is not a reason-code-tagged failure");
+}

@@ -76,6 +76,18 @@ pub struct ChunkFailure {
     /// Verbatim error recorded on the fallback score (e.g.
     /// `"provider 'mimo-v2.5-pro' (model 'mimo-v2.5-pro') returned an empty completion ..."`).
     pub reason: String,
+    /// M38: the [`crate::repo::experts::llm_experts::scoring::ParseReasonCode`]
+    /// that classified the schema failure, when the chunk failure was a
+    /// schema-broken response (missing keys / unparseable YAML). The same
+    /// stable lowercase string the parser already logs at INFO — kept
+    /// here so a reader can `grep reason_code=missing_expected_keys`
+    /// across the rendered Markdown / JSON without re-parsing the prose
+    /// `reason`. `None` for failures the parser never saw (LLM call
+    /// transport errors, the M26 `disable_thinking` retry exhausting).
+    /// `#[serde(default)]` keeps JSON written before the field existed
+    /// deserializable.
+    #[serde(default)]
+    pub reason_code: Option<String>,
 }
 
 /// Provenance metadata for a repo-review report.

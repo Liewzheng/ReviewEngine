@@ -445,6 +445,9 @@ pub async fn run_repo_review(
                                     module: chunk.module.clone(),
                                     loc: chunk.total_loc as u64,
                                     reason: format!("scheduler unavailable: {e}"),
+                                    // Scheduler failure is not a parser
+                                    // classification — no reason code.
+                                    reason_code: None,
                                 },
                             );
                             return score;
@@ -498,12 +501,22 @@ pub async fn run_repo_review(
                                 } else {
                                     format!("{CHUNK_NOT_REVIEWED_PREFIX} — module {}: {}", chunk.module, s.summary)
                                 };
+                                // M38: surface the schema-broken reason
+                                // code (when one exists) into
+                                // `ChunkFailure.reason_code` so the
+                                // `Chunks Reviewed` table renders it
+                                // inline. `None` on every other failure
+                                // class (LLM call error, M26 empty-retry
+                                // exhausting) — those never reach
+                                // `parse_expert_yaml` and carry no code.
+                                let reason_code = s.reason_code.map(|c| c.as_str().to_string());
                                 push_chunk_failure(
                                     &not_reviewed_reasons,
                                     ChunkFailure {
                                         module: chunk.module.clone(),
                                         loc: chunk.total_loc as u64,
                                         reason: format!("LLM response not actionable: {}", s.summary),
+                                        reason_code,
                                     },
                                 );
                                 s.summary = prefixed_summary;
@@ -527,6 +540,11 @@ pub async fn run_repo_review(
                                     module: chunk.module.clone(),
                                     loc: chunk.total_loc as u64,
                                     reason: format!("LLM assessment unavailable: {e}"),
+                                    // LLM transport / chain failure never
+                                    // reaches `parse_expert_yaml` — the
+                                    // parser never saw a response, so no
+                                    // reason code can be classified.
+                                    reason_code: None,
                                 },
                             );
                             chunk_fallback_score(chunk, format!("LLM assessment unavailable: {e}"))

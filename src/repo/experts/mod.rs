@@ -84,6 +84,19 @@ pub struct ExpertScore {
     /// error, unparseable YAML, or schema-conforming YAML with no `score`).
     /// `None` when sampling was disabled.
     pub samples_failed: Option<usize>,
+    /// M38: the [`crate::repo::experts::llm_experts::scoring::ParseReasonCode`]
+    /// paired with a chunk that the LLM expert could not parse, when one
+    /// was produced. `None` on every other path (genuine assessment,
+    /// legacy-wrapper recovery, LLM-call failure — the latter carries its
+    /// own `summary` text and is bucketed into `ChunkFailure` with no
+    /// `reason_code`). Surfaced via the `Chunks Reviewed` appendix in the
+    /// repo-review report so a schema-broken chunk is grep-friendly in the
+    /// rendered Markdown and JSON. Internal: not part of the JSON
+    /// contract (the report-layer struct is `ExpertScoreOutput`, not this
+    /// one), and `pub(crate)` so external crate users cannot construct
+    /// `ExpertScore { reason_code: ... }` without going through an LLM
+    /// expert — which is the only path that ever sets it.
+    pub(crate) reason_code: Option<crate::repo::experts::llm_experts::scoring::ParseReasonCode>,
 }
 
 /// A single finding or observation within an expert score.
@@ -306,6 +319,7 @@ mod tests {
             samples: None,
             samples_attempted: None,
             samples_failed: None,
+            reason_code: None,
         }
     }
 
@@ -387,6 +401,7 @@ mod tests {
             samples: Some(vec![40, 45]),
             samples_attempted: Some(2),
             samples_failed: Some(0),
+            reason_code: None,
         };
         let cloned = original.clone();
         assert_eq!(cloned.expert_name, "security");

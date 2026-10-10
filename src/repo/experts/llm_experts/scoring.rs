@@ -64,27 +64,43 @@ impl ParseReasonCode {
     }
 }
 
-pub(crate) fn parse_expert_yaml(expert: &str, raw: &str, expected_keys: &[&str]) -> serde_yaml_ng::Value {
+/// Inner implementation of [`parse_expert_yaml`] / [`parse_expert_yaml_diagnosed`]:
+/// classifies a raw LLM response against the expert's `expected_keys` and returns
+/// the parsed `Value` (or `Null` on every failure path) plus, when the result
+/// is `Null`, the [`ParseReasonCode`] that explains why.
+///
+/// All four `Null`-yielding terminal paths are reached from a single shared
+/// classifier so [`parse_expert_yaml`] (which discards the code) and
+/// [`parse_expert_yaml_diagnosed`] (which surfaces it to the M38 clarifying
+/// retry) cannot disagree about why a given response failed. The legacy
+/// `review:` wrapper is treated as a success path here — the inner mapping is
+/// promoted, the code is `None` — so a legacy payload does not look like a
+/// schema-broken response to the retry logic.
+fn classify_expert_yaml(
+    expert: &str,
+    raw: &str,
+    expected_keys: &[&str],
+) -> (serde_yaml_ng::Value, Option<ParseReasonCode>) {
     if raw.trim().is_empty() {
         tracing::warn!(
             expert_name = expert,
             reason_code = ParseReasonCode::EmptyResponse.as_str(),
             "LLM returned empty response; using fallback score and empty findings"
         );
-        return serde_yaml_ng::Value::Null;
+        return (serde_yaml_ng::Value::Null, Some(ParseReasonCode::EmptyResponse));
     }
 
     let cleaned = crate::output::parser::clean_yaml(raw);
     let parsed = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&cleaned).ok();
     if let Some(v) = &parsed {
         if v.is_mapping() && expected_keys.iter().any(|k| !v[*k].is_null()) {
-            return v.clone();
+            return (v.clone(), None);
         }
     }
     if let Some(fenced) = crate::output::parser::extract_first_fenced_yaml(raw) {
         if let Ok(v) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&fenced) {
             if v.is_mapping() && expected_keys.iter().any(|k| !v[*k].is_null()) {
-                return v;
+                return (v, None);
             }
         }
     }
@@ -100,10 +116,10 @@ pub(crate) fn parse_expert_yaml(expert: &str, raw: &str, expected_keys: &[&str])
             reason_code = ParseReasonCode::LegacyReviewFallback.as_str(),
             "LLM response uses the legacy 'review:' wrapper; promoting to top-level keys"
         );
-        return legacy;
+        return (legacy, None);
     }
 
-    if parsed.as_ref().is_some_and(|v| v.is_mapping()) {
+    let reason = if parsed.as_ref().is_some_and(|v| v.is_mapping()) {
         tracing::warn!(
             expert_name = expert,
             reason_code = ParseReasonCode::MissingExpectedKeys.as_str(),
@@ -111,6 +127,7 @@ pub(crate) fn parse_expert_yaml(expert: &str, raw: &str, expected_keys: &[&str])
             excerpt = %truncate_excerpt(raw),
             "LLM response parsed as YAML but missing expected keys {expected_keys:?}; using fallback score and empty findings"
         );
+        ParseReasonCode::MissingExpectedKeys
     } else {
         tracing::warn!(
             expert_name = expert,
@@ -119,8 +136,35 @@ pub(crate) fn parse_expert_yaml(expert: &str, raw: &str, expected_keys: &[&str])
             excerpt = %truncate_excerpt(raw),
             "LLM response failed YAML parse; using fallback score and empty findings"
         );
-    }
-    serde_yaml_ng::Value::Null
+        ParseReasonCode::UnparseableYaml
+    };
+    (serde_yaml_ng::Value::Null, Some(reason))
+}
+
+/// Parse an expert YAML response, returning the parsed value or `Null` on
+/// every failure path. See [`classify_expert_yaml`] for the reasoning
+/// classifier; this thin wrapper just discards the `ParseReasonCode` so the
+/// existing call sites keep their `Value`-only contract.
+pub(crate) fn parse_expert_yaml(expert: &str, raw: &str, expected_keys: &[&str]) -> serde_yaml_ng::Value {
+    classify_expert_yaml(expert, raw, expected_keys).0
+}
+
+/// Same classification as [`parse_expert_yaml`] but also returns the
+/// [`ParseReasonCode`] paired with the `Null` result. The reason code is
+/// `None` when the response was either accepted as-is or recovered via the
+/// legacy `review:` wrapper promotion — both paths surface a usable `Value`.
+///
+/// The M38 clarifying retry uses this to decide whether the initial
+/// single-shot response warrants a model-side re-prompt: only the two
+/// schema-broken codes (`MissingExpectedKeys`, `UnparseableYaml`) qualify;
+/// `EmptyResponse` stays with the M26 `disable_thinking` retry and never
+/// reaches a second clarifying call from here.
+pub(crate) fn parse_expert_yaml_diagnosed(
+    expert: &str,
+    raw: &str,
+    expected_keys: &[&str],
+) -> (serde_yaml_ng::Value, Option<ParseReasonCode>) {
+    classify_expert_yaml(expert, raw, expected_keys)
 }
 
 /// M18-W2 legacy schema recovery: when the cleaned YAML parses into a
@@ -200,6 +244,16 @@ pub(crate) struct ScoringCall {
     /// never reaches this struct (the unreachable "1 when errored"
     /// wording from r1 is gone — see `call_scoring`).
     pub samples_failed: usize,
+    /// M38: the [`ParseReasonCode`] that explains why `content` failed to
+    /// parse, when it failed and the clarifying retry (also M38) did not
+    /// recover. `None` on every successful path: the initial response
+    /// parsed cleanly, or the retry surfaced a usable response. The
+    /// single-shot path sets this from [`parse_expert_yaml_diagnosed`] on
+    /// the FINAL content (after the retry ran, if any); the multi-sample
+    /// path leaves it at the default (`None`) because the per-sample
+    /// drop counter already captures the failure aggregate and a
+    /// clarifying retry would just become per-sample N+1 calls.
+    pub reason_code: Option<ParseReasonCode>,
 }
 
 pub(crate) async fn call_scoring(
@@ -216,6 +270,77 @@ pub(crate) async fn call_scoring(
 
     if n <= 1 {
         let response = llm.complete_with_fallback(configs, system, user).await?;
+        // M38: the single-shot path used to surface a non-empty but
+        // schema-broken response directly to `parse_expert_yaml`, which
+        // logged `missing_expected_keys` / `unparseable_yaml` and
+        // returned `Null` — the chunk then fell back to the default
+        // 70/0 placeholder summary with no model-side recovery. That is
+        // the exact failure M37 surfaced: a one-shot variance in the
+        // model returning a non-conforming payload where re-prompting
+        // with a clarifying instruction recovered a real review in every
+        // captured rerun. We classify the initial response, and only if
+        // it landed on `MissingExpectedKeys` or `UnparseableYaml` (the
+        // two schema-broken codes — `EmptyResponse` stays with M26's
+        // `disable_thinking` retry inside `complete_with_fallback` and
+        // `LegacyReviewFallback` is a recovered success, not a failure)
+        // do we re-prompt with an explicit clarification. The retry is
+        // bounded to ONE attempt; the original response is reused if
+        // the retry still parses to `Null`, so the M26 fallback path
+        // still runs unchanged on hard failure.
+        let mut content = response.content;
+        // Definite assignment on every path: the if-branch always sets
+        // `reason_code` (either to `None` on recovery or to the initial
+        // reason on a still-broken retry), and the else-branch sets it
+        // to `None`. The unused-assignment warning surfaces when this
+        // initializer is left in place — Rust sees the else-branch
+        // overwriting `None` before it's read — so we declare without
+        // an initial value and let each arm take ownership.
+        let reason_code: Option<ParseReasonCode>;
+        let (_, initial_reason) = parse_expert_yaml_diagnosed(expert, &content, expected_keys);
+        if matches!(
+            initial_reason,
+            Some(ParseReasonCode::MissingExpectedKeys) | Some(ParseReasonCode::UnparseableYaml)
+        ) {
+            match clarifying_retry(llm, configs, system, user, expert, expected_keys).await {
+                Ok(ClarifyingRetryOutcome::Recovered {
+                    content: recovered_content,
+                }) => {
+                    tracing::info!(
+                        expert_name = expert,
+                        initial_reason_code = initial_reason.map(|r| r.as_str()).unwrap_or(""),
+                        "M38: schema-broken single-shot response recovered by clarifying retry"
+                    );
+                    content = recovered_content;
+                    reason_code = None;
+                }
+                Ok(ClarifyingRetryOutcome::StillBroken { retry_reason }) => {
+                    tracing::warn!(
+                        expert_name = expert,
+                        initial_reason_code = initial_reason.map(|r| r.as_str()).unwrap_or(""),
+                        retry_reason_code = retry_reason.map(|r| r.as_str()).unwrap_or(""),
+                        "M38: clarifying retry also produced a schema-broken response; \
+                         using fallback score and recording the original reason code"
+                    );
+                    reason_code = initial_reason;
+                }
+                Err(retry_err) => {
+                    tracing::warn!(
+                        expert_name = expert,
+                        initial_reason_code = initial_reason.map(|r| r.as_str()).unwrap_or(""),
+                        error = %retry_err,
+                        "M38: clarifying retry call failed; using fallback score and recording the original reason code"
+                    );
+                    reason_code = initial_reason;
+                }
+            }
+        } else {
+            // `initial_reason` is `None` (parsed or legacy-wrapper
+            // recovered) or `Some(EmptyResponse)` (M26 territory — the
+            // chain already ran its `disable_thinking` retry). Neither
+            // should trigger a clarifying call.
+            reason_code = None;
+        }
+
         // M18-W2: the single-shot path always returns a 1/0 baseline.
         // Call errors short-circuit through the `?` above and never reach
         // this branch, so the unreachable "samples_failed = 1 when the
@@ -224,13 +349,17 @@ pub(crate) async fn call_scoring(
         // sites (code_quality.rs / architecture.rs) gate the public
         // `samples_attempted` / `samples_failed` fields on
         // `call.samples.is_some()`, so the JSON contract holds:
-        // single-shot runs report no rate; multi-sample runs do.
+        // single-shot runs report no rate; multi-sample runs do. The
+        // M38 reason_code is internal to the experts and never reaches
+        // the JSON contract (it surfaces via the `Chunks Reviewed`
+        // appendix instead — see `repo_review/render.rs`).
         return Ok(ScoringCall {
-            content: response.content,
+            content,
             median: None,
             samples: None,
             samples_attempted: 1,
             samples_failed: 0,
+            reason_code,
         });
     }
 
@@ -299,7 +428,62 @@ pub(crate) async fn call_scoring(
         samples: Some(samples),
         samples_attempted: n,
         samples_failed: failed,
+        // M38: multi-sample runs drop individual bad responses inside the
+        // loop above and aggregate the failure rate on `samples_failed`.
+        // A clarifying retry per dropped sample would inflate the call
+        // budget to N+1 without a corresponding benefit (the median
+        // already absorbs one bad sample out of three); the spec pins
+        // the retry to the single-shot path, so this branch keeps
+        // `reason_code` at its default `None`.
+        reason_code: None,
     })
+}
+
+/// Outcome of [`clarifying_retry`] — one re-prompt against the same
+/// provider chain, with a clarifying instruction appended to the original
+/// user prompt. The retry is bounded to a single attempt: see
+/// `call_scoring`'s single-shot branch for the trigger conditions and the
+/// upper-bound pin. A recovered response is preferred when present; a
+/// still-broken response surfaces its reason code so the caller can
+/// preserve the original `reason_code` for the report.
+enum ClarifyingRetryOutcome {
+    Recovered { content: String },
+    StillBroken { retry_reason: Option<ParseReasonCode> },
+}
+
+/// M38: build and dispatch the clarifying follow-up call when the initial
+/// single-shot response is non-empty but schema-broken (`MissingExpectedKeys`
+/// or `UnparseableYaml`). The clarifying prompt keeps the original system
+/// prompt unchanged (the schema contract lives there) and appends a short
+/// explicit instruction to the user prompt asking the model to re-emit as
+/// the YAML schema specified. We always run against the original
+/// `configs` chain — the same provider/model the user configured — and
+/// the same `disable_thinking` setting the chain already applied; we do
+/// NOT promote to a secondary provider here, because the failure is a
+/// content shape, not a transport problem, and a different provider
+/// would still need to emit the same shape on the retry.
+async fn clarifying_retry(
+    llm: &crate::llm::client::LLMClient,
+    configs: &[crate::models::LLMConfig],
+    system: &str,
+    user: &str,
+    expert: &str,
+    expected_keys: &[&str],
+) -> anyhow::Result<ClarifyingRetryOutcome> {
+    let clarifying_user = format!(
+        "{user}\n\n---\n\n\
+         Your previous response did not include any of the required keys ({keys}). \
+         Re-emit the assessment as the YAML schema specified in the system prompt. \
+         Do not include any prose outside the code block.",
+        keys = expected_keys.join(", "),
+    );
+    let retry = llm.complete_with_fallback(configs, system, &clarifying_user).await?;
+    let (_, retry_reason) = parse_expert_yaml_diagnosed(expert, &retry.content, expected_keys);
+    if retry_reason.is_none() {
+        Ok(ClarifyingRetryOutcome::Recovered { content: retry.content })
+    } else {
+        Ok(ClarifyingRetryOutcome::StillBroken { retry_reason })
+    }
 }
 
 pub(crate) fn append_facts_block(user: &mut String, facts_block: Option<&str>) {

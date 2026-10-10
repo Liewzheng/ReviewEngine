@@ -1,9 +1,11 @@
 //! CLI command handlers, split by domain into submodules.
 //!
-//! This facade only declares the submodules and re-exports the `pub` entry
-//! points, so `cli::mod` keeps calling `handlers::run_*` unchanged. Shared
-//! output/LLM helpers live in `review`/`output` (the `pub(super)` items there
-//! are used by the sibling command modules).
+//! This facade declares the submodules, re-exports the `pub` entry points so
+//! `cli::mod` keeps calling `handlers::run_*` unchanged, and carries the
+//! `pub(super)` helpers shared by the non-review command modules
+//! (`single_expert_review_output` and `log_output_targets`, M34). The
+//! output/LLM plumbing for the review flow still lives in `review` / `output`
+//! (their `pub(super)` items feed the sibling command modules).
 
 use review_engine::models::{ExpertReport, ReviewOutput};
 

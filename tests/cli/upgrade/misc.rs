@@ -1,7 +1,7 @@
 use super::*;
 
 // ─────────────────────────────────────────────────────────────────────
-// `ask --stdin` — AK-05 regression.
+// `ask --stdin` — AK-05 regression + M34 dual-write pin.
 //
 // `run_ask_stdin` used to call the file-backed handler with the arguments
 // swapped: the stdin diff was passed as `question` and the question string as
@@ -9,6 +9,29 @@ use super::*;
 // a file path and failed with `No such file or directory (os error 2)`.
 // The stdin path now runs against the in-memory diff; this test drives the
 // real binary with a mock LLM and asserts the happy path succeeds.
+//
+// M34 (W13): the `ask` / `describe` / `improve` / `update_changelog`
+// handlers now also write a timestamped copy of the report under
+// `config.output_dir` (default `<state dir>/reports/`) — the same dual-write
+// the `review` and `repo-review` paths already do. The pre-M34 handlers
+// passed `None` for the output dir, so ask/describe/improve silently
+// dropped the copy and the docs in `docs/getting-started.md` only applied
+// to the review commands. This test pins the new behaviour: an isolated
+// `--config-dir` state root guarantees the timestamped copy lands in a
+// fresh temp directory and never touches the user's real config.
+//
+// Two operational notes worth keeping here:
+//   (a) every ask/describe/improve/update_changelog run now writes into
+//       `<state dir>/reports/`, which on a default install is
+//       `~/.config/review-engine/reports/` — CI runs and shell wrappers
+//       inherit `HOME`, so they write there too;
+//   (b) an unwritable or unresolvable `output_dir` now makes these
+//       commands exit non-zero (the dual write fails after stdout already
+//       received the report). The `review` commands have always behaved
+//       this way; the three new ones inherit it. The current behaviour
+//       is consistent with `review` and is the least surprising choice
+//       (a silent drop would be a regression on the docs promise), so
+//       this test does not paper over it.
 // ─────────────────────────────────────────────────────────────────────
 #[tokio::test]
 async fn ask_stdin_with_question_succeeds_with_mock_llm() {
@@ -42,17 +65,46 @@ async fn ask_stdin_with_question_succeeds_with_mock_llm() {
                 -fn old() {}\n\
                 +fn new() {}\n";
 
-    let mut child = Command::new(bin_path())
-        .args([
-            "ask",
-            "--stdin",
-            "--question",
-            "What does this diff change?",
-            "--format",
-            "markdown",
-            "--llm-config",
-            llm_config.as_str(),
-        ])
+    // Isolated state root: a fresh temp HOME plus --config-dir pointing at a
+    // sibling temp, with every steering env var cleared. Without isolation
+    // the timestamped-copy assertion below would either write into the
+    // user's real `~/.config/review-engine/reports/` (RENG-113: 0600 file
+    // ownership stays with the user, so the test would leak there) or pick
+    // up a REVIEW_ENGINE_CONFIG_DIR from the developer's shell.
+    let home = TempDir::new().unwrap();
+    let state_root = TempDir::new().unwrap();
+    let state_root_str = state_root.path().to_str().unwrap().to_string();
+
+    let mut cmd = Command::new(bin_path());
+    cmd.args([
+        "--config-dir",
+        &state_root_str,
+        "ask",
+        "--stdin",
+        "--question",
+        "What does this diff change?",
+        "--format",
+        "markdown",
+        "--llm-config",
+        llm_config.as_str(),
+    ])
+    .env("HOME", home.path())
+    .current_dir(home.path());
+    for key in [
+        "REVIEW_DATA_DIR",
+        "REVIEW_ENGINE_CONFIG_DIR",
+        "REVIEW_UI_STATE_FILE",
+        "REVIEW_AUTH_FILE",
+        "REVIEW_DISPATCH_STATE",
+        "REVIEW_FEEDBACK_PATH",
+        "REVIEW_MODELS_DEV_CACHE",
+        "DATABASE_URL",
+        "REVIEW_DISABLE_DB",
+        "LLM_CONFIG",
+    ] {
+        cmd.env_remove(key);
+    }
+    let mut child = cmd
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -85,6 +137,42 @@ async fn ask_stdin_with_question_succeeds_with_mock_llm() {
     assert!(
         stdout.contains("stdin diff answer"),
         "expected the mock LLM answer on stdout, got: {stdout}"
+    );
+
+    // M34 dual-write pin: a timestamped copy of the same report must land
+    // under `<state dir>/reports/`. Pre-M34, ask passed `None` for the
+    // output dir, so this directory stayed empty and the docs in
+    // `docs/getting-started.md` only applied to the review paths.
+    let reports_dir = state_root.path().join("reports");
+    let saved: Vec<_> = std::fs::read_dir(&reports_dir)
+        .unwrap_or_else(|e| {
+            panic!(
+                "ask --stdin must create the reports dir under --config-dir ({reports_dir:?}): {e}\nstdout: {stdout}\nstderr: {stderr}"
+            )
+        })
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(
+        saved.len(),
+        1,
+        "exactly one timestamped copy under {reports_dir:?}: {saved:?}"
+    );
+    let name = saved[0].file_name().unwrap().to_string_lossy().into_owned();
+    assert!(
+        name.starts_with("review_") && name.ends_with(".md"),
+        "timestamped copy name must match the review_<ts>.<ext> pattern, got: {name}"
+    );
+    let file_content = std::fs::read_to_string(&saved[0]).unwrap();
+    // The sink prints to stdout via `println!` (one trailing newline) and
+    // writes the raw `text` to the file (which itself ends with one
+    // newline from the ask markdown format), so the two are equal up to
+    // one trailing newline. Compare after trimming all trailing
+    // whitespace from both sides.
+    assert_eq!(
+        file_content.trim_end(),
+        stdout.trim_end(),
+        "timestamped copy must mirror the stdout report (modulo trailing whitespace)"
     );
 }
 

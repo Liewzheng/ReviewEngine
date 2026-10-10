@@ -4,6 +4,7 @@ use review_engine::models::*;
 
 use super::output::write_output;
 use super::review::require_llm_configs;
+use super::{log_output_targets, single_expert_review_output};
 
 pub async fn run_update_changelog(
     local_path: &str,
@@ -52,24 +53,9 @@ pub async fn run_update_changelog(
         serde_json::to_string_pretty(&result).unwrap_or_default(),
     );
 
-    let review_out = ReviewOutput {
-        reports: vec![ExpertReport {
-            expert_name: "update_changelog".to_string(),
-            findings: vec![],
-            markdown: md,
-            raw_llm_response: String::new(),
-            parse_error: None,
-            raw_dump_path: None,
-            llm_model: None,
-            llm_fp: None,
-            llm_provider: None,
-        }],
-        aggregated: None,
-        dropped_findings: vec![],
-        consolidated: None,
-        errors: vec![],
-    };
-    write_output(&review_out, format, output, None, None, false)?;
+    let review_out = single_expert_review_output("update_changelog", md);
+    log_output_targets("update_changelog", output, &config.output_dir);
+    write_output(&review_out, format, output, None, Some(&config.output_dir), false)?;
 
     Ok(())
 }

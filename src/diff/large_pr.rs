@@ -112,13 +112,13 @@ pub fn assess_large_pr(files: &[DiffFile], thresholds: &LargePrThresholds) -> La
 
 /// Apply compression to files based on the compression level.
 pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) -> Vec<String> {
+    let before = files.len();
     let mut actions = Vec::new();
 
     match level {
         CompressionLevel::None => {}
         CompressionLevel::Light => {
             // Light: filter generated/vendor files, apply token budget
-            let before = files.len();
             files.retain(|f| !processor::should_ignore_file(f));
             let removed = before - files.len();
             if removed > 0 {
@@ -152,6 +152,16 @@ pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) ->
         }
     }
 
+    let compressed_chunks = before - files.len();
+    tracing::info!(
+        compression_level = ?level,
+        files_before = before,
+        files_after = files.len(),
+        compressed_chunks,
+        actions_count = actions.len(),
+        "apply_compression: completed"
+    );
+
     actions
 }
 
@@ -161,7 +171,16 @@ pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) ->
 ///
 /// Configured semantics:
 /// - `"none"`: skip compression entirely.
-/// - `"light"`: compress deletion-only files only.
+/// - `"light"`: compress deletion-only files only. **Light does not change
+///   chunking strategy** — the chunker (`chunk_by_files` / `chunk_by_hunks` /
+///   `adaptive_chunk` / `semantic_chunk`) and `max_chunks_per_expert` govern
+///   how the diff is sliced, regardless of the compression level. If you want
+///   a tighter prompt budget on a large PR, raise the level to `medium` /
+///   `aggressive`; if you want to *protect* the chunking strategy while
+///   trimming only the deletion-only files, `light` is the right knob. When
+///   the diff has no deletion-only files, `apply_deletion_only_compression`
+///   returns `0 actions` and emits a `tracing::info!` event with
+///   `compressed_chunks = 0` so the no-op is still observable in the logs.
 /// - `"medium"` / `"aggressive"`: the corresponding [`apply_compression`] behaviour.
 ///
 /// Returns the effective level and the actions taken.
@@ -170,7 +189,8 @@ pub fn apply_configured_compression(
     configured: &str,
     assessed: &CompressionLevel,
 ) -> (CompressionLevel, Vec<String>) {
-    match configured.trim().to_lowercase().as_str() {
+    let before = files.len();
+    let (level, actions) = match configured.trim().to_lowercase().as_str() {
         "none" => (CompressionLevel::None, Vec::new()),
         "light" => (CompressionLevel::Light, apply_deletion_only_compression(files)),
         "medium" => (
@@ -182,7 +202,21 @@ pub fn apply_configured_compression(
             apply_compression(files, &CompressionLevel::Aggressive),
         ),
         _ => (assessed.clone(), apply_compression(files, assessed)),
-    }
+    };
+
+    let compressed_chunks = before - files.len();
+    tracing::info!(
+        configured = %configured,
+        assessed = ?assessed,
+        effective_level = ?level,
+        files_before = before,
+        files_after = files.len(),
+        compressed_chunks,
+        actions_count = actions.len(),
+        "apply_configured_compression: completed"
+    );
+
+    (level, actions)
 }
 
 /// Compress only deletion-only files (files whose hunks contain nothing but

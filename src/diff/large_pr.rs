@@ -118,7 +118,11 @@ pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) ->
     match level {
         CompressionLevel::None => {}
         CompressionLevel::Light => {
-            // Light: filter generated/vendor files, apply token budget
+            // Light (auto path): filter generated/vendor files only.
+            // Token-budget enforcement lives in the `Aggressive` branch —
+            // see the doc comment on `apply_configured_compression` for
+            // the configured `"light"` (deletion-only) path and how the
+            // two diverge.
             files.retain(|f| !processor::should_ignore_file(f));
             let removed = before - files.len();
             if removed > 0 {
@@ -171,17 +175,25 @@ pub fn apply_compression(files: &mut Vec<DiffFile>, level: &CompressionLevel) ->
 ///
 /// Configured semantics:
 /// - `"none"`: skip compression entirely.
-/// - `"light"`: compress deletion-only files only. **Light does not change
-///   chunking strategy** — the chunker (`chunk_by_files` / `chunk_by_hunks` /
-///   `adaptive_chunk` / `semantic_chunk`) and `max_chunks_per_expert` govern
-///   how the diff is sliced, regardless of the compression level. If you want
-///   a tighter prompt budget on a large PR, raise the level to `medium` /
-///   `aggressive`; if you want to *protect* the chunking strategy while
-///   trimming only the deletion-only files, `light` is the right knob. When
-///   the diff has no deletion-only files, `apply_deletion_only_compression`
-///   returns `0 actions` and emits a `tracing::info!` event with
-///   `compressed_chunks = 0` so the no-op is still observable in the logs.
-/// - `"medium"` / `"aggressive"`: the corresponding [`apply_compression`] behaviour.
+/// - `"light"`: compress deletion-only files only.
+/// - `"medium"`: `"light"` plus generated/vendor filtering, priority sort, and
+///   a 200-char line-truncate (the generated/vendor filter is the delta over
+///   `"light"`, since deletion-only compression is already in `"light"`).
+/// - `"aggressive"`: `"medium"` plus a 120-char line-truncate and a 40K token
+///   budget (`apply_token_budget`).
+///
+/// **Compression level never changes chunking strategy.** The chunker
+/// (`chunk_by_files` / `chunk_by_hunks` / `adaptive_chunk` / `semantic_chunk`)
+/// and `max_tokens_per_chunk` (the per-chunk token budget handed to every
+/// chunker in `src/team/orchestrator/pipeline.rs`) are the knobs that resize
+/// the slices; `max_chunks_per_expert` is a routing quota (chunks per
+/// expert), not a slicing knob. If you want a tighter prompt budget on a
+/// large PR, raise the level to `medium` / `aggressive`; if you want to
+/// *protect* the chunking strategy while trimming only the deletion-only
+/// files, `"light"` is the right knob. When the diff has no deletion-only
+/// files, `apply_deletion_only_compression` returns `0 actions` and emits a
+/// `tracing::info!` event with `compressed_chunks = 0` so the no-op is still
+/// observable in the logs.
 ///
 /// Returns the effective level and the actions taken.
 pub fn apply_configured_compression(

@@ -577,57 +577,33 @@ fn evidence_hint(finding: &Finding, numbered_content: &str) -> Option<String> {
 /// and surrounding prose; entries with an unusable `index` are skipped and
 /// unknown verdict strings fail open to `confirmed`. Returns an error when
 /// no verdict list can be extracted at all (caller keeps the batch).
+///
+/// M18 self-audit #5: the YAML → entries routine used to be a near copy
+/// of the verifier's; it now lives in [`crate::team::verdict`] so the
+/// "fenced fallback / no-verdicts-list error / index-skip" rules are
+/// defined once. The adjudicator adds verdict-string interpretation,
+/// `new_severity` parsing, and `cited_lines` carriage on top of the
+/// shared shape.
 fn parse_verdicts(text: &str) -> anyhow::Result<Vec<Decision>> {
-    let cleaned = crate::output::parser::clean_yaml(text);
-    let value: serde_yaml_ng::Value = match serde_yaml_ng::from_str(&cleaned) {
-        Ok(v) => v,
-        Err(e) => {
-            let fenced = crate::output::parser::extract_first_fenced_yaml(text)
-                .ok_or_else(|| anyhow::anyhow!("adjudication YAML parse failed: {}", e))?;
-            serde_yaml_ng::from_str(&fenced).map_err(|e2| anyhow::anyhow!("adjudication YAML parse failed: {}", e2))?
-        }
-    };
-
-    let items = value
-        .get("verdicts")
-        .and_then(|v| v.as_sequence())
-        .ok_or_else(|| anyhow::anyhow!("adjudication response has no 'verdicts' list"))?;
-
-    let mut decisions = Vec::with_capacity(items.len());
-    for item in items {
-        let Some(index) = item.get("index").and_then(|v| v.as_u64()) else {
-            continue;
-        };
-        let verdict = match item
-            .get("verdict")
-            .and_then(|v| v.as_str())
-            .unwrap_or("confirmed")
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "false_positive" | "false-positive" | "drop" => Verdict::FalsePositive,
-            "downgrade" => Verdict::Downgrade,
-            _ => Verdict::Confirmed,
-        };
-        let new_severity = item
-            .get("new_severity")
-            .and_then(|v| v.as_str())
-            .and_then(parse_severity_label);
-        let reason = item.get("reason").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let cited_lines = item
-            .get("cited_lines")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        decisions.push(Decision {
-            index: index as usize,
-            verdict,
-            new_severity,
-            reason,
-            cited_lines,
-        });
-    }
-    Ok(decisions)
+    crate::team::verdict::parse_verdict_entries(text).map(|entries| {
+        entries
+            .into_iter()
+            .map(|entry| {
+                let verdict = match entry.verdict.to_ascii_lowercase().as_str() {
+                    "false_positive" | "false-positive" | "drop" => Verdict::FalsePositive,
+                    "downgrade" => Verdict::Downgrade,
+                    _ => Verdict::Confirmed,
+                };
+                Decision {
+                    index: entry.index,
+                    verdict,
+                    new_severity: entry.new_severity.as_deref().and_then(parse_severity_label),
+                    reason: entry.reason,
+                    cited_lines: entry.cited_lines,
+                }
+            })
+            .collect()
+    })
 }
 
 /// Build the user prompt for one adjudication batch over a single file.

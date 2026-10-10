@@ -185,13 +185,20 @@ pub(crate) struct ScoringCall {
     pub samples: Option<Vec<u8>>,
     /// M18-W2: total number of scoring samples that landed (whether they
     /// produced a score or not). When `samples.is_some()`, this is the
-    /// `n` requested. Used to compute the by-expert fallback rate as
-    /// `1 - successful / attempted`.
+    /// `n` requested; when `samples` is `None` (the single-shot `n = 1`
+    /// path) the value is kept as a uniform `1` baseline so the
+    /// multi/single-shot shapes line up internally, but the public
+    /// ExpertScore field is gated on `samples.is_some()` (see
+    /// `code_quality.rs` / `architecture.rs`). Used to compute the
+    /// by-expert fallback rate as `samples_failed / samples_attempted`.
     pub samples_attempted: usize,
     /// M18-W2: how many of the attempted samples failed (call error,
-    /// unparseable YAML, or schema-conforming YAML with no `score`). When
-    /// `samples_attempted > 0`, the fallback rate is `samples_failed /
-    /// samples_attempted`. `0` for the single-shot path (`n = 1`).
+    /// unparseable YAML, or schema-conforming YAML with no `score`).
+    /// When `samples_attempted > 0`, the fallback rate is
+    /// `samples_failed / samples_attempted`. `0` on the single-shot path
+    /// (`n = 1`) because a call error short-circuits through `?` and
+    /// never reaches this struct (the unreachable "1 when errored"
+    /// wording from r1 is gone — see `call_scoring`).
     pub samples_failed: usize,
 }
 
@@ -209,10 +216,15 @@ pub(crate) async fn call_scoring(
 
     if n <= 1 {
         let response = llm.complete_with_fallback(configs, system, user).await?;
-        // M18-W2: track a single sample's outcome so the fallback rate
-        // is uniform across paths. The single-shot path always counts as
-        // one attempt with zero failures on success — `samples_failed = 1`
-        // when the call errored.
+        // M18-W2: the single-shot path always returns a 1/0 baseline.
+        // Call errors short-circuit through the `?` above and never reach
+        // this branch, so the unreachable "samples_failed = 1 when the
+        // call errored" wording from the r1 draft is gone — there is no
+        // errored-but-`Ok` path here. The two ExpertScore construction
+        // sites (code_quality.rs / architecture.rs) gate the public
+        // `samples_attempted` / `samples_failed` fields on
+        // `call.samples.is_some()`, so the JSON contract holds:
+        // single-shot runs report no rate; multi-sample runs do.
         return Ok(ScoringCall {
             content: response.content,
             median: None,

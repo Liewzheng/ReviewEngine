@@ -103,6 +103,99 @@ fn test_convert_scores_empty() {
     assert!(conv.lead_summary.is_none());
 }
 
+/// P2-2 contract: the public ExpertScoreOutput `samples_attempted` /
+/// `samples_failed` fields are absent (`None` → skipped on serialize)
+/// whenever the matching `samples` field is absent. This is the JSON
+/// contract `convert_scores` must publish — `samples_attempted: 1,
+/// samples_failed: 0` would be a misleading "0% fallback rate" on the
+/// single-shot path (`score_samples = 1`, the default).
+#[test]
+fn test_convert_scores_samples_rate_is_none_when_samples_is_none() {
+    // Single-shot path: `samples = None` (no sampling). The ExpertScore
+    // builder for the LLM experts gates both rate fields on
+    // `samples.is_some()` and writes `None` here.
+    let single_shot = ExpertScore {
+        expert_name: "code_quality".to_string(),
+        weight: 10,
+        score: 80,
+        summary: "ok".to_string(),
+        details: vec![],
+        fallback: false,
+        evaluated_loc: None,
+        samples: None,
+        samples_attempted: None,
+        samples_failed: None,
+    };
+    // Multi-sample path: `samples = Some([..])`. Both rate fields
+    // populated so dashboards can read the denominator.
+    let multi_sample = ExpertScore {
+        expert_name: "architecture".to_string(),
+        weight: 15,
+        score: 80,
+        summary: "ok".to_string(),
+        details: vec![],
+        fallback: false,
+        evaluated_loc: None,
+        samples: Some(vec![80, 90, 70]),
+        samples_attempted: Some(3),
+        samples_failed: Some(1),
+    };
+    let conv = convert_scores(&[single_shot, multi_sample]);
+    assert_eq!(conv.expert_scores.len(), 2);
+
+    // Single-shot output: rate fields absent.
+    let out_single = &conv.expert_scores[0];
+    assert!(out_single.samples.is_none());
+    assert_eq!(out_single.samples_attempted, None);
+    assert_eq!(out_single.samples_failed, None);
+
+    // Multi-sample output: rate fields present with the by-expert
+    // fallback rate readable as `samples_failed / samples_attempted`.
+    let out_multi = &conv.expert_scores[1];
+    assert_eq!(out_multi.samples, Some(vec![80, 90, 70]));
+    assert_eq!(out_multi.samples_attempted, Some(3));
+    assert_eq!(out_multi.samples_failed, Some(1));
+    assert_eq!(
+        out_multi.samples_failed.unwrap() as f64 / out_multi.samples_attempted.unwrap() as f64,
+        1.0 / 3.0
+    );
+}
+
+/// P2-2 JSON contract pin: a JSON-serialized single-shot ExpertScoreOutput
+/// must NOT include `samples_attempted` / `samples_failed` (the
+/// `skip_serializing_if = "Option::is_none"` gates). A report at the
+/// default `score_samples = 1` therefore carries no rate — what the
+/// docs in `three` files have promised since the field was added.
+#[test]
+fn test_expert_score_output_json_omits_rate_when_samples_is_none() {
+    let out = ExpertScoreOutput {
+        name: "code_quality".to_string(),
+        weight: 10,
+        score: 80,
+        summary: "ok".to_string(),
+        details: vec![],
+        fallback: false,
+        samples: None,
+        sample_min: None,
+        sample_max: None,
+        samples_attempted: None,
+        samples_failed: None,
+    };
+    let json = serde_json::to_value(&out).expect("serialize");
+    assert!(
+        json.get("samples_attempted").is_none(),
+        "single-shot JSON must omit samples_attempted: {json}"
+    );
+    assert!(
+        json.get("samples_failed").is_none(),
+        "single-shot JSON must omit samples_failed: {json}"
+    );
+    assert!(
+        json.get("samples").is_none(),
+        "single-shot JSON must omit samples: {json}"
+    );
+}
+
 #[test]
 fn test_convert_scores_architecture_extracts_lead_summary() {
     let scores = vec![ExpertScore {
@@ -1937,6 +2030,15 @@ fn llm_enhance_concurrency_never_yields_a_zero() {
 //   [hygiene] → kept, even if the prose reads as "no CI test step"
 //   (the broadened predicate that swallowed test_coverage on sirena —
 //   RENG-115 round 3 — was the reason the [hygiene]-tag-only filter is
+//   the contract).
+//
+// M18-W3 supersession note: the reng-workflow-audit §6 item 3 wording
+// ("note-only expert 不进 Top Risks / Risk Map") is the r2 surface;
+// `acd5b7a` (0.10.51 — RENG-115 r3, shipped one day after the audit)
+// narrowed the predicate back to `[hygiene]`-tag-only, and re-implementing
+// the literal note-only exclusion would swallow `test_coverage` 70/100
+// on sirena (single `severity: note` "No CI test step detected" line,
+// no tag). The three shapes below pin the r3-superseded contract.
 //   the contract).
 //
 // This test pins the three shapes above so a future "filter by severity"

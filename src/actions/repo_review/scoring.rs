@@ -329,6 +329,8 @@ mod tests {
         );
     }
 }
+
+/// Remove verification-dropped findings from the code_quality chunk scores.
 ///
 /// `kept` holds the surviving standard findings, matched against the chunk
 /// `ScoreItem`s by (file, title, severity, category), where `title`

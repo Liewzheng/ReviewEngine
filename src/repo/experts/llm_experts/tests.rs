@@ -659,7 +659,12 @@ fn parse_reason_code_strings_are_stable() {
 // `call_scoring` runs N samples in parallel; each may fail (call error,
 // unparseable response, schema-conform-but-no-score). The `samples_failed`
 // counter is the numerator of the by-expert fallback rate that dashboards
-// aggregate over time.
+// aggregate over time. The `samples_failed`/`samples_attempted` fields on
+// the internal `ScoringCall` keep a uniform 1/0 baseline on the
+// single-shot path (`n = 1`), but the two ExpertScore construction sites
+// gate the public rate fields on `samples.is_some()` so the JSON contract
+// carries no misleading "0% fallback rate" on the default
+// `score_samples = 1` configuration.
 
 #[tokio::test(start_paused = true)]
 async fn call_scoring_reports_samples_failed_count() {
@@ -733,9 +738,15 @@ async fn call_scoring_single_shot_records_one_attempt_no_failures_on_success() {
     )
     .await
     .unwrap();
-    // Single-shot path (`n = 1`): no `samples` (no median), but
-    // `samples_attempted = 1` and `samples_failed = 0` so the report
-    // can still surface "1 attempted, 0 failed" without ambiguity.
+    // Single-shot path (`n = 1`): the `ScoringCall` itself keeps a 1/0
+    // baseline so the multi/single-shot shapes stay uniform — but the
+    // two ExpertScore construction sites (`code_quality.rs` /
+    // `architecture.rs`) gate the public `samples_attempted` /
+    // `samples_failed` fields on `call.samples.is_some()`. So the public
+    // JSON carries no rate on the single-shot path (the P2-2 contract
+    // surfaced in M26 r1 review); this test pins the internal
+    // `ScoringCall` shape, and the multi-sample test below pins the
+    // public ExpertScore rate surface.
     assert!(call.samples.is_none());
     assert_eq!(call.samples_attempted, 1);
     assert_eq!(call.samples_failed, 0);

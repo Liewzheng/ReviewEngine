@@ -125,6 +125,7 @@ fn test_convert_scores_samples_rate_is_none_when_samples_is_none() {
         samples: None,
         samples_attempted: None,
         samples_failed: None,
+        reason_code: None,
     };
     // Multi-sample path: `samples = Some([..])`. Both rate fields
     // populated so dashboards can read the denominator.
@@ -139,6 +140,7 @@ fn test_convert_scores_samples_rate_is_none_when_samples_is_none() {
         samples: Some(vec![80, 90, 70]),
         samples_attempted: Some(3),
         samples_failed: Some(1),
+        reason_code: None,
     };
     let conv = convert_scores(&[single_shot, multi_sample]);
     assert_eq!(conv.expert_scores.len(), 2);
@@ -2197,11 +2199,13 @@ fn chunk_summary_with_failures_renders_total_and_per_failure_rows() {
                 module: "src/llm".to_string(),
                 loc: 480,
                 reason: "LLM assessment unavailable: provider 'mimo' returned 500".to_string(),
+                reason_code: None,
             },
             ChunkFailure {
                 module: "src/cli".to_string(),
                 loc: 230,
                 reason: "scheduler unavailable: semaphore closed".to_string(),
+                reason_code: None,
             },
         ],
     };
@@ -2258,5 +2262,113 @@ fn chunk_summary_zero_failures_with_some_reviewed_omits_table_but_keeps_totals()
     assert!(
         !md.contains("| Module | LOC | Reason |"),
         "an empty failures vec must not render the per-failure table header"
+    );
+}
+
+// ─── M38: inline `reason_code` in the `Chunks Reviewed` table ───
+//
+// The M37 root-cause report's Option C: surface the
+// `parse_expert_yaml` reason code inside the failure row so the report's
+// reader can `grep reason_code=missing_expected_keys` across the
+// rendered Markdown / JSON without re-parsing the prose `reason`.
+// Backward-compat: a failure without a `reason_code` (the M26 empty
+// path, the LLM transport path) renders the bare reason; only the two
+// schema-broken codes (the ones the parser actually classifies) carry
+// the marker.
+
+#[test]
+fn m38_chunk_summary_renders_reason_code_inline() {
+    let mut output = minimal_output();
+    output.chunk_summary = ChunkSummary {
+        total: 2,
+        reviewed: 0,
+        not_reviewed: 2,
+        failures: vec![
+            ChunkFailure {
+                module: "src/llm".to_string(),
+                loc: 5009,
+                reason: "LLM response not actionable: Code quality assessment completed".to_string(),
+                reason_code: Some("missing_expected_keys".to_string()),
+            },
+            ChunkFailure {
+                module: "src/cli".to_string(),
+                loc: 800,
+                reason: "LLM response not actionable: Code quality assessment completed".to_string(),
+                reason_code: Some("unparseable_yaml".to_string()),
+            },
+        ],
+    };
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    // The grep-friendly marker reaches the Markdown verbatim.
+    assert!(
+        md.contains("[reason_code=missing_expected_keys]"),
+        "the missing_expected_keys marker must be inline; md was:\n{md}"
+    );
+    assert!(
+        md.contains("[reason_code=unparseable_yaml]"),
+        "the unparseable_yaml marker must be inline; md was:\n{md}"
+    );
+    // The verbatim reason still follows the marker.
+    assert!(
+        md.contains("[reason_code=missing_expected_keys] LLM response not actionable"),
+        "marker must precede the verbatim reason: {md}"
+    );
+    // JSON output carries the same `reason_code` field — the renderer
+    // is the Markdown path; the JSON contract is `ChunkFailure.reason_code`
+    // round-tripping through `serde`.
+    let json = render_repo_review_output(&output, "json", false).unwrap();
+    assert!(
+        json.contains("\"reason_code\": \"missing_expected_keys\""),
+        "JSON contract must carry the reason_code field: {json}"
+    );
+    assert!(
+        json.contains("\"reason_code\": \"unparseable_yaml\""),
+        "JSON contract must carry the reason_code field: {json}"
+    );
+}
+
+#[test]
+fn m38_chunk_summary_no_reason_code_marker_when_absent() {
+    // A failure that the parser never saw (LLM transport error,
+    // scheduler-closed) carries no reason code. The renderer must not
+    // emit an empty `[reason_code=]` placeholder — it must just show
+    // the bare reason.
+    let mut output = minimal_output();
+    output.chunk_summary = ChunkSummary {
+        total: 1,
+        reviewed: 0,
+        not_reviewed: 1,
+        failures: vec![ChunkFailure {
+            module: "src/llm".to_string(),
+            loc: 5009,
+            reason: "LLM assessment unavailable: provider 'mimo' returned 500".to_string(),
+            reason_code: None,
+        }],
+    };
+    let md = render_repo_review_output(&output, "markdown", false).unwrap();
+    assert!(
+        !md.contains("[reason_code="),
+        "no marker placeholder when reason_code is None: {md}"
+    );
+    assert!(md.contains("returned 500"), "the bare reason must still render");
+}
+
+#[test]
+fn m38_chunk_failure_deserializes_without_reason_code_field() {
+    // JSON written before M38 must still deserialize. The
+    // `#[serde(default)]` on `ChunkFailure.reason_code` keeps the
+    // backward-compat path open.
+    let json = r#"{
+        "module": "src/llm",
+        "loc": 480,
+        "reason": "LLM assessment unavailable: provider 'mimo' returned 500"
+    }"#;
+    let failure: ChunkFailure = serde_json::from_str(json).expect("pre-M38 JSON deserializes");
+    assert_eq!(failure.module, "src/llm");
+    assert_eq!(failure.loc, 480);
+    assert!(failure.reason.contains("returned 500"));
+    assert!(
+        failure.reason_code.is_none(),
+        "missing field falls back to None via #[serde(default)]"
     );
 }

@@ -231,6 +231,15 @@ pub fn render_repo_review_output(
             // configs don't render an empty section. Rendered BEFORE the
             // verification appendix so the "this chunk was never reviewed"
             // signal lands earlier than the verification noise.
+            //
+            // M38: each failure row also inlines the parser reason code
+            // (when present) inside the Reason cell, prefixed with the
+            // stable `[reason_code=...]` marker the parser itself logs
+            // at INFO. The marker is the grep handle a reader uses to ask
+            // "how many chunks failed for X reason?" — it survives
+            // whitespace collapses inside backticks and is absent on
+            // failure classes the parser never classified (LLM transport
+            // errors, the M26 empty-completion retry exhausting).
             if output.chunk_summary.total > 0 {
                 let cs = &output.chunk_summary;
                 md.push_str("---\n\n## Chunks Reviewed\n\n");
@@ -250,7 +259,11 @@ pub fn render_repo_review_output(
                         // site (the LLM provider layer) — by the time the
                         // message reaches us it carries no secrets.
                         let reason = f.reason.replace('\n', " ");
-                        md.push_str(&format!("| `{}` | {} | `{}` |\n", f.module, f.loc, reason));
+                        let cell = match f.reason_code.as_deref() {
+                            Some(code) => format!("`[reason_code={code}] {reason}`"),
+                            None => format!("`{reason}`"),
+                        };
+                        md.push_str(&format!("| `{}` | {} | {} |\n", f.module, f.loc, cell));
                     }
                     md.push('\n');
                 }

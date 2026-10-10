@@ -118,6 +118,31 @@ pub async fn run(cli: Cli) -> Result<()> {
         std::process::exit(0);
     });
 
+    // W13: `--output` vs `config.output_dir` priority. The explicit file
+    // named by `--output <path>` is the absolute primary write target — the
+    // user asked for it, so it always wins over any default path. When
+    // `config.output_dir` is non-empty, a timestamped copy of the same
+    // content is also written there by `handlers::output::write_report_text`.
+    //
+    // Logging coverage as of M34 r2, layer by layer:
+    //   * CLI dispatch (the arms below): every Review arm that destructures
+    //     `output` traces `--output = <path>` so the override is visible
+    //     at the dispatch layer. The `review --stdin` arm carries the same
+    //     trace (the JSON envelope does not have an `output` key — `--output`
+    //     is a CLI flag the caller passes alongside the JSON, see
+    //     `handlers::review::run_stdin`).
+    //   * `ask` / `describe` / `improve` / `update_changelog` handlers: call
+    //     `handlers::log_output_targets`, which traces BOTH `--output` (when
+    //     set) and `config.output_dir` (when non-empty), so `logs.ndjson`
+    //     carries both lines for these four commands.
+    //   * `review` command's four local/MR handlers in `handlers/review.rs`
+    //     do NOT yet call `log_output_targets`; the timestamped copy is
+    //     written silently (the dual write itself works, only the trace is
+    //     missing). Wiring that up needs `handlers/review.rs`, which is
+    //     M31's file — recorded as a post-merge follow-up, not done here.
+    // `write_report_text` also prints a one-line `Report saved to …` notice
+    // to stderr for the timestamped copy, which the audit tools that read
+    // `logs.ndjson` will not see.
     match cmd {
         Commands::Review {
             path: Some(dir),
@@ -129,6 +154,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             verbose,
             ..
         } => {
+            if let Some(path) = &output {
+                tracing::info!(
+                    command = "review --path",
+                    "--output = {} (explicit file overrides any default path)",
+                    path
+                );
+            }
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
             handlers::run_local_path(
                 &dir, &repo, config, llm_config, &format, &output, pm, &review_id, verbose,
@@ -150,6 +182,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             verbose,
             ..
         } => {
+            if let Some(path) = &output {
+                tracing::info!(
+                    command = "review --mr-url",
+                    "--output = {} (explicit file overrides any default path)",
+                    path
+                );
+            }
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
             handlers::run_mr(
                 &url,
@@ -176,6 +215,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             verbose,
             ..
         } => {
+            if let Some(path) = &output {
+                tracing::info!(
+                    command = "review --diff",
+                    "--output = {} (explicit file overrides any default path)",
+                    path
+                );
+            }
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
             handlers::run_local(
                 &diff_path,
@@ -204,6 +250,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             verbose,
             ..
         } => {
+            if let Some(path) = &output {
+                tracing::info!(
+                    command = "review --local-path",
+                    "--output = {} (explicit file overrides any default path)",
+                    path
+                );
+            }
             let (pm, review_id) = spawn_progress_if_needed(&progress_map, cli.progress);
             handlers::run_local_repo(
                 &path,
@@ -228,6 +281,13 @@ pub async fn run(cli: Cli) -> Result<()> {
             output,
             ..
         } => {
+            if let Some(path) = &output {
+                tracing::info!(
+                    command = "review --stdin",
+                    "--output = {} (explicit file overrides any default path)",
+                    path
+                );
+            }
             handlers::run_stdin(&format, &output).await?;
         }
         Commands::Review { .. } => {

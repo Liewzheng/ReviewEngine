@@ -4,6 +4,7 @@ use review_engine::models::*;
 
 use super::output::write_output;
 use super::review::{is_github_url, require_llm_configs};
+use super::{log_output_targets, single_expert_review_output};
 
 pub async fn run_ask(
     question: &str,
@@ -44,24 +45,9 @@ pub async fn run_ask(
         question, result.answer
     );
 
-    let review_out = ReviewOutput {
-        reports: vec![ExpertReport {
-            expert_name: "ask".to_string(),
-            findings: vec![],
-            markdown: md,
-            raw_llm_response: String::new(),
-            parse_error: None,
-            raw_dump_path: None,
-            llm_model: None,
-            llm_fp: None,
-            llm_provider: None,
-        }],
-        aggregated: None,
-        dropped_findings: vec![],
-        consolidated: None,
-        errors: vec![],
-    };
-    write_output(&review_out, format, output, None, None, false)?;
+    let review_out = single_expert_review_output("ask", md);
+    log_output_targets("ask", output, &config.output_dir);
+    write_output(&review_out, format, output, None, Some(&config.output_dir), false)?;
 
     Ok(())
 }
@@ -100,24 +86,9 @@ async fn run_ask_with_diff(
         question, result.answer
     );
 
-    let review_out = ReviewOutput {
-        reports: vec![ExpertReport {
-            expert_name: "ask".to_string(),
-            findings: vec![],
-            markdown: md,
-            raw_llm_response: String::new(),
-            parse_error: None,
-            raw_dump_path: None,
-            llm_model: None,
-            llm_fp: None,
-            llm_provider: None,
-        }],
-        aggregated: None,
-        dropped_findings: vec![],
-        consolidated: None,
-        errors: vec![],
-    };
-    write_output(&review_out, format, output, None, None, false)?;
+    let review_out = single_expert_review_output("ask", md);
+    log_output_targets("ask", output, &config.output_dir);
+    write_output(&review_out, format, output, None, Some(&config.output_dir), false)?;
 
     Ok(())
 }
@@ -177,24 +148,9 @@ pub async fn run_ask_local_repo(
         question, result.answer
     );
 
-    let review_out = ReviewOutput {
-        reports: vec![ExpertReport {
-            expert_name: "ask".to_string(),
-            findings: vec![],
-            markdown: md,
-            raw_llm_response: String::new(),
-            parse_error: None,
-            raw_dump_path: None,
-            llm_model: None,
-            llm_fp: None,
-            llm_provider: None,
-        }],
-        aggregated: None,
-        dropped_findings: vec![],
-        consolidated: None,
-        errors: vec![],
-    };
-    write_output(&review_out, format, output, None, None, false)?;
+    let review_out = single_expert_review_output("ask", md);
+    log_output_targets("ask", output, &config.output_dir);
+    write_output(&review_out, format, output, None, Some(&config.output_dir), false)?;
 
     Ok(())
 }

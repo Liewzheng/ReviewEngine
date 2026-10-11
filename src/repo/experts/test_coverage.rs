@@ -26,6 +26,40 @@ impl RepoExpert for TestCoverage {
 
         // Layer 1: test framework detection
         let has_dev_deps = ctx.entries.iter().any(|e| {
+            let basename = std::path::Path::new(&e.path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            // Go's `go test` is built into the toolchain — `go.mod`'s
+            // mere presence declares the project testable, regardless
+            // of whether any `require` entries exist (a zero-dep Go
+            // module like callme is still legitimately testable).
+            if basename == "go.mod" {
+                return true;
+            }
+            // Maven (`pom.xml`) and Gradle (`build.gradle`,
+            // `build.gradle.kts`) declare the JUnit / TestNG runner
+            // either explicitly (`<dependency>...junit</dependency>`,
+            // `testImplementation "junit:junit:…"`, `test { … }`) or
+            // implicitly via the standard `src/test/java/` source
+            // layout. We accept the file as evidence of a configured
+            // framework when its content mentions any of those markers;
+            // a future round can add a Maven-plugin-shape check.
+            if basename == "pom.xml" || basename == "build.gradle" || basename == "build.gradle.kts" {
+                if let Ok(c) = std::fs::read_to_string(&e.path) {
+                    let lower = c.to_ascii_lowercase();
+                    if lower.contains("junit")
+                        || lower.contains("testng")
+                        || lower.contains("surefire")
+                        || lower.contains("testimplementation")
+                        || lower.contains("testcompile")
+                        || lower.contains("src/test/")
+                    {
+                        return true;
+                    }
+                }
+                return false;
+            }
             if !e.path.ends_with("Cargo.toml")
                 && !e.path.ends_with("pyproject.toml")
                 && !e.path.ends_with("setup.py")
@@ -345,6 +379,179 @@ mod tests {
                 .iter()
                 .any(|d| d.message.contains("No test framework configured")),
             "should not report a missing test framework"
+        );
+    }
+
+    /// RENG-118 / M62: a Go project whose `go.mod` is present must be
+    /// treated as having a configured test framework — `go test` is
+    /// part of the Go toolchain. The RENG-80 reproducer (a real
+    /// zero-dep Go project) had the legacy expert emit
+    /// "No test framework configured" and drag the score down 10
+    /// points. The Go path must say `dev-deps=yes` and stay silent
+    /// about a missing framework.
+    #[tokio::test]
+    async fn go_mod_presence_counts_as_configured_test_framework() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gomod = write_file(
+            &dir,
+            "go.mod",
+            "module gitlab.islet.space/isletspace/callme\n\ngo 1.27\n",
+        );
+        // A small Go source so the expert has something to evaluate
+        // — no `_test.go` file is required for the framework check
+        // (matches the callme shape: real go.mod, no tests yet).
+        let src = write_file(&dir, "cmd/callme/main.go", "package main\nfunc main() {}\n");
+
+        let entries = vec![
+            crate::repo::FileEntry {
+                path: gomod,
+                language: "Config".to_string(),
+                loc: 3,
+                is_binary: false,
+                is_generated: false,
+            },
+            crate::repo::FileEntry {
+                path: src,
+                language: "Go".to_string(),
+                loc: 2,
+                is_binary: false,
+                is_generated: false,
+            },
+        ];
+        let ctx = RepoContext {
+            entries,
+            stats: crate::repo::RepoStats::default(),
+            llm_configs: Vec::new(),
+            config: None,
+            facts_block: None,
+        };
+        let score = TestCoverage
+            .evaluate(&ctx, None)
+            .await
+            .expect("evaluate should not fail");
+
+        assert!(
+            score.summary.contains("dev-deps=yes"),
+            "go.mod presence must count as a configured framework: {}",
+            score.summary
+        );
+        assert!(
+            !score
+                .details
+                .iter()
+                .any(|d| d.message.contains("No test framework configured")),
+            "Go project must not be reported with 'No test framework configured': {:?}",
+            score.details.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// RENG-118 / M62: a Maven `pom.xml` that declares the JUnit
+    /// dependency counts as a configured test framework. Without this
+    /// a Java project would emit the same false-positive
+    /// "No test framework configured" finding a Go project used to.
+    #[tokio::test]
+    async fn pom_xml_with_junit_counts_as_configured_test_framework() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pom = write_file(
+            &dir,
+            "pom.xml",
+            r#"<?xml version="1.0"?>
+<project>
+  <dependencies>
+    <dependency>
+      <groupId>junit</groupId>
+      <artifactId>junit</artifactId>
+      <version>4.13.2</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+</project>
+"#,
+        );
+        let ctx = RepoContext {
+            entries: vec![crate::repo::FileEntry {
+                path: pom,
+                language: "Config".to_string(),
+                loc: 12,
+                is_binary: false,
+                is_generated: false,
+            }],
+            stats: crate::repo::RepoStats::default(),
+            llm_configs: Vec::new(),
+            config: None,
+            facts_block: None,
+        };
+        let score = TestCoverage
+            .evaluate(&ctx, None)
+            .await
+            .expect("evaluate should not fail");
+
+        assert!(
+            score.summary.contains("dev-deps=yes"),
+            "pom.xml + junit must count as a configured framework: {}",
+            score.summary
+        );
+        assert!(
+            !score
+                .details
+                .iter()
+                .any(|d| d.message.contains("No test framework configured")),
+            "Maven project with junit must not be reported with 'No test framework configured': {:?}",
+            score.details.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
+
+    /// RENG-118 / M62: a Gradle `build.gradle` declaring the JUnit
+    /// `testImplementation` scope counts as a configured test framework.
+    /// The Java / Gradle path was the sibling of the Maven path
+    /// covered by `pom_xml_with_junit_counts_as_configured_test_framework`
+    /// — the M62-r1 review noted the implementation was paired with
+    /// a missing pin for the Gradle file shape.
+    #[tokio::test]
+    async fn build_gradle_with_testimplementation_counts_as_configured_test_framework() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gradle = write_file(
+            &dir,
+            "build.gradle",
+            r#"plugins {
+    id 'java'
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+"#,
+        );
+        let ctx = RepoContext {
+            entries: vec![crate::repo::FileEntry {
+                path: gradle,
+                language: "Config".to_string(),
+                loc: 7,
+                is_binary: false,
+                is_generated: false,
+            }],
+            stats: crate::repo::RepoStats::default(),
+            llm_configs: Vec::new(),
+            config: None,
+            facts_block: None,
+        };
+        let score = TestCoverage
+            .evaluate(&ctx, None)
+            .await
+            .expect("evaluate should not fail");
+
+        assert!(
+            score.summary.contains("dev-deps=yes"),
+            "build.gradle + testImplementation must count as a configured framework: {}",
+            score.summary
+        );
+        assert!(
+            !score
+                .details
+                .iter()
+                .any(|d| d.message.contains("No test framework configured")),
+            "Gradle project with junit must not be reported with 'No test framework configured': {:?}",
+            score.details.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
 }

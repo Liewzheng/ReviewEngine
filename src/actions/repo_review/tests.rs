@@ -1812,6 +1812,64 @@ fn test_render_markdown_provenance_non_git() {
     assert!(md.contains("- **Git HEAD**: (not a git repository)"));
 }
 
+// ── markdown: scope note (M61) ──
+
+/// The repo-review report carries a fixed bilingual scope note directly under
+/// the H1, before Provenance. The note is the reader's first signal that the
+/// health score covers structure / hygiene / static signals only — behavioural
+/// / runtime regressions belong to the MR review path.
+#[test]
+fn test_render_markdown_scope_note_under_title() {
+    let md = render_repo_review_output(&minimal_output(), "markdown", false).unwrap();
+    // Both halves of the bilingual line must reach the report so a reader
+    // skimming either language gets the same scope signal.
+    assert!(
+        md.contains("**定位 / Scope**: 全仓体检报告"),
+        "Chinese scope note must render under the title: {md}"
+    );
+    assert!(
+        md.contains("whole-repo health sweep"),
+        "English scope note must render under the title: {md}"
+    );
+    assert!(
+        md.contains("behavioural regressions are out of scope"),
+        "behavioural-regression scope claim must be explicit: {md}"
+    );
+    assert!(
+        md.contains("use the MR review path"),
+        "the MR-review-path direction must be explicit: {md}"
+    );
+    // Ordering: H1 → scope note → Provenance. Without the ordering check a
+    // regression that drops the note into a later section would still match
+    // the `contains` assertions above.
+    let title = md.find("# Repository Health Report").unwrap();
+    let scope = md
+        .find("**定位 / Scope**: 全仓体检报告")
+        .expect("scope note must render");
+    let prov = md.find("## Provenance").unwrap();
+    assert!(
+        title < scope && scope < prov,
+        "scope note must sit between the H1 and Provenance; got title@{title}, scope@{scope}, prov@{prov}"
+    );
+}
+
+/// The scope note is a Markdown-only artefact. JSON output flows through
+/// `serde_json::to_string_pretty` and must not carry the prose — JSON consumers
+/// read it as a structure, not a document, so leaking the note would be a
+/// wire-format drift rather than enrichment.
+#[test]
+fn test_render_json_scope_note_absent() {
+    let json = render_repo_review_output(&minimal_output(), "json", false).unwrap();
+    assert!(
+        !json.contains("定位 / Scope"),
+        "JSON output must not carry the scope-note prose: {json}"
+    );
+    assert!(
+        !json.contains("whole-repo health sweep"),
+        "JSON output must not carry the English scope-note prose: {json}"
+    );
+}
+
 // ── markdown: zero-finding experts & fallback annotation ──
 
 fn expert_output(name: &str, score: u8, summary: &str, fallback: bool) -> ExpertScoreOutput {

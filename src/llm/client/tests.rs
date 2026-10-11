@@ -312,6 +312,7 @@ impl super::super::provider::LLMProvider for MockProvider {
                 content: "success".to_string(),
                 total_tokens: 10,
                 model: "mock".to_string(),
+                finish_reason: None,
                 provider: self.name.clone(),
                 fallback: false,
                 entry_fp: None,
@@ -858,9 +859,137 @@ async fn test_real_http_503_retries_up_to_the_attempt_budget() {
     server.verify().await;
 }
 
-/// Nothing is listening on port 1, so the request fails without any HTTP
-/// response (`reqwest` connection refused). It carries no status, so it keeps
-/// the historical retry: two backoffs (1s + 2s) run before giving up.
+/// M42 / RENG-46 — the M41 live failure: the upstream returns HTTP 200
+/// with a body that is not JSON (a chunked timeout page, an HTML
+/// proxy error, a truncated mid-string body, a `>4KiB` body that the
+/// M42-R2 first-attempt `&body_str[..4096]` cap clipped). The pre-M42
+/// code surfaced `Failed to parse LLM response: error decoding
+/// response body` with nothing in the chain — operators had no way
+/// to tell a transport hiccup from a non-JSON HTML page. The
+/// post-M42 path:
+/// 1. attaches a typed [`JsonDecodeError`] marker the compliance
+///    sub-step can downcast to (categorisation),
+/// 2. treats the call as Unknown (retryable) — the next attempt may
+///    succeed if the proxy hiccup was a one-off.
+///
+/// Body-excerpt capture was tried in M42-R2 first attempt and
+/// reverted: `resp.bytes().await` and `resp.json().await` share the
+/// same body reader on reqwest 0.12, and a separate `bytes()` read
+/// BEFORE the JSON parse succeeded in surfacing the body excerpt
+/// for unit fixtures but on a live `>4KiB` body the `&body_str[..4096]`
+/// cap truncated the bytes the parse then saw, so the parser
+/// failed with `EOF while parsing` at exactly the truncation point.
+/// The wire path is `resp.json()` only; the typed marker + status
+/// code are enough for operator triage.
+///
+/// Note: this test does NOT use `start_paused` — reqwest's connection
+/// pool needs real time to establish TCP connections to wiremock, and
+/// the backoff sleeps are short (1s + 2s) so the test still finishes
+/// quickly.
+#[tokio::test]
+async fn test_real_http_200_with_non_json_body_classifies_as_retryable() {
+    let server = MockServer::start().await;
+    let body = "<html><body>upstream timeout — gateway has the details</body></html>";
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a non-JSON body with no other config must fail");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("error decoding response body"),
+        "the original error message must surface: {message}"
+    );
+    // Typed marker is reachable via chain — the compliance sub-step
+    // downcasts to it to render a categorised Note.
+    let marker = err.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
+    assert!(marker.is_some(), "JsonDecodeError marker must be in the chain");
+    let marker = marker.unwrap();
+    assert_eq!(marker.status, 200);
+    // The body excerpt is intentionally empty: reqwest's `resp.json()`
+    // drains the body before we can read it as bytes. This is a known
+    // limitation of the wire path; the typed marker + status code
+    // alone are enough for operators to triage.
+    assert!(
+        marker.status == 200,
+        "marker carries the HTTP status: {}",
+        marker.status
+    );
+    assert_eq!(
+        requests_seen(&server).await,
+        3,
+        "JSON-decode must use the attempt budget"
+    );
+}
+
+/// M42 / RENG-46 — single-config `complete` path: same JSON-decode
+/// behaviour, with the typed marker attached. The body excerpt is
+/// intentionally empty on this path (resp.json() drains first; see
+/// the JsonDecodeError doc-comment in `mod.rs` for the wire-path
+/// trade-off).
+#[tokio::test]
+async fn test_complete_with_non_json_body_attaches_typed_marker() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json".to_string()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete(&real_config(&server.uri()), "system", "user")
+        .await
+        .expect_err("non-JSON body must fail");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("error decoding response body"),
+        "the original error must surface: {message}"
+    );
+    assert!(
+        err.chain().any(|c| c.downcast_ref::<JsonDecodeError>().is_some()),
+        "JsonDecodeError marker must be attached"
+    );
+}
+
+/// M42 / RENG-46 — typed-marker happy path: a JsonDecodeError wrapped
+/// via `Error::new(...)` and `.context(...)` is classified as Unknown
+/// (retryable), not Permanent (give-up).
+#[test]
+fn json_decode_error_classifies_as_unknown() {
+    let raw = anyhow::Error::new(JsonDecodeError { status: 200 });
+    assert_eq!(LLMClient::retry_verdict(&raw), RetryVerdict::Unknown);
+}
+
+/// M42 — the typed marker survives a `.context(...)` wrapper so the
+/// compliance sub-step can downcast through the chain.
+#[test]
+fn json_decode_error_downcast_works_through_context_chain() {
+    let raw = anyhow::Error::new(JsonDecodeError { status: 200 }).context(anyhow::anyhow!("inner anyhow message"));
+    let marker = raw.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
+    assert!(
+        marker.is_some(),
+        "JsonDecodeError must be reachable through any chain depth"
+    );
+}
+
+/// M42-R2: `resp.bytes().await` was removed along with the body-excerpt
+/// capture path (see the `JsonDecodeError` doc-comment in `mod.rs`).
+/// There is no longer a truncation safety property to assert here —
+/// `resp.json()` is a `bytes() + serde_json::from_slice` round-trip and
+/// reqwest owns the framing. If a future revision re-introduces
+/// explicit body capture, the multi-byte truncation rule should be
+/// re-tested at the new capture site.
 #[tokio::test(start_paused = true)]
 async fn test_real_transport_failure_without_status_still_retries() {
     let client = LLMClient::new();
@@ -1037,6 +1166,7 @@ impl super::super::provider::LLMProvider for ScriptedToggleProvider {
             content: body.clone(),
             total_tokens: 1,
             model: "mock".to_string(),
+            finish_reason: None,
             provider: "scripted".to_string(),
             fallback: false,
             entry_fp: None,

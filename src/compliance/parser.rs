@@ -73,10 +73,14 @@ fn github_patterns() -> &'static Patterns {
 /// Extract ticket references from `description`.
 ///
 /// `mr_project` is the GitLab project / GitHub owner-repo of the MR itself
-/// — needed to backfill the local-shorthand refs (`!N`, `#N`) into a
-/// canonical URL. `provider_host` is the host the MR was opened on; refs
-/// whose URL is on a different host are dropped (the cross-host guard
+/// — needed to backfill the local-shorthand refs (`#N`) into a canonical
+/// URL. `provider_host` is the host the MR was opened on; refs whose URL
+/// is on a different host are dropped (the cross-host guard
 /// pr-agent's `extract_gitlab_ticket_references` enforces).
+///
+/// GitLab's `!N` is the MR-reference sigil, NOT a ticket reference —
+/// it is intentionally NOT parsed (see module docs). GitHub's `#N`
+/// shorthand covers the same role on the GitHub side.
 pub fn extract_ticket_refs(
     description: &str,
     provider: TicketProvider,

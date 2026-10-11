@@ -859,23 +859,35 @@ async fn test_real_http_503_retries_up_to_the_attempt_budget() {
     server.verify().await;
 }
 
-/// M42 / RENG-46 — the MR68 live failure: the upstream returns HTTP 200
+/// M42 / RENG-46 — the M41 live failure: the upstream returns HTTP 200
 /// with a body that is not JSON (a chunked timeout page, an HTML
-/// proxy error, a truncated response). The old code surfaced
-/// `Failed to parse LLM response: error decoding response body` with
-/// nothing in the chain. The new path:
-/// 1. captures the raw body excerpt so operators can see what came back,
-/// 2. attaches a typed [`JsonDecodeError`] marker the compliance
-///    sub-step can downcast to,
-/// 3. treats the call as Unknown (retryable) — the next attempt may
+/// proxy error, a truncated mid-string body, a `>4KiB` body that the
+/// M42-R2 first-attempt `&body_str[..4096]` cap clipped). The pre-M42
+/// code surfaced `Failed to parse LLM response: error decoding
+/// response body` with nothing in the chain — operators had no way
+/// to tell a transport hiccup from a non-JSON HTML page. The
+/// post-M42 path:
+/// 1. attaches a typed [`JsonDecodeError`] marker the compliance
+///    sub-step can downcast to (categorisation),
+/// 2. treats the call as Unknown (retryable) — the next attempt may
 ///    succeed if the proxy hiccup was a one-off.
+///
+/// Body-excerpt capture was tried in M42-R2 first attempt and
+/// reverted: `resp.bytes().await` and `resp.json().await` share the
+/// same body reader on reqwest 0.12, and a separate `bytes()` read
+/// BEFORE the JSON parse succeeded in surfacing the body excerpt
+/// for unit fixtures but on a live `>4KiB` body the `&body_str[..4096]`
+/// cap truncated the bytes the parse then saw, so the parser
+/// failed with `EOF while parsing` at exactly the truncation point.
+/// The wire path is `resp.json()` only; the typed marker + status
+/// code are enough for operator triage.
 ///
 /// Note: this test does NOT use `start_paused` — reqwest's connection
 /// pool needs real time to establish TCP connections to wiremock, and
 /// the backoff sleeps are short (1s + 2s) so the test still finishes
 /// quickly.
 #[tokio::test]
-async fn test_real_http_200_with_non_json_body_is_retried_with_body_in_error_chain() {
+async fn test_real_http_200_with_non_json_body_classifies_as_retryable() {
     let server = MockServer::start().await;
     let body = "<html><body>upstream timeout — gateway has the details</body></html>";
     Mock::given(method("POST"))
@@ -920,7 +932,9 @@ async fn test_real_http_200_with_non_json_body_is_retried_with_body_in_error_cha
 
 /// M42 / RENG-46 — single-config `complete` path: same JSON-decode
 /// behaviour, with the typed marker attached. The body excerpt is
-/// intentionally empty on this path (resp.json() drains first).
+/// intentionally empty on this path (resp.json() drains first; see
+/// the JsonDecodeError doc-comment in `mod.rs` for the wire-path
+/// trade-off).
 #[tokio::test]
 async fn test_complete_with_non_json_body_attaches_typed_marker() {
     let server = MockServer::start().await;
@@ -961,8 +975,7 @@ fn json_decode_error_classifies_as_unknown() {
 /// compliance sub-step can downcast through the chain.
 #[test]
 fn json_decode_error_downcast_works_through_context_chain() {
-    let raw = anyhow::Error::new(JsonDecodeError { status: 200 })
-        .context(anyhow::anyhow!("inner anyhow message"));
+    let raw = anyhow::Error::new(JsonDecodeError { status: 200 }).context(anyhow::anyhow!("inner anyhow message"));
     let marker = raw.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
     assert!(
         marker.is_some(),
@@ -970,23 +983,13 @@ fn json_decode_error_downcast_works_through_context_chain() {
     );
 }
 
-/// M42 — defence-in-depth: redact_body_excerpt must not panic when the
-/// 512-byte truncation cap lands inside a multi-byte UTF-8 character.
-/// The MR66 live run triggered this: a non-JSON HTML body whose byte
-/// 512 was inside a 3-byte CJK sequence caused the binary to panic
-/// before producing any output. The fix snaps the cut to the nearest
-/// char boundary.
-///
-/// (Removed in M42-R2 — the body-excerpt capture was reverted to the
-/// pre-M42 wire path because `resp.bytes().await` failed on its own
-/// in a live run, taking down every LLM call. The redaction helper is
-/// gone with it. The truncation-safety assertion lives on the wire
-/// side now: a 4 KiB CJK body that round-trips through reqwest
-/// without panic is exactly what `resp.json()` already does. If a
-/// future revision re-introduces explicit body capture, the multi-
-/// byte truncation rule should be re-tested.)
-#[allow(dead_code)]
-const REDACT_BODY_EXCERTS_NOTE: &str = "see commit message for the truncation-safety rationale";
+/// M42-R2: `resp.bytes().await` was removed along with the body-excerpt
+/// capture path (see the `JsonDecodeError` doc-comment in `mod.rs`).
+/// There is no longer a truncation safety property to assert here —
+/// `resp.json()` is a `bytes() + serde_json::from_slice` round-trip and
+/// reqwest owns the framing. If a future revision re-introduces
+/// explicit body capture, the multi-byte truncation rule should be
+/// re-tested at the new capture site.
 
 /// Nothing is listening on port 1, so the request fails without any HTTP
 /// response (`reqwest` connection refused). It carries no status, so it keeps

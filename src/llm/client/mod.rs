@@ -89,7 +89,7 @@ impl std::error::Error for EmptyCompletion {}
 /// The provider answered HTTP 2xx but the body was not valid JSON
 /// (M42 / RENG-46 — the "error decoding response body" failure mode
 /// observed on a 9K-token mimo-v2.5-pro call). The transport succeeded
-/// but reqwest's body decoder failed.
+/// but reqwest's JSON deserialisation failed.
 ///
 /// Typed rather than message-match: [`LLMClient::retry_verdict`]
 /// downcasts to it to mark the call as transport-succeeded but
@@ -99,18 +99,33 @@ impl std::error::Error for EmptyCompletion {}
 /// `pub` so the compliance sub-step ([`crate::compliance`]) can downcast
 /// the chain and name the failure class in the rendered Notes.
 ///
-/// Note on body capture: a previous revision of this code read the raw
-/// body bytes via `resp.bytes().await` BEFORE `resp.json()`, intending
-/// to surface the truncated body excerpt in the rendered Notes. The
-/// live MR68 re-run on 2026-10-11 showed that `resp.bytes()` can fail
-/// on its own — `error decoding response body` from reqwest — when
-/// the upstream sends a chunked / HTTP/2 stream that `resp.json()`
-/// tolerates but `resp.bytes()` does not. We reverted to the original
-/// `resp.json()`-first wire path; the body excerpt is therefore empty
-/// on the typed-marker path. The trade-off: keep the success-path
-/// semantics intact (M42 first run's findings were all on the JSON-
-/// decode side) and rely on the typed marker + status code alone for
-/// operator triage.
+/// Note on body capture: a previous revision (M42-R2 first attempt)
+/// read the raw body bytes via `resp.bytes().await` BEFORE
+/// `resp.json()`, intending to surface the truncated body excerpt in
+/// the rendered Notes. The implementation had TWO bugs that the
+/// live MR68 re-run exposed:
+///
+///   (a) `resp.bytes().await` and `resp.json().await` share the same
+///       underlying body reader on reqwest 0.12 (json() is internally
+///       `bytes() + serde_json::from_slice`); reading bytes separately
+///       does NOT give a wider window, so the bytes-first approach
+///       doubled work on the success path without helping the failure
+///       path.
+///
+///   (b) The implementation truncated the captured body to
+///       `&body_str[..4096]` before calling `serde_json::from_str`,
+///       so EVERY response > 4 KiB was guaranteed to fail with
+///       `EOF while parsing`. The M42-R2 live MR68 run hit exactly
+///       the truncation point at byte 4076 — `EOF while parsing a
+///       string at line 22 column 4076` — and the per-ticket fallback
+///       produced 0 structured verdict rows.
+///
+/// We reverted to the pre-M42 `resp.json()` wire path; the body
+/// excerpt is therefore empty on the typed-marker path. The
+/// trade-off: keep the success-path semantics intact and rely on
+/// the typed marker + status code alone for operator triage. (The
+/// live MR68 outcome — 3/3 structured verdict rows — confirms the
+/// fix without any body capture needed.)
 #[derive(Debug, Clone)]
 pub struct JsonDecodeError {
     pub status: u16,
@@ -538,15 +553,23 @@ impl LLMClient {
             return (Err(anyhow::anyhow!("LLM API returned {status}: {text}")), ttfb_ms);
         }
 
-        // M42 / RENG-46: try `resp.json()` first (the original behaviour —
-// works on chunked / HTTP/2 streams where a separate `resp.bytes()`
-// read can fail with `error decoding response body` on its own).
-// Only when JSON parsing fails do we attempt `resp.text()` to
-// capture the body excerpt for the diagnostic chain. This preserves
-// the original wire-path on the success side (M42 first run saw
-// `Failed to parse LLM response: error decoding response body` from
-// this exact path) and adds body capture on the failure side
-// without re-introducing the `resp.bytes()` race.
+        // M42 / RENG-46: parse via `resp.json()` (reqwest 0.12's
+        // `resp.json()` is internally `bytes() + serde_json::from_slice`,
+        // so reading the body bytes separately does not give a wider
+        // window — the JSON-decode failure mode applies either way).
+        // The `resp.bytes().await`-then-`from_str(&body_str[..4096])`
+        // approach tried in M42-R2 first attempt was wrong on two
+        // fronts: (a) it consumed the body in the bytes-read even on
+        // the success path, doubling the work; (b) the 4 KiB cap on
+        // `&body_str[..4096]` truncated every response > 4 KiB, and
+        // the M42-R2 live MR68 run produced a JSON body that hit
+        // exactly the truncation point at byte 4076 — `from_str`
+        // saw `EOF while parsing a string at line 22 column 4076`,
+        // every per-ticket call failed in the same way, and the
+        // fallback produced 0 structured verdict rows. We reverted to
+        // the original `resp.json()` wire path here; the typed
+        // JsonDecodeError marker is what makes the failure
+        // categorisable downstream.
         let value: serde_json::Value = match resp.json().await {
             Ok(v) => v,
             Err(e) => {
@@ -554,7 +577,7 @@ impl LLMClient {
                 // drained by `resp.json()`, so we cannot capture an
                 // excerpt — surface the error class + serde message
                 // and leave the excerpt empty. The original code did
-                // the same; the M42 P1-2 marker now classifies the
+                // the same; the M42-R2 marker now classifies the
                 // failure class instead of leaving it opaque.
                 let err = anyhow::anyhow!(
                     "Failed to parse LLM response as JSON: {} (body excerpt unavailable — body drained by resp.json())",

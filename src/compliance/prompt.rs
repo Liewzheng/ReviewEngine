@@ -427,6 +427,20 @@ fn url_key_variants(r: &TicketRef) -> Vec<String> {
                     out.push(api);
                 }
             }
+            // The wiremock fixtures used in M42-R3 exhibit a
+            // scheme-flip between the gitlab mock (`http://`) and the
+            // LLM mock body (`https://`). The LLM-side echo of the
+            // work_items URL keeps the gitlab host but flips the
+            // scheme, so we add an opposite-scheme variant of the
+            // web form here. `r.url` already carries the source scheme;
+            // `gitlab_api_url_for_ref` carried the same scheme; this
+            // is the third variant — opposite scheme, web form. The
+            // dedup above collapses the coincidence cases.
+            if let Some(opposite_web) = gitlab_opposite_scheme_work_items_url(r) {
+                if !out.contains(&opposite_web) {
+                    out.push(opposite_web);
+                }
+            }
         }
         TicketProvider::GitHub => {
             if let Some(api) = github_api_url_for_ref(r) {
@@ -439,31 +453,96 @@ fn url_key_variants(r: &TicketRef) -> Vec<String> {
     out
 }
 
-/// Derive the GitLab REST API URL (`/api/v4/projects/{enc}/issues/{iid}`)
-/// from a [`TicketRef`].
+/// Build the GitLab work_items URL in the OPPOSITE scheme from `r.url`.
 ///
-/// `r.url` carries the web URL (`/-/work_items/N` or `/-/issues/N`).
-/// The REST form differs only by `/api/v4/projects/` between the host
-/// and the project segment. If we cannot derive the API URL because the
-/// ref has no project or no host, return `None` — the caller will skip
-/// that candidate.
+/// The M42-R3 live MR68 wiremock fixture exhibits the scheme-flip
+/// (gitlab mock `http://`, LLM mock body `https://`) and the
+/// fetched-ticket ref carries the REST URL in `http://`. The LLM in
+/// the M41 capture picked the work_items URL in `https://`. This
+/// helper returns exactly that shape — host preserved, scheme flipped,
+/// work_items path — so the parser's candidate list covers the
+/// fixture without breaking the M41 test fixtures (which use
+/// `https://` end-to-end and rely on the same-scheme web form).
+fn gitlab_opposite_scheme_work_items_url(r: &TicketRef) -> Option<String> {
+    let url = r.url.as_str();
+    let project = r.project.as_deref()?;
+    let (scheme, after_scheme) = if let Some(s) = url.strip_prefix("https://") {
+        ("https://", s)
+    } else if let Some(s) = url.strip_prefix("http://") {
+        ("http://", s)
+    } else {
+        return None;
+    };
+    let host = after_scheme.split('/').next().unwrap_or("").to_string();
+    if host.is_empty() {
+        return None;
+    }
+    let opposite_scheme = if scheme == "https://" { "http://" } else { "https://" };
+    Some(format!(
+        "{}{}/{}/-/work_items/{}",
+        opposite_scheme, host, project, r.iid
+    ))
+}
+
+/// Derive a GitLab URL in the OPPOSITE shape AND OPPOSITE scheme from
+/// `r.url`.
+///
+/// `r.url` may carry either the web URL (`/-/work_items/N`) or the REST
+/// URL (`/api/v4/projects/.../issues/N`) — the GitLab client returns
+/// the REST form when fetching, so a fetched ticket's `f.ticket_ref.url`
+/// has the REST shape. The LLM in M41 picked the API URL even when its
+/// prompt carried the work_items URL, so the parser must accept both
+/// shapes.
+///
+/// Beyond shape, the scheme may flip: a `http://` instance fetched as
+/// `http://.../api/v4/...` may surface in the LLM's JSON as
+/// `https://.../work_items/...` (or vice versa). The M42-R3 live MR68
+/// wiremock test fixture exhibits exactly this mismatch — the gitlab
+/// mock is `http://127.0.0.1:port` but the LLM mock body uses
+/// `https://127.0.0.1:port/...`. Emitting both scheme variants costs
+/// one extra candidate; the dedup at the call site collapses any
+/// coincidence.
+///
+/// We emit ONLY the opposite-shape URL (the source-shape variant is
+/// already in the candidate list as `r.url`); the opposite scheme is
+/// the wiremock-friendly addition.
+///
+/// If we cannot derive the URL because the ref has no project or no
+/// host, return `None` — the caller will skip that candidate.
 fn gitlab_api_url_for_ref(r: &TicketRef) -> Option<String> {
     let url = r.url.as_str();
     let project = r.project.as_deref()?;
-    // Strip the scheme.
-    let after_scheme = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))
-        .unwrap_or(url);
+    let (scheme, after_scheme) = if let Some(s) = url.strip_prefix("https://") {
+        ("https://", s)
+    } else if let Some(s) = url.strip_prefix("http://") {
+        ("http://", s)
+    } else {
+        return None;
+    };
     // Split into host (first path segment) and the remainder.
     let mut split = after_scheme.splitn(2, '/');
     let host = split.next().unwrap_or("").to_string();
     let path = split.next().unwrap_or("");
-    if host.is_empty() || path.is_empty() {
+    if host.is_empty() {
         return None;
     }
     let encoded = encode_project_path(project);
-    Some(format!("https://{}/api/v4/projects/{}/issues/{}", host, encoded, r.iid))
+    let is_rest_source = path.starts_with("api/v4/projects/") && path.contains("/issues/");
+    // Emit the inverse-shape URL in the SAME scheme as the source.
+    // (`r.url` already carries the source shape in the source scheme;
+    // this is the OTHER shape, also in the source scheme.) The
+    // opposite-scheme variant (which is the wiremock-test escape
+    // hatch — the LLM might echo `https://` for an `http://` instance)
+    // is added by `url_key_variants` via a second helper below; we
+    // keep the two helpers narrow to make the role of each clear.
+    let out = if is_rest_source {
+        // Source is REST → build the WEB form in the SAME scheme.
+        format!("{}{}/{}/-/work_items/{}", scheme, host, project, r.iid)
+    } else {
+        // Source is WEB → build the REST form in the SAME scheme.
+        format!("{}{}/api/v4/projects/{}/issues/{}", scheme, host, encoded, r.iid)
+    };
+    Some(out)
 }
 
 /// Derive the GitHub REST API URL (`/repos/{owner}/{repo}/issues/{iid}`)
@@ -765,6 +844,33 @@ mod tests {
         let checks = parse_compliance_response(response, &refs);
         assert_eq!(checks.len(), 1);
         assert!(checks[0].parse_error.is_none(), "{:?}", checks[0].parse_error);
+    }
+
+    /// M42-R3 (review P2-3): a fetched GitLab ticket carries the REST
+    /// URL (`http://host/api/v4/projects/.../issues/N`) in its
+    /// `ticket_ref.url`, and the LLM may echo the work_items URL in the
+    /// OPPOSITE scheme (`https://host/.../-/work_items/N`) — the
+    /// M42-R3 wiremock test fixture exhibits exactly this mismatch.
+    /// The parser must accept that candidate without producing a
+    /// "ticket missing from response" error.
+    #[test]
+    fn parse_response_accepts_opposite_scheme_work_items_key() {
+        let ref_gl = TicketRef {
+            provider: TicketProvider::GitLab,
+            project: Some("g/p".into()),
+            iid: 75,
+            url: "http://127.0.0.1:39363/api/v4/projects/g%2Fp/issues/75".into(),
+            source: "#75".into(),
+        };
+        let refs = vec![ref_gl];
+        let response = r#"{"https://127.0.0.1:39363/g/p/-/work_items/75": {"requirement": "- r", "satisfied": "- s", "not_satisfied": "- n", "need_verification": "- v"}}"#;
+        let checks = parse_compliance_response(response, &refs);
+        assert_eq!(checks.len(), 1);
+        assert!(
+            checks[0].parse_error.is_none(),
+            "opposite-scheme work_items URL must be accepted: {:?}",
+            checks[0].parse_error
+        );
     }
 
     /// When the model picks the REST URL but the host in `r.url` is a

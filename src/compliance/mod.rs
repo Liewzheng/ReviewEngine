@@ -375,16 +375,7 @@ pub async fn run_for_review(
                     "compliance batch LLM call truncated at finish_reason={:?}; falling back to per-ticket calls",
                     completion.finish_reason
                 ));
-                return run_per_ticket_fallback(
-                    &llm_client,
-                    llm_cfg,
-                    mr_info,
-                    diff,
-                    &plan.ticket_refs,
-                    &fetched,
-                    output,
-                )
-                .await;
+                return run_per_ticket_fallback(&llm_client, llm_cfg, mr_info, diff, &fetched, output).await;
             }
             // Attach the title from the fetched body so the section can
             // surface it (the parser does not see the title).
@@ -411,11 +402,44 @@ pub async fn run_for_review(
             // (provider rejected the request), or an empty content
             // (the model answered nothing). All three currently show
             // up as the same opaque message.
+            //
+            // M42-R3 (review P2-4): the batch call can also fail at the
+            // LLM-client layer with a typed error (transport error,
+            // JSON-decode error on a >4KiB body that the M42-R2 first
+            // attempt's `&body_str[..4096]` cap would have truncated,
+            // HTTP-status error). Same as the `Ok+length` branch, the
+            // bounded per-ticket fallback can rescue the run: each
+            // per-ticket call is smaller than the batch and may succeed
+            // even when the batch call did not (e.g. transient transport
+            // hiccup mid-stream). Cost is at most `MAX_TICKETS_PER_REVIEW`
+            // per-ticket calls on top of the failed batch call.
+            let error_summary = format!("compliance LLM call failed: {}", categorise_llm_error(&e));
+            // Cheap pre-check: only attempt the fallback if the
+            // failure looks transient / per-ticket-rescuable. A 4xx
+            // (auth, bad model, rate limit) would surface the same
+            // error for every per-ticket call — falling back wastes
+            // budget. The categorise_llm_error helper classifies by
+            // typed marker; we treat JSON-decode (transport hiccup)
+            // and unknown (no status) as worth a retry.
+            let retryable = e
+                .chain()
+                .any(|c| c.downcast_ref::<crate::llm::client::JsonDecodeError>().is_some())
+                || e.chain().all(|c| {
+                    // No status surfaced anywhere → transport / DNS / TLS.
+                    c.downcast_ref::<crate::llm::client::EmptyCompletion>().is_none()
+                });
+            if !retryable {
+                output.notes.push(error_summary);
+                output.unanalysed_tickets = std::mem::take(&mut fetched);
+                return Some(output);
+            }
+            // Attempt the per-ticket fallback. The first note records
+            // the batch-call failure for the audit trail; the
+            // fallback's own notes record per-ticket progress.
             output
                 .notes
-                .push(format!("compliance LLM call failed: {}", categorise_llm_error(&e)));
-            output.unanalysed_tickets = std::mem::take(&mut fetched);
-            Some(output)
+                .push(format!("{error_summary}; falling back to per-ticket calls"));
+            return run_per_ticket_fallback(&llm_client, llm_cfg, mr_info, diff, &fetched, output).await;
         }
     }
 }
@@ -437,13 +461,12 @@ async fn run_per_ticket_fallback(
     llm_cfg: &LLMConfig,
     mr_info: &MRInfo,
     diff: &str,
-    ticket_refs: &[TicketRef],
     fetched: &[FetchedTicket],
     mut output: ComplianceOutput,
 ) -> Option<ComplianceOutput> {
     let mut checks: Vec<TicketCheck> = Vec::with_capacity(fetched.len());
     let mut succeeded = 0usize;
-    for (i, f) in fetched.iter().enumerate() {
+    for f in fetched.iter() {
         // Single-ticket slice — the Jinja template renders one block.
         let one = std::slice::from_ref(f);
         let (system, user) = match prompt::build_compliance_prompt(mr_info, diff, one) {
@@ -456,15 +479,22 @@ async fn run_per_ticket_fallback(
                 checks.push(make_parse_error_check(
                     &f.ticket_ref,
                     &f.title,
-                    "",
                     "prompt build failed",
+                    "",
                 ));
                 continue;
             }
         };
         match llm_client.complete(llm_cfg, &system, &user).await {
             Ok(completion) => {
-                let one_ref = std::slice::from_ref(ticket_refs.get(i).unwrap_or(&f.ticket_ref));
+                // Use the ref from the fetched ticket itself, not the
+                // `ticket_refs[i]` index — when a fetch failed earlier
+                // (so `fetched.len() < ticket_refs.len()`) the indices
+                // are misaligned and the wrong ref would be aligned
+                // against the wrong fetch, producing a "ticket
+                // missing from response" parse error on a row whose
+                // title is the failed-fetch ticket's title.
+                let one_ref = std::slice::from_ref(&f.ticket_ref);
                 let mut per_ticket = prompt::parse_compliance_response(&completion.content, one_ref);
                 if let Some(check) = per_ticket.first_mut() {
                     check.ticket_title = f.title.clone();

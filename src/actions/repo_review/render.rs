@@ -70,6 +70,16 @@ pub fn render_repo_review_output(
             // ── Header ──
             md.push_str("# Repository Health Report\n\n");
 
+            // ── Scope note (M61) ──
+            // Anchors the report's posture so a reader does not mistake a
+            // 72/100 health score for a behaviour-correctness verdict.
+            // Behavioural / runtime regressions are the MR review path's
+            // job, not this whole-repo health sweep's.
+            md.push_str(
+                "> **定位 / Scope**: 全仓体检报告（结构、卫生、静态信号为主），不覆盖运行时行为回归——行为正确性请走 MR 评审。\
+                 This is a whole-repo health sweep (structure, hygiene, static signals); behavioural regressions are out of scope — use the MR review path.\n\n",
+            );
+
             // ── Provenance (compact, directly under the title) ──
             // Everything a consumer needs to trace this report back to the
             // exact snapshot that produced it.

@@ -500,4 +500,58 @@ mod tests {
             score.details.iter().map(|d| &d.message).collect::<Vec<_>>()
         );
     }
+
+    /// RENG-118 / M62: a Gradle `build.gradle` declaring the JUnit
+    /// `testImplementation` scope counts as a configured test framework.
+    /// The Java / Gradle path was the sibling of the Maven path
+    /// covered by `pom_xml_with_junit_counts_as_configured_test_framework`
+    /// — the M62-r1 review noted the implementation was paired with
+    /// a missing pin for the Gradle file shape.
+    #[tokio::test]
+    async fn build_gradle_with_testimplementation_counts_as_configured_test_framework() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let gradle = write_file(
+            &dir,
+            "build.gradle",
+            r#"plugins {
+    id 'java'
+}
+
+dependencies {
+    testImplementation 'junit:junit:4.13.2'
+}
+"#,
+        );
+        let ctx = RepoContext {
+            entries: vec![crate::repo::FileEntry {
+                path: gradle,
+                language: "Config".to_string(),
+                loc: 7,
+                is_binary: false,
+                is_generated: false,
+            }],
+            stats: crate::repo::RepoStats::default(),
+            llm_configs: Vec::new(),
+            config: None,
+            facts_block: None,
+        };
+        let score = TestCoverage
+            .evaluate(&ctx, None)
+            .await
+            .expect("evaluate should not fail");
+
+        assert!(
+            score.summary.contains("dev-deps=yes"),
+            "build.gradle + testImplementation must count as a configured framework: {}",
+            score.summary
+        );
+        assert!(
+            !score
+                .details
+                .iter()
+                .any(|d| d.message.contains("No test framework configured")),
+            "Gradle project with junit must not be reported with 'No test framework configured': {:?}",
+            score.details.iter().map(|d| &d.message).collect::<Vec<_>>()
+        );
+    }
 }

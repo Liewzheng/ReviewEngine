@@ -272,7 +272,12 @@ impl LLMClient {
     /// number inside a response body from being mistaken for the real verdict.
     /// [`anyhow::Error::chain`] is walked so the status survives the
     /// `.context(...)` wrappers the provider layer adds.
-    fn http_status_code(err: &anyhow::Error) -> Option<u16> {
+    ///
+    /// `pub(crate)` so the compliance sub-step ([`crate::compliance`])
+    /// can ask the same question of an error returned from a single
+    /// `complete` call and reuse the retry-verdict rule (408 / 429 /
+    /// 5xx → retryable; other 4xx → permanent).
+    pub(crate) fn http_status_code(err: &anyhow::Error) -> Option<u16> {
         const MARKER: &str = " returned ";
         err.chain().find_map(|cause| {
             let message = cause.to_string();

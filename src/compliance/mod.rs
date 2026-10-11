@@ -414,20 +414,27 @@ pub async fn run_for_review(
             // hiccup mid-stream). Cost is at most `MAX_TICKETS_PER_REVIEW`
             // per-ticket calls on top of the failed batch call.
             let error_summary = format!("compliance LLM call failed: {}", categorise_llm_error(&e));
-            // Cheap pre-check: only attempt the fallback if the
-            // failure looks transient / per-ticket-rescuable. A 4xx
-            // (auth, bad model, rate limit) would surface the same
-            // error for every per-ticket call — falling back wastes
-            // budget. The categorise_llm_error helper classifies by
-            // typed marker; we treat JSON-decode (transport hiccup)
-            // and unknown (no status) as worth a retry.
-            let retryable = e
-                .chain()
-                .any(|c| c.downcast_ref::<crate::llm::client::JsonDecodeError>().is_some())
-                || e.chain().all(|c| {
-                    // No status surfaced anywhere → transport / DNS / TLS.
-                    c.downcast_ref::<crate::llm::client::EmptyCompletion>().is_none()
-                });
+            // Pre-check: only attempt the fallback if the failure is
+            // plausibly per-ticket-rescuable. Reuse the same rule as
+            // `LLMClient::retry_verdict` — 408 / 429 / 5xx are retryable
+            // (the upstream will likely return the same verdict on
+            // each per-ticket call, but a transient 5xx or 429 may
+            // resolve on a retry), and other 4xx (401, 403, 404, 400,
+            // …) are permanent — retrying the same call with the same
+            // credentials would burn `MAX_TICKETS_PER_REVIEW` budget
+            // for no chance of success. JSON-decode (transport hiccup
+            // on a malformed response) and no-status failures (DNS /
+            // TLS / connection refused) are also retryable: the LLM
+            // service might be back on the next attempt.
+            let status = crate::llm::client::LLMClient::http_status_code(&e);
+            let retryable = match status {
+                Some(s) if s == 408 || s == 429 || (500..600).contains(&s) => true,
+                Some(s) if (400..500).contains(&s) => false,
+                // No status anywhere in the chain → transport / DNS / TLS,
+                // OR a typed JSON-decode marker on a 2xx body. Both
+                // are worth a retry.
+                _ => true,
+            };
             if !retryable {
                 output.notes.push(error_summary);
                 output.unanalysed_tickets = std::mem::take(&mut fetched);

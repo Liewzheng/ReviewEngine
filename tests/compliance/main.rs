@@ -956,3 +956,153 @@ async fn finish_reason_stop_does_not_trigger_per_ticket_fallback() {
         "exactly one LLM call on the `stop` path (no fallback)"
     );
 }
+
+/// M42-R4 (review P2): a 4xx batch call (401 Unauthorized here) MUST
+/// NOT trigger the per-ticket fallback. Retrying with the same
+/// credentials on the same upstream would burn up to
+/// `MAX_TICKETS_PER_REVIEW` budget for zero chance of success — the
+/// pre-R4 retryable check was wrong on this point (it returned `true`
+/// for any error without an `EmptyCompletion` marker, which is every
+/// non-typed error including 401/403/404). The post-R4 check uses
+/// `LLMClient::http_status_code` and only allows retry on
+/// 408 / 429 / 5xx (per `retry_verdict`).
+///
+/// Assertion shape:
+///   - exactly 1 LLM call (the batch; the fallback does not fire),
+///   - `unanalysed_tickets` carries the fetched ticket (the renderer
+///     shows it under the "fetched, no analysis" block),
+///   - Notes carry a categorised failure message — but no
+///     "falling back to per-ticket calls" annotation.
+#[tokio::test]
+async fn batch_call_4xx_does_not_trigger_per_ticket_fallback() {
+    let llm = MockServer::start().await;
+    let gitlab = MockServer::start().await;
+
+    mount_gitlab_issue(&gitlab, "g/p", 75, "T75", "do the thing").await;
+
+    // A 401 Unauthorized response — the typical "wrong API key" case
+    // (the live MR68 run never hit this, but every other integration
+    // does at least once). The body shape is the OpenAI-compatible
+    // error envelope.
+    let body = r#"{"error":{"message":"Incorrect API key provided: sk-***REDACTED***. You can find your API key at https://example.com.","type":"invalid_request_error","code":"invalid_api_key"}}"#;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(401).set_body_string(body))
+        .expect(1)
+        .mount(&llm)
+        .await;
+
+    let mr_url = format!("{}/g/p/-/merge_requests/1", gitlab.uri());
+    let mr = mr_with_description("Closes #75");
+    let cfg = llm_cfg(&llm.uri());
+
+    let config = ComplianceConfig { enabled: true };
+    let result = run_for_review(&config, &mr, &mr_url, "diff", &[cfg], "test-token")
+        .await
+        .expect("the run should produce a compliance output (even on 401)");
+
+    // Exactly one LLM call. The fallback did not fire.
+    let llm_requests = llm.received_requests().await.unwrap_or_default();
+    assert_eq!(
+        llm_requests.len(),
+        1,
+        "401 is permanent → no per-ticket retry: {:?}",
+        result.notes
+    );
+
+    // The fetched ticket is rendered as "fetched, no analysis" — not
+    // as three parse_error rows from a futile per-ticket retry.
+    assert_eq!(
+        result.unanalysed_tickets.len(),
+        1,
+        "the fetched ticket lands in unanalysed_tickets, not in checks as 3 parse_error rows: {:?}",
+        result.notes
+    );
+    assert_eq!(
+        result.checks.len(),
+        0,
+        "no parse_error rows on a permanent 4xx (the fallback did not fire): {:?}",
+        result.checks
+    );
+
+    // Notes carry a categorised failure but NO fallback annotation.
+    let notes_str: Vec<&str> = result.notes.iter().map(|s| s.as_str()).collect();
+    assert!(
+        notes_str.iter().any(|n| n.contains("compliance LLM call failed")),
+        "Notes must carry the failure message: {:?}",
+        result.notes
+    );
+    assert!(
+        !notes_str.iter().any(|n| n.contains("per-ticket fallback")),
+        "401 MUST NOT trigger the per-ticket fallback: {:?}",
+        result.notes
+    );
+    assert!(
+        !notes_str.iter().any(|n| n.contains("falling back")),
+        "no fallback note on a permanent 4xx: {:?}",
+        result.notes
+    );
+}
+
+/// M42-R4 (review P2): a 5xx batch call (503 here) MUST trigger the
+/// per-ticket fallback — the upstream might be back on a retry, and
+/// the per-ticket calls are smaller and may succeed where the batch
+/// did not. The cost is bounded: 1 batch + at most
+/// `MAX_TICKETS_PER_REVIEW` per-ticket calls.
+///
+/// This test also covers the M41 "error decoding response body"
+/// failure class — both no-status transport errors and 5xx status
+/// errors go through the same `retryable` branch (the post-R4 check
+/// uses `LLMClient::http_status_code` and treats 408 / 429 / 5xx as
+/// retryable).
+#[tokio::test]
+async fn batch_call_transport_error_triggers_per_ticket_fallback() {
+    let llm = MockServer::start().await;
+    let gitlab = MockServer::start().await;
+
+    mount_gitlab_issue(&gitlab, "g/p", 75, "T75", "do the thing").await;
+    mount_gitlab_issue(&gitlab, "g/p", 76, "T76", "do the other thing").await;
+
+    // Every LLM call (batch + per-ticket) returns 503. Wiremock FIFO
+    // match order: the single matcher accepts any POST /chat/completions,
+    // so it serves every call consistently.
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(503).set_body_string(r#"{"error":"upstream temporarily unavailable"}"#))
+        .expect(1..=4)
+        .mount(&llm)
+        .await;
+
+    let mr_url = format!("{}/g/p/-/merge_requests/1", gitlab.uri());
+    let mr = mr_with_description("Closes #75 #76");
+    let cfg = llm_cfg(&llm.uri());
+
+    let config = ComplianceConfig { enabled: true };
+    let result = run_for_review(&config, &mr, &mr_url, "diff", &[cfg], "test-token")
+        .await
+        .expect("the run should produce a compliance output (even on 503)");
+
+    // The fallback fired: 1 batch + 2 per-ticket calls = 3 total.
+    let llm_requests = llm.received_requests().await.unwrap_or_default();
+    assert!(
+        llm_requests.len() >= 2 && llm_requests.len() <= 4,
+        "expected 1 batch + 2 per-ticket, got {}: {:?}",
+        llm_requests.len(),
+        result.notes
+    );
+
+    // The fallback mark present, and a per-ticket failure note per ticket.
+    let notes_str: Vec<&str> = result.notes.iter().map(|s| s.as_str()).collect();
+    assert!(
+        notes_str.iter().any(|n| n.contains("per-ticket fallback")),
+        "per-ticket fallback must fire on the 503 path: {:?}",
+        result.notes
+    );
+    assert!(
+        notes_str
+            .iter()
+            .any(|n| n.contains("503") || n.contains("upstream temporarily")),
+        "Notes must name the failure cause (the 503 status): {:?}",
+        result.notes
+    );
+}

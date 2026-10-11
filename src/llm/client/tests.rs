@@ -990,10 +990,6 @@ fn json_decode_error_downcast_works_through_context_chain() {
 /// reqwest owns the framing. If a future revision re-introduces
 /// explicit body capture, the multi-byte truncation rule should be
 /// re-tested at the new capture site.
-
-/// Nothing is listening on port 1, so the request fails without any HTTP
-/// response (`reqwest` connection refused). It carries no status, so it keeps
-/// the historical retry: two backoffs (1s + 2s) run before giving up.
 #[tokio::test(start_paused = true)]
 async fn test_real_transport_failure_without_status_still_retries() {
     let client = LLMClient::new();

@@ -858,6 +858,171 @@ async fn test_real_http_503_retries_up_to_the_attempt_budget() {
     server.verify().await;
 }
 
+/// M42 / RENG-46 — the MR68 live failure: the upstream returns HTTP 200
+/// with a body that is not JSON (a chunked timeout page, an HTML
+/// proxy error, a truncated response). The old code surfaced
+/// `Failed to parse LLM response: error decoding response body` with
+/// nothing in the chain. The new path:
+/// 1. captures the raw body excerpt so operators can see what came back,
+/// 2. attaches a typed [`JsonDecodeError`] marker the compliance
+///    sub-step can downcast to,
+/// 3. treats the call as Unknown (retryable) — the next attempt may
+///    succeed if the proxy hiccup was a one-off.
+///
+/// Note: this test does NOT use `start_paused` — reqwest's connection
+/// pool needs real time to establish TCP connections to wiremock, and
+/// the backoff sleeps are short (1s + 2s) so the test still finishes
+/// quickly.
+#[tokio::test]
+async fn test_real_http_200_with_non_json_body_is_retried_with_body_in_error_chain() {
+    let server = MockServer::start().await;
+    let body = "<html><body>upstream timeout — gateway has the details</body></html>";
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a non-JSON body with no other config must fail");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("upstream timeout") || message.contains("body excerpt"),
+        "the body excerpt must surface in the error chain: {message}"
+    );
+    // Typed marker is reachable via chain — the compliance sub-step
+    // downcasts to it to render a categorised Note.
+    let marker = err.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
+    assert!(marker.is_some(), "JsonDecodeError marker must be in the chain");
+    let marker = marker.unwrap();
+    assert_eq!(marker.status, 200);
+    assert!(marker.body_excerpt.contains("upstream timeout"));
+    assert_eq!(
+        requests_seen(&server).await,
+        3,
+        "JSON-decode must use the attempt budget"
+    );
+}
+
+/// M42 / RENG-46 — single-config `complete` path: same JSON-decode
+/// behaviour, with the body excerpt visible. Single-config `complete`
+/// does NOT retry (no fallback chain), so the mock expects exactly one
+/// hit and the typed marker still attaches.
+#[tokio::test]
+async fn test_complete_with_non_json_body_carries_body_excerpt() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json".to_string()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete(&real_config(&server.uri()), "system", "user")
+        .await
+        .expect_err("non-JSON body must fail");
+
+    let message = format!("{err:#}");
+    assert!(message.contains("not json"), "body excerpt must surface: {message}");
+    assert!(
+        err.chain().any(|c| c.downcast_ref::<JsonDecodeError>().is_some()),
+        "JsonDecodeError marker must be attached"
+    );
+}
+
+/// M42 — defence-in-depth: bearer tokens / API keys embedded in the
+/// failing response body must NOT end up in the surfaced error chain.
+#[tokio::test]
+async fn test_non_json_body_redacts_credential_tokens_in_excerpt() {
+    let server = MockServer::start().await;
+    let body = "Bearer glpat-ABCDEFG12345 sk-test1234 body content tp-cn-zxcvbnm1234";
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete(&real_config(&server.uri()), "system", "user")
+        .await
+        .expect_err("non-JSON body must fail");
+
+    let message = format!("{err:#}");
+    assert!(
+        !message.contains("glpat-ABCDEFG12345"),
+        "GitLab token must be redacted: {message}"
+    );
+    assert!(
+        !message.contains("sk-test1234"),
+        "OpenAI-style key must be redacted: {message}"
+    );
+    assert!(
+        !message.contains("tp-cn-zxcvbnm1234"),
+        "mimo-style key must be redacted: {message}"
+    );
+    assert!(
+        message.contains("<REDACTED>"),
+        "redaction marker must appear: {message}"
+    );
+}
+
+/// M42 / RENG-46 — typed-marker happy path: a JsonDecodeError wrapped
+/// via `Error::new(...)` and `.context(...)` is classified as Unknown
+/// (retryable), not Permanent (give-up).
+#[test]
+fn json_decode_error_classifies_as_unknown() {
+    let raw = anyhow::Error::new(JsonDecodeError {
+        status: 200,
+        body_excerpt: "excerpt".into(),
+    });
+    assert_eq!(LLMClient::retry_verdict(&raw), RetryVerdict::Unknown);
+}
+
+/// M42 — the typed marker survives a `.context(...)` wrapper so the
+/// compliance sub-step can downcast through the chain.
+#[test]
+fn json_decode_error_downcast_works_through_context_chain() {
+    let raw = anyhow::Error::new(JsonDecodeError {
+        status: 200,
+        body_excerpt: "excerpt".into(),
+    })
+    .context(anyhow::anyhow!("inner anyhow message"));
+    let marker = raw.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
+    assert!(
+        marker.is_some(),
+        "JsonDecodeError must be reachable through any chain depth"
+    );
+}
+
+/// M42 — defence-in-depth: redact_body_excerpt must not panic when the
+/// 512-byte truncation cap lands inside a multi-byte UTF-8 character.
+/// The MR66 live run triggered this: a non-JSON HTML body whose byte
+/// 512 was inside a 3-byte CJK sequence caused the binary to panic
+/// before producing any output. The fix snaps the cut to the nearest
+/// char boundary.
+#[test]
+fn redact_body_excerpt_handles_multibyte_at_truncation_boundary() {
+    // Build a body that has a 3-byte CJK character straddling the
+    // 512-byte mark so a naive truncate panics.
+    let mut body = String::from("a".repeat(510));
+    body.push('è'); // 2-byte char: positions 510, 511
+    body.push('你'); // 3-byte char: positions 512, 513, 514
+    body.push_str(&"b".repeat(100));
+
+    // Just calling the function must not panic.
+    let redacted = redact_body_excerpt(&body);
+    assert!(redacted.ends_with("… (truncated)"));
+}
+
 /// Nothing is listening on port 1, so the request fails without any HTTP
 /// response (`reqwest` connection refused). It carries no status, so it keeps
 /// the historical retry: two backoffs (1s + 2s) run before giving up.

@@ -374,11 +374,42 @@ pub async fn run_for_review(
             // P2-2: distinguish "LLM call failed" from "fetch failed":
             // the fetch succeeded, the LLM didn't — keep the tickets on a
             // separate field so the renderer can label them correctly.
-            output.notes.push(format!("compliance LLM call failed: {e}"));
+            //
+            // M42 / RENG-46: categorise the failure class so the rendered
+            // Notes tell the operator whether it was a JSON-decode
+            // (transport hiccup, body captured), an HTTP-status
+            // (provider rejected the request), or an empty content
+            // (the model answered nothing). All three currently show
+            // up as the same opaque message.
+            output
+                .notes
+                .push(format!("compliance LLM call failed: {}", categorise_llm_error(&e)));
             output.unanalysed_tickets = std::mem::take(&mut fetched);
             Some(output)
         }
     }
+}
+
+/// Render a one-line summary of an LLM call error so the operator can
+/// triage without grepping through chain entries. Order matters: the
+/// typed markers (M42's [`crate::llm::client::JsonDecodeError`] /
+/// [`crate::llm::client::EmptyCompletion`]) are tried first so the
+/// summary names the failure class even when the underlying message
+/// looks identical.
+fn categorise_llm_error(err: &anyhow::Error) -> String {
+    // Walk the chain so a `.context(...)` wrapper does not hide the
+    // typed marker the inner step attached.
+    for cause in err.chain() {
+        if cause.downcast_ref::<crate::llm::client::JsonDecodeError>().is_some() {
+            return format!("JSON decode: {err}");
+        }
+        if cause.downcast_ref::<crate::llm::client::EmptyCompletion>().is_some() {
+            return format!("empty completion: {err}");
+        }
+    }
+    // Fall back to the chain message — keep the inner text so an HTTP
+    // status like `LLM API returned 401 Unauthorized: …` is visible.
+    format!("{err:#}")
 }
 
 /// Convenience: build the [`TicketProvider`] from an MR URL.

@@ -63,8 +63,11 @@ enum RetryVerdict {
 /// was accepted as a successful call — `parse_llm_response` is fail-soft, so
 /// it became an expert report with no findings and no raw response, and a
 /// review that produced nothing reported itself as a clean, high-scoring pass.
+///
+/// `pub` so the compliance sub-step ([`crate::compliance`]) can downcast
+/// the chain and name the failure class in the rendered Notes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct EmptyCompletion {
+pub struct EmptyCompletion {
     provider: String,
     model: String,
 }
@@ -82,6 +85,98 @@ impl std::fmt::Display for EmptyCompletion {
 }
 
 impl std::error::Error for EmptyCompletion {}
+
+/// The provider answered HTTP 2xx but the body was not valid JSON
+/// (M42 / RENG-46 — the "error decoding response body" failure mode
+/// observed on a 9K-token mimo-v2.5-pro call). The transport succeeded
+/// but reqwest's body decoder failed; we capture the truncated body so
+/// the caller can distinguish this from an empty content / HTTP-status
+/// / transport error.
+///
+/// Typed rather than message-match: [`LLMClient::retry_verdict`]
+/// downcasts to it to mark the call as transport-succeeded but
+/// body-malformed (still retried — the upstream may have sent a
+/// chunked or partial response that the next attempt does not).
+///
+/// `pub` so the compliance sub-step ([`crate::compliance`]) can downcast
+/// the chain and name the failure class in the rendered Notes.
+#[derive(Debug, Clone)]
+pub struct JsonDecodeError {
+    pub(crate) status: u16,
+    pub(crate) body_excerpt: String,
+}
+
+impl std::fmt::Display for JsonDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LLM response body is not JSON (HTTP {}): {}",
+            self.status, self.body_excerpt
+        )
+    }
+}
+
+impl std::error::Error for JsonDecodeError {}
+
+/// Defence-in-depth redaction for an LLM response body excerpt that
+/// ends up in the error chain. The caller already scrubs at the
+/// request boundary, but a body excerpt that lands in the rendered
+/// Markdown Notes / stderr must not leak the user's API key, a
+/// `Bearer …` token, or any obvious credential pattern. The redaction
+/// runs over a 4 KiB excerpt and is intentionally cheap.
+fn redact_body_excerpt(excerpt: &str) -> String {
+    // Bearer / sk- / glpat- / tp-cn- style tokens. Anything matching the
+    // common credential prefix is replaced with `<REDACTED>`.
+    let mut out = excerpt.to_string();
+    for prefix in ["Bearer ", "bearer ", "sk-", "SK-", "glpat-", "tp-cn"] {
+        // Walk the string finding each occurrence; `find` returns the
+        // byte offset within the haystack, which is also valid as a
+        // char boundary because the prefixes are ASCII-only.
+        let mut start = 0usize;
+        while let Some(rel) = out[start..].find(prefix) {
+            let abs = start + rel;
+            // Bound the slice we mutate so a prefix that lands at the
+            // very end of the string (no terminator char) does not
+            // overflow. `find` on the suffix gives us the slice, and
+            // we cap by the remaining length.
+            let abs_end = abs + prefix.len();
+            if abs_end > out.len() {
+                break;
+            }
+            let tail = &out[abs_end..];
+            let end = tail
+                .find(|c: char| {
+                    c.is_whitespace()
+                        || c == '"'
+                        || c == '\''
+                        || c == ','
+                        || c == '<'
+                        || c == '>'
+                        || c == '}'
+                        || c == '{'
+                })
+                .unwrap_or(tail.len());
+            let replace_end = abs_end + end;
+            out.replace_range(abs..replace_end, "<REDACTED>");
+            start = abs + "<REDACTED>".len();
+        }
+    }
+    // Cap the visible size so a multi-KiB HTML body does not blow up
+    // the rendered Notes (the cap is applied a second time at the
+    // call site to keep the err-display concise).
+    const MAX_BODY_EXCERPT: usize = 512;
+    if out.len() > MAX_BODY_EXCERPT {
+        // `truncate` panics if the byte index lands inside a multi-byte
+        // UTF-8 character — snap to the nearest char boundary first.
+        let mut cut = MAX_BODY_EXCERPT;
+        while cut > 0 && !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out.push_str("… (truncated)");
+    }
+    out
+}
 
 impl LLMClient {
     /// Create a new `LLMClient` with a default reqwest HTTP client (120s timeout).
@@ -182,6 +277,14 @@ impl LLMClient {
         // §4). Checked before the status parse because it carries no status.
         if err.downcast_ref::<EmptyCompletion>().is_some() {
             return RetryVerdict::Empty;
+        }
+        // M42 / RENG-46: a JSON-decode error on a 2xx body is a transport
+        // hiccup the next attempt might not hit (chunked response,
+        // proxy timeout halfway through). Treated as Unknown so the
+        // normal retry-with-backoff loop kicks in, not the
+        // permanent-give-up path.
+        if err.downcast_ref::<JsonDecodeError>().is_some() {
+            return RetryVerdict::Unknown;
         }
         match Self::http_status_code(err) {
             Some(status) if status == 408 || status == 429 || (500..600).contains(&status) => {
@@ -485,9 +588,41 @@ impl LLMClient {
             return (Err(anyhow::anyhow!("LLM API returned {status}: {text}")), ttfb_ms);
         }
 
-        let value: serde_json::Value = match resp.json().await {
+        // M42 / RENG-46: read the raw body BEFORE calling `resp.json()`,
+        // so a JSON-decode failure still has the bytes available for
+        // the error chain. We only keep up to 4 KiB so an enormous
+        // HTML / proxy error page does not blow up the log.
+        let raw_body = resp.bytes().await.map(|b| {
+            let cap = 4096.min(b.len());
+            String::from_utf8_lossy(&b[..cap]).into_owned()
+        });
+        let body_str = match raw_body {
+            Ok(s) => s,
+            Err(e) => return (Err(anyhow::anyhow!("failed to read LLM response body: {e}")), ttfb_ms),
+        };
+        let value: serde_json::Value = match serde_json::from_str(&body_str) {
             Ok(v) => v,
-            Err(e) => return (Err(anyhow::anyhow!("Failed to parse LLM response: {}", e)), ttfb_ms),
+            Err(e) => {
+                let err = anyhow::anyhow!(
+                    "Failed to parse LLM response as JSON: {} (body excerpt: {})",
+                    e,
+                    redact_body_excerpt(&body_str)
+                );
+                // Tag the error class so the compliance sub-step (and
+                // other callers) can distinguish JSON-decode from
+                // HTTP-status / transport in the rendered Notes.
+                // Wrapping the marker via `.context(...)` makes it
+                // reachable from the chain via `downcast_ref` (the
+                // inner anyhow keeps the body excerpt visible).
+                let marker = JsonDecodeError {
+                    status: status.as_u16(),
+                    body_excerpt: redact_body_excerpt(&body_str),
+                };
+                // The marker is the OUTER error so `err.downcast_ref`
+                // works directly — the inner anyhow message survives
+                // as the `source()` chain for callers that want both.
+                return (Err(anyhow::Error::new(marker).context(err)), ttfb_ms);
+            }
         };
 
         let content = match value["choices"][0]["message"]["content"].as_str() {

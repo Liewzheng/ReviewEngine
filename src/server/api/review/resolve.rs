@@ -120,6 +120,12 @@ pub(crate) struct ReviewOutcome {
 ///
 /// `llm_sink` (RENG-57) receives one latency sample per LLM call attempt and is
 /// forwarded to the orchestrator unchanged.
+///
+/// `mr_url` + `gitlab_token` (M40 P1-3) feed the ticket-compliance
+/// sub-step when the resolved source is an MR-based review — the server
+/// path needs both to fetch tickets from the provider. `None` skips the
+/// step (local / static-diff sources have no MR to gate on; the CLI
+/// library `run_review` is unaffected because it inlines its own copy).
 pub(crate) async fn run_review(
     resolved: ResolvedSource,
     config_toml: Option<String>,
@@ -127,6 +133,8 @@ pub(crate) async fn run_review(
     llm_sink: Option<std::sync::Arc<dyn crate::llm::sampling::LlmCallSink>>,
     expert_overrides: Arc<crate::config::ExpertOverrides>,
     aggregated: Option<bool>,
+    mr_url: Option<String>,
+    gitlab_token: Option<String>,
 ) -> anyhow::Result<ReviewOutcome> {
     let config_source = config_toml.map(crate::models::ConfigSource::Inline);
     let mut app_config = crate::config::resolve_config(config_source).await?;
@@ -145,7 +153,7 @@ pub(crate) async fn run_review(
     let experts = app_config.build_expert_defs();
     // MR-based reviews reuse the freshly fetched metadata so prompts carry the
     // real title/branches; local/static sources keep the placeholder context.
-    let mut mr_info = resolved.mr_info.unwrap_or_else(|| {
+    let mut mr_info = resolved.mr_info.clone().unwrap_or_else(|| {
         crate::models::MRInfo::new(
             "api".to_string(),
             "API Review".to_string(),
@@ -154,7 +162,7 @@ pub(crate) async fn run_review(
         )
     });
     // RENG-18: attach AGENTS.md context resolved alongside the diff/MR info.
-    mr_info.agents_md = resolved.agents_md;
+    mr_info.agents_md = resolved.agents_md.clone();
 
     let review_result = tokio::time::timeout(
         std::time::Duration::from_secs(600),
@@ -222,10 +230,32 @@ pub(crate) async fn run_review(
     // the output is what keeps a partially failed run from reading as a clean
     // one, and it is what the review detail surfaces.
     let failed = failures.len();
-    let output = crate::server::build_review_output_from_reports(reports, maybe_aggregated)
+    let mut output = crate::server::build_review_output_from_reports(reports, maybe_aggregated)
         .with_dropped_findings(dropped_findings)
         .with_consolidated(consolidated)
         .with_errors(failures);
+
+    // M40 / RENG P1-3: webhook/REST reviews previously skipped the
+    // compliance sub-step because `crate::compliance` was only invoked
+    // from `crate::lib::run_review` (CLI). When the MR URL + token are
+    // in hand and the resolved `AppConfig` carries a compliance gate,
+    // run the step here too so the published board can render
+    // `## Ticket compliance check` on the server path.
+    if let (Some(url), Some(token)) = (mr_url.as_deref(), gitlab_token.as_deref()) {
+        if let Some(compliance) = crate::compliance::run_for_review(
+            &app_config.compliance,
+            &mr_info,
+            url,
+            &resolved.diff,
+            &llm_configs,
+            token,
+        )
+        .await
+        {
+            output = output.with_compliance(compliance);
+        }
+    }
+
     let findings: usize = output.reports.iter().map(|r| r.findings.len()).sum();
     let summary = if failed == 0 {
         format!("{} expert report(s), {} finding(s)", output.reports.len(), findings)
@@ -406,6 +436,10 @@ mod tests {
             Arc::new(overrides),
             // RENG-95: no WebUI aggregation override in this test.
             None,
+            // M40: no MR URL / token in this static-diff test → skip
+            // the compliance sub-step.
+            None,
+            None,
         )
         .await
         .expect("an empty expert team is a legitimate (empty) review");
@@ -471,6 +505,11 @@ mod tests {
             None,
             Arc::new(crate::config::ExpertOverrides::default()),
             // RENG-95: no WebUI aggregation override in this test.
+            None,
+            // M40 / RENG P1-3: no MR URL / token in this test → the
+            // compliance sub-step is skipped (a static-diff review has
+            // no MR to gate on).
+            None,
             None,
         )
         .await;
@@ -550,6 +589,10 @@ mod tests {
             None,
             Arc::new(ExpertOverrides::default()),
             // RENG-95: no WebUI aggregation override in these tests.
+            None,
+            // M40: no MR URL / token in this static-diff test → skip
+            // the compliance sub-step.
+            None,
             None,
         )
         .await
@@ -693,6 +736,9 @@ mod tests {
             Arc::new(ExpertOverrides::default()),
             // RENG-95: no WebUI aggregation override in these tests.
             None,
+            // M40: static-diff → no MR URL / token → skip compliance.
+            None,
+            None,
         )
         .await
         .expect("the mock answers every expert AND the aggregator");
@@ -766,6 +812,9 @@ mod tests {
             Arc::new(ExpertOverrides::default()),
             // RENG-95: no WebUI aggregation override in these tests.
             None,
+            // M40: static-diff → no MR URL / token → skip compliance.
+            None,
+            None,
         )
         .await
         .expect("the mock answers every expert");
@@ -811,6 +860,9 @@ mod tests {
             None,
             Arc::new(ExpertOverrides::default()),
             // RENG-95: no WebUI aggregation override in these tests.
+            None,
+            // M40: static-diff → no MR URL / token → skip compliance.
+            None,
             None,
         )
         .await

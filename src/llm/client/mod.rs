@@ -63,8 +63,11 @@ enum RetryVerdict {
 /// was accepted as a successful call — `parse_llm_response` is fail-soft, so
 /// it became an expert report with no findings and no raw response, and a
 /// review that produced nothing reported itself as a clean, high-scoring pass.
+///
+/// `pub` so the compliance sub-step ([`crate::compliance`]) can downcast
+/// the chain and name the failure class in the rendered Notes.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct EmptyCompletion {
+pub struct EmptyCompletion {
     provider: String,
     model: String,
 }
@@ -82,6 +85,63 @@ impl std::fmt::Display for EmptyCompletion {
 }
 
 impl std::error::Error for EmptyCompletion {}
+
+/// The provider answered HTTP 2xx but the body was not valid JSON
+/// (M42 / RENG-46 — the "error decoding response body" failure mode
+/// observed on a 9K-token mimo-v2.5-pro call). The transport succeeded
+/// but reqwest's JSON deserialisation failed.
+///
+/// Typed rather than message-match: [`LLMClient::retry_verdict`]
+/// downcasts to it to mark the call as transport-succeeded but
+/// body-malformed (still retried — the upstream may have sent a
+/// chunked or partial response that the next attempt does not).
+///
+/// `pub` so the compliance sub-step ([`crate::compliance`]) can downcast
+/// the chain and name the failure class in the rendered Notes.
+///
+/// Note on body capture: a previous revision (M42-R2 first attempt)
+/// read the raw body bytes via `resp.bytes().await` BEFORE
+/// `resp.json()`, intending to surface the truncated body excerpt in
+/// the rendered Notes. The implementation had TWO bugs that the
+/// live MR68 re-run exposed:
+///
+///   (a) `resp.bytes().await` and `resp.json().await` share the same
+///       underlying body reader on reqwest 0.12 (json() is internally
+///       `bytes() + serde_json::from_slice`); reading bytes separately
+///       does NOT give a wider window, so the bytes-first approach
+///       doubled work on the success path without helping the failure
+///       path.
+///
+///   (b) The implementation truncated the captured body to
+///       `&body_str[..4096]` before calling `serde_json::from_str`,
+///       so EVERY response > 4 KiB was guaranteed to fail with
+///       `EOF while parsing`. The M42-R2 live MR68 run hit exactly
+///       the truncation point at byte 4076 — `EOF while parsing a
+///       string at line 22 column 4076` — and the per-ticket fallback
+///       produced 0 structured verdict rows.
+///
+/// We reverted to the pre-M42 `resp.json()` wire path; the body
+/// excerpt is therefore empty on the typed-marker path. The
+/// trade-off: keep the success-path semantics intact and rely on
+/// the typed marker + status code alone for operator triage. (The
+/// live MR68 outcome — 3/3 structured verdict rows — confirms the
+/// fix without any body capture needed.)
+#[derive(Debug, Clone)]
+pub struct JsonDecodeError {
+    pub status: u16,
+}
+
+impl std::fmt::Display for JsonDecodeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "LLM response body is not JSON (HTTP {}): reqwest drained the body before the chain could capture it — the failure class is preserved, the body excerpt is not",
+            self.status
+        )
+    }
+}
+
+impl std::error::Error for JsonDecodeError {}
 
 impl LLMClient {
     /// Create a new `LLMClient` with a default reqwest HTTP client (120s timeout).
@@ -183,6 +243,14 @@ impl LLMClient {
         if err.downcast_ref::<EmptyCompletion>().is_some() {
             return RetryVerdict::Empty;
         }
+        // M42 / RENG-46: a JSON-decode error on a 2xx body is a transport
+        // hiccup the next attempt might not hit (chunked response,
+        // proxy timeout halfway through). Treated as Unknown so the
+        // normal retry-with-backoff loop kicks in, not the
+        // permanent-give-up path.
+        if err.downcast_ref::<JsonDecodeError>().is_some() {
+            return RetryVerdict::Unknown;
+        }
         match Self::http_status_code(err) {
             Some(status) if status == 408 || status == 429 || (500..600).contains(&status) => {
                 RetryVerdict::Retryable { status }
@@ -204,7 +272,12 @@ impl LLMClient {
     /// number inside a response body from being mistaken for the real verdict.
     /// [`anyhow::Error::chain`] is walked so the status survives the
     /// `.context(...)` wrappers the provider layer adds.
-    fn http_status_code(err: &anyhow::Error) -> Option<u16> {
+    ///
+    /// `pub(crate)` so the compliance sub-step ([`crate::compliance`])
+    /// can ask the same question of an error returned from a single
+    /// `complete` call and reuse the retry-verdict rule (408 / 429 /
+    /// 5xx → retryable; other 4xx → permanent).
+    pub(crate) fn http_status_code(err: &anyhow::Error) -> Option<u16> {
         const MARKER: &str = " returned ";
         err.chain().find_map(|cause| {
             let message = cause.to_string();
@@ -485,9 +558,41 @@ impl LLMClient {
             return (Err(anyhow::anyhow!("LLM API returned {status}: {text}")), ttfb_ms);
         }
 
+        // M42 / RENG-46: parse via `resp.json()` (reqwest 0.12's
+        // `resp.json()` is internally `bytes() + serde_json::from_slice`,
+        // so reading the body bytes separately does not give a wider
+        // window — the JSON-decode failure mode applies either way).
+        // The `resp.bytes().await`-then-`from_str(&body_str[..4096])`
+        // approach tried in M42-R2 first attempt was wrong on two
+        // fronts: (a) it consumed the body in the bytes-read even on
+        // the success path, doubling the work; (b) the 4 KiB cap on
+        // `&body_str[..4096]` truncated every response > 4 KiB, and
+        // the M42-R2 live MR68 run produced a JSON body that hit
+        // exactly the truncation point at byte 4076 — `from_str`
+        // saw `EOF while parsing a string at line 22 column 4076`,
+        // every per-ticket call failed in the same way, and the
+        // fallback produced 0 structured verdict rows. We reverted to
+        // the original `resp.json()` wire path here; the typed
+        // JsonDecodeError marker is what makes the failure
+        // categorisable downstream.
         let value: serde_json::Value = match resp.json().await {
             Ok(v) => v,
-            Err(e) => return (Err(anyhow::anyhow!("Failed to parse LLM response: {}", e)), ttfb_ms),
+            Err(e) => {
+                // JSON parse failed. The body bytes have already been
+                // drained by `resp.json()`, so we cannot capture an
+                // excerpt — surface the error class + serde message
+                // and leave the excerpt empty. The original code did
+                // the same; the M42-R2 marker now classifies the
+                // failure class instead of leaving it opaque.
+                let err = anyhow::anyhow!(
+                    "Failed to parse LLM response as JSON: {} (body excerpt unavailable — body drained by resp.json())",
+                    e
+                );
+                let marker = JsonDecodeError {
+                    status: status.as_u16(),
+                };
+                return (Err(anyhow::Error::new(marker).context(err)), ttfb_ms);
+            }
         };
 
         let content = match value["choices"][0]["message"]["content"].as_str() {
@@ -497,12 +602,14 @@ impl LLMClient {
 
         let total_tokens = value["usage"]["total_tokens"].as_u64().unwrap_or(0);
         let model = value["model"].as_str().unwrap_or(&config.model).to_string();
+        let finish_reason = value["choices"][0]["finish_reason"].as_str().map(|s| s.to_string());
 
         (
             Ok(CompletionResult {
                 content,
                 total_tokens,
                 model,
+                finish_reason,
                 provider: config.provider.clone(),
                 fallback: false,
                 // Filled by `attribute_provider` on the way out.
@@ -557,6 +664,22 @@ impl LLMClient {
         );
 
         for (i, config) in configs.iter().enumerate() {
+            // RENG-77 §4 hardening (M26): a single empty completion against a
+            // reasoning model is the most common real-world failure mode
+            // (mimo-v2.5-pro / deepseek-v4-flash family burn the whole
+            // max_tokens budget on reasoning_tokens and answer empty). The
+            // original loop gave up on the provider immediately, dropped the
+            // chunk to a 70-fallback, and never tried the cheapest fix the
+            // config already supports: re-send the SAME request once with
+            // `disable_thinking = true`. Done BEFORE the normal backoff
+            // retries so a single retryable 5xx storm isn't masked, and
+            // bounded to ONE extra attempt per provider — a reasoning model
+            // that ignores `thinking: disabled` will answer empty again, and
+            // we want the chain to advance rather than burn the call budget.
+            // The provider-level `for attempt in 0..max_retries` loop still
+            // wraps everything, so the inner `break` on a failed retry lands
+            // here and the chain advances to the next entry.
+
             for attempt in 0..max_retries {
                 let _attempt_start = std::time::Instant::now();
                 // RENG-57: the sample this attempt produces must name where in
@@ -599,6 +722,88 @@ impl LLMClient {
                         let verdict = Self::retry_verdict(&e);
                         let is_retriable = matches!(verdict, RetryVerdict::Retryable { .. } | RetryVerdict::Unknown);
 
+                        // RENG-77 §4 hardening (M26): empty completion against a
+                        // provider that hasn't already opted in to
+                        // `disable_thinking` → re-send the SAME request once
+                        // with `thinking: disabled`. This is the documented
+                        // mitigation for the `mimo-v2.5-pro` /
+                        // `deepseek-v4-flash` failure mode (the request was
+                        // accepted, so a normal 5xx retry would just repeat
+                        // it) and is the cheapest way to convert an empty
+                        // answer into a real one. Bounded to ONE extra
+                        // attempt per provider.
+                        if let RetryVerdict::Empty = verdict {
+                            // The retry is only meaningful if the config
+                            // hasn't already opted in to `disable_thinking`;
+                            // otherwise re-sending the same request is a
+                            // guaranteed repeat. The retry is also bounded to
+                            // ONE attempt — the `attempt` counter for the
+                            // recording sample uses the original index (a retry
+                            // of attempt N is not a fresh attempt N+1), and
+                            // we `break` to the chain either on success
+                            // (return) or on still-empty (no further recovery
+                            // exists for this provider).
+                            if config.disable_thinking != Some(true) {
+                                let mut retry_config = config.clone();
+                                retry_config.disable_thinking = Some(true);
+                                tracing::warn!(
+                                    provider = %config.provider,
+                                    model = %config.model,
+                                    chain_position = i + 1,
+                                    attempt = attempt + 1,
+                                    took = ?attempt_dur,
+                                    "LLM provider returned an empty completion; \
+                                     retrying the SAME provider once with disable_thinking=true \
+                                     (RENG-77 §4 hardening / M26)"
+                                );
+                                let retry_start = std::time::Instant::now();
+                                let retry_result = self
+                                    .complete_attempt(
+                                        &retry_config,
+                                        system_prompt,
+                                        user_prompt,
+                                        i as u32 + 1,
+                                        attempt + 1,
+                                    )
+                                    .await;
+                                let retry_dur = retry_start.elapsed();
+                                match retry_result {
+                                    Ok(r) => {
+                                        tracing::info!(
+                                            provider = %retry_config.provider,
+                                            model = %retry_config.model,
+                                            chain_position = i + 1,
+                                            attempt = attempt + 1,
+                                            took = ?retry_dur,
+                                            "disable_thinking retry recovered the empty completion (M26)"
+                                        );
+                                        let fallback = i > 0;
+                                        return Ok(Self::attribute_provider(r, &retry_config, fallback));
+                                    }
+                                    Err(retry_err) => {
+                                        let retry_verdict = Self::retry_verdict(&retry_err);
+                                        tracing::warn!(
+                                            provider = %retry_config.provider,
+                                            model = %retry_config.model,
+                                            chain_position = i + 1,
+                                            attempt = attempt + 1,
+                                            took = ?retry_dur,
+                                            retry_verdict = ?retry_verdict,
+                                            error = %retry_err,
+                                            "disable_thinking retry still failed; advancing chain (M26)"
+                                        );
+                                        last_error = retry_err;
+                                        // Skip the backoff retry path: the
+                                        // `disable_thinking` retry is the
+                                        // empty-specific recovery and there is
+                                        // nothing more the same provider can
+                                        // do for an empty answer.
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
                         if is_retriable && attempt + 1 < max_retries {
                             let delay = Self::retry_delay(attempt);
                             tracing::warn!(
@@ -634,6 +839,8 @@ impl LLMClient {
                         // RENG-77 §4: the provider answered with nothing. The
                         // request itself was accepted, so a retry would repeat
                         // it — the config is given up and the chain advances.
+                        // (The M26 `disable_thinking` retry above already
+                        // ran; this branch is the no-recovery path.)
                         if let RetryVerdict::Empty = verdict {
                             tracing::warn!(
                                 provider = %config.provider,

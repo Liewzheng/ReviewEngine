@@ -312,6 +312,7 @@ impl super::super::provider::LLMProvider for MockProvider {
                 content: "success".to_string(),
                 total_tokens: 10,
                 model: "mock".to_string(),
+                finish_reason: None,
                 provider: self.name.clone(),
                 fallback: false,
                 entry_fp: None,
@@ -858,9 +859,137 @@ async fn test_real_http_503_retries_up_to_the_attempt_budget() {
     server.verify().await;
 }
 
-/// Nothing is listening on port 1, so the request fails without any HTTP
-/// response (`reqwest` connection refused). It carries no status, so it keeps
-/// the historical retry: two backoffs (1s + 2s) run before giving up.
+/// M42 / RENG-46 — the M41 live failure: the upstream returns HTTP 200
+/// with a body that is not JSON (a chunked timeout page, an HTML
+/// proxy error, a truncated mid-string body, a `>4KiB` body that the
+/// M42-R2 first-attempt `&body_str[..4096]` cap clipped). The pre-M42
+/// code surfaced `Failed to parse LLM response: error decoding
+/// response body` with nothing in the chain — operators had no way
+/// to tell a transport hiccup from a non-JSON HTML page. The
+/// post-M42 path:
+/// 1. attaches a typed [`JsonDecodeError`] marker the compliance
+///    sub-step can downcast to (categorisation),
+/// 2. treats the call as Unknown (retryable) — the next attempt may
+///    succeed if the proxy hiccup was a one-off.
+///
+/// Body-excerpt capture was tried in M42-R2 first attempt and
+/// reverted: `resp.bytes().await` and `resp.json().await` share the
+/// same body reader on reqwest 0.12, and a separate `bytes()` read
+/// BEFORE the JSON parse succeeded in surfacing the body excerpt
+/// for unit fixtures but on a live `>4KiB` body the `&body_str[..4096]`
+/// cap truncated the bytes the parse then saw, so the parser
+/// failed with `EOF while parsing` at exactly the truncation point.
+/// The wire path is `resp.json()` only; the typed marker + status
+/// code are enough for operator triage.
+///
+/// Note: this test does NOT use `start_paused` — reqwest's connection
+/// pool needs real time to establish TCP connections to wiremock, and
+/// the backoff sleeps are short (1s + 2s) so the test still finishes
+/// quickly.
+#[tokio::test]
+async fn test_real_http_200_with_non_json_body_classifies_as_retryable() {
+    let server = MockServer::start().await;
+    let body = "<html><body>upstream timeout — gateway has the details</body></html>";
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
+        .expect(3)
+        .mount(&server)
+        .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete_with_fallback(&[real_config(&server.uri())], "system", "user")
+        .await
+        .expect_err("a non-JSON body with no other config must fail");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("error decoding response body"),
+        "the original error message must surface: {message}"
+    );
+    // Typed marker is reachable via chain — the compliance sub-step
+    // downcasts to it to render a categorised Note.
+    let marker = err.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
+    assert!(marker.is_some(), "JsonDecodeError marker must be in the chain");
+    let marker = marker.unwrap();
+    assert_eq!(marker.status, 200);
+    // The body excerpt is intentionally empty: reqwest's `resp.json()`
+    // drains the body before we can read it as bytes. This is a known
+    // limitation of the wire path; the typed marker + status code
+    // alone are enough for operators to triage.
+    assert!(
+        marker.status == 200,
+        "marker carries the HTTP status: {}",
+        marker.status
+    );
+    assert_eq!(
+        requests_seen(&server).await,
+        3,
+        "JSON-decode must use the attempt budget"
+    );
+}
+
+/// M42 / RENG-46 — single-config `complete` path: same JSON-decode
+/// behaviour, with the typed marker attached. The body excerpt is
+/// intentionally empty on this path (resp.json() drains first; see
+/// the JsonDecodeError doc-comment in `mod.rs` for the wire-path
+/// trade-off).
+#[tokio::test]
+async fn test_complete_with_non_json_body_attaches_typed_marker() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/chat/completions"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json".to_string()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = LLMClient::new();
+    let err = client
+        .complete(&real_config(&server.uri()), "system", "user")
+        .await
+        .expect_err("non-JSON body must fail");
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("error decoding response body"),
+        "the original error must surface: {message}"
+    );
+    assert!(
+        err.chain().any(|c| c.downcast_ref::<JsonDecodeError>().is_some()),
+        "JsonDecodeError marker must be attached"
+    );
+}
+
+/// M42 / RENG-46 — typed-marker happy path: a JsonDecodeError wrapped
+/// via `Error::new(...)` and `.context(...)` is classified as Unknown
+/// (retryable), not Permanent (give-up).
+#[test]
+fn json_decode_error_classifies_as_unknown() {
+    let raw = anyhow::Error::new(JsonDecodeError { status: 200 });
+    assert_eq!(LLMClient::retry_verdict(&raw), RetryVerdict::Unknown);
+}
+
+/// M42 — the typed marker survives a `.context(...)` wrapper so the
+/// compliance sub-step can downcast through the chain.
+#[test]
+fn json_decode_error_downcast_works_through_context_chain() {
+    let raw = anyhow::Error::new(JsonDecodeError { status: 200 }).context(anyhow::anyhow!("inner anyhow message"));
+    let marker = raw.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
+    assert!(
+        marker.is_some(),
+        "JsonDecodeError must be reachable through any chain depth"
+    );
+}
+
+/// M42-R2: `resp.bytes().await` was removed along with the body-excerpt
+/// capture path (see the `JsonDecodeError` doc-comment in `mod.rs`).
+/// There is no longer a truncation safety property to assert here —
+/// `resp.json()` is a `bytes() + serde_json::from_slice` round-trip and
+/// reqwest owns the framing. If a future revision re-introduces
+/// explicit body capture, the multi-byte truncation rule should be
+/// re-tested at the new capture site.
 #[tokio::test(start_paused = true)]
 async fn test_real_transport_failure_without_status_still_retries() {
     let client = LLMClient::new();
@@ -992,4 +1121,293 @@ async fn a_probe_healthy_anthropic_card_with_a_versioned_base_completes() {
         completion.headers.get("authorization").is_none(),
         "Anthropic must not receive a bearer header"
     );
+}
+
+// ─── M26: empty-completion auto-retry with disable_thinking=true ───
+//
+// A reasoning model that burns its `max_tokens` budget on
+// `reasoning_tokens` (e.g. `mimo-v2.5-pro`, `deepseek-v4-flash`) returns
+// HTTP 200 with an empty `choices[0].message.content`. The M24 recall run
+// hit this 37 times in 18 instances. The M26 mitigation: before
+// advancing the chain, re-send the SAME request once with
+// `disable_thinking = true`. The retry must:
+//
+// 1. Recover the answer when the model behaves with `thinking: disabled`.
+// 2. Skip when the config already has `disable_thinking = true` (no
+//    useful second attempt — same body would repeat the empty response).
+// 3. Bounded to ONE attempt per provider (no chain of retries on empty).
+// 4. Not run when the response is non-empty (no extra round trip on the
+//    happy path).
+
+/// Scripted provider: each call returns the body at the matching index
+/// (capped at the last body). Tracks every `disable_thinking` flag so
+/// the test can prove the second call set it to `Some(true)` while the
+/// first left it as `None`.
+struct ScriptedToggleProvider {
+    bodies: Vec<String>,
+    call_count: AtomicUsize,
+    disable_thinking_seen: Arc<std::sync::Mutex<Vec<Option<bool>>>>,
+}
+
+#[async_trait]
+impl super::super::provider::LLMProvider for ScriptedToggleProvider {
+    fn name(&self) -> &str {
+        "scripted"
+    }
+
+    async fn complete(
+        &self,
+        params: &super::super::provider::CompletionParams,
+    ) -> Result<super::super::provider::CompletionResult, anyhow::Error> {
+        let i = self.call_count.fetch_add(1, Ordering::SeqCst);
+        self.disable_thinking_seen.lock().unwrap().push(params.disable_thinking);
+        let body = &self.bodies[i.min(self.bodies.len() - 1)];
+        Ok(super::super::provider::CompletionResult {
+            content: body.clone(),
+            total_tokens: 1,
+            model: "mock".to_string(),
+            finish_reason: None,
+            provider: "scripted".to_string(),
+            fallback: false,
+            entry_fp: None,
+        })
+    }
+}
+
+#[tokio::test]
+async fn empty_completion_triggers_a_disable_thinking_retry_that_recovers() {
+    // Body 0: empty string (the reasoning-model failure shape).
+    // Body 1: a real, schema-conforming payload that the disable_thinking
+    // retry will recover. If the client surfaces it, the call succeeds.
+    let bodies = vec![String::new(), "score: 88\nsummary: \"ok\"\nfindings: []\n".to_string()];
+    let disable_thinking_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = ScriptedToggleProvider {
+        bodies: bodies.clone(),
+        call_count: AtomicUsize::new(0),
+        disable_thinking_seen: disable_thinking_seen.clone(),
+    };
+
+    let mut registry = ProviderRegistry::new();
+    registry.register(Box::new(provider));
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+
+    let configs = vec![LLMConfig {
+        provider: "scripted".to_string(),
+        model: "mock-reasoning".to_string(),
+        api_key: "k".to_string(),
+        api_base: "https://api.example".to_string(),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: None, // <- the M26 trigger condition
+        disabled: false,
+    }];
+
+    let result = client
+        .complete_with_fallback(&configs, "system", "user")
+        .await
+        .expect("the disable_thinking retry must convert the empty completion into a success");
+    assert_eq!(result.content, bodies[1]);
+
+    let seen = disable_thinking_seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        2,
+        "exactly two attempts: the empty call + the disable_thinking retry"
+    );
+    assert_eq!(seen[0], None, "the original call did not opt in to disable_thinking");
+    assert_eq!(seen[1], Some(true), "the M26 retry must carry disable_thinking=true");
+}
+
+#[tokio::test]
+async fn empty_completion_with_disable_thinking_already_set_does_not_retry() {
+    // Body 0: empty. The retry would repeat the same empty — the config
+    // already opts in, so the M26 path skips the retry and the chain
+    // surfaces the error.
+    let bodies = vec![String::new()];
+    let disable_thinking_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = ScriptedToggleProvider {
+        bodies,
+        call_count: AtomicUsize::new(0),
+        disable_thinking_seen: disable_thinking_seen.clone(),
+    };
+    let mut registry = ProviderRegistry::new();
+    registry.register(Box::new(provider));
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+
+    let configs = vec![LLMConfig {
+        provider: "scripted".to_string(),
+        model: "mock-reasoning".to_string(),
+        api_key: "k".to_string(),
+        api_base: "https://api.example".to_string(),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: Some(true), // <- already opted in: no M26 retry
+        disabled: false,
+    }];
+
+    let err = client
+        .complete_with_fallback(&configs, "system", "user")
+        .await
+        .expect_err("a config that already has disable_thinking set does not get a second retry");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("empty completion"),
+        "the diagnosis must reach the caller: {message}"
+    );
+
+    let seen = disable_thinking_seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "the M26 retry must skip a config that already opts in to disable_thinking; saw {seen:?}"
+    );
+    assert_eq!(
+        seen[0],
+        Some(true),
+        "the original call still had disable_thinking=true; no second attempt ran"
+    );
+}
+
+#[tokio::test]
+async fn empty_completion_retry_is_bounded_to_one_attempt_when_still_empty() {
+    // Body 0: empty (the trigger).
+    // Body 1: empty (the disable_thinking retry — a reasoning model that
+    // ignores `thinking: disabled` will still answer empty).
+    // Body 2: irrelevant; the client must NOT call it.
+    let bodies = vec![
+        String::new(),
+        String::new(),
+        "score: 80\nsummary: \"x\"\nfindings: []\n".to_string(),
+    ];
+    let disable_thinking_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = ScriptedToggleProvider {
+        bodies,
+        call_count: AtomicUsize::new(0),
+        disable_thinking_seen: disable_thinking_seen.clone(),
+    };
+    let mut registry = ProviderRegistry::new();
+    registry.register(Box::new(provider));
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+
+    let configs = vec![LLMConfig {
+        provider: "scripted".to_string(),
+        model: "mock-reasoning".to_string(),
+        api_key: "k".to_string(),
+        api_base: "https://api.example".to_string(),
+        max_tokens: 4096,
+        temperature: 0.3,
+        disable_thinking: None,
+        disabled: false,
+    }];
+
+    let err = client
+        .complete_with_fallback(&configs, "system", "user")
+        .await
+        .expect_err("a single-entry chain must surface the empty twice (original + retry)");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("empty completion"),
+        "the diagnosis must reach the caller: {message}"
+    );
+
+    let seen = disable_thinking_seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        2,
+        "exactly two attempts: the original + one disable_thinking retry; saw {seen:?}"
+    );
+}
+
+#[tokio::test]
+async fn empty_completion_retry_only_fires_on_empty_verdicts_not_on_5xx() {
+    // Body 0: 500-class error (Retryable, not Empty). The M26 retry is
+    // empty-specific — a 5xx must continue through the normal
+    // backoff retry path, NOT trigger an extra disable_thinking call.
+    let provider = MockProvider::new("mock", 999, "OpenAI API returned 500 Internal Server Error: {}");
+    let calls = provider.calls();
+    let mut registry = ProviderRegistry::new();
+    registry.register(Box::new(provider));
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+
+    let err = client
+        .complete_with_fallback(&[mock_config("mock")], "system", "user")
+        .await
+        .expect_err("a 500 with no other config must fail");
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("500"),
+        "the 500 status must reach the caller: {message}"
+    );
+
+    // The 500 path uses the normal backoff retry budget (3 attempts),
+    // NOT the M26 disable_thinking retry — the M26 retry is empty-only.
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "500 must use the standard attempt budget, not the empty-specific M26 retry"
+    );
+}
+
+#[tokio::test]
+async fn empty_completion_retry_advances_to_next_provider_when_still_empty() {
+    // Two providers: both answer empty. The M26 retry runs once on each
+    // before the chain gives up. Two providers × two attempts each = 4
+    // recorded attempts (the script enforces this ordering).
+    let bodies = vec![
+        String::new(), // primary: empty
+        String::new(), // primary disable_thinking retry: still empty
+        String::new(), // fallback: empty
+        String::new(), // fallback disable_thinking retry: still empty
+    ];
+    let disable_thinking_seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider = ScriptedToggleProvider {
+        bodies,
+        call_count: AtomicUsize::new(0),
+        disable_thinking_seen: disable_thinking_seen.clone(),
+    };
+    let mut registry = ProviderRegistry::new();
+    registry.register(Box::new(provider));
+    let client = LLMClient::new().with_registry(Arc::new(registry));
+
+    let configs = vec![
+        LLMConfig {
+            provider: "scripted".to_string(),
+            model: "primary".to_string(),
+            api_key: "k".to_string(),
+            api_base: "https://api.example".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+            disabled: false,
+        },
+        LLMConfig {
+            provider: "scripted".to_string(),
+            model: "fallback".to_string(),
+            api_key: "k".to_string(),
+            api_base: "https://api.example".to_string(),
+            max_tokens: 4096,
+            temperature: 0.3,
+            disable_thinking: None,
+            disabled: false,
+        },
+    ];
+
+    let err = client
+        .complete_with_fallback(&configs, "system", "user")
+        .await
+        .expect_err("both providers empty across both retries must fail");
+    let message = format!("{err:#}");
+    assert!(message.contains("empty completion"));
+
+    let seen = disable_thinking_seen.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        4,
+        "each provider gets its M26 disable_thinking retry: 2 providers × 2 attempts; saw {seen:?}"
+    );
+    // Sequence: [None, Some(true), None, Some(true)] — primary + retry, then fallback + retry.
+    assert_eq!(seen[0], None);
+    assert_eq!(seen[1], Some(true));
+    assert_eq!(seen[2], None);
+    assert_eq!(seen[3], Some(true));
 }

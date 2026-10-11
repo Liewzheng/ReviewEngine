@@ -392,19 +392,35 @@ async fn an_empty_completion_is_an_error_and_advances_the_chain() {
         "the error chain names the configured model — the user already sees it on the card: {err}"
     );
 
-    // Both attempts are recorded. The empty one has `success == false`
-    // (the client turns the verdict into an error before recording), so
-    // the LLM page's failure count picks it up.
+    // M26: the empty verdict prompts the client to retry the SAME provider
+    // once with `disable_thinking = true` (the documented mitigation for
+    // reasoning models that burn their budget on `reasoning_tokens`). With
+    // the mock still answering empty on the retry, BOTH attempts land
+    // in the sink as failures, both with the empty-completion diagnosis,
+    // and the chain still surfaces the failure because no other entry
+    // exists. The old `assert_eq!(samples.len(), 1)` shape is now `2`.
     let samples = sink.samples();
-    assert_eq!(samples.len(), 1, "no retry on the empty verdict");
-    assert!(!samples[0].success);
-    let recorded = samples[0].error.as_deref().unwrap_or_default();
-    assert!(
-        recorded.contains("empty completion"),
-        "the recorded row carries the diagnosis so the page's call-level history is honest: {recorded}"
+    assert_eq!(
+        samples.len(),
+        2,
+        "M26 retry: empty primary + empty disable_thinking retry = 2 samples"
     );
+    assert!(!samples[0].success);
+    assert!(!samples[1].success);
+    for s in &samples {
+        let recorded = s.error.as_deref().unwrap_or_default();
+        assert!(
+            recorded.contains("empty completion"),
+            "the recorded row carries the diagnosis so the page's call-level history is honest: {recorded}"
+        );
+    }
 
-    // The chain advances on empty: the SECOND config serves.
+    // The chain advances on empty: the SECOND config serves. The primary
+    // still pays the M26 retry budget (one extra empty attempt), so the
+    // recorded sample count is 3: the empty primary, the empty retry,
+    // and the fallback hit. This is the "the cheap fix didn't work"
+    // path, which is exactly the case the retry was designed to
+    // mitigate, not a regression.
     let sink = Arc::new(CaptureSink::default());
     let client = LLMClient::new().with_sink(Some(sink.clone()));
     let healthy_cfg = config("xiaomi", &healthy.uri());
@@ -429,9 +445,14 @@ async fn an_empty_completion_is_an_error_and_advances_the_chain() {
     );
     assert!(result.fallback);
     let samples = sink.samples();
-    assert_eq!(samples.len(), 2, "the failed primary AND the fallback hit are recorded");
+    assert_eq!(
+        samples.len(),
+        3,
+        "M26 retry + chain advance: 2 empty attempts on the primary + 1 fallback hit"
+    );
     assert!(!samples[0].success);
-    assert!(samples[1].success);
+    assert!(!samples[1].success);
+    assert!(samples[2].success);
     assert!(
         samples[0]
             .error
@@ -439,6 +460,14 @@ async fn an_empty_completion_is_an_error_and_advances_the_chain() {
             .unwrap_or_default()
             .contains("empty completion"),
         "the failed primary's recorded error names the diagnosis"
+    );
+    assert!(
+        samples[1]
+            .error
+            .as_deref()
+            .unwrap_or_default()
+            .contains("empty completion"),
+        "the disable_thinking retry's recorded error names the diagnosis"
     );
 }
 

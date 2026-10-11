@@ -291,14 +291,25 @@ pub fn is_safe_inline_path(path: &str) -> bool {
 /// findings that differed just in `file` rendered byte-identical notes (the
 /// `10737`/`10738` pair on MR !26, posted 2 s apart) and a reader could not
 /// tell which path a note anchored to.
+///
+/// RENG-113 round 2: `title` and `recommendation` are LLM prose — the same
+/// plaintext class as Evidence in the team renderer. The publish-time gate
+/// in [`crate::publish_review_with_diff`] scans exactly the body this
+/// function returns (a defense-in-depth catch on top of the board body's
+/// redact pass). Redacting here keeps the rendered note, the scan, and the
+/// gate in lockstep: a title that quotes a config line is masked before
+/// the gate sees it, and the marker-aware scan accepts the masked note.
+///
+/// `expert_name` is a fixed expert identifier (e.g. `security`,
+/// `code_quality`) and is not user/LLM prose — left verbatim.
 pub fn format_inline_body(finding: &crate::models::Finding) -> String {
     format!(
         "**[{}]** {} (Confidence: {}/10)\n\n`{}`\n\n{}",
         finding.expert_name,
-        finding.title,
+        crate::models::redact_text(&finding.title),
         finding.confidence,
         inline_anchor(finding),
-        finding.recommendation,
+        crate::models::redact_text(&finding.recommendation),
     )
 }
 
@@ -1043,6 +1054,7 @@ mod tests {
             dropped_findings: Vec::new(),
             consolidated: Some(consolidated.clone()),
             errors: Vec::new(),
+            compliance: None,
         };
 
         let provider = RecordingProvider::new(&[]);
@@ -1093,6 +1105,35 @@ mod tests {
         let mut ranged = make_finding("lead", "crates/sirena-cli/src/rt.rs", 120, Severity::Critical);
         ranged.line_end = Some(132);
         assert!(format_inline_body(&ranged).contains("`crates/sirena-cli/src/rt.rs:120-132`"));
+    }
+
+    /// RENG-113 round 2: `format_inline_body` runs `title` and
+    /// `recommendation` through [`crate::models::redact_text`] so the
+    /// publish-time gate sees a body the renderer has already masked. A
+    /// finding whose title or recommendation quotes a config line lands in
+    /// the inline note as the marker, not the plaintext.
+    #[test]
+    fn format_inline_body_redacts_title_and_recommendation() {
+        let mut f = make_finding("security", "src/auth.rs", 3, Severity::High);
+        f.title = "leaked: password = \"hunter2_real_secret\"".to_string();
+        f.recommendation = "rotate password = \"hunter2_real_secret\"".to_string();
+        let body = format_inline_body(&f);
+
+        assert!(
+            !body.contains("hunter2_real_secret"),
+            "the inline note body must not carry the plaintext: {body}"
+        );
+        // Both fields are masked; each emission produces its own marker.
+        assert_eq!(
+            body.matches("kind=password").count(),
+            2,
+            "one marker per redacted field: {body}"
+        );
+        // The structural fields stay intact: the file anchor, the expert
+        // name, the confidence score.
+        assert!(body.contains("**[security]**"), "expert name is verbatim: {body}");
+        assert!(body.contains("`src/auth.rs:3`"), "file anchor is verbatim: {body}");
+        assert!(body.contains("Confidence: 9/10"), "confidence is verbatim: {body}");
     }
 
     /// One failing post must not abandon the rest of the batch (corpus §4.6).

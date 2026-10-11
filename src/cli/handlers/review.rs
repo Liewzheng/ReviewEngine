@@ -4,12 +4,18 @@ use review_engine::models::*;
 use review_engine::progress::ProgressMap;
 use std::path::PathBuf;
 
+use super::log_output_targets;
 use super::output::{write_output, write_report_text};
 
 /// Resolve the `--verbose` raw-dump directory: `<output>.raw/` when an explicit
 /// `--output` file is given, otherwise `<output_dir>/review-raw/`. Returns
 /// `None` when `--verbose` is off or the directory cannot be created (a
 /// warning is printed; the review still runs).
+///
+/// The directory is created with owner-only (`0700`) permissions on Unix
+/// (RENG-113 / M18-W1): the prompt + response files inside it can quote a
+/// credential-shaped fixture exactly the way the report markdown can, so
+/// the dump needs the same perms as the report.
 fn verbose_dump_dir(verbose: bool, output: &Option<String>, output_dir: &str) -> Option<PathBuf> {
     if !verbose {
         return None;
@@ -18,11 +24,7 @@ fn verbose_dump_dir(verbose: bool, output: &Option<String>, output_dir: &str) ->
         Some(path) => PathBuf::from(format!("{path}.raw")),
         None => PathBuf::from(output_dir).join("review-raw"),
     };
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("warning: [verbose] failed to create dump dir {}: {e}", dir.display());
-        return None;
-    }
-    Some(dir)
+    review_engine::team::orchestrator::create_secure_dump_dir(&dir)
 }
 
 /// The tuple `review_engine::team::orchestrator::run_experts` returns: the
@@ -204,8 +206,15 @@ pub async fn run_stdin(format: &str, output: &Option<String>) -> Result<()> {
         None,
     )
     .await?;
+    // M34 follow-up (M35): the stdin `--output` trace lives at the
+    // dispatch arms in `app.rs`; here we also need the dual-target
+    // log so `logs.ndjson` carries the same shape as every other
+    // review entry point (the audit's "missing output_dir trace"
+    // gap from the M34 r2 review notes).
+    //
     // The verification-enabled flag is resolved inside `run_review` and not
     // available here; `false` keeps the historical list-only appendix.
+    log_output_targets("review --stdin", output, "");
     write_output(&result, format, output, None, None, false)?;
 
     Ok(())
@@ -236,6 +245,12 @@ pub async fn run_mr(
 
     let progress_override = progress_map.map(|map| (map, review_id.to_string()));
     let result = review_engine::run_review(mr_url, &token, configs, config_source, progress_override, dump_dir).await?;
+    // M34 follow-up (M35): the dispatch arm already traces --output; the
+    // helper traces the dual-target pair (--output + output_dir) so a run
+    // that has both writes surfaces both targets before the file lands.
+    // The dispatch trace and the helper trace read identically — the helper
+    // is the one that names output_dir, which the dispatch trace omits.
+    log_output_targets("review --mr-url", output, &config.output_dir);
     write_output(
         &result,
         format,
@@ -312,6 +327,11 @@ pub async fn run_local(
         review_id,
     )
     .await;
+    // M34 follow-up (M35): mirror the dual-target trace the dispatch
+    // arm emits. The dispatch arm already names --output; the helper
+    // names both targets so the trace is identical to the ask /
+    // describe / improve / update_changelog handlers.
+    log_output_targets("review --local --diff", output, &config.output_dir);
     write_output(
         &out,
         format,
@@ -426,6 +446,11 @@ pub async fn run_local_repo(
             None
         }
     };
+    // M34 follow-up (M35): identical dual-target trace. See
+    // `run_local` above for the rationale — the helper brings the
+    // review handlers' trace line into parity with
+    // ask / describe / improve / update_changelog / the dispatcher.
+    log_output_targets("review --repo", output, &config.output_dir);
     write_output(
         &out,
         format,
@@ -524,6 +549,12 @@ pub async fn run_local_path(
         });
     }
 
+    // M34 follow-up (M35): dual-target trace. The dispatch arm at
+    // `app.rs` already emitted the --output line; the helper emits
+    // the paired output_dir line so `logs.ndjson` carries the same
+    // shape as every other review entry point (and the audit's
+    // "missing output_dir trace" gap from the M34 r2 review is closed).
+    log_output_targets("review --path", output, &config.output_dir);
     write_output(
         &out,
         format,
@@ -574,6 +605,11 @@ pub async fn run_repo_review_local_or_enhanced(
     };
 
     let text = review_engine::actions::repo_review::render_repo_review_output(&result, format, verification_enabled)?;
+    // M34 follow-up (M35): dual-target trace, mirroring the MR / local
+    // review paths above so the trace shape is identical. The dispatch
+    // arm at `app.rs` emits the --output line; the helper emits the
+    // paired output_dir line.
+    log_output_targets("review --repo-review", output, &output_dir);
     // Unified sink, same as the MR review paths: no --output prints to stdout
     // AND saves a timestamped copy into the reports dir (default runs land on
     // disk); --output writes the explicit file plus the same timestamped copy.
@@ -694,6 +730,7 @@ mod tests {
         ConsolidatedReport {
             findings: vec![],
             low_confidence_removed: 0,
+            confidence_downgraded: 0,
             duplicates_merged: 0,
             conflicts: vec![],
             assessment: OverallAssessment {
@@ -709,6 +746,10 @@ mod tests {
             reviewed_files: 0,
             unreviewed_files: vec![],
             coverage: None,
+            parse_status: vec![],
+            verification_stats: None,
+            injected_context: Default::default(),
+            confidence_filter_policy: Default::default(),
             adjudicated_removed: vec![],
         }
     }

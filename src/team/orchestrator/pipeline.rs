@@ -19,9 +19,10 @@ use crate::progress::ProgressMap;
 use crate::prompt::PromptEngine;
 use anyhow::Context as _;
 
+use crate::context::agents_md::InjectedContextEntry;
 use crate::output::parser::validate_findings;
 use crate::team::adjudicator;
-use crate::team::lead_consolidator::{ConsolidatedReport, FileCoverage};
+use crate::team::lead_consolidator::{ConsolidatedReport, FileCoverage, InjectedContext, VerificationStats};
 use crate::team::verifier::{self, DroppedFinding};
 
 use super::validation::{
@@ -129,6 +130,20 @@ fn assess_and_chunk_diff(
 
 /// Run Pass 1 Lead Overview — produces a `GlobalReviewContext` that is
 /// appended to every expert's prompt, regardless of PR size.
+///
+/// Acquires a permit from the shared concurrency semaphore (M18-W11): the
+/// lead overview counts against `max_concurrent_llm_calls` exactly like an
+/// expert task. The audit expected a wall-clock win (an 11-expert × 6-slot
+/// pipeline parallelising the overview with the first expert batch) but
+/// that overlap is not real here — the overview result is `clone()`d into
+/// every expert task before [`run_experts_inner`] creates them (`:623`),
+/// so the overview is a strict serial prerequisite of the expert pass and
+/// the permit always has zero contenders when it is acquired. The change
+/// is therefore consistency / future-proofing: when the orchestration is
+/// later reshaped so the overview and the experts can overlap (the
+/// `global_context` would have to stop being an expert-prompt input),
+/// the semaphore accounting is already in place and the per-call cap
+/// stays honest. No permit, no overview.
 async fn build_lead_overview(
     mr_info: &MRInfo,
     files: &[DiffFile],
@@ -136,6 +151,7 @@ async fn build_lead_overview(
     llm_configs: &[LLMConfig],
     project_config: Option<&crate::models::ProjectConfig>,
     project_context: &crate::context::ProjectContext,
+    semaphore: Arc<Semaphore>,
     llm_sink: Option<Arc<dyn crate::llm::sampling::LlmCallSink>>,
 ) -> Option<GlobalReviewContext> {
     let lead_expert = non_aggregators
@@ -161,6 +177,17 @@ async fn build_lead_overview(
                 return None;
             }
         };
+
+    // Shared semaphore: cap concurrent LLM calls. A closed semaphore (the
+    // orchestrator shutting down) is treated like a prompt-build failure —
+    // the overview degrades to None and the expert pass runs without it.
+    let _permit = match semaphore.acquire().await {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Pass 1 Overview semaphore error: {}", e);
+            return None;
+        }
+    };
 
     match llm_client
         .complete_with_fallback(&overview_config, &system, &user)
@@ -190,6 +217,23 @@ async fn build_lead_overview(
 ///
 /// Returns `None` when every attempt fails; the caller then runs the expert
 /// pass without a global context — the degradation path is unchanged.
+///
+/// M18-W12: the eventual `None` is the expected fallback when the LLM
+/// returns prose-only or a schema-different document. It used to log at
+/// `WARN`, which is the same level real LLM-call failures log at — NAS 24
+/// days showed 94 such `WARN`s, 100% of the WARN budget for the team
+/// pipeline, drowning the genuinely-informative errors. The log is now at
+/// `INFO` with a `reason_code` field so a log pipeline can filter
+/// cleanly. The three values actually emitted are:
+///
+/// - `tab_indent_fallback_succeeded` — the sanitized (tab → 2-space) YAML
+///   parsed after the strict attempt failed.
+/// - `fence_fallback_succeeded` — the first fenced YAML block parsed
+///   after both the strict and sanitized attempts failed.
+/// - `schema_mismatch` — every attempt failed; the function returns
+///   `None` and the expert pass runs without a global context.
+///
+/// Only the prompt-build and LLM-call failures keep their `WARN` level.
 fn parse_global_review_context(raw: &str) -> Option<GlobalReviewContext> {
     let strict_err = match serde_yaml_ng::from_str::<GlobalReviewContext>(raw) {
         Ok(ctx) => return Some(ctx),
@@ -198,18 +242,27 @@ fn parse_global_review_context(raw: &str) -> Option<GlobalReviewContext> {
 
     let sanitized = sanitize_overview_yaml(raw);
     if let Ok(ctx) = serde_yaml_ng::from_str::<GlobalReviewContext>(&sanitized) {
+        tracing::info!(
+            reason_code = "tab_indent_fallback_succeeded",
+            "GlobalReviewContext parsed after tab-indent / fence sanitization"
+        );
         return Some(ctx);
     }
 
     if let Some(fenced) = crate::output::parser::extract_first_fenced_yaml(raw) {
         if let Ok(ctx) = serde_yaml_ng::from_str::<GlobalReviewContext>(&fenced) {
+            tracing::info!(
+                reason_code = "fence_fallback_succeeded",
+                "GlobalReviewContext parsed from the first fenced YAML block"
+            );
             return Some(ctx);
         }
     }
 
-    tracing::warn!(
-        "Failed to parse GlobalReviewContext: {:?} (fence/tab sanitization and fenced-block fallback also failed)",
-        strict_err
+    tracing::info!(
+        reason_code = "schema_mismatch",
+        error = %strict_err,
+        "Lead overview YAML did not match GlobalReviewContext schema after strict / sanitized / fenced-block attempts; degrading to no global context"
     );
     None
 }
@@ -234,24 +287,31 @@ fn sanitize_overview_yaml(text: &str) -> String {
         .join("\n")
 }
 
-/// Set up concurrency-control infrastructure: semaphore, rate limiter, and
-/// completion counter.
+/// Build the concurrency semaphore the lead overview and the expert tasks
+/// share (M18-W11).
 ///
 /// The semaphore size goes through [`super::concurrent_llm_calls`], the sink
 /// guard that refuses a limit of 0 (a 0-permit semaphore would make every
-/// expert task wait forever, i.e. a silent hang). The CLI clears a 0 cap before
-/// it gets here, so if the guard fires something upstream let one through — the
-/// warning names this site.
-fn setup_concurrency_control(config: &AppConfig) -> (Arc<Semaphore>, Arc<RateLimiter>, Arc<AtomicUsize>) {
+/// LLM task wait forever, i.e. a silent hang). The CLI clears a 0 cap
+/// before it gets here, so if the guard fires something upstream let one
+/// through — the warning names this site.
+fn build_concurrency_semaphore(config: &AppConfig) -> Arc<Semaphore> {
     let max_concurrent = super::concurrent_llm_calls(Some(config), "team review pipeline");
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    Arc::new(Semaphore::new(max_concurrent))
+}
+
+/// Set up concurrency-control infrastructure: rate limiter and completion
+/// counter (the semaphore is built separately via
+/// [`build_concurrency_semaphore`] so the lead overview can acquire a
+/// permit before the expert pass wires up its tasks).
+fn setup_concurrency_control(config: &AppConfig) -> (Arc<RateLimiter>, Arc<AtomicUsize>) {
     let rate_limiter = Arc::new(RateLimiter::new(
         config.rate_limit.max_rpm,
         config.rate_limit.max_tpm,
         config.rate_limit.window_seconds,
     ));
     let completed_count = Arc::new(AtomicUsize::new(0));
-    (semaphore, rate_limiter, completed_count)
+    (rate_limiter, completed_count)
 }
 
 type Task = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<(ExpertReport, u64, u64)>> + Send>>;
@@ -325,10 +385,16 @@ fn create_expert_task(
         // a zero-finding or mis-parsed run can be debugged from the actual LLM
         // exchange, and reference the file path on the report (the renderer
         // shows a truncated excerpt + the full path).
+        //
+        // RENG-113 / M18-W1: the dump files hold the same LLM exchange the
+        // report markdown renders, and that exchange can quote a
+        // credential-shaped fixture. The dump therefore goes through the
+        // shared secure-write helper — `OpenOptions::mode(0o600)` on Unix,
+        // the response passed through `redact_text` first — instead of a
+        // raw `std::fs::write` that left the response at umask-derived
+        // `0644` and the credential quoted in the clear.
         if let Some(dir) = &dump_dir {
-            if let Err(e) = std::fs::create_dir_all(dir) {
-                eprintln!("warning: [verbose] failed to create dump dir {}: {e}", dir.display());
-            } else {
+            if super::create_secure_dump_dir(dir).is_some() {
                 let seq = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_nanos())
@@ -341,9 +407,9 @@ fn create_expert_task(
                 let prompt_path = dir.join(format!("{safe}.{seq}.prompt.txt"));
                 let resp_path = dir.join(format!("{safe}.{seq}.response.txt"));
                 let prompt_text = format!("=== SYSTEM ===\n{system}\n\n=== USER ===\n{user}\n");
-                if let Err(e) = std::fs::write(&prompt_path, &prompt_text) {
+                if let Err(e) = super::write_secure_dump_file(&prompt_path, &prompt_text) {
                     eprintln!("warning: [verbose] failed to write prompt dump: {e}");
-                } else if let Err(e) = std::fs::write(&resp_path, &result.content) {
+                } else if let Err(e) = super::write_secure_dump_file(&resp_path, &result.content) {
                     eprintln!("warning: [verbose] failed to write response dump: {e}");
                 } else {
                     report.raw_dump_path = Some(resp_path.display().to_string());
@@ -457,6 +523,18 @@ pub(crate) async fn run_experts_inner(
 )> {
     let mut files = parse_and_filter_diff(diff_raw);
 
+    // M18-W5 / M35 r1 P2-1: the `## Injected Context` rows are collected
+    // where the prompts are actually built (chunked branch / non-chunked
+    // branch), not from the pre-chunk file list. The M35 r0 fix used the
+    // pre-chunk list, which let chunked mode claim files that were never
+    // injected and miss files that were (default large-PR path is chunked;
+    // M32 r1's P2-2 invariant broken again through a different mechanism —
+    // reproduction A under-reported 2 of 4 injected files; reproduction B
+    // fabricated 2 rows for files the same report's coverage banner said
+    // were never assigned). AGENTS.md is still read once here because it's
+    // not chunk-bounded.
+    let agents_entry = read_agents_md_meta_if_applicable(&mr_info.project_path, config);
+
     // Assess large PR and set up chunking if needed
     let (non_aggregators, chunked_mode) = assess_and_chunk_diff(&mut files, experts, config);
 
@@ -471,6 +549,17 @@ pub(crate) async fn run_experts_inner(
     // Gather lightweight project context for the lead overview
     let project_context = gather_lead_project_context(mr_info, &files, base_ref, head_ref);
 
+    // Concurrency cap is set up here (M18-W11) — before the lead overview
+    // call — so the overview joins the same semaphore accounting as the
+    // expert pass. There is no wall-clock saving today: the overview
+    // result is `clone()`d into every expert task, so the overview is a
+    // strict serial prerequisite and the permit it acquires has zero
+    // contenders (the experts are not yet spawned). The split exists so
+    // a future restructure that does parallelise overview + experts
+    // (e.g. by letting experts run with an empty `global_context` first
+    // and re-prompting once it lands) gets the cap right automatically.
+    let semaphore = build_concurrency_semaphore(config);
+
     // Pass 1: Lead Overview (now runs for all PR sizes)
     let global_context: Option<GlobalReviewContext> = build_lead_overview(
         mr_info,
@@ -479,6 +568,7 @@ pub(crate) async fn run_experts_inner(
         llm_configs,
         config.project.as_ref(),
         &project_context,
+        semaphore.clone(),
         llm_sink.clone(),
     )
     .await;
@@ -508,7 +598,7 @@ pub(crate) async fn run_experts_inner(
         files.len(),
     );
 
-    let (semaphore, rate_limiter, completed_count) = setup_concurrency_control(config);
+    let (rate_limiter, completed_count) = setup_concurrency_control(config);
 
     let total_experts = non_aggregators.len();
     let total_tasks = chunked_mode.as_ref().map(|(_, a)| a.len()).unwrap_or(total_experts);
@@ -520,6 +610,17 @@ pub(crate) async fn run_experts_inner(
     // dropped from the report).
     let mut tasks: Vec<Task> = Vec::new();
     let mut task_files: Vec<Vec<String>> = Vec::new();
+    // M18-W5 / M35 r1 P2-1: collect the `## Injected Context` rows at the
+    // build sites where the prompts are actually constructed. Each
+    // `_with_meta` call yields `.body` (byte-identical to the no-meta
+    // builder we used previously — so prompt payloads are unchanged) and
+    // `.entries` (the per-file rows the lead summary surfaces). The hunks
+    // chunking strategy can place the same file in several chunks; we
+    // dedupe by `source` below before attaching.
+    let mut injected_entries: Vec<InjectedContextEntry> = Vec::new();
+    if let Some(agents) = agents_entry {
+        injected_entries.push(agents);
+    }
 
     if let Some((_chunks, assignments)) = chunked_mode {
         // Root cause A: `route_chunks` already bounded each expert to
@@ -536,18 +637,22 @@ pub(crate) async fn run_experts_inner(
             let task_diff_text = processor::render_diff_text(&files_for_task);
             let task_lang = filter::detect_language(&files_for_task);
             // Chunked mode: each task injects only the contents of the
-            // files in its own chunk assignment.
-            let task_file_contents = crate::context::file_contents::build_file_contents_section(
+            // files in its own chunk assignment. `_with_meta` runs the
+            // same per-file cap + total-budget check + trim-once flow as
+            // the no-meta builder, so the body bytes are unchanged from
+            // before — only `entries` is captured here for the row table.
+            let task_contents = crate::context::file_contents::build_file_contents_section_with_meta(
                 &files_for_task,
                 &mr_info.project_path,
                 max_context_file_bytes,
             );
+            injected_entries.extend(task_contents.entries);
 
             tasks.push(create_expert_task(
                 expert,
                 mr_info.clone(),
                 task_diff_text,
-                task_file_contents,
+                task_contents.body,
                 task_lang,
                 llm_configs.to_vec(),
                 config.clone(),
@@ -565,18 +670,19 @@ pub(crate) async fn run_experts_inner(
     } else {
         // Non-chunked mode: all experts share one injection built from the
         // full changed-file list.
-        let file_contents = crate::context::file_contents::build_file_contents_section(
+        let file_contents_report = crate::context::file_contents::build_file_contents_section_with_meta(
             &files,
             &mr_info.project_path,
             max_context_file_bytes,
         );
+        injected_entries.extend(file_contents_report.entries);
         for expert in non_aggregators {
             task_files.push(files.iter().map(|f| f.path.clone()).collect());
             tasks.push(create_expert_task(
                 expert,
                 mr_info.clone(),
                 diff_text.clone(),
-                file_contents.clone(),
+                file_contents_report.body.clone(),
                 lang.clone(),
                 llm_configs.to_vec(),
                 config.clone(),
@@ -592,6 +698,16 @@ pub(crate) async fn run_experts_inner(
             ));
         }
     }
+
+    // M35 r1 P2-1: the hunks chunking strategy can place the same file in
+    // more than one chunk — the per-task entries captured above would then
+    // emit duplicate rows. Dedup by `source` (the same key the
+    // per-file `with_meta` producer uses internally), keeping the first
+    // occurrence so the per-file byte count and sha reflect the first
+    // chunk's view. The renderer prints one row per source, which is
+    // the unit of "an injection" — collapse duplicates here so the audit
+    // table stops claiming two injections of the same file.
+    dedup_injected_entries(&mut injected_entries);
 
     let results: Vec<anyhow::Result<(ExpertReport, u64, u64)>> = join_all(tasks).await;
 
@@ -617,12 +733,12 @@ pub(crate) async fn run_experts_inner(
     };
     if coverage.unreviewed_files.is_empty() {
         info!(
-            "Coverage: {} of {} files reviewed (complete)",
+            "File routing: {} of {} files assigned to a successful expert task (complete)",
             coverage.reviewed_files, coverage.total_files
         );
     } else {
         tracing::warn!(
-            "Coverage: {} of {} files reviewed; {} files not covered by any expert: {}",
+            "File routing: {} of {} files assigned to a successful expert task; {} file(s) not assigned to any expert: {}",
             coverage.reviewed_files,
             coverage.total_files,
             coverage.unreviewed_files.len(),
@@ -670,8 +786,23 @@ pub(crate) async fn run_experts_inner(
     // Optional LLM verification pass: re-check findings against the diff
     // hunks, the referenced files' full content, and the changed-file list.
     // Fail-open by construction — `verify_findings` never returns an error.
-    let mut dropped_findings = if config.report.verification_pass {
-        let dropped = verifier::verify_findings(
+    //
+    // The M31 rich `VerificationStats` (findings_checked / batches_total /
+    // batches_llm_failed / batches_parse_failed / batches_skipped / skipped /
+    // dropped) is captured here so we can both log the full breakdown and
+    // project it onto the M32 simple `{checked, skipped, dropped}` shape
+    // that lives on `ConsolidatedReport` and feeds the lead summary's
+    // `Verification pass: ran on N, skipped M, dropped K` line. Mapping
+    // rationale: `checked` counts *findings* the verifier saw (the "ran on
+    // N" number is per-finding — "every kept finding was examined" is what
+    // readers ask for); `skipped` sums the three failure kinds
+    // (`batches_llm_failed + batches_parse_failed + batches_skipped`, which
+    // M31 already exposes as the aggregate `skipped`); `dropped` is the
+    // count of findings the verifier explicitly marked for removal.
+    let mut dropped_findings = Vec::new();
+    let mut verification_stats: Option<verifier::VerificationStats> = None;
+    if config.report.verification_pass {
+        let outcome = verifier::verify_findings_outcome(
             &mut reports,
             &files,
             &mr_info.project_path,
@@ -680,17 +811,33 @@ pub(crate) async fn run_experts_inner(
             llm_sink.clone(),
         )
         .await;
+        let rich = outcome.stats;
+        let dropped = outcome.dropped;
         // Log unconditionally so a run that dropped nothing is still visible.
-        let checked = reports.iter().map(|r| r.findings.len()).sum::<usize>() + dropped.len();
-        info!(
-            "Verification pass: checked {} findings, dropped {}",
-            checked,
-            dropped.len()
-        );
-        dropped
-    } else {
-        Vec::new()
-    };
+        // The M32 renderer rewrites this line into
+        // `Verification pass: ran on N, skipped M, dropped K`
+        // — the INFO line keeps the same fields so log scrapers can match.
+        if rich.skipped > 0 {
+            info!(
+                "Verification pass: checked {} findings across {} batch(es); skipped {} batch(es) ({} parse failures, {} LLM errors, {} empty verdict list), dropped {}",
+                rich.findings_checked,
+                rich.batches_total,
+                rich.skipped,
+                rich.batches_parse_failed,
+                rich.batches_llm_failed,
+                rich.batches_skipped,
+                dropped.len()
+            );
+        } else {
+            info!(
+                "Verification pass: checked {} findings, dropped {}",
+                rich.findings_checked,
+                dropped.len()
+            );
+        }
+        verification_stats = Some(rich);
+        dropped_findings = dropped;
+    }
 
     // Feedback-driven filtering (A9): drop findings the user previously
     // marked as false positives, matched by stable fingerprint. Runs after
@@ -731,6 +878,32 @@ pub(crate) async fn run_experts_inner(
         );
     }
 
+    // M18-W5 + M18-W7 wiring (M35): attach the post-processing signals the
+    // lead summary renders from `ConsolidatedReport`. Set BEFORE adjudication
+    // and `refresh_assessment` so a refresh-cycle pass also sees them on the
+    // report — neither set mutates `consolidated.findings` and both fields
+    // survive the round-trip.
+    //
+    // `verification_stats`: the verifier ran (skip → `None`), so we project
+    // the M31 rich stats onto the M32 simple {checked, skipped, dropped}
+    // shape. The full per-kind breakdown still lands in the INFO line above
+    // and in the per-task `logs.ndjson` entries; the report-side copy
+    // deliberately stays at "ran on N findings, M skipped, K dropped" so the
+    // lead summary fits on one line. `Some(_)` here is what makes
+    // `render_lead_summary` print the line at all (the renderer treats
+    // `None` and all-zero identically, which is exactly the silent-pass
+    // failure mode the field exists to prevent).
+    consolidated = consolidated.with_injected_context(InjectedContext {
+        entries: injected_entries,
+    });
+    if let Some(rich) = verification_stats {
+        consolidated = consolidated.with_verification_stats(VerificationStats {
+            checked: rich.findings_checked,
+            skipped: rich.skipped,
+            dropped: rich.dropped,
+        });
+    }
+
     // Final adjudication pass (false-positive reduction, phase 3): the
     // lead-model LLM re-examines each consolidated finding at or above
     // `adjudicate_min_severity` against the FULL content of the cited file —
@@ -756,6 +929,23 @@ pub(crate) async fn run_experts_inner(
             .iter()
             .filter(|f| adjudicator::severity_rank(&f.severity) >= adjudicator::severity_rank(&min_severity))
             .count();
+        // M18-W6 (pipeline 侧): when the user widens `adjudicate_min_severity`
+        // past what survived lead-consolidation, the pass silently does
+        // nothing and the report reads as "adjudication ran, dropped 0".
+        // Consolidation can downgrade confidence-thin findings to
+        // `Severity::Note` (rank 0), so a `min_severity = Low` (rank 1)
+        // gate then sees 0 candidates — the user thinks adjudication is
+        // doing its job. Surface the count of downgraded findings + the
+        // config knob to reach them in the log line so the next reader
+        // knows where to look. The M32 consolidator-side semantic
+        // change (raising `min_confidence` to keep the finding at its
+        // reported severity) is independent of this hint.
+        let total_findings = consolidated.findings.len();
+        let below_min = consolidated
+            .findings
+            .iter()
+            .filter(|f| adjudicator::severity_rank(&f.severity) < adjudicator::severity_rank(&min_severity))
+            .count();
         // Select the lead/consolidation model role for the adjudicator, as
         // with the Pass 1 overview; fall back to the full config list.
         let adjudication_configs: Vec<LLMConfig> = match &lead_for_adjudication {
@@ -778,12 +968,28 @@ pub(crate) async fn run_experts_inner(
             llm_sink.clone(),
         )
         .await;
-        info!(
-            "Adjudication pass: {} candidate(s) at or above {:?}, dropped {}",
-            candidates,
-            min_severity,
-            removed.len()
-        );
+        if candidates == 0 && total_findings > 0 {
+            // 0 candidates is the audit-flagged silent-drop case: the gate
+            // excludes every finding, so the pass is a no-op. Surface the
+            // exact knob the operator can turn to include more findings
+            // (drop `adjudicate_min_severity` to "note") and the count of
+            // findings the consolidation pass demoted below the gate.
+            info!(
+                "Adjudication pass: 0 candidate(s) at or above {:?}; {} finding(s) consolidated \
+                 below the gate (set `adjudicate_min_severity = \"note\"` to include them, and check \
+                 `min_confidence` if these were demoted by the consolidator). dropped {}",
+                min_severity,
+                below_min,
+                removed.len()
+            );
+        } else {
+            info!(
+                "Adjudication pass: {} candidate(s) at or above {:?}, dropped {}",
+                candidates,
+                min_severity,
+                removed.len()
+            );
+        }
         consolidated.adjudicated_removed = removed;
     }
 
@@ -815,6 +1021,56 @@ pub(crate) async fn run_experts_inner(
         dropped_findings,
         consolidated,
     ))
+}
+
+/// Read the local `AGENTS.md` for the `## Injected Context` row when
+/// `inject_agents_md` is enabled and the project path is a real local
+/// directory (M18-W5, wired in M35, rewritten in M35 r1).
+///
+/// **When the row actually renders:** local CLI / diff / path / repo
+/// reviews with `mr_info.project_path` pointing at an existing directory.
+/// **When it does NOT:** server-side reviews (GitLab MR via webhook, GitLab
+/// REST submit, GitHub PR) carry `mr_info.project_path = "group/project"`
+/// — a non-directory string — so the row is silently absent. The server
+/// path injects a provider-fetched AGENTS.md into `mr_info.agents_md` for
+/// the prompt body, but it doesn't have an on-disk file to stat for the
+/// meta row; the table is intentionally local-only, and the renderer
+/// suppresses the section when `entries` is empty. Callers that need a
+/// "no row" guarantee can rely on `InjectedContext::entries.is_empty()`
+/// on the resulting report.
+///
+/// Same cap ([`crate::context::agents_md::DEFAULT_MAX_FILE_BYTES`]) and
+/// same missing/symlink/oversized silent-skip behavior as the CLI/server
+/// callers' `prepare_review` / `resolve.rs` AGENTS.md handling, so the
+/// meta row matches the bytes the LLM saw when a row is emitted.
+pub(super) fn read_agents_md_meta_if_applicable(
+    project_path: &str,
+    config: &AppConfig,
+) -> Option<InjectedContextEntry> {
+    use crate::context::agents_md::{read_local_agents_md_with_meta, DEFAULT_MAX_FILE_BYTES};
+
+    if !config.report.inject_agents_md || !std::path::Path::new(project_path).is_dir() {
+        return None;
+    }
+    read_local_agents_md_with_meta(project_path.as_ref(), DEFAULT_MAX_FILE_BYTES).map(|r| r.meta)
+}
+
+/// Drop duplicate rows by `source` from a per-task accumulation.
+///
+/// M35 r1: the hunks chunking strategy can place the same changed file in
+/// more than one chunk (e.g. one chunk for its first hunk, another for a
+/// later hunk); each task's `_with_meta` build then emits the row again.
+/// The audit table renders one row per source — collapse duplicates here
+/// so the report stops claiming two injections of the same file.
+///
+/// `retain` keeps the **first** occurrence; if multiple chunks each
+/// truncated the same file differently (rare; would require the per-file
+/// cap to bind in one chunk and not the other), the first-chunk row is
+/// what the reader sees. The first row also wins over later rows in any
+/// "did an expert receive this file at all" question.
+pub(super) fn dedup_injected_entries(entries: &mut Vec<InjectedContextEntry>) {
+    let mut seen = std::collections::HashSet::new();
+    entries.retain(|e| seen.insert(e.source.clone()));
 }
 
 #[cfg(test)]
@@ -987,22 +1243,78 @@ mod global_context_parse_tests {
     /// `Semaphore::new(0)` (the hang the CLI clears a 0 cap for). The guard is
     /// the shared [`super::concurrent_llm_calls`]; this pins the site.
     #[test]
-    fn setup_concurrency_control_never_builds_a_zero_permit_semaphore() {
+    fn build_concurrency_semaphore_never_builds_a_zero_permit_semaphore() {
         let config = |cap: Option<usize>| -> AppConfig {
             serde_json::from_value(serde_json::json!({ "max_concurrent_llm_calls": cap }))
                 .expect("minimal AppConfig must deserialize")
         };
 
         assert_eq!(
-            setup_concurrency_control(&config(Some(0))).0.available_permits(),
+            build_concurrency_semaphore(&config(Some(0))).available_permits(),
             super::super::DEFAULT_LLM_CONCURRENCY,
             "0 must degrade to the default, never to a 0-permit semaphore"
         );
-        assert_eq!(setup_concurrency_control(&config(None)).0.available_permits(), 6);
+        assert_eq!(build_concurrency_semaphore(&config(None)).available_permits(), 6);
         assert_eq!(
-            setup_concurrency_control(&config(Some(3))).0.available_permits(),
+            build_concurrency_semaphore(&config(Some(3))).available_permits(),
             3,
             "a real limit still reaches the semaphore"
         );
+    }
+
+    /// M18-W12: a downgrade path (tab indent / fenced block) now logs at
+    /// INFO with a `reason_code` field, and the final `None` does too. The
+    /// previous code logged the `None` at WARN — same level as real LLM
+    /// failures, drowning the genuinely-informative errors (NAS 24 days:
+    /// 100 % of the WARN budget was this benign degradation).
+    ///
+    /// Pins the regression by capturing the emitted event and asserting both
+    /// the level split (`WARN` absent, `INFO` present) and the structured
+    /// `reason_code = "schema_mismatch"` field. The capture is wired with
+    /// [`tracing::subscriber::with_default`] so this test does not depend
+    /// on the process-global subscriber (which other test modules — notably
+    /// `team::adjudicator::tests` — install first via RENG-70; a global
+    /// install here would silently fail and the events would land in
+    /// another module's sink, making this assertion empty). A revert of
+    /// the level / reason_code change surfaces here immediately (WARN
+    /// present or `schema_mismatch` missing both fail).
+    #[test]
+    fn parse_global_review_context_logs_reason_codes_not_warnings() {
+        use std::sync::{Arc, Mutex};
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let buf_for_factory = buf.clone();
+        let make_writer = move || -> CaptureWriter { CaptureWriter(buf_for_factory.clone()) };
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(make_writer)
+            .with_max_level(tracing::Level::INFO)
+            .finish();
+        let result =
+            tracing::subscriber::with_default(subscriber, || parse_global_review_context("not yaml at all: [unclosed"));
+        assert!(result.is_none());
+        let text = String::from_utf8_lossy(&buf.lock().unwrap()).to_string();
+        assert!(
+            !text.contains("WARN") && !text.contains(" warn"),
+            "the `None` fallback must not log at WARN: {text}"
+        );
+        assert!(
+            text.contains("INFO") && text.contains("schema_mismatch"),
+            "the `None` fallback must log at INFO + reason_code=schema_mismatch: {text}"
+        );
+    }
+
+    /// Per-event writer used by [`parse_global_review_context_logs_reason_codes_not_warnings`].
+    /// Cheaply cloneable (the inner `Arc<Mutex<Vec<u8>>>` is shared with the
+    /// `tracing_subscriber::fmt` factory closure).
+    struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 }

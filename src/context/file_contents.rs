@@ -9,27 +9,42 @@
 //! — remote reviews, deleted files, non-UTF-8 content, unsafe paths — are
 //! skipped silently.
 
+use crate::context::agents_md::InjectedContextEntry;
 use crate::models::DiffFile;
 
 /// Per-file byte cap for injected contents. Content beyond the cap is
 /// truncated and the truncation is noted inline.
 pub(crate) const MAX_SINGLE_FILE_BYTES: usize = 20_000;
 
-/// Build the `## Full File Contents` body for the given diff files.
+/// Build the `## Full File Contents` body for the given diff files, plus the
+/// per-file [`InjectedContextEntry`] rows the M18-W5 `## Injected Context`
+/// report section needs.
 ///
 /// Files are ordered by change size (additions + deletions, descending, path
 /// as tie-break) so the most heavily modified files win the `max_total_bytes`
 /// budget; files that no longer fit are listed under an "Omitted" heading.
-/// Returns an empty string when the budget is zero, the project path is not
-/// a readable local directory (e.g. remote reviews), or no file content
-/// could be read.
-pub(crate) fn build_file_contents_section(files: &[DiffFile], project_path: &str, max_total_bytes: usize) -> String {
+/// Returns an empty [`FileContentsReport`] when the budget is zero, the
+/// project path is not a readable local directory (e.g. remote reviews), or
+/// no file content could be read.
+///
+/// M35 r1: the orchestrator previously had a thin `build_file_contents_section`
+/// wrapper that returned just the body. M35 wired the orchestrator to the
+/// `_with_meta` variant directly (so chunked-mode per-task builds can
+/// capture the meta rows from the same call site that produces the body —
+/// P2-1), so the body-only wrapper has no remaining caller. Removed in
+/// M35 r1; both the body and the entries now come from this single
+/// function.
+pub(crate) fn build_file_contents_section_with_meta(
+    files: &[DiffFile],
+    project_path: &str,
+    max_total_bytes: usize,
+) -> FileContentsReport {
     if max_total_bytes == 0 || files.is_empty() {
-        return String::new();
+        return FileContentsReport::default();
     }
     let root = std::path::Path::new(project_path);
     if !root.is_dir() {
-        return String::new();
+        return FileContentsReport::default();
     }
 
     let mut ordered: Vec<&DiffFile> = files.iter().collect();
@@ -39,39 +54,91 @@ pub(crate) fn build_file_contents_section(files: &[DiffFile], project_path: &str
             .then_with(|| a.path.cmp(&b.path))
     });
 
-    let mut out = String::new();
+    let mut body = String::new();
     let mut used = 0usize;
     let mut omitted: Vec<&str> = Vec::new();
+    let mut meta: Vec<InjectedContextEntry> = Vec::new();
 
     for file in ordered {
-        let Some(content) = read_changed_file(root, &file.path, MAX_SINGLE_FILE_BYTES) else {
+        let Some(injected_content) = read_changed_file(root, &file.path, MAX_SINGLE_FILE_BYTES) else {
             continue; // unsafe path, unreadable, or non-UTF-8 → skip silently
         };
-        if used + content.len() > max_total_bytes {
+        let original_bytes = std::fs::metadata(root.join(&file.path))
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        let per_file_truncated = injected_content.len() < original_bytes || original_bytes > MAX_SINGLE_FILE_BYTES;
+
+        // M35 (M32 review r2 P3-2): the displayed slice the LLM sees is
+        // `injected_content.trim_end()` — the body uses the trimmed slice.
+        // Trim once, up front, and feed that single `displayed` value to
+        // every sink (budget check, `injected_bytes`, SHA-256 hash, body)
+        // so they cannot disagree. Previously the body embedded
+        // `injected_content.trim_end()` while the meta row hashed and
+        // counted the un-trimmed `injected_content` — the embedded slice
+        // and the fingerprint were off by a few trailing-newline bytes.
+        //
+        // P2-2 (review r1): the meta row was pushed *before* the
+        // total-budget check before this fix, so a file that was then
+        // skipped by the budget (`omitted.push(...); continue`) still got
+        // a row whose `injected_bytes = content.len()` and
+        // `truncated = false`, rendering as `8192 / 8192 bytes (100%) |
+        // ok` while the prompt body listed it under "Omitted". The
+        // budget check now runs *before* the row is pushed; files
+        // rejected by the budget show up under "Omitted (context budget
+        // exhausted)" in the prompt body, and their row is intentionally
+        // absent from `## Injected Context` so the audit cannot disagree
+        // with the body.
+        let displayed = injected_content.trim_end();
+
+        if used + displayed.len() > max_total_bytes {
             omitted.push(&file.path);
             continue;
         }
-        used += content.len();
+        used += displayed.len();
+
+        meta.push(InjectedContextEntry {
+            source: format!("changed file {}", file.path),
+            original_bytes,
+            injected_bytes: displayed.len(),
+            truncated: per_file_truncated,
+            sha256: crate::context::agents_md::sha256_hex(displayed),
+        });
+
         let ext = std::path::Path::new(&file.path)
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
-        out.push_str(&format!(
-            "### `{}`\n```{}\n{}\n```\n\n",
-            file.path,
-            ext,
-            content.trim_end()
-        ));
+        body.push_str(&format!("### `{}`\n```{}\n{}\n```\n\n", file.path, ext, displayed,));
     }
 
     if !omitted.is_empty() {
-        out.push_str("### Omitted (context budget exhausted)\n");
+        body.push_str("### Omitted (context budget exhausted)\n");
         for path in omitted {
-            out.push_str(&format!("- `{}`\n", path));
+            body.push_str(&format!("- `{}`\n", path));
         }
     }
 
-    out.trim_end().to_string()
+    FileContentsReport {
+        body: body.trim_end().to_string(),
+        entries: meta,
+    }
+}
+
+/// What [`build_file_contents_section_with_meta`] returns: the prompt section
+/// plus the meta rows the M18-W5 `## Injected Context` block surfaces.
+///
+/// `entries` is consumed by the orchestrator (M35), which feeds it into
+/// `ConsolidatedReport::injected_context` for the lead-summary renderer.
+/// The body and entries are produced from a single call, so the two cannot
+/// disagree — the audit's RENG-19 "截断不可见" invariant plus the M32
+/// P2-2 "table cannot lie about injection" rule both pin to the same
+/// per-file scan.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FileContentsReport {
+    /// The actual prompt-body markdown (the fenced `### ...` blocks).
+    pub body: String,
+    /// Per-changed-file `## Injected Context` rows.
+    pub entries: Vec<InjectedContextEntry>,
 }
 
 /// Read a changed file from the local checkout, capped at `max_bytes`.
@@ -126,7 +193,7 @@ mod tests {
         std::fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
 
         let files = vec![make_diff_file("src/main.rs", 3, 1)];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("### `src/main.rs`"));
         assert!(section.contains("```rs"));
@@ -138,7 +205,7 @@ mod tests {
     fn test_remote_or_missing_project_path_yields_empty() {
         let files = vec![make_diff_file("src/main.rs", 3, 1)];
         // "owner/repo" style project path does not exist locally → no injection.
-        let section = build_file_contents_section(&files, "owner/repo-does-not-exist-xyz", 60_000);
+        let section = build_file_contents_section_with_meta(&files, "owner/repo-does-not-exist-xyz", 60_000).body;
         assert!(section.is_empty());
     }
 
@@ -147,7 +214,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.rs"), "fn a() {}\n").unwrap();
         let files = vec![make_diff_file("a.rs", 1, 0)];
-        assert!(build_file_contents_section(&files, dir.path().to_str().unwrap(), 0).is_empty());
+        assert!(
+            build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 0)
+                .body
+                .is_empty()
+        );
     }
 
     #[test]
@@ -157,7 +228,7 @@ mod tests {
         std::fs::write(dir.path().join("big.rs"), &big).unwrap();
 
         let files = vec![make_diff_file("big.rs", 10, 0)];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("file truncated: exceeded 20000 bytes"));
         // Truncated content (20000 + note) fits in the section.
@@ -177,7 +248,7 @@ mod tests {
             make_diff_file("large.rs", 90, 10),
             make_diff_file("mid.rs", 40, 5),
         ];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 210);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 210).body;
 
         // Priority: large (100 changes) → mid (45) → small (1, omitted).
         assert!(section.contains("### `large.rs`"));
@@ -191,6 +262,88 @@ mod tests {
         assert!(large_pos < mid_pos);
     }
 
+    /// M35 (M32 review r2 P3-3): the `_with_meta` producer's omitted-file
+    /// behavior — a file rejected by the budget check must NOT receive a
+    /// row in `entries`. The audit's P2-2 worry was that an admitted row
+    /// could render "8192 / 8192 bytes (100%) | ok" while the prompt body
+    /// listed the file under "Omitted"; that's the bug surface this test
+    /// pins so the orchestrator (M35) wiring can rely on the invariant.
+    #[test]
+    fn test_omitted_file_has_no_meta_row() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("fits.rs"), "fn fits() {}\n".repeat(50)).unwrap(); // ~700 bytes
+        std::fs::write(dir.path().join("huge.rs"), "h".repeat(5000)).unwrap();
+
+        let files = vec![
+            make_diff_file("huge.rs", 100, 0), // huge.rs beats fits.rs to the budget
+            make_diff_file("fits.rs", 1, 0),
+        ];
+        // Budget that admits huge.rs (5000 bytes) but rejects fits.rs.
+        let report = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 5_000);
+
+        assert!(report.body.contains("### `huge.rs`"));
+        assert!(!report.body.contains("### `fits.rs`"));
+        assert!(report.body.contains("### Omitted (context budget exhausted)"));
+        assert!(report.body.contains("- `fits.rs`"));
+
+        // huge.rs has a row; fits.rs deliberately does not.
+        let sources: Vec<&str> = report.entries.iter().map(|e| e.source.as_str()).collect();
+        assert!(
+            sources.iter().any(|s| s.contains("huge.rs")),
+            "huge.rs is admitted and must carry a meta row; got {sources:?}"
+        );
+        assert!(
+            !sources.iter().any(|s| s.contains("fits.rs")),
+            "fits.rs is omitted and must NOT carry a meta row; got {sources:?}"
+        );
+    }
+
+    /// M35 (M32 review r2 P3-2): the body, `injected_bytes`, and
+    /// `sha256` all reference the *trimmed* slice the LLM actually sees,
+    /// not the post-truncation `read_changed_file` return value (which
+    /// retains trailing whitespace from `read_to_string`). Pin the
+    /// invariant so a future refactor that diverges again is caught.
+    #[test]
+    fn test_meta_row_hash_and_bytes_match_trimmed_body() {
+        let dir = tempfile::tempdir().unwrap();
+        // File ends with newline + trailing whitespace; trim_end must
+        // strip them from the meta row, hash, and body simultaneously.
+        std::fs::write(dir.path().join("a.rs"), "fn a() {}\n\n\n").unwrap();
+
+        let files = vec![make_diff_file("a.rs", 1, 0)];
+        let report = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000);
+
+        assert_eq!(report.entries.len(), 1);
+        let entry = &report.entries[0];
+        // Original on-disk bytes include the trailing newlines; trimmed
+        // displayed bytes do not. The row's `injected_bytes` matches the
+        // body the LLM actually saw (the trimmed one).
+        assert_eq!(entry.original_bytes, "fn a() {}\n\n\n".len());
+        assert!(
+            entry.injected_bytes < entry.original_bytes,
+            "trim_end should shorten the injected byte count"
+        );
+
+        // The body fences `displayed` in ```<ext>\n{displayed}\n```,
+        // so the displayed slice appears between the language tag and
+        // the closing fence. Pin the substring that includes the
+        // ext tag so a regression that re-introduces the trailing
+        // newlines is caught.
+        let displayed = "fn a() {}";
+        let expected_segment = format!("```rs\n{displayed}\n```");
+        assert!(
+            report.body.contains(&expected_segment),
+            "the body must contain `{expected_segment}`; body was: {report_body}",
+            report_body = report.body
+        );
+        // Body length is strictly the displayed bytes, not the
+        // un-trimmed `injected_content`. (The body has additional
+        // "### `a.rs`" header + final `trim_end()` so we don't check an
+        // exact match — only the substring.)
+        let expected_hash = crate::context::agents_md::sha256_hex(displayed);
+        assert_eq!(entry.sha256, expected_hash);
+    }
+
     #[test]
     fn test_budget_falls_through_to_smaller_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -199,7 +352,7 @@ mod tests {
 
         let files = vec![make_diff_file("huge.rs", 100, 0), make_diff_file("tiny.rs", 1, 0)];
         // Budget fits tiny.rs but not huge.rs.
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 100);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 100).body;
 
         assert!(section.contains("### `tiny.rs`"));
         assert!(!section.contains("### `huge.rs`"));
@@ -212,7 +365,7 @@ mod tests {
         std::fs::write(dir.path().join("exists.rs"), "fn e() {}\n").unwrap();
 
         let files = vec![make_diff_file("deleted.rs", 0, 20), make_diff_file("exists.rs", 5, 0)];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("### `exists.rs`"));
         // No omitted note for files that simply could not be read.
@@ -229,7 +382,7 @@ mod tests {
             make_diff_file("/etc/passwd", 40, 0),
             make_diff_file("ok.rs", 1, 0),
         ];
-        let section = build_file_contents_section(&files, dir.path().to_str().unwrap(), 60_000);
+        let section = build_file_contents_section_with_meta(&files, dir.path().to_str().unwrap(), 60_000).body;
 
         assert!(section.contains("### `ok.rs`"));
         assert!(!section.contains("escape.rs"));

@@ -344,6 +344,16 @@ pub(crate) async fn run_review_common(
         .with_dropped_findings(dropped_findings)
         .with_consolidated(consolidated)
         .with_errors(expert_failures);
+    // M40 / RENG P1-3: the webhook path now runs the compliance sub-step
+    // when the resolved `AppConfig` carries a compliance gate. `url`
+    // and `token` are already in hand here (the webhook path always
+    // has both — local / static-diff reviews do not come through this
+    // function).
+    if let Some(compliance) =
+        crate::compliance::run_for_review(&config.compliance, &mr_info, url, &diff, &llm_configs, token).await
+    {
+        output = output.with_compliance(compliance);
+    }
     if !output.errors.is_empty() {
         tracing::warn!(
             failed = output.errors.len(),

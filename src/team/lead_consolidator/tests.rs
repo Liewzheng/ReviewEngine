@@ -151,10 +151,93 @@ fn test_filter_low_confidence_downgrades() {
     let result = config.consolidate(&reports, None);
     // Low confidence finding should be downgraded (not removed by default)
     assert_eq!(result.low_confidence_removed, 0);
+    // M18-W6: the same run counts how many findings the filter re-routed,
+    // so a later user setting `adjudicate_min_severity = "low"` can see
+    // exactly which findings the confidence filter quietly moved to Note.
+    assert_eq!(result.confidence_downgraded, 1);
+    assert!(
+        result.assessment.tl_dr.contains("Confidence filter downgraded"),
+        "TL;DR must surface the downgraded count when adjudication will see it: {}",
+        result.assessment.tl_dr
+    );
     // The downgraded finding severity changed from High → Medium
     let downgraded = result.findings.iter().find(|f| f.file == "b.rs");
     assert!(downgraded.is_some());
     assert_eq!(downgraded.unwrap().severity, Severity::Medium);
+    // P1-1 (review r1): the previous banner said "raise min_confidence or
+    // enable drop_low_confidence", which is the *opposite* of correct —
+    // both make things worse. The new banner must explicitly LOWER
+    // min_confidence (or lower adjudicate_min_severity) and must
+    // explicitly warn against drop_low_confidence.
+    assert!(
+        result.assessment.tl_dr.contains("LOWER min_confidence"),
+        "banner must suggest LOWERING min_confidence, got: {}",
+        result.assessment.tl_dr
+    );
+    assert!(
+        result.assessment.tl_dr.contains("Do NOT enable drop_low_confidence"),
+        "banner must warn against drop_low_confidence, got: {}",
+        result.assessment.tl_dr
+    );
+    assert!(
+        !result.assessment.tl_dr.contains("默认 min_confidence = 6"),
+        "banner must NOT hardcode the default value, got: {}",
+        result.assessment.tl_dr
+    );
+    assert!(
+        !result.assessment.tl_dr.contains("raise min_confidence"),
+        "banner must NOT suggest raising min_confidence, got: {}",
+        result.assessment.tl_dr
+    );
+    // P2-3 (review r1): the actual filter policy must travel with the
+    // report so the post-adjudication audit-info field stays accurate
+    // even when the task resumes on a different worker thread.
+    assert_eq!(result.confidence_filter_policy.min_confidence, 6);
+    assert!(!result.confidence_filter_policy.drop_low_confidence);
+}
+
+#[test]
+fn test_filter_low_confidence_policy_carries_through_refresh_assessment() {
+    // P2-3 (review r1): the previous thread-local trick went blank on the
+    // `adjudicate(...)` await when the task resumed on another worker.
+    // The fix is to put the policy on the report. Simulate the path:
+    // consolidate → adjudication mutates findings → refresh_assessment
+    // reads the policy back from the report.
+    let config = ConsolidatorConfig {
+        min_confidence: 8,         // non-default so we can detect drift
+        drop_low_confidence: true, // ditto
+        deduplicate: true,
+        scoring: None,
+        expert_weights: ExpertWeights::new(),
+    };
+    let findings = vec![
+        make_finding(Severity::Critical, 9, "a.rs", Some(1), "Good"),
+        make_finding(Severity::High, 5, "b.rs", Some(2), "Below"),
+        make_finding(Severity::Medium, 4, "c.rs", Some(3), "Also below"),
+    ];
+    let reports = vec![make_report("tester", findings)];
+    let mut consolidated = config.consolidate(&reports, None);
+    assert_eq!(consolidated.low_confidence_removed, 2);
+    assert_eq!(consolidated.confidence_filter_policy.min_confidence, 8);
+    assert!(consolidated.confidence_filter_policy.drop_low_confidence);
+
+    // Simulate adjudication removing the surviving finding.
+    consolidated.findings.clear();
+    consolidated
+        .adjudicated_removed
+        .push(crate::team::verifier::DroppedFinding {
+            finding: make_finding(Severity::Critical, 9, "a.rs", Some(1), "high severity"),
+            reason: "contradicts ground truth".to_string(),
+        });
+    // refresh_assessment must preserve the policy — even if it ran on a
+    // different worker thread (the test serializes everything on one, but
+    // the field is what matters).
+    consolidated.refresh_assessment(reports.len());
+    assert_eq!(
+        consolidated.confidence_filter_policy.min_confidence, 8,
+        "the policy must survive refresh_assessment"
+    );
+    assert!(consolidated.confidence_filter_policy.drop_low_confidence);
 }
 
 #[test]
@@ -173,6 +256,11 @@ fn test_filter_low_confidence_drops() {
     let reports = vec![make_report("tester", findings)];
     let result = config.consolidate(&reports, None);
     assert_eq!(result.low_confidence_removed, 1);
+    // M18-W6: drop_low_confidence = true → the filter removes findings
+    // outright rather than downgrading them; the `confidence_downgraded`
+    // count must stay 0 (it counts *downgrades*, not removals).
+    assert_eq!(result.confidence_downgraded, 0);
+    assert!(!result.assessment.tl_dr.contains("Confidence filter downgraded"));
     assert_eq!(result.findings.len(), 1);
 }
 
@@ -412,7 +500,16 @@ fn test_consolidate_coverage_shortfall_caps_score() {
     assert_eq!(result.assessment.score, 34);
     assert_eq!(result.unreviewed_files, vec!["f5.rs".to_string()]);
     assert!(result.consensus_reached == (34 >= 70));
-    assert!(result.assessment.tl_dr.contains("4/10 files reviewed"));
+    // P2-1 (review r1): the banner was renamed from "Coverage" to "File
+    // routing" so the lead summary uses one label for the file-level
+    // metric — the old "4/10 files reviewed" wording would no longer
+    // appear in the TL;DR. Assert the metric still surfaces under the
+    // new label so a future regression that drops the cap banner fails
+    // this test rather than hiding.
+    assert!(result
+        .assessment
+        .tl_dr
+        .contains("4/10 files assigned to a successful expert task"));
 }
 
 #[test]
@@ -599,7 +696,16 @@ fn test_refresh_assessment_after_full_removal() {
         vec![make_finding(Severity::High, 9, "a.rs", Some(1), "False positive")],
     )];
     let mut consolidated = config.consolidate_with_coverage(&reports, None, &coverage, None);
-    assert!(consolidated.assessment.tl_dr.contains("4/10 files reviewed"));
+    // P2-1 (review r1): the banner was renamed from "Coverage" to "File
+    // routing" so the lead summary uses one label for the file-level
+    // metric — the old "4/10 files reviewed" wording would no longer
+    // appear in the TL;DR. The fixture still wants to assert the
+    // metric survives `refresh_assessment`; assert the same number under
+    // the new label.
+    assert!(consolidated
+        .assessment
+        .tl_dr
+        .contains("4/10 files assigned to a successful expert task"));
     assert!(!consolidated.assessment.unverified);
 
     let removed = consolidated.findings.pop().expect("one finding consolidated");
@@ -626,8 +732,8 @@ fn test_refresh_assessment_after_full_removal() {
         "must not claim the experts found nothing, got: {tl_dr}"
     );
     assert!(
-        tl_dr.contains("4/10 files reviewed"),
-        "coverage banner must survive the refresh, got: {tl_dr}"
+        tl_dr.contains("4/10 files assigned to a successful expert task"),
+        "File routing banner must survive the refresh (P2-1 review r1), got: {tl_dr}"
     );
     assert_tldr_counts_match(&consolidated.findings, tl_dr);
 }

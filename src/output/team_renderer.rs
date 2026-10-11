@@ -5,6 +5,19 @@ use crate::models::*;
 use crate::output::markdown::{close_unclosed_code_fences, strip_markdown_fences};
 use crate::team::lead_consolidator::{ConsolidatedReport, ExpertWeights};
 
+/// Redact suspected credential values in `text` before the field is rendered.
+///
+/// Applied to every piece of LLM-derived text that lands in a report
+/// (`summary`, `impact`, `recommendation`, `evidence`, the raw-response
+/// excerpt): the expert is supposed to *quote* a misconfigured line, and the
+/// quote is what carries the plaintext. The marker preserves the diagnostic
+/// context — key name + length + fingerprint — so the reader still knows
+/// *which* line had the hit. See [`crate::models::redact_text`] for the
+/// patterns.
+fn redact(text: &str) -> String {
+    crate::models::redact_text(text)
+}
+
 /// How many characters of a raw LLM response to inline in the report before
 /// pointing at the full dump file. Keeps the report readable while making the
 /// LLM input/output inspectable.
@@ -58,8 +71,12 @@ pub fn render_expert_section(report: &crate::models::ExpertReport) -> String {
             .take(RAW_RESPONSE_EXCERPT_CHARS)
             .collect();
         let truncated = report.raw_llm_response.chars().count() > RAW_RESPONSE_EXCERPT_CHARS;
+        // The raw LLM response is whatever the expert emitted; a security
+        // finding against a config line echoes the line verbatim. Redact it
+        // here (RENG-113) so the report file and the MR discussion both carry
+        // the masked form.
         extras.push_str("**Raw LLM response**（原始 LLM 输出）\n\n```text\n");
-        extras.push_str(&excerpt);
+        extras.push_str(&redact(&excerpt));
         if truncated {
             extras.push_str("… (truncated)");
         }
@@ -153,7 +170,10 @@ pub fn render_team_report_with_scoring(
     ));
 
     // ── TL;DR ───────────────────────────────────────────────────────────────
-    out.push_str(&format!("### TL;DR\n{}\n\n", close_unclosed_code_fences(&tl_dr)));
+    out.push_str(&format!(
+        "### TL;DR\n{}\n\n",
+        close_unclosed_code_fences(&redact(&tl_dr))
+    ));
 
     // ── Reviewer List ───────────────────────────────────────────────────────
     out.push_str("### Reviewers\n\n");
@@ -212,7 +232,14 @@ pub fn render_team_report_with_scoring(
             out.push_str(&format!("#### {:?}\n\n", severity));
 
             for f in severity_findings {
-                out.push_str(&format!("**{}** — Confidence {}/10\n", f.title, f.confidence,));
+                // RENG-113 round 2: title is LLM prose — same treatment as
+                // Evidence / impact / recommendation below. The reviewer
+                // probe (`/tmp/reng113-probe/rust-probe`) showed a title
+                // like `leaked: password = "hunter2_real_secret"` reaching
+                // this line verbatim; the publish gate caught it (the e2e
+                // refusal test still passes), and the report file was the
+                // unredacted exposure.
+                out.push_str(&format!("**{}** — Confidence {}/10\n", redact(&f.title), f.confidence,));
                 out.push_str(&format!(
                     "> [{}] {} `{}:{}`\n\n",
                     f.expert_name,
@@ -223,15 +250,21 @@ pub fn render_team_report_with_scoring(
                 if !f.evidence.is_empty() {
                     let evidence = strip_markdown_fences(&f.evidence);
                     let evidence = close_unclosed_code_fences(&evidence);
-                    out.push_str(&format!("**Evidence**:\n```\n{}\n```\n\n", evidence));
+                    // RENG-113: an Evidence block is exactly where a security
+                    // finding quotes the offending line, which can carry the
+                    // real secret. Redact before the block lands in the report.
+                    out.push_str(&format!("**Evidence**:\n```\n{}\n```\n\n", redact(&evidence)));
                 }
                 if !f.impact.is_empty() {
-                    out.push_str(&format!("**Impact**: {}\n\n", close_unclosed_code_fences(&f.impact)));
+                    out.push_str(&format!(
+                        "**Impact**: {}\n\n",
+                        close_unclosed_code_fences(&redact(&f.impact))
+                    ));
                 }
                 if !f.recommendation.is_empty() {
                     out.push_str(&format!(
                         "**Recommendation**: {}\n\n",
-                        close_unclosed_code_fences(&f.recommendation)
+                        close_unclosed_code_fences(&redact(&f.recommendation))
                     ));
                 }
                 out.push_str(&format!("Effort: {:?} | Severity: {:?}\n\n", f.effort, f.severity));
@@ -398,35 +431,137 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
             );
         }
     }
-    // Coverage banner: honest about how much of the diff was actually
-    // reviewed. Under-coverage is never hidden — it also caps the score.
+
+    // M18-W7: verification-pass accounting line. Populated when M31 plumbs
+    // `verification_stats` through; missing values (`None`) mean the run had
+    // no review at all (e.g. an empty expert team) so we say so instead of
+    // fabricating zeros.
+    //
+    // M35 r1 P3-1: the previous copy labelled every skip as a "parse
+    // failure", but `stats.skipped` is the M31 sum across three distinct
+    // failure kinds (batches_llm_failed + batches_parse_failed +
+    // batches_skipped), only one of which is actually a parser problem.
+    // A verifier that answered `verdicts: []` to every batch was
+    // attributed as "parse failures" before; that was the per-run INFO
+    // line saying "0 parse failures, 2 empty verdict list" while the
+    // report said "解析失败 2 批 / parse failures 2". The copy now says
+    // "skipped" generically, and names the three possible causes with a
+    // pointer at the INFO line — the run-level breakdown survives in
+    // `logs.ndjson`.
+    if let Some(stats) = &consolidated.verification_stats {
+        if stats.checked > 0 || stats.skipped > 0 || stats.dropped > 0 {
+            out.push_str(&format!(
+                "**Verification pass**: ran on {checked}, skipped {skipped}, dropped {dropped} — \
+                 验证批处理：跳过 {skipped} 批（可能为 parse 失败 / LLM 错误 / 空 verdict 列表；详细分项见 logs.ndjson）/ \
+                 skipped {skipped} batch(es) (parse failures / LLM errors / empty verdict list — see logs.ndjson for the breakdown), dropped {dropped}\n\n",
+                checked = stats.checked,
+                skipped = stats.skipped,
+                dropped = stats.dropped,
+            ));
+        }
+    }
+
+    // M18-W8: parse-status summary. Every report whose output the parser could
+    // not parse is named in a single line under the lead summary, so a
+    // silent miss is loud. The per-expert section already replaces "no
+    // issues" with the parse-error ⚠️ (`render_expert_section`).
+    //
+    // P2-4 (review r1): `parse_status` is one entry per `ExpertReport`,
+    // not per expert — a chunked review asks the same expert several times
+    // and the report repeats the name. The audit's RENG-79 lesson applies
+    // here too: count *reports* in the headline ("N 份专家报告"), and
+    // dedupe the names list so one failing expert on four chunks prints
+    // "4 份 / 1 名" rather than "4 位 / security, security, security,
+    // security".
+    if !consolidated.parse_status.is_empty() {
+        let total_reports = consolidated.parse_status.len();
+        let mut unique_names: Vec<&str> = consolidated
+            .parse_status
+            .iter()
+            .map(|p| p.expert_name.as_str())
+            .collect();
+        unique_names.sort_unstable();
+        unique_names.dedup();
+        let unique_count = unique_names.len();
+        let names = unique_names
+            .iter()
+            .map(|n| format!("`{}`", n))
+            .collect::<Vec<_>>()
+            .join(", ");
+        // Headline counts: report-level (what the data actually is) and,
+        // when it differs, the distinct-expert count as a parenthetical.
+        let headline = if total_reports == unique_count {
+            format!("{} 份专家报告 / {} expert report(s)", total_reports, total_reports)
+        } else {
+            format!(
+                "{} 份专家报告（{} 位不同专家）/ {} expert report(s) from {} distinct expert(s)",
+                total_reports, unique_count, total_reports, unique_count
+            )
+        };
+        out.push_str(&format!(
+            "> ⚠️ **{} 输出解析失败（未审）** / parse failures (未审 / un-reviewed): {}\n\n",
+            headline, names
+        ));
+    }
+
+    // M18-W4: file routing (replaces the old "Coverage" banner). Tells the
+    // reader how many files reached a successful expert task — distinct from
+    // the hunk-level ratio in the Coverage detail section that follows.
     if consolidated.total_files > 0 {
         if consolidated.unreviewed_files.is_empty() {
             out.push_str(&format!(
-                "**Coverage**: {} of {} files reviewed\n\n",
+                "**File routing**: {}/{} files assigned to a successful expert task\n\n",
                 consolidated.reviewed_files, consolidated.total_files,
             ));
         } else {
             out.push_str(&format!(
-                "**Coverage**: {} of {} files reviewed; **{} files not covered by any expert**: {}\n\n",
+                "**File routing**: {}/{} files assigned to a successful expert task; \
+                 **{} files not assigned** / 未分配的 {} 个文件: {}\n\n",
                 consolidated.reviewed_files,
                 consolidated.total_files,
+                consolidated.unreviewed_files.len(),
                 consolidated.unreviewed_files.len(),
                 consolidated.unreviewed_files.join(", "),
             ));
         }
     }
-    // Hunk-level coverage ledger: changed ranges vs. demonstrably-touched
-    // ranges, plus the uncovered ranges (coverage debt) and the per-expert
-    // truncation accounting. Rendered whenever the consolidator was given a
-    // ledger (the full `run_experts` path).
+
+    // M18-W4: hunk-level coverage goes into its own "## Coverage detail"
+    // section so the file-routing banner above and the hunk-level ratio
+    // below never read as one optimistic "Coverage: 100%" line — the audit's
+    // 21-of-21 / 0-of-1211 regression. The detail section is omitted when
+    // the consolidator was not given a ledger (the backward-compatible
+    // `consolidate()` wrapper path).
     if let Some(coverage) = &consolidated.coverage {
+        out.push_str("## Coverage detail\n\n");
         out.push_str(&format!(
-            "**Hunk Coverage**: {}/{} changed lines demonstrably reviewed ({:.0}%)\n\n",
+            "- **Hunk coverage**: {}/{} changed lines demonstrably reviewed ({:.0}%); \
+              threshold {:.0}%\n",
             coverage.covered_changed_lines,
             coverage.total_changed_lines,
             coverage.ratio * 100.0,
+            crate::coverage::COVERAGE_THRESHOLD * 100.0,
         ));
+        if coverage.is_sufficient() {
+            out.push_str("- **Status**: ✅ Sufficient\n");
+        } else {
+            // The number of uncovered lines first (the reader's question),
+            // then the threshold-gate phrasing — "below threshold" is what
+            // RENG-19's user read as a silently swallowed review.
+            out.push_str(&format!(
+                "- **Status**: ⚠️ **Insufficient** — {} of {} changed lines were not \
+                 demonstrably examined ({} uncovered span(s)); below the {:.0}% threshold — \
+                 this run's verdict is not trustworthy. / 覆盖不足（阈值 {:.0}%）：\
+                 {} 行未覆盖，分布在 {} 处区间，结果不可信。\n",
+                coverage.uncovered_changed_lines(),
+                coverage.total_changed_lines,
+                coverage.debt.len(),
+                crate::coverage::COVERAGE_THRESHOLD * 100.0,
+                crate::coverage::COVERAGE_THRESHOLD * 100.0,
+                coverage.uncovered_changed_lines(),
+                coverage.debt.len(),
+            ));
+        }
         if !coverage.debt.is_empty() {
             // `debt` holds every uncovered span, which on a large sparse diff
             // is hundreds of entries; the report names a bounded preview and
@@ -443,28 +578,65 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                 String::new()
             };
             out.push_str(&format!(
-                "**未覆盖区域 / uncovered** ({} lines): {}{}\n\n",
+                "- **未覆盖区域 / uncovered** ({} lines): {}{}\n",
                 coverage.uncovered_changed_lines(),
                 debt.join(", "),
                 tail,
             ));
         }
-        out.push_str(&render_truncation_warning(&coverage.findings_truncation));
+        // Per-expert truncation accounting (RENG-79): marks surfaces in the detail
+        // block instead of the lead-summary banner so the file-routing and
+        // hunk-coverage lines stay the two primary signals.
+        let truncation = render_truncation_warning(&coverage.findings_truncation);
+        if !truncation.is_empty() {
+            out.push('\n');
+            out.push_str(&truncation);
+        }
+        out.push('\n');
+    }
+
+    // M18-W5: ## Injected Context — one row per truncated or partial context
+    // source (AGENTS.md / changed files). Suppressed entirely when the
+    // orchestrator has no data; until M31 populates the field it stays empty
+    // by default and the section is hidden. The table distinguishes
+    // "truncated" from "missing" so a reviewer can tell whether the rest of
+    // the file was *unused* or *unavailable*.
+    if !consolidated.injected_context.entries.is_empty() {
+        out.push_str("## Injected Context\n\n");
+        out.push_str(
+            "Each row is one source that was injected into expert prompts (AGENTS.md, \
+             changed files). `original_bytes` is the on-disk size; `injected_bytes` is what \
+             actually reached the LLM after truncation. The SHA-256 fingerprint is over the \
+             *injected* slice so two reports can be compared. / 每行代表一处被注入到专家 prompt \
+             的上下文源（AGENTS.md / 变更文件）；`original_bytes` 是磁盘上的大小，`injected_bytes` \
+             是经截断后实际进入 LLM 的字节数，SHA-256 是对 *实际注入* 片段取指纹，便于跨报告比对。\n\n",
+        );
+        out.push_str("| Source | Size (injected / original) | Status | SHA-256 (16 chars) |\n");
+        out.push_str("|--------|----------------------------|--------|--------------------|\n");
+        for entry in &consolidated.injected_context.entries {
+            out.push_str(&entry.render_row());
+            out.push('\n');
+        }
+        out.push('\n');
     }
     out.push_str(&format!(
         "### TL;DR\n{}\n\n",
-        close_unclosed_code_fences(&assessment.tl_dr)
+        close_unclosed_code_fences(&redact(&assessment.tl_dr))
     ));
 
     if !consolidated.conflicts.is_empty() {
         out.push_str("### ⚖️ Reviewer Discussion\n\n");
         for conflict in &consolidated.conflicts {
             let line = conflict.line.map_or(String::new(), |l| format!(":{}", l));
+            // The conflict description is expert-derived prose — redact it
+            // the same way we redact the per-finding bodies, so a lead
+            // summary on a config-bearing file doesn't smuggle the plaintext
+            // into the report.
             out.push_str(&format!(
                 "#### `{file}{line}` — {issue}\n\n",
                 file = conflict.file,
                 line = line,
-                issue = conflict.issue,
+                issue = redact(&conflict.issue),
             ));
 
             // Look up the severity each expert assigned to this location from
@@ -484,12 +656,12 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                         "- **{}** (severity: {:?}): {}\n",
                         expert,
                         severity,
-                        close_unclosed_code_fences(resolution)
+                        close_unclosed_code_fences(&redact(resolution))
                     )),
                     None => out.push_str(&format!(
                         "- **{}**: {}\n",
                         expert,
-                        close_unclosed_code_fences(resolution)
+                        close_unclosed_code_fences(&redact(resolution))
                     )),
                 }
             }
@@ -514,7 +686,7 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                     "\n**Lead resolution**: Adopt **{}**'s position ({}): {}\n\n",
                     conflict.experts[winner],
                     basis,
-                    close_unclosed_code_fences(resolution),
+                    close_unclosed_code_fences(&redact(resolution)),
                 ));
             }
         }
@@ -533,8 +705,8 @@ pub fn render_lead_summary(consolidated: &ConsolidatedReport) -> String {
                 f.severity,
                 f.file,
                 line,
-                close_unclosed_code_fences(&f.title),
-                close_unclosed_code_fences(&dropped.reason),
+                close_unclosed_code_fences(&redact(&f.title)),
+                close_unclosed_code_fences(&redact(&dropped.reason)),
             ));
         }
         out.push('\n');

@@ -504,6 +504,13 @@ pub(crate) async fn enqueue_review(
                     // RENG-95: the WebUI-set aggregation flag, applied the
                     // same way (the review path never reads `app_config`).
                     aggregation_override,
+                    // M40 / RENG P1-3: pass the MR URL + GitLab token
+                    // through so the server path can run the compliance
+                    // sub-step on webhook / REST reviews, matching the
+                    // CLI library `run_review` behaviour. `None` for
+                    // local / static-diff reviews.
+                    mr_url.clone(),
+                    gitlab_token.clone(),
                 )
                 .await
             }
@@ -617,6 +624,7 @@ mod tests {
         ConsolidatedReport {
             findings: Vec::new(),
             low_confidence_removed: 0,
+            confidence_downgraded: 0,
             duplicates_merged: 0,
             conflicts: Vec::new(),
             assessment: OverallAssessment {
@@ -632,6 +640,10 @@ mod tests {
             reviewed_files: 0,
             unreviewed_files: Vec::new(),
             coverage: None,
+            parse_status: Vec::new(),
+            verification_stats: None,
+            injected_context: Default::default(),
+            confidence_filter_policy: Default::default(),
             adjudicated_removed: Vec::new(),
         }
     }

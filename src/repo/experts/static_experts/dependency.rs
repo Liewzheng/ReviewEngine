@@ -72,6 +72,7 @@ impl RepoExpert for Dependency {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         })
     }
 }

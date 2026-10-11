@@ -12,6 +12,7 @@ pub mod adjudicator;
 pub mod file_source;
 pub mod lead_consolidator;
 pub mod orchestrator;
+pub mod verdict;
 pub mod verifier;
 
 pub use crate::models::ExpertReport;

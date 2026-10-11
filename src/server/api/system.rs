@@ -653,7 +653,8 @@ async fn auth_status(Extension(auth): Extension<Arc<AuthConfig>>) -> impl IntoRe
 mod tests {
     use super::*;
     use crate::models::{
-        AppConfig, DiffConfig, ExpertTomlDef, LanguagesConfig, RateLimitConfig, ReportConfig, ScoringConfig,
+        AppConfig, ComplianceConfig, DiffConfig, ExpertTomlDef, LanguagesConfig, RateLimitConfig, ReportConfig,
+        ScoringConfig,
     };
     use std::collections::HashMap;
 
@@ -721,6 +722,7 @@ mod tests {
             diff: DiffConfig::default(),
             rate_limit: RateLimitConfig::default(),
             languages: LanguagesConfig::default(),
+            compliance: ComplianceConfig::default(),
         };
         let mut state = AppState::new(vec![]);
         *state.app_config.write().unwrap() = Some(Arc::new(config));
@@ -1745,6 +1747,7 @@ mod tests {
             diff: DiffConfig::default(),
             rate_limit: RateLimitConfig::default(),
             languages: LanguagesConfig::default(),
+            compliance: ComplianceConfig::default(),
         };
         let mut state = AppState::new(vec![]);
         *state.app_config.write().unwrap() = Some(Arc::new(config.clone()));

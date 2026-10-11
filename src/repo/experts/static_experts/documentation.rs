@@ -131,6 +131,7 @@ impl RepoExpert for Documentation {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            ..Default::default()
         })
     }
 }

@@ -19,6 +19,7 @@ fn make_score(name: &str, score: u8, weight: u8, summary: &str, details: Vec<Sco
         fallback: false,
         evaluated_loc: None,
         samples: None,
+        ..Default::default()
     }
 }
 
@@ -459,4 +460,64 @@ fn test_is_noise_summary() {
     assert!(is_noise_summary("No code provided"));
     assert!(is_noise_summary("no code sample"));
     assert!(!is_noise_summary("Valid summary"));
+}
+
+// ─── RENG-115: fallback experts must not enter the aggregate ─────
+
+/// RENG-115: a fallback expert (the LLM call failed and the layer
+/// stamped `LLM_FALLBACK_SCORE` / `fallback = true`) must not claim
+/// a Top-Risk slot. The aggregator builds `top_risks` from the
+/// per-expert scores and sorts ascending; if a 70/100 placeholder
+/// slips through, it competes for the "lowest expert" slot against
+/// any genuinely weak genuine expert, polluting the report. Filter
+/// fallbacks out of `top_risks` so the list only ranks real data.
+#[test]
+fn test_aggregate_top_risks_skip_fallback_experts() {
+    let mut fallback = make_score("architecture", 70, 15, "fallback summary", vec![]);
+    fallback.fallback = true;
+    let weak_genuine = make_score(
+        "code_quality",
+        50,
+        10,
+        "genuinely weak",
+        vec![make_item("medium", "Real concern")],
+    );
+    let mediocre = make_score("security", 80, 15, "fine", vec![make_item("note", "Minor")]);
+    let result = aggregate(vec![fallback, weak_genuine, mediocre], None);
+    let names: Vec<&str> = result.conclusion.top_risks.iter().map(|(n, _)| n.as_str()).collect();
+    assert!(
+        !names.contains(&"architecture"),
+        "fallback expert must not appear in top_risks: {names:?}"
+    );
+    // The genuinely weakest score (code_quality: 50) IS a real
+    // expert and MUST remain the top risk.
+    assert_eq!(
+        names.first().copied(),
+        Some("code_quality"),
+        "genuine 50/100 expert must keep the top slot: {names:?}"
+    );
+}
+
+/// RENG-115: a fallback expert that would otherwise pull the
+/// weighted aggregate *up* (a 70/100 placeholder alongside a low
+/// genuine expert) must not lift the headline score. The aggregator
+/// hands `merged_scores` to `weighted_total`, which now filters
+/// `fallback = true` out of the math.
+#[test]
+fn test_aggregate_lifts_headline_when_only_genuine_scores_remain() {
+    // Two chunks collapsed into a multi-chunk code_quality group
+    // (genuine), plus one fallback architecture expert. The headline
+    // must reflect the genuine 60/100, not get dragged up by the
+    // fallback's 70/100 placeholder weight.
+    let genuine = make_score("code_quality", 60, 10, "real", vec![make_item("note", "Y")]);
+    let mut fallback = make_score("architecture", 70, 15, "placeholder", vec![]);
+    fallback.fallback = true;
+    let result = aggregate(vec![genuine, fallback], None);
+    // `weighted_total` is called on `merged_scores`. With fallback
+    // filtered, the only remaining expert is code_quality at 60
+    // (weight 10) — that expert's score IS the headline.
+    assert_eq!(
+        result.conclusion.aggregated_score, 60,
+        "headline must follow genuine scores only"
+    );
 }

@@ -56,13 +56,7 @@ impl Client {
             .parse()
             .with_context(|| format!("Failed to parse PR number from URL: {pr_url}"))?;
 
-        // Validate owner and repo to prevent path traversal / command injection
-        if owner.is_empty() || owner.contains("..") || owner.contains('/') || owner.contains(':') {
-            anyhow::bail!("Invalid GitHub owner in PR URL: {pr_url}");
-        }
-        if repo.is_empty() || repo.contains("..") || repo.contains('/') || repo.contains(':') {
-            anyhow::bail!("Invalid GitHub repo in PR URL: {pr_url}");
-        }
+        Self::validate_owner_repo(owner, repo, pr_url)?;
 
         Ok(Self {
             http: HttpClient::builder()
@@ -76,6 +70,45 @@ impl Client {
             token: token.to_string(),
             commit_sha: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// Construct a client targeted at a specific owner/repo (M40 / RENG
+    /// ticket compliance: the PR URL shape is not what the compliance
+    /// sub-step fetches, and synthesizing a fake PR URL with a literal
+    /// `N` is what was breaking the GitHub leg in the previous revision).
+    ///
+    /// The PR number is still required so the client has the same
+    /// invariants the URL-based constructor enforces (a non-zero
+    /// PR-shaped client), but `fetch_issue` ignores it and talks to
+    /// `/repos/{owner}/{repo}/issues/{number}` directly.
+    pub fn for_issue(token: &str, owner_repo: &str, api_base: &str, pr_number: u32) -> Result<Self> {
+        let mut parts = owner_repo.splitn(2, '/');
+        let owner = parts.next().unwrap_or("").to_string();
+        let repo = parts.next().unwrap_or("").to_string();
+        Self::validate_owner_repo(&owner, &repo, owner_repo)?;
+        Ok(Self {
+            http: HttpClient::builder()
+                .timeout(Duration::from_secs(120))
+                .build()
+                .with_context(|| "Failed to create HTTP client")?,
+            api_base: api_base.to_string(),
+            owner,
+            repo,
+            pr_number,
+            token: token.to_string(),
+            commit_sha: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    fn validate_owner_repo(owner: &str, repo: &str, src: &str) -> Result<()> {
+        // Validate owner and repo to prevent path traversal / command injection
+        if owner.is_empty() || owner.contains("..") || owner.contains('/') || owner.contains(':') {
+            anyhow::bail!("Invalid GitHub owner in {src}");
+        }
+        if repo.is_empty() || repo.contains("..") || repo.contains('/') || repo.contains(':') {
+            anyhow::bail!("Invalid GitHub repo in {src}");
+        }
+        Ok(())
     }
 
     /// Build a GitHub API URL for the given path.
@@ -484,6 +517,113 @@ impl Client {
         }
 
         Ok(resp.json().await?)
+    }
+
+    /// Fetch a single GitHub issue by number, optionally under a different
+    /// `owner/repo` than the one this client is bound to (M40 / RENG ticket
+    /// compliance: cross-repo ticket refs like `isletspace/sirena#42`
+    /// resolve to a repo other than the PR's).
+    ///
+    /// Returns a [`crate::compliance::FetchedTicket`]. On any non-2xx
+    /// response the ticket is returned with `error` set so the compliance
+    /// orchestrator can surface a section note rather than failing the
+    /// review.
+    pub async fn fetch_issue(&self, owner_repo: Option<&str>, number: u32) -> Result<crate::compliance::FetchedTicket> {
+        use crate::compliance::fetch::{github_issue_url, TICKET_BODY_BUDGET};
+        use crate::compliance::{FetchedTicket, TicketProvider, TicketRef};
+
+        let (owner, repo) = match owner_repo {
+            Some(o_r) => {
+                let mut parts = o_r.splitn(2, '/');
+                let o = parts.next().unwrap_or("").to_string();
+                let r = parts.next().unwrap_or("").to_string();
+                if o.is_empty() || r.is_empty() {
+                    return Ok(FetchedTicket {
+                        ticket_ref: TicketRef {
+                            provider: TicketProvider::GitHub,
+                            project: Some(o_r.to_string()),
+                            iid: number,
+                            url: String::new(),
+                            source: format!("#{number}"),
+                        },
+                        title: String::new(),
+                        body: String::new(),
+                        web_url: None,
+                        error: Some("missing owner/repo".to_string()),
+                    });
+                }
+                (o, r)
+            }
+            None => (self.owner.clone(), self.repo.clone()),
+        };
+        let url = github_issue_url(&self.api_base, &owner, &repo, number);
+        let ticket_ref = TicketRef {
+            provider: TicketProvider::GitHub,
+            project: Some(format!("{owner}/{repo}")),
+            iid: number,
+            url: url.clone(),
+            source: format!("#{number}"),
+        };
+        let resp = self.http.get(&url).headers(self.headers()).send().await;
+        let resp = match resp {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(FetchedTicket {
+                    ticket_ref,
+                    title: String::new(),
+                    body: String::new(),
+                    web_url: None,
+                    error: Some(format!("transport: {e}")),
+                });
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Ok(FetchedTicket {
+                ticket_ref,
+                title: String::new(),
+                body: String::new(),
+                web_url: None,
+                error: Some(format!(
+                    "HTTP {status}: {}",
+                    crate::llm::sampling::truncate_error(&body)
+                )),
+            });
+        }
+        #[derive(serde::Deserialize)]
+        struct GitHubIssue {
+            title: Option<String>,
+            body: Option<String>,
+            html_url: Option<String>,
+        }
+        let issue: GitHubIssue = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(FetchedTicket {
+                    ticket_ref,
+                    title: String::new(),
+                    body: String::new(),
+                    web_url: None,
+                    error: Some(format!("parse: {e}")),
+                });
+            }
+        };
+        let body = issue.body.unwrap_or_default();
+        let body = if body.chars().count() > TICKET_BODY_BUDGET {
+            let mut out: String = body.chars().take(TICKET_BODY_BUDGET).collect();
+            out.push_str("\n\n[…truncated]");
+            out
+        } else {
+            body
+        };
+        Ok(FetchedTicket {
+            ticket_ref,
+            title: issue.title.unwrap_or_default(),
+            body,
+            web_url: issue.html_url,
+            error: None,
+        })
     }
 }
 

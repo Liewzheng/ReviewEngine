@@ -1,4 +1,5 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use review_engine::compliance::render::render_compliance_section;
 use review_engine::models::*;
 use std::path::{Path, PathBuf};
 
@@ -54,6 +55,20 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
                 text.push_str("\n---\n\n");
                 text.push_str(&review_engine::output::team_renderer::render_lead_summary(consolidated));
             }
+            // M40 / RENG ticket compliance section: rendered after the
+            // lead summary and BEFORE the verification appendix so it sits
+            // alongside the per-expert sections, not in the footer (the
+            // P2-5 review caught a comment-vs-code drift on the order).
+            if let Some(compliance) = &result.compliance {
+                let section = render_compliance_section(compliance);
+                if !section.is_empty() {
+                    if !text.ends_with('\n') {
+                        text.push('\n');
+                    }
+                    text.push_str("\n---\n\n");
+                    text.push_str(&section);
+                }
+            }
             let appendix = review_engine::output::renderer::render_dropped_findings_appendix(
                 &result.dropped_findings,
                 verification_enabled,
@@ -86,6 +101,56 @@ fn format_output(result: &ReviewOutput, format: &str, verification_enabled: bool
     })
 }
 
+/// Persist `text` to `path` with `0600` permissions on Unix.
+///
+/// RENG-113: the report file is the canonical local copy of the review — by
+/// default it lives at `~/.config/review-engine/reports/review_*.md` with
+/// the user's umask. A `0644` mode lets every other account on the same host
+/// read it, which means a quoted `password = "real_password"` line in
+/// Evidence (already redacted at the renderer, but still — defence in
+/// depth) becomes readable. `0600` keeps the file owner-only.
+///
+/// RENG-113 round 2: the round-1 implementation wrote first and chmod'd
+/// after — the file briefly existed with umask-derived perms (typically
+/// `0644`) and an interrupted run left it that way. Round 2 creates the
+/// file with `OpenOptions::mode(0o600)` so the file is born with the
+/// right perms and never sits in a permissive window. The chmod-after step
+/// stays for the overwrite path (truncate doesn't change mode on existing
+/// files; the chmod covers pre-existing files that already have a
+/// permissive mode).
+///
+/// On non-Unix targets the function falls through to a plain `fs::write`;
+/// Windows file ACLs are not modelled here.
+fn write_report_file(path: &Path, text: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        // `create(true).write(true).truncate(true).mode(0o600)` is the
+        // single syscall path: the inode's mode is set before the file
+        // becomes reachable on the filesystem, so there is no window
+        // where another process can `open()` it under a permissive mode.
+        // `mode()` is an OpenOptionsExt method (Unix-only).
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed to create {}", path.display()))?;
+        std::io::Write::write_all(&mut file, text.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
+        // Belt-and-braces: if the file already existed (truncate path),
+        // the kernel may have left its old mode alone. Force `0600` again.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+            .with_context(|| format!("failed to chmod 0600 {}", path.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, text)?;
+    }
+    Ok(())
+}
+
 /// Persist `text` as a timestamped report under `output_dir` (the default
 /// reports directory) and return the file path. Shared by both `--output`
 /// branches so every run — explicit file or stdout — leaves a copy in the
@@ -108,7 +173,7 @@ fn save_timestamped_report(text: &str, format: &str, output_dir: &str) -> Result
     let now = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("review_{}.{}", now, ext);
     let filepath = dir.join(&filename);
-    std::fs::write(&filepath, text)?;
+    write_report_file(&filepath, text)?;
     Ok(filepath)
 }
 
@@ -120,6 +185,11 @@ fn save_timestamped_report(text: &str, format: &str, output_dir: &str) -> Result
 /// * no `--output`: print to stdout, plus the same timestamped copy.
 ///
 /// The timestamped copy is skipped only when `output_dir` is `None`.
+///
+/// Both the `--output` file and the timestamped copy are written with
+/// `0600` on Unix (RENG-113): the report carries evidence text and other
+/// LLM-derived prose that may quote a config line, and `0644` would let any
+/// other account on the host read it.
 pub(super) fn write_report_text(
     text: &str,
     format: &str,
@@ -136,7 +206,7 @@ pub(super) fn write_report_text(
                 }
             }
             std::fs::create_dir_all(path.parent().unwrap_or(path))?;
-            std::fs::write(path, text)?;
+            write_report_file(path, text)?;
         }
         None => {
             // No explicit output: print to stdout
@@ -200,6 +270,7 @@ mod tests {
         ConsolidatedReport {
             findings: vec![],
             low_confidence_removed: 0,
+            confidence_downgraded: 0,
             duplicates_merged: 1,
             conflicts: vec![ExpertConflict {
                 file: "src/auth.rs".to_string(),
@@ -224,6 +295,10 @@ mod tests {
             reviewed_files: 0,
             unreviewed_files: vec![],
             coverage: None,
+            parse_status: vec![],
+            verification_stats: None,
+            injected_context: Default::default(),
+            confidence_filter_policy: Default::default(),
             adjudicated_removed: vec![],
         }
     }
@@ -245,6 +320,7 @@ mod tests {
             dropped_findings: vec![],
             consolidated,
             errors: vec![],
+            compliance: None,
         }
     }
 
@@ -266,6 +342,7 @@ mod tests {
             diff: Default::default(),
             rate_limit: Default::default(),
             languages: Default::default(),
+            compliance: Default::default(),
         };
         let (_, mr_info) = prepare_review(&config, "/real/repo", "local", "main");
         assert_eq!(mr_info.project_path, "/real/repo");
@@ -323,6 +400,85 @@ mod tests {
         assert!(out.contains("\"score\": 72"));
         assert!(out.contains("\"risk_level\": \"Medium\""));
     }
+
+    /// M40 / RENG: when `compliance = None` the section is absent.
+    #[test]
+    fn test_format_output_markdown_without_compliance_omits_section() {
+        let out = render(&sample_output(None), "markdown", false);
+        assert!(
+            !out.contains("## Ticket compliance check"),
+            "compliance = None → section absent"
+        );
+    }
+
+    /// M40 / RENG: when `compliance = Some(_)` the section appears alongside
+    /// the per-expert sections (before the verification appendix).
+    #[test]
+    fn test_format_output_markdown_with_compliance_renders_section() {
+        let mut output = sample_output(Some(make_consolidated()));
+        let mut compliance = review_engine::compliance::ComplianceOutput::empty();
+        compliance
+            .notes
+            .push("description references 4 tickets, capped at 3".to_string());
+        compliance
+            .fetch_failures
+            .push(review_engine::compliance::FetchedTicket {
+                ticket_ref: review_engine::compliance::TicketRef {
+                    provider: review_engine::compliance::TicketProvider::GitLab,
+                    project: Some("g/p".into()),
+                    iid: 99,
+                    url: "https://gitlab.example.com/g/p/-/work_items/99".into(),
+                    source: "!99".into(),
+                },
+                title: String::new(),
+                body: String::new(),
+                web_url: None,
+                error: Some("HTTP 404".into()),
+            });
+        output.compliance = Some(compliance);
+        let out = render(&output, "markdown", false);
+        assert!(out.contains("## Ticket compliance check"), "section heading is emitted");
+        assert!(out.contains("fetch failed"), "fetch failure is rendered");
+        assert!(out.contains("capped at 3"), "notes are rendered");
+    }
+
+    /// P2-2: fetched-but-unanalysed tickets are rendered on their own
+    /// block, not under the "fetch failed" heading. The reader must not
+    /// see "fetch failed" when the fetch actually succeeded.
+    #[test]
+    fn test_format_output_markdown_unanalysed_renders_separately_from_failed() {
+        let mut output = sample_output(Some(make_consolidated()));
+        let mut compliance = review_engine::compliance::ComplianceOutput::empty();
+        compliance
+            .unanalysed_tickets
+            .push(review_engine::compliance::FetchedTicket {
+                ticket_ref: review_engine::compliance::TicketRef {
+                    provider: review_engine::compliance::TicketProvider::GitLab,
+                    project: Some("g/p".into()),
+                    iid: 73,
+                    url: "https://gitlab.example.com/g/p/-/work_items/73".into(),
+                    source: "#73".into(),
+                },
+                title: "SIRENA-84".into(),
+                body: "...".into(),
+                web_url: Some("https://gitlab.example.com/g/p/-/work_items/73".into()),
+                error: None,
+            });
+        compliance
+            .notes
+            .push("compliance gate is on but no usable LLM is configured".to_string());
+        output.compliance = Some(compliance);
+        let out = render(&output, "markdown", false);
+        assert!(out.contains("fetched but not analysed"), "unanalysed bucket header");
+        assert!(out.contains("SIRENA-84"), "fetched title is rendered");
+        // The fetched ticket must NOT be labelled "fetch failed".
+        let unanalysed_pos = out.find("fetched but not analysed").expect("header is present");
+        let failed_pos = out.find("fetch failed").unwrap_or(usize::MAX);
+        assert!(
+            unanalysed_pos < failed_pos || failed_pos == usize::MAX,
+            "unanalysed header must not be replaced by a 'fetch failed' header for the same ticket"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -346,6 +502,7 @@ mod report_output_tests {
             diff: Default::default(),
             rate_limit: Default::default(),
             languages: Default::default(),
+            compliance: Default::default(),
         }
     }
 
@@ -477,5 +634,118 @@ mod report_output_tests {
             std::fs::read_to_string(&explicit).unwrap(),
             "timestamped copy and --output file hold identical content"
         );
+    }
+
+    // ── RENG-113: report files must land with 0600 on Unix ──────────────
+
+    /// The timestamped copy under `output_dir` is the canonical local copy
+    /// of the review. RENG-113: by default it lands at
+    /// `~/.config/review-engine/reports/review_*.md` with the user's umask,
+    /// which on most distros is `0644` and lets every other account on the
+    /// host read it. The report carries Evidence blocks and other LLM prose
+    /// — even with the redaction applied at the renderer, `0600` is the
+    /// "owner only" baseline.
+    #[cfg(unix)]
+    #[test]
+    fn write_report_text_lands_the_timestamped_copy_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        let reports_str = reports.to_string_lossy().to_string();
+        write_report_text("secret", "markdown", &None, Some(&reports_str)).unwrap();
+        let saved = saved_files(&reports);
+        assert_eq!(saved.len(), 1);
+        let mode = std::fs::metadata(&saved[0]).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the timestamped report file must be owner-only, got {:o}",
+            mode
+        );
+    }
+
+    /// Same baseline for the explicit `--output` file: even when the user
+    /// pointed the report at a custom path, the file mode is `0600`.
+    #[cfg(unix)]
+    #[test]
+    fn write_report_text_lands_the_explicit_output_file_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let explicit = dir.path().join("explicit.md");
+        write_report_text(
+            "secret",
+            "markdown",
+            &Some(explicit.to_string_lossy().to_string()),
+            None,
+        )
+        .unwrap();
+        let mode = std::fs::metadata(&explicit).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the --output file must be owner-only, got {:o}", mode);
+    }
+
+    // RENG-113 round 2: the round-1 `fs::write` then chmod path left a
+    // transient window where the file was reachable at the umask's
+    // default (typically `0644`). Round 2 creates the file with
+    // `OpenOptions::mode(0o600)` and the file is born at `0600`. The
+    // overwrite path must still land at `0600` too — the truncate path
+    // inherits the existing file's mode if no chmod runs, which is the
+    // round-1 bug we are closing.
+    #[cfg(unix)]
+    #[test]
+    fn write_report_text_overwrites_an_existing_file_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let explicit = dir.path().join("overwrite.md");
+        // First write — lands at 0600.
+        write_report_text(
+            "first body",
+            "markdown",
+            &Some(explicit.to_string_lossy().to_string()),
+            None,
+        )
+        .unwrap();
+        // Second write — must overwrite and stay at 0600.
+        write_report_text(
+            "second body",
+            "markdown",
+            &Some(explicit.to_string_lossy().to_string()),
+            None,
+        )
+        .unwrap();
+
+        let mode = std::fs::metadata(&explicit).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "the overwrite path must keep 0600, got {:o}", mode);
+        assert_eq!(std::fs::read_to_string(&explicit).unwrap(), "second body");
+    }
+
+    /// RENG-113 round 2: a pre-existing file with permissive mode must be
+    /// brought back to `0600` by the next write. The OpenOptions path is
+    /// primary for new files; the chmod after-step tightens files already on
+    /// disk — together they close the round-1 transient window.
+    #[cfg(unix)]
+    #[test]
+    fn write_report_text_tightens_a_pre_existing_permissive_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let explicit = dir.path().join("preexisting.md");
+        // Drop a file with `0644` mode — the round-1 transient window
+        // value, the very thing the OpenOptions fix closes.
+        std::fs::write(&explicit, "old").unwrap();
+        std::fs::set_permissions(&explicit, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        write_report_text(
+            "new body",
+            "markdown",
+            &Some(explicit.to_string_lossy().to_string()),
+            None,
+        )
+        .unwrap();
+
+        let mode = std::fs::metadata(&explicit).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the write must tighten a permissive file to 0600, got {:o}",
+            mode
+        );
+        assert_eq!(std::fs::read_to_string(&explicit).unwrap(), "new body");
     }
 }

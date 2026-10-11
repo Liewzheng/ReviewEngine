@@ -413,11 +413,22 @@ impl InlinePlan<'_> {
                 ));
             }
             for finding in &self.rolled_up {
+                // RENG-113 round 3: the rolled-up list renders each
+                // finding's title into the board body — same plaintext
+                // class as Evidence / recommendation / TL;DR (all masked
+                // in their respective renderers). A credential in a
+                // rolled-up title would otherwise reach the MR discussion
+                // verbatim, and `format_inline_body` only masks the inline
+                // notes that pass the cap — the rolled-up half was the
+                // last unredacted channel in the publish path. Mask here
+                // so the rolled-up list and the per-expert sections
+                // agree, and so the publish gate's defense-in-depth scan
+                // sees a board the renderer has already sanitized.
                 out.push_str(&format!(
                     "- **[{}]** `{}` — {} (Confidence: {}/10)\n",
                     finding.severity,
                     super::inline_anchor(finding),
-                    finding.title,
+                    crate::models::redact_text(&finding.title),
                     finding.confidence,
                 ));
             }
@@ -825,5 +836,101 @@ mod tests {
         assert!(section.contains("exceeded the 2-note per-round cap"));
         assert!(section.contains("`src/f3.rs:3`") && section.contains("`src/f4.rs:4`"));
         assert!(!section.contains("`src/f1.rs:1`"), "posted findings are not re-listed");
+    }
+
+    /// RENG-113 round 3: a credential that lives in a *rolled-up* title
+    /// (admitted by the policy but withheld from inline delivery past the
+    /// per-round cap) is masked in `board_section` so the board carries
+    /// the marker, not the plaintext. Without this guard the rolled-up
+    /// list is the last unredacted channel in the publish path —
+    /// `format_inline_body` only masks the inline half, so a credential
+    /// in a rolled-up title used to reach the MR discussion verbatim and
+    /// trigger the publish-time gate's defense-in-depth refusal with no
+    /// escape (the operator couldn't "re-redact" a generated marker list).
+    ///
+    /// The same finding() helper defaults `title = "issue in <file>"` and
+    /// `category = "security"` — we override the title on the third one to
+    /// carry the credential.
+    #[test]
+    fn board_section_redacts_titles_in_the_rolled_up_list() {
+        let policy = PublishPolicy::default();
+        let mut findings: Vec<Finding> = (1..=3)
+            .map(|i| finding(&format!("src/f{i}.rs"), Some(i), Severity::High, 9, "fix it"))
+            .collect();
+        // Three admitted findings, default cap is two → the third is
+        // rolled up; put the credential in its title.
+        findings[2].title = "leaked: password = \"hunter2_real_secret\"".to_string();
+        let plan = plan_inline_notes(&findings, None, false, &policy);
+        assert_eq!(plan.selected.len(), 2);
+        assert_eq!(plan.rolled_up.len(), 1, "the third finding is rolled up");
+        assert_eq!(plan.rolled_up[0].file, "src/f3.rs");
+
+        let section = plan.board_section(&policy);
+
+        // The plaintext is gone — the rendered board carries the marker.
+        assert!(
+            !section.contains("hunter2_real_secret"),
+            "rolled-up title must be masked: {section}"
+        );
+        assert!(
+            section.contains("kind=password"),
+            "the rolled-up marker is named: {section}"
+        );
+        // Structural fields stay intact (severity, anchor, confidence).
+        assert!(section.contains("[high]"), "severity label is verbatim: {section}");
+        assert!(section.contains("`src/f3.rs:3`"), "the anchor is verbatim: {section}");
+        assert!(
+            section.contains("Confidence: 9/10"),
+            "the confidence is verbatim: {section}"
+        );
+    }
+
+    /// RENG-113 round 3 (end-to-end): the gate passing through a board whose
+    /// rolled-up list carries a credential title is what closes the
+    /// user-facing publish dead-end the reviewer reproduced. The
+    /// plan_inline_notes / render_board / scan_for_publish path is the
+    /// production call sequence; the test goes through the same shape as
+    /// the existing rolled-up cases in `tests/publish/` and asserts the
+    /// board body the publisher would post.
+    #[test]
+    fn board_section_redaction_lets_a_rolled_up_credential_pass_the_gate() {
+        let policy = PublishPolicy::default();
+        let mut findings: Vec<Finding> = (1..=3)
+            .map(|i| finding(&format!("src/f{i}.rs"), Some(i), Severity::High, 9, "fix it"))
+            .collect();
+        findings[2].title = "leaked: password = \"hunter2_real_secret\"".to_string();
+        let plan = plan_inline_notes(&findings, None, false, &policy);
+
+        // Compose the same way `publish_review_with_diff` does:
+        // `board_section` first, the publish-time scan second.
+        let board = crate::publisher::render_board(&make_output(&findings), &plan, &policy);
+        assert!(
+            crate::models::scan_for_publish(&board).is_ok(),
+            "a board whose rolled-up list was masked must pass the gate; got board:\n{board}"
+        );
+        assert!(
+            !board.contains("hunter2_real_secret"),
+            "the rendered board carries no plaintext: {board}"
+        );
+    }
+
+    /// Build the minimal `ReviewOutput` that `render_board` needs. The
+    /// rolled-up shape only depends on the policy + finding set, not on
+    /// any per-expert section content — `report.markdown` is empty and
+    /// the consolidated report is `None`, which is the smallest fixture
+    /// the function accepts without panicking.
+    fn make_output(findings: &[Finding]) -> crate::models::ReviewOutput {
+        use crate::models::{ExpertReport, ReviewOutput};
+        ReviewOutput::new(vec![ExpertReport {
+            expert_name: "lead".to_string(),
+            findings: findings.to_vec(),
+            markdown: String::new(),
+            raw_llm_response: String::new(),
+            parse_error: None,
+            raw_dump_path: None,
+            llm_provider: None,
+            llm_model: None,
+            llm_fp: None,
+        }])
     }
 }

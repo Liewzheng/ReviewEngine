@@ -48,7 +48,7 @@ pub struct RepoContext {
 // ─── ExpertScore ─────────────────────────────
 
 /// Score produced by a single expert evaluation.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ExpertScore {
     /// Name of the expert that produced this score.
     pub expert_name: String,
@@ -74,6 +74,29 @@ pub struct ExpertScore {
     /// (`scoring.score_samples > 1`); the reported `score` is their median.
     /// `None` when sampling was disabled (the default).
     pub samples: Option<Vec<u8>>,
+    /// M18-W2: how many scoring samples were attempted for this expert
+    /// (including failures). Always set when `samples.is_some()` is set
+    /// (the two move together — a single-shot path leaves both as the
+    /// default of `None`). Lets the report surface the by-expert fallback
+    /// rate as `samples_failed / samples_attempted`.
+    pub samples_attempted: Option<usize>,
+    /// M18-W2: how many of the attempted scoring samples failed (call
+    /// error, unparseable YAML, or schema-conforming YAML with no `score`).
+    /// `None` when sampling was disabled.
+    pub samples_failed: Option<usize>,
+    /// M38: the [`crate::repo::experts::llm_experts::scoring::ParseReasonCode`]
+    /// paired with a chunk that the LLM expert could not parse, when one
+    /// was produced. `None` on every other path (genuine assessment,
+    /// legacy-wrapper recovery, LLM-call failure — the latter carries its
+    /// own `summary` text and is bucketed into `ChunkFailure` with no
+    /// `reason_code`). Surfaced via the `Chunks Reviewed` appendix in the
+    /// repo-review report so a schema-broken chunk is grep-friendly in the
+    /// rendered Markdown and JSON. Internal: not part of the JSON
+    /// contract (the report-layer struct is `ExpertScoreOutput`, not this
+    /// one), and `pub(crate)` so external crate users cannot construct
+    /// `ExpertScore { reason_code: ... }` without going through an LLM
+    /// expert — which is the only path that ever sets it.
+    pub(crate) reason_code: Option<crate::repo::experts::llm_experts::scoring::ParseReasonCode>,
 }
 
 /// A single finding or observation within an expert score.
@@ -247,12 +270,31 @@ pub(crate) fn finding_to_score_item(f: &crate::models::Finding) -> ScoreItem {
 /// the sum of all active weights. This normalises the result to a
 /// 0–100 scale even when only a subset of experts is active.
 ///
+/// **Fallback experts are excluded from the math.** A score is marked
+/// `fallback = true` when no genuine assessment could be produced —
+/// e.g. the LLM call failed after every retry or the response was
+/// unparseable. Including those `LLM_FALLBACK_SCORE` (70/100) values
+/// in the aggregate would silently mask a failed expert behind a
+/// "healthy-enough" placeholder and (in adversarial cases) lift the
+/// headline score above what any real data supports. Filter them out
+/// here so a placeholder never enters the weighted total. The
+/// `fallback` flag survives on the per-expert [`ExpertScore`] and
+/// still surfaces through the per-chunk / risk-category render layer.
+///
+/// When **every** expert falls back (or the list is empty),
+/// `compute_weighted` returns 0 — the only honest answer when no
+/// genuine data exists.
+///
 /// Returns `(score, risk_level)` where `risk_level` comes from the unified
 /// [`crate::scoring::review`] mapping with the default thresholds — the
 /// same bands the retired repo-local mapping used (≤40 Critical, 41–60
 /// High, 61–80 Medium, 81–90 LowMedium, 91+ Healthy).
 pub fn weighted_total(scores: &[ExpertScore]) -> (u8, crate::models::RiskLevel) {
-    let pairs: Vec<(u8, u8)> = scores.iter().map(|s| (s.score, s.weight)).collect();
+    let pairs: Vec<(u8, u8)> = scores
+        .iter()
+        .filter(|s| !s.fallback)
+        .map(|s| (s.score, s.weight))
+        .collect();
     let score = crate::scoring::review::compute_weighted(&pairs);
     let risk =
         crate::scoring::review::score_to_risk_level_with_config(score, &crate::models::RiskThresholdConfig::default());
@@ -275,6 +317,9 @@ mod tests {
             fallback: false,
             evaluated_loc: None,
             samples: None,
+            samples_attempted: None,
+            samples_failed: None,
+            reason_code: None,
         }
     }
 
@@ -354,6 +399,9 @@ mod tests {
             fallback: true,
             evaluated_loc: Some(1234),
             samples: Some(vec![40, 45]),
+            samples_attempted: Some(2),
+            samples_failed: Some(0),
+            reason_code: None,
         };
         let cloned = original.clone();
         assert_eq!(cloned.expert_name, "security");
@@ -362,17 +410,59 @@ mod tests {
         assert!(cloned.fallback);
         assert_eq!(cloned.evaluated_loc, Some(1234));
         assert_eq!(cloned.samples, Some(vec![40, 45]));
+        assert_eq!(cloned.samples_attempted, Some(2));
+        assert_eq!(cloned.samples_failed, Some(0));
         assert_eq!(cloned.details[0].severity, "high");
         assert_eq!(cloned.details[0].message, "missing bounds check");
     }
 
     #[test]
-    fn weighted_total_ignores_fallback_scores_only_in_details_not_math() {
-        // Fallback flag does not change the math: both scores count.
-        let mut a = score("a", 100, 50);
+    fn weighted_total_excludes_fallback_experts_from_the_aggregate() {
+        // RENG-115: a fallback expert's `LLM_FALLBACK_SCORE` (70/100) is
+        // a placeholder, not a genuine assessment, and must not enter
+        // the weighted total. With the fallback score filtered out, the
+        // remaining expert's 50/100 (weight 50) drives the aggregate.
+        // The `fallback` flag still survives on the score for the
+        // per-expert rendering layer — only the headline math changes.
+        let mut fallback = score("architecture", 70, 15);
+        fallback.fallback = true;
+        let (total, risk) = weighted_total(&[fallback, score("security", 50, 15)]);
+        assert_eq!(
+            total, 50,
+            "fallback expert must be excluded, leaving security 50/100 as the total"
+        );
+        assert_eq!(risk, RiskLevel::High, "50 falls in 41–60 High band");
+    }
+
+    #[test]
+    fn weighted_total_when_every_score_is_fallback_returns_zero_critical() {
+        // All-fallback: there is no genuine data, so the aggregate
+        // honestly reports zero. 0 ≤ 40 → Critical band.
+        let mut a = score("a", 70, 50);
         a.fallback = true;
-        let (score, risk) = weighted_total(&[a, score("b", 50, 50)]);
-        assert_eq!(score, 75);
-        assert_eq!(risk, RiskLevel::Medium);
+        let mut b = score("b", 70, 50);
+        b.fallback = true;
+        let (total, risk) = weighted_total(&[a, b]);
+        assert_eq!(total, 0, "all-fallback → 0/100");
+        assert_eq!(risk, RiskLevel::Critical);
+    }
+
+    #[test]
+    fn weighted_total_mixes_fallback_and_genuine_using_only_genuine_math() {
+        // Two genuine scores at weights 50 each: weighted math is
+        // (50*50 + 100*50) / 100 = 7500/100 = 75. A heavy fallback
+        // (70, weight 100) is filtered out before the math. Without
+        // the filter, it would have pulled the aggregate down to
+        // (50*50 + 100*50 + 70*100) / 200 = 72.5 → 73 (and worse, the
+        // placeholder 70 would have masqueraded as a real assessment).
+        let genuine_a = score("a", 50, 50);
+        let genuine_b = score("b", 100, 50);
+        let mut fallback = score("c", 70, 100);
+        fallback.fallback = true;
+        let (total, _risk) = weighted_total(&[genuine_a, genuine_b, fallback]);
+        assert_eq!(
+            total, 75,
+            "only genuine scores participate in the math: (50*50 + 100*50) / 100 = 75"
+        );
     }
 }

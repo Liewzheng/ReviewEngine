@@ -27,8 +27,12 @@ use serde::{Deserialize, Serialize};
 /// review to be considered sufficiently covered (mirrors kodus's 0.7 gate).
 pub const COVERAGE_THRESHOLD: f64 = 0.7;
 
-/// Whether a file target has been touched by any expert finding.
-/// Whether a file target has been touched by any expert finding.
+/// Per-file coverage status used by [`CoverageTarget`]: tracks each diff
+/// file's "pending/touched" state independently of the aggregate ratio. A
+/// file no expert has yet referenced is `Pending`; a file with at least one
+/// matching finding is `Touched`. The aggregate run-level ratio lives on
+/// [`CoverageSummary::is_sufficient`] — `CoverageStatus` is bookkeeping, the
+/// summary is the verdict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CoverageStatus {
     /// No expert has yet referenced any line in this file's changed ranges.

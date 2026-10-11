@@ -46,6 +46,7 @@ const IGNORED_EXTENSIONS: &[&str] = &[
     ".min.css",
     ".map",
     "package-lock.json",
+    ".spdx",
 ];
 
 const IGNORED_PATHS: &[&str] = &[
@@ -63,13 +64,41 @@ const IGNORED_PATHS: &[&str] = &[
     "build/",
     ".generated/",
     "generated/",
+    "licenses/",
+    "LICENSES/",
+];
+
+/// Exact base filenames that are never worth reviewing: legal and changelog
+/// documents whose diff is essentially boilerplate. Matched case-insensitively
+/// against the final path component, so `LICENSE`, `license.md`, `LICENSE-APACHE`
+/// and the British spelling `LICENCE` are all covered; a path component named
+/// `myfile-license.rs` is **not** (we only compare the base name).
+const IGNORED_FILENAMES: &[&str] = &[
+    "license",
+    "license.txt",
+    "license.md",
+    "license-apache",
+    "license-mit",
+    "license-bsd",
+    "licence",
+    "licence.txt",
+    "licence.md",
+    "changelog",
+    "changelog.md",
+    "changelog.txt",
+    "notice",
+    "notice.txt",
 ];
 
 /// Determine whether a diff file should be excluded from review.
 ///
 /// Checks against known binary/lock/generated extensions and paths
-/// (`node_modules/`, `target/`, `vendor/`, etc.). Uses case-insensitive
-/// extension matching.
+/// (`node_modules/`, `target/`, `vendor/`, etc.), and against well-known
+/// legal/changelog filenames (`LICENSE`, `LICENCE`, `CHANGELOG`, `NOTICE` and
+/// their `.txt` / `.md` / `-APACHE` / `-MIT` / `-BSD` variants). Uses
+/// case-insensitive matching for extensions and base filenames; the path
+/// substring match keeps its historical case-sensitive behaviour for entries
+/// other than `licenses/` / `LICENSES/`.
 pub fn should_ignore(file: &DiffFile) -> bool {
     let path = &file.new_path;
 
@@ -80,6 +109,12 @@ pub fn should_ignore(file: &DiffFile) -> bool {
     let path_lower = path.to_ascii_lowercase();
     if IGNORED_EXTENSIONS.iter().any(|ext| path_lower.ends_with(*ext)) {
         return true;
+    }
+
+    if let Some(base) = path_lower.rsplit('/').next() {
+        if !base.is_empty() && IGNORED_FILENAMES.contains(&base) {
+            return true;
+        }
     }
 
     false
@@ -215,6 +250,97 @@ mod tests {
     #[test]
     fn should_ignore_source_maps() {
         assert!(should_ignore(&make_file("dist/bundle.js.map")));
+    }
+
+    #[test]
+    fn should_ignore_license_filename() {
+        // Top-level LICENSE / LICENSE.md / LICENSE.txt — no review value.
+        assert!(should_ignore(&make_file("LICENSE")));
+        assert!(should_ignore(&make_file("license")));
+        assert!(should_ignore(&make_file("License")));
+        assert!(should_ignore(&make_file("LICENSE.md")));
+        assert!(should_ignore(&make_file("license.txt")));
+        // Cargo-style per-dependency license files.
+        assert!(should_ignore(&make_file("licenses/tracing/LICENSE")));
+    }
+
+    #[test]
+    fn should_ignore_license_with_dashed_suffix() {
+        // Project sub-license files like `LICENSE-APACHE`, `LICENSE-MIT`.
+        assert!(should_ignore(&make_file("LICENSE-APACHE")));
+        assert!(should_ignore(&make_file("LICENSE-MIT")));
+        assert!(should_ignore(&make_file("license-mit")));
+        assert!(should_ignore(&make_file("LICENSE-BSD")));
+    }
+
+    #[test]
+    fn should_ignore_british_spelling_licence() {
+        // Some European / Commonwealth projects use `LICENCE`.
+        assert!(should_ignore(&make_file("LICENCE")));
+        assert!(should_ignore(&make_file("LICENCE.md")));
+        assert!(should_ignore(&make_file("licence.txt")));
+    }
+
+    #[test]
+    fn should_ignore_changelog_filename() {
+        assert!(should_ignore(&make_file("CHANGELOG")));
+        assert!(should_ignore(&make_file("Changelog")));
+        assert!(should_ignore(&make_file("CHANGELOG.md")));
+        assert!(should_ignore(&make_file("CHANGELOG.txt")));
+        // Nested changelogs (e.g. monorepo) are also boilerplate.
+        assert!(should_ignore(&make_file("docs/CHANGELOG.md")));
+        assert!(should_ignore(&make_file("packages/foo/CHANGELOG")));
+    }
+
+    #[test]
+    fn should_ignore_notice_filename() {
+        assert!(should_ignore(&make_file("NOTICE")));
+        assert!(should_ignore(&make_file("notice")));
+        assert!(should_ignore(&make_file("NOTICE.txt")));
+    }
+
+    #[test]
+    fn should_ignore_licenses_directory_lowercase_and_uppercase() {
+        // Cargo publishes per-dependency licenses under lowercase `licenses/`,
+        // but some monorepos use `LICENSES/`.
+        assert!(should_ignore(&make_file("licenses/foo/LICENSE")));
+        assert!(should_ignore(&make_file("LICENSES/foo/LICENSE")));
+        assert!(should_ignore(&make_file("LICENSES/foo/notice.txt")));
+    }
+
+    #[test]
+    fn should_ignore_spdx_extension() {
+        // SPDX-formatted license / dependency metadata files.
+        assert!(should_ignore(&make_file("thirdparty.spdx")));
+        assert!(should_ignore(&make_file("sbom.spdx")));
+        assert!(should_ignore(&make_file("docs/THIRDPARTY.spdx")));
+    }
+
+    #[test]
+    fn should_not_ignore_files_with_license_as_path_substring() {
+        // The base-name match must only fire when the file is named exactly
+        // `LICENSE` (or one of its variants); a path that merely contains
+        // `license` must still go through review. This protects against the
+        // same false-positive class the font-extension test pins: a path like
+        // `licensor.rs` (the author of a software license, not a license file)
+        // and `mylicense_helper.rs` (a utility module) must remain in scope.
+        assert!(!should_ignore(&make_file("src/licensor.rs")));
+        assert!(!should_ignore(&make_file("src/mylicense_helper.rs")));
+        assert!(!should_ignore(&make_file("src/license_checker.rs")));
+        assert!(!should_ignore(&make_file("src/license_parser.rs")));
+        // CHANGELOG and NOTICE substrings likewise must not match.
+        assert!(!should_ignore(&make_file("src/changelog_formatter.rs")));
+        assert!(!should_ignore(&make_file("src/notice_handler.rs")));
+    }
+
+    #[test]
+    fn should_not_ignore_files_with_embedded_license_or_changelog_substring() {
+        // Same class as the woff / ttf regression: a base name that contains
+        // `license` / `changelog` / `notice` must not be silently dropped.
+        assert!(!should_ignore(&make_file("myfilelicense")));
+        assert!(!should_ignore(&make_file("myfilechangelog")));
+        assert!(!should_ignore(&make_file("myfilenotice")));
+        assert!(!should_ignore(&make_file("LICENSE_HELPER.rs")));
     }
 
     #[test]

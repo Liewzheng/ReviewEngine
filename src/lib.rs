@@ -627,7 +627,7 @@ mod publish_policy_e2e_tests {
         let requests = received(&server).await;
         assert!(
             inline_posts(&requests).is_empty(),
-            "a docs-only round posts no inline note: {requests:?}"
+            "a docs-only round posts no inline note"
         );
 
         let board = board_body(&server).await;
@@ -766,23 +766,20 @@ mod publish_policy_e2e_tests {
             .expect("the board must be updated with the publish outcome");
         assert!(
             board_update.contains("1 could not be published"),
-            "the board states how many notes were lost: {board_update}"
+            "the board states how many notes were lost"
         );
         assert!(
             board_update.contains("**1 inline note(s) failed to publish**"),
-            "{board_update}"
+            "the board names how many notes were lost in bold"
         );
         assert!(
             board_update.contains("`bad.rs:3` — HTTP 400"),
-            "the board names the refused anchor and GitLab's status: {board_update}"
+            "the board names the refused anchor and GitLab's status"
         );
-        assert!(
-            board_update.contains("line_code"),
-            "the board carries GitLab's verdict: {board_update}"
-        );
+        assert!(board_update.contains("line_code"), "the board carries GitLab's verdict");
         assert!(
             !board_update.contains("`good.rs:2` — HTTP"),
-            "only the refused note is listed: {board_update}"
+            "only the refused note is listed"
         );
 
         // The board itself (the POSTed body) is unchanged by the addendum: the
@@ -790,7 +787,7 @@ mod publish_policy_e2e_tests {
         let initial_board = board_body(&server).await;
         assert!(
             !initial_board.contains("could not be published"),
-            "the first board body cannot know the outcome yet: {initial_board}"
+            "the first board body cannot know the outcome yet"
         );
     }
 
@@ -814,7 +811,7 @@ mod publish_policy_e2e_tests {
         assert_eq!(inline_posts(&requests).len(), 1);
         assert!(
             !requests.iter().any(|(method, _, _)| method == "PUT"),
-            "no failure, no addendum: {requests:?}"
+            "no failure, no addendum"
         );
     }
 
@@ -850,23 +847,17 @@ mod publish_policy_e2e_tests {
             .expect_err("a hand-built body whose inline note carries the plaintext must refuse");
 
         let msg = err.to_string();
-        assert!(
-            msg.contains("refusing to publish"),
-            "the gate's first-line reason: {msg}"
-        );
+        assert!(msg.contains("refusing to publish"), "the gate's first-line reason");
         assert!(
             !msg.contains("hunter2_real_secret"),
-            "the value itself must never appear in the error: {msg}"
+            "the value itself must never appear in the error"
         );
 
         // Defence in depth: the gate ran before the provider saw the body,
         // so the mock server received neither a board POST nor an inline
         // POST.
         let requests = received(&server).await;
-        assert!(
-            requests.is_empty(),
-            "no provider call may happen on a refused publish: {requests:?}"
-        );
+        assert!(requests.is_empty(), "no provider call may happen on a refused publish");
     }
 
     /// A finding whose title (rendered verbatim by the hand-built
@@ -889,24 +880,15 @@ mod publish_policy_e2e_tests {
             .expect_err("publishing must refuse a credential in the board");
 
         let msg = err.to_string();
-        assert!(
-            msg.contains("refusing to publish"),
-            "the gate's first-line reason: {msg}"
-        );
-        assert!(
-            msg.contains("board body"),
-            "the gate names the offending surface: {msg}"
-        );
+        assert!(msg.contains("refusing to publish"), "the gate's first-line reason");
+        assert!(msg.contains("board body"), "the gate names the offending surface");
         assert!(
             !msg.contains("hunter2_real_secret"),
-            "the value itself must never appear in the error: {msg}"
+            "the value itself must never appear in the error"
         );
 
         let requests = received(&server).await;
-        assert!(
-            requests.is_empty(),
-            "no provider call may happen on a refused publish: {requests:?}"
-        );
+        assert!(requests.is_empty(), "no provider call may happen on a refused publish");
     }
 
     /// A clean review still publishes: the gate must not be a false-positive
@@ -937,13 +919,13 @@ mod publish_policy_e2e_tests {
 
         assert!(msg.contains("kind=password"));
         assert!(msg.contains("key=password"));
-        assert!(msg.contains("len=19"), "the real length is 19 chars: {msg}");
-        assert!(!msg.contains("hunter2_real_secret"), "the value is never echoed: {msg}");
+        assert!(msg.contains("len=19"), "the real length is 19 chars");
+        assert!(!msg.contains("hunter2_real_secret"), "the value is never echoed");
         // The fingerprint is short (8 hex chars) and stable, so a reviewer
         // can grep the local report file for it.
         let fp_start = msg.find("fp=").expect("fp is in the error");
         let fp = &msg[fp_start + 3..fp_start + 3 + 8];
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()), "fp is hex: {fp}");
+        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()), "fp is hex");
     }
 
     // ── RENG-113 round 2: the render→board→gate chain (P1 regression) ───
@@ -978,9 +960,9 @@ mod publish_policy_e2e_tests {
         let board = board_body(&server).await;
         assert!(
             !board.contains("hunter2_real_secret"),
-            "the board body must not carry the plaintext: {board}"
+            "the board body must not carry the plaintext"
         );
-        assert!(board.contains("kind=password"), "the board carries the marker: {board}");
+        assert!(board.contains("kind=password"), "the board carries the marker");
     }
 
     /// RENG-113 round 2: a credential that the renderer could not mask (the
@@ -1009,7 +991,7 @@ mod publish_policy_e2e_tests {
         let board = board_body(&server).await;
         assert!(
             !board.contains("hunter2_real_secret"),
-            "the board body must not carry the plaintext title: {board}"
+            "the board body must not carry the plaintext title"
         );
     }
 
@@ -1040,15 +1022,12 @@ mod publish_policy_e2e_tests {
             .expect_err("a board whose renderer could not mask the credential must refuse");
 
         let msg = err.to_string();
-        assert!(msg.contains("refusing to publish"), "{msg}");
-        assert!(!msg.contains("hunter2_real_secret"), "the value is never echoed: {msg}");
+        assert!(msg.contains("refusing to publish"), "publish refused");
+        assert!(!msg.contains("hunter2_real_secret"), "the value is never echoed");
 
         // Defence in depth: the gate ran before the provider saw the body.
         let requests = received(&server).await;
-        assert!(
-            requests.is_empty(),
-            "no provider call may happen on a refused publish: {requests:?}"
-        );
+        assert!(requests.is_empty(), "no provider call may happen on a refused publish");
     }
 
     /// RENG-113 round 3: a credential in a *rolled-up* title (admitted
@@ -1084,19 +1063,19 @@ mod publish_policy_e2e_tests {
         let board = board_body(&server).await;
         assert!(
             !board.contains("hunter2_real_secret"),
-            "the rolled-up title must be masked: {board}"
+            "the rolled-up title must be masked"
         );
         assert!(
             board.contains("kind=password"),
-            "the rolled-up marker is named in the board: {board}"
+            "the rolled-up marker is named in the board"
         );
         // The rolled-up list still names the anchor and the cap that
         // pulled the finding out of inline delivery — what the reviewer
         // expects to see.
-        assert!(board.contains("`src/f3.rs:1`"), "the anchor is named: {board}");
+        assert!(board.contains("`src/f3.rs:1`"), "the anchor is named");
         assert!(
             board.contains("exceeded the 2-note per-round cap"),
-            "the cap explanation is named: {board}"
+            "the cap explanation is named"
         );
 
         // Two inline notes went up (the first two), the third was the
@@ -1104,13 +1083,13 @@ mod publish_policy_e2e_tests {
         // (round-2 `format_inline_body`); the gate sees them masked too.
         let requests = received(&server).await;
         let posted = inline_posts(&requests);
-        assert_eq!(posted.len(), 2, "the default cap is two notes per round: {requests:?}");
+        assert_eq!(posted.len(), 2, "the default cap is two notes per round");
         // And the inline-note bodies are themselves masked — the
         // plaintext does not leak through the inline path either.
         for body in &posted {
             assert!(
                 !body.contains("hunter2_real_secret"),
-                "inline note body carries no plaintext: {body}"
+                "inline note body carries no plaintext"
             );
         }
     }

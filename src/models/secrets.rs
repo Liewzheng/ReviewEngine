@@ -637,14 +637,11 @@ mod tests {
     fn redact_password_assignment_keeps_key_and_replaces_value() {
         let line = r#"password = "hunter2_real""#;
         let redacted = redact_text(line);
-        assert!(!redacted.contains("hunter2_real"), "plaintext must be gone: {redacted}");
-        assert!(
-            redacted.contains("password = "),
-            "the key + separator survives: {redacted}"
-        );
-        assert!(redacted.contains("kind=password"), "the kind is named: {redacted}");
-        assert!(redacted.contains("key=password"), "the key name is echoed: {redacted}");
-        assert!(redacted.contains("len=12"), "the length is reported: {redacted}");
+        assert!(!redacted.contains("hunter2_real"), "plaintext must be gone");
+        assert!(redacted.contains("password = "), "the key + separator survives");
+        assert!(redacted.contains("kind=password"), "the kind is named");
+        assert!(redacted.contains("key=password"), "the key name is echoed");
+        assert!(redacted.contains("len=12"), "the length is reported");
         // The length matches the original value length.
         let len = "hunter2_real".chars().count();
         assert_eq!(len, 12);
@@ -725,7 +722,7 @@ mod tests {
     fn plain_text_is_unchanged() {
         let line = "the function `read_password` returns `None` when EOF is reached";
         let redacted = redact_text(line);
-        assert_eq!(redacted, line, "benign prose must not be touched: {redacted}");
+        assert_eq!(redacted, line, "benign prose must not be touched");
 
         // A bare equal sign without a credential-shaped key.
         assert_eq!(redact_text("x = 1 + 2"), "x = 1 + 2");
@@ -762,7 +759,7 @@ mod tests {
     fn overlapping_hits_pick_the_structured_assignment() {
         let line = r#"token = "glpat_AbCdEfGhIjKlMnOpQrStUv""#;
         let hits = scan_secrets(line);
-        assert_eq!(hits.len(), 1, "the value-only GitLab match must be dropped: {hits:?}");
+        assert_eq!(hits.len(), 1, "the value-only GitLab match must be dropped");
         assert_eq!(hits[0].kind, SecretKind::Token, "the structured token assignment wins");
         assert_eq!(hits[0].key.as_deref(), Some("token"));
     }
@@ -835,12 +832,12 @@ mod tests {
             let redacted = redact_text(body);
             assert!(
                 scan_for_publish(&redacted).is_ok(),
-                "redacted body must not trip the publish gate; got redaction: {redacted:?}"
+                "redacted body must not trip the publish gate"
             );
             assert_eq!(
                 scan_secrets(&redacted).len(),
                 0,
-                "a redacted body must scan to zero hits: {redacted}"
+                "a redacted body must scan to zero hits"
             );
         }
     }
@@ -861,7 +858,7 @@ mod tests {
         for body in cases {
             let once = redact_text(body);
             let twice = redact_text(&once);
-            assert_eq!(once, twice, "redact must converge: once={once:?} twice={twice:?}");
+            assert_eq!(once, twice, "redact must converge");
         }
     }
 
@@ -1026,22 +1023,22 @@ mod tests {
     fn redact_text_catches_json_escaped_value() {
         let body = r#"{\"password\": \"hunter2_real\"}"#;
         let redacted = redact_text(body);
-        assert!(!redacted.contains("hunter2_real"), "plaintext must be gone: {redacted}");
+        assert!(!redacted.contains("hunter2_real"), "plaintext must be gone");
         assert!(
             redacted.contains("kind=password"),
-            "the structured detector matches after normalization: {redacted}"
+            "the structured detector matches after normalization"
         );
         assert!(
             redacted.contains("key=password"),
-            "the key name is preserved across the JSON quoting: {redacted}"
+            "the key name is preserved across the JSON quoting"
         );
         assert!(
             redacted.starts_with("{\\\"password\\\": \\\""),
-            "opening JSON framing is preserved verbatim: {redacted}"
+            "opening JSON framing is preserved verbatim"
         );
         assert!(
             redacted.ends_with("\\\"}"),
-            "closing JSON framing is preserved verbatim: {redacted}"
+            "closing JSON framing is preserved verbatim"
         );
     }
 
@@ -1067,13 +1064,10 @@ mod tests {
     fn redact_text_is_idempotent_on_json_escaped_input() {
         let body = r#"{\"password\": \"hunter2_real\"}"#;
         let once = redact_text(body);
-        assert!(!once.contains("hunter2_real"), "plaintext is gone: {once}");
-        assert!(once.contains("***[redacted:"), "marker is in place: {once}");
+        assert!(!once.contains("hunter2_real"), "plaintext is gone");
+        assert!(once.contains("***[redacted:"), "marker is in place");
         let twice = redact_text(&once);
-        assert_eq!(
-            once, twice,
-            "redact must converge on the escaped form: once={once:?} twice={twice:?}"
-        );
+        assert_eq!(once, twice, "redact must converge on the escaped form");
     }
 
     /// W14: ranges coming back from `scan_secrets` must point into the
@@ -1089,7 +1083,7 @@ mod tests {
         // output).
         let body = r#"{\"password\": \"ZZUNIQUE_MARKER_VALUE_42\"}"#;
         let hits = scan_secrets(body);
-        assert_eq!(hits.len(), 1, "exactly one structured hit: {hits:?}");
+        assert_eq!(hits.len(), 1, "exactly one structured hit");
         let hit = &hits[0];
         // The reported range, sliced on the ORIGINAL text, must yield
         // the same value the detector stored on the hit (any byte drift
@@ -1098,7 +1092,7 @@ mod tests {
         let original_slice = &body[hit.range.clone()];
         assert_eq!(
             original_slice, "ZZUNIQUE_MARKER_VALUE_42",
-            "hit range must point at the original-text bytes of the value, got slice={original_slice:?}"
+            "hit range must point at the original-text bytes of the value"
         );
         // And the redacted output must keep the JSON framing intact
         // around the substituted placeholder. Use regular-string
@@ -1108,18 +1102,18 @@ mod tests {
         let redacted = redact_text(body);
         assert!(
             !redacted.contains("ZZUNIQUE_MARKER_VALUE_42"),
-            "the unique value is masked: {redacted}"
+            "the unique value is masked"
         );
         assert!(
             redacted.starts_with("{\\\"password\\\": \\\"***["),
-            "opening framing + marker prefix preserved: {redacted}"
+            "opening framing + marker prefix preserved"
         );
         // Marker format is `***[redacted:…]***`, so the marker ends
         // with `***` (three asterisks), not `***]`. After the marker
         // comes the closing JSON framing `\"}`.
         assert!(
             redacted.ends_with("***\\\"}"),
-            "marker suffix + closing framing preserved: {redacted}"
+            "marker suffix + closing framing preserved"
         );
     }
 
@@ -1138,11 +1132,11 @@ mod tests {
         let redacted = redact_text(body);
         assert!(
             !redacted.contains("glpat-AbCdEfGhIjKlMnOpQrStUv"),
-            "the value-only GitLab token is masked: {redacted}"
+            "the value-only GitLab token is masked"
         );
         assert!(
             redacted.contains("kind=gitlab_token"),
-            "the value-only path picks up the prefix inside the JSON-escaped payload: {redacted}"
+            "the value-only path picks up the prefix inside the JSON-escaped payload"
         );
     }
 

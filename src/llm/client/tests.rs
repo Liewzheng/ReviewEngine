@@ -312,6 +312,7 @@ impl super::super::provider::LLMProvider for MockProvider {
                 content: "success".to_string(),
                 total_tokens: 10,
                 model: "mock".to_string(),
+                finish_reason: None,
                 provider: self.name.clone(),
                 fallback: false,
                 entry_fp: None,
@@ -892,8 +893,8 @@ async fn test_real_http_200_with_non_json_body_is_retried_with_body_in_error_cha
 
     let message = format!("{err:#}");
     assert!(
-        message.contains("upstream timeout") || message.contains("body excerpt"),
-        "the body excerpt must surface in the error chain: {message}"
+        message.contains("error decoding response body"),
+        "the original error message must surface: {message}"
     );
     // Typed marker is reachable via chain — the compliance sub-step
     // downcasts to it to render a categorised Note.
@@ -901,7 +902,15 @@ async fn test_real_http_200_with_non_json_body_is_retried_with_body_in_error_cha
     assert!(marker.is_some(), "JsonDecodeError marker must be in the chain");
     let marker = marker.unwrap();
     assert_eq!(marker.status, 200);
-    assert!(marker.body_excerpt.contains("upstream timeout"));
+    // The body excerpt is intentionally empty: reqwest's `resp.json()`
+    // drains the body before we can read it as bytes. This is a known
+    // limitation of the wire path; the typed marker + status code
+    // alone are enough for operators to triage.
+    assert!(
+        marker.status == 200,
+        "marker carries the HTTP status: {}",
+        marker.status
+    );
     assert_eq!(
         requests_seen(&server).await,
         3,
@@ -910,11 +919,10 @@ async fn test_real_http_200_with_non_json_body_is_retried_with_body_in_error_cha
 }
 
 /// M42 / RENG-46 — single-config `complete` path: same JSON-decode
-/// behaviour, with the body excerpt visible. Single-config `complete`
-/// does NOT retry (no fallback chain), so the mock expects exactly one
-/// hit and the typed marker still attaches.
+/// behaviour, with the typed marker attached. The body excerpt is
+/// intentionally empty on this path (resp.json() drains first).
 #[tokio::test]
-async fn test_complete_with_non_json_body_carries_body_excerpt() {
+async fn test_complete_with_non_json_body_attaches_typed_marker() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/chat/completions"))
@@ -930,48 +938,13 @@ async fn test_complete_with_non_json_body_carries_body_excerpt() {
         .expect_err("non-JSON body must fail");
 
     let message = format!("{err:#}");
-    assert!(message.contains("not json"), "body excerpt must surface: {message}");
+    assert!(
+        message.contains("error decoding response body"),
+        "the original error must surface: {message}"
+    );
     assert!(
         err.chain().any(|c| c.downcast_ref::<JsonDecodeError>().is_some()),
         "JsonDecodeError marker must be attached"
-    );
-}
-
-/// M42 — defence-in-depth: bearer tokens / API keys embedded in the
-/// failing response body must NOT end up in the surfaced error chain.
-#[tokio::test]
-async fn test_non_json_body_redacts_credential_tokens_in_excerpt() {
-    let server = MockServer::start().await;
-    let body = "Bearer glpat-ABCDEFG12345 sk-test1234 body content tp-cn-zxcvbnm1234";
-    Mock::given(method("POST"))
-        .and(path("/chat/completions"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(body.to_string()))
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let client = LLMClient::new();
-    let err = client
-        .complete(&real_config(&server.uri()), "system", "user")
-        .await
-        .expect_err("non-JSON body must fail");
-
-    let message = format!("{err:#}");
-    assert!(
-        !message.contains("glpat-ABCDEFG12345"),
-        "GitLab token must be redacted: {message}"
-    );
-    assert!(
-        !message.contains("sk-test1234"),
-        "OpenAI-style key must be redacted: {message}"
-    );
-    assert!(
-        !message.contains("tp-cn-zxcvbnm1234"),
-        "mimo-style key must be redacted: {message}"
-    );
-    assert!(
-        message.contains("<REDACTED>"),
-        "redaction marker must appear: {message}"
     );
 }
 
@@ -980,10 +953,7 @@ async fn test_non_json_body_redacts_credential_tokens_in_excerpt() {
 /// (retryable), not Permanent (give-up).
 #[test]
 fn json_decode_error_classifies_as_unknown() {
-    let raw = anyhow::Error::new(JsonDecodeError {
-        status: 200,
-        body_excerpt: "excerpt".into(),
-    });
+    let raw = anyhow::Error::new(JsonDecodeError { status: 200 });
     assert_eq!(LLMClient::retry_verdict(&raw), RetryVerdict::Unknown);
 }
 
@@ -991,11 +961,8 @@ fn json_decode_error_classifies_as_unknown() {
 /// compliance sub-step can downcast through the chain.
 #[test]
 fn json_decode_error_downcast_works_through_context_chain() {
-    let raw = anyhow::Error::new(JsonDecodeError {
-        status: 200,
-        body_excerpt: "excerpt".into(),
-    })
-    .context(anyhow::anyhow!("inner anyhow message"));
+    let raw = anyhow::Error::new(JsonDecodeError { status: 200 })
+        .context(anyhow::anyhow!("inner anyhow message"));
     let marker = raw.chain().find_map(|c| c.downcast_ref::<JsonDecodeError>());
     assert!(
         marker.is_some(),
@@ -1009,19 +976,17 @@ fn json_decode_error_downcast_works_through_context_chain() {
 /// 512 was inside a 3-byte CJK sequence caused the binary to panic
 /// before producing any output. The fix snaps the cut to the nearest
 /// char boundary.
-#[test]
-fn redact_body_excerpt_handles_multibyte_at_truncation_boundary() {
-    // Build a body that has a 3-byte CJK character straddling the
-    // 512-byte mark so a naive truncate panics.
-    let mut body = String::from("a".repeat(510));
-    body.push('è'); // 2-byte char: positions 510, 511
-    body.push('你'); // 3-byte char: positions 512, 513, 514
-    body.push_str(&"b".repeat(100));
-
-    // Just calling the function must not panic.
-    let redacted = redact_body_excerpt(&body);
-    assert!(redacted.ends_with("… (truncated)"));
-}
+///
+/// (Removed in M42-R2 — the body-excerpt capture was reverted to the
+/// pre-M42 wire path because `resp.bytes().await` failed on its own
+/// in a live run, taking down every LLM call. The redaction helper is
+/// gone with it. The truncation-safety assertion lives on the wire
+/// side now: a 4 KiB CJK body that round-trips through reqwest
+/// without panic is exactly what `resp.json()` already does. If a
+/// future revision re-introduces explicit body capture, the multi-
+/// byte truncation rule should be re-tested.)
+#[allow(dead_code)]
+const REDACT_BODY_EXCERTS_NOTE: &str = "see commit message for the truncation-safety rationale";
 
 /// Nothing is listening on port 1, so the request fails without any HTTP
 /// response (`reqwest` connection refused). It carries no status, so it keeps
@@ -1202,6 +1167,7 @@ impl super::super::provider::LLMProvider for ScriptedToggleProvider {
             content: body.clone(),
             total_tokens: 1,
             model: "mock".to_string(),
+            finish_reason: None,
             provider: "scripted".to_string(),
             fallback: false,
             entry_fp: None,

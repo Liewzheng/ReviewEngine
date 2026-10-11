@@ -20,6 +20,16 @@ pub struct CompletionResult {
     pub content: String,
     /// Total tokens consumed (input + output, if available from the provider).
     pub total_tokens: u64,
+    /// Why the model stopped generating. Provider-aliased:
+    /// OpenAI-style (`"stop"`, `"length"`, `"content_filter"`, `"tool_calls"`)
+    /// or Anthropic-style (`"end_turn"`, `"max_tokens"`, `"stop_sequence"`).
+    /// `None` when the provider did not echo a stop reason.
+    ///
+    /// M42-R2 (RENG-46 §3): a `Some("length")` value tells the response was
+    /// cut at the `max_tokens` budget. Compliance callers use this to fall
+    /// back to per-ticket calls when the batch prompt overruns the budget;
+    /// the rest of the codebase leaves the value uninspected.
+    pub finish_reason: Option<String>,
     /// The CONFIGURED model of the card that served this completion
     /// (`LLMConfig.model`) — RENG-77. Providers echo an alias of their own
     /// (`deepseek-flash`, `gpt-4o-2024-11-20`); every consumer looks the value
@@ -237,11 +247,13 @@ impl LLMProvider for OpenAIProvider {
 
         let total_tokens = value["usage"]["total_tokens"].as_u64().unwrap_or(0);
         let model = value["model"].as_str().unwrap_or(&params.model).to_string();
+        let finish_reason = value["choices"][0]["finish_reason"].as_str().map(|s| s.to_string());
 
         Ok(CompletionResult {
             content,
             total_tokens,
             model,
+            finish_reason,
             provider: self.name().to_string(),
             fallback: false,
             entry_fp: None,
@@ -390,11 +402,13 @@ impl LLMProvider for AnthropicProvider {
         let total_tokens = value["usage"]["input_tokens"].as_u64().unwrap_or(0)
             + value["usage"]["output_tokens"].as_u64().unwrap_or(0);
         let model = value["model"].as_str().unwrap_or(&params.model).to_string();
+        let finish_reason = value["stop_reason"].as_str().map(|s| s.to_string());
 
         Ok(CompletionResult {
             content,
             total_tokens,
             model,
+            finish_reason,
             provider: self.name().to_string(),
             fallback: false,
             entry_fp: None,

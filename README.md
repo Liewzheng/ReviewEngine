@@ -125,6 +125,18 @@ The installer also creates a `reng` symlink next to the binary, so `reng` and
 `review-engine` are the same command — `reng` is the shorter alias used
 throughout this README.
 
+### Homebrew (macOS / Linux)
+
+Tap, trust, and install via the official Homebrew tap:
+
+```bash
+brew tap Liewzheng/homebrew-tap
+brew trust liewzheng/tap
+brew install review-engine
+```
+
+Homebrew 6+ (released 2026-06) refuses installs from untrusted third-party taps — trust the whole tap with `brew trust liewzheng/tap`, or only this formula with `brew trust --formula liewzheng/tap/review-engine` (see the [Tap Trust docs](https://docs.brew.sh/Tap-Trust)). The formula installs both `review-engine` and the `reng` alias, so either name works on the command line. Upgrades remain a one-liner: `brew upgrade review-engine` (covered below under [Upgrading](#upgrading)).
+
 Configure an LLM provider. DeepSeek is accessed through the OpenAI-compatible API:
 
 ```bash

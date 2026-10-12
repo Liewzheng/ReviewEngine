@@ -121,6 +121,18 @@ curl -fsSL https://raw.githubusercontent.com/Liewzheng/ReviewEngine/master/insta
 > bash install.sh
 > ```
 
+### Homebrew（macOS / Linux）
+
+通过官方 Homebrew tap 安装：
+
+```bash
+brew tap Liewzheng/homebrew-tap
+brew trust liewzheng/tap
+brew install review-engine
+```
+
+Homebrew 6+（2026-06 发布）默认拒绝从未受信的第三方 tap 安装 —— 可以使用 `brew trust liewzheng/tap` 信任整个 tap，也可以使用 `brew trust --formula liewzheng/tap/review-engine` 只信任当前这一个 formula（详见 [Tap Trust 文档](https://docs.brew.sh/Tap-Trust)）。formula 同时提供 `review-engine` 与 `reng` 两个命令名，可以直接使用其一。升级同样是一行命令：`brew upgrade review-engine`。
+
 配置 LLM 供应商。DeepSeek 通过 OpenAI 兼容 API 访问：
 
 ```bash

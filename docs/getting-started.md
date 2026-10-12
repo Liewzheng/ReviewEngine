@@ -18,6 +18,18 @@ The script detects your platform, resolves the latest stable release, verifies t
 
 The installer also creates a `reng` symlink next to the binary. `reng` and `review-engine` are the same command — examples below use `reng`.
 
+### Homebrew
+
+Homebrew (macOS / Linux) is the easiest way to keep `review-engine` up to date alongside your other developer tools. Add the official tap, mark it as trusted, and install:
+
+```bash
+brew tap Liewzheng/homebrew-tap
+brew trust liewzheng/tap
+brew install review-engine
+```
+
+Homebrew 6+ (released 2026-06) refuses installs from untrusted third-party taps — `brew trust liewzheng/tap` trusts the whole tap, or `brew trust --formula liewzheng/tap/review-engine` trusts only this single formula (see the [Tap Trust docs](https://docs.brew.sh/Tap-Trust)). To upgrade later: `brew upgrade review-engine`. The formula installs both `review-engine` and the `reng` alias (the tap's install block uses `bin.install_symlink "review-engine" => "reng"`), so either name works on the command line — same as the `install.sh` path above.
+
 ### Windows
 
 A native Windows binary is published as a zip asset — no `install.sh` or WSL required. Download `review-engine-x86_64-pc-windows-msvc.zip` (contains `review-engine.exe`) from the [Releases page](https://github.com/Liewzheng/ReviewEngine/releases) (Windows on ARM: `review-engine-aarch64-pc-windows-msvc.zip`).
